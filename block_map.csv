@@ -1,0 +1,11 @@
+# block_map.csv  —  블록(INSERT) 이름 패턴 -> 카테고리/파라미터 매핑
+# 기둥·문·창은 보통 BLOCK 참조(INSERT)로 삽입됨. 블록명으로 분류.
+# pattern: 블록명 정규식(대소문자 무시) / category: wall|column|slab|zone|opening
+# width: 평면 크기(mm). explode 형상이 있으면 그걸 쓰고, 없을 때 마커 박스/원 크기로 폴백.
+#   column → 정사각 한 변, opening → 원 지름. height: 기둥 3D 높이.
+pattern,category,width,height,thickness
+COL|기둥|PILLAR,column,400,3000,
+DOOR|문,opening,900,,
+WIND|창|WINDOW,opening,1200,,
+# [Phase 2.7] MEP 장비 블록 (위치 추출만, 3D 빌드 후속)
+PUMP|AHU|FAN|PANEL|VAV|FCU|장비|펌프|분전반,equipment,800,,

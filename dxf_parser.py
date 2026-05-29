@@ -1,0 +1,1047 @@
+"""
+dxf_parser.py  v2  —  결정론적 코어 + 과거 프로젝트 자산 흡수
+DXF → 정규화 geometry.json (FreeCAD 빌더와의 계약)
+
+v2 신규 (과거 프로젝트에서 가져온 패턴):
+  [MEP 물량산출 계획]  layer_map.csv 기반 매핑 테이블 (하드코딩 규칙 → 외부 CSV)
+  [MEP 물량산출 계획]  shapely 점-다각형 존 판정 (요소 → 방/구역 귀속)
+  [MEP Phase 1]        --scan 인벤토리 모드 (빌드 전 통계로 도면 검증)
+  [ATA cad_parser]     SPLINE 추출 + 호 근사 정비
+
+사용:
+  python3 dxf_parser.py plan.dxf --scan                 # 인벤토리만
+  python3 dxf_parser.py plan.dxf -m layer_map.csv -o geometry.json
+"""
+import argparse
+import copy
+import csv
+import difflib
+import json
+import math
+import os
+import re
+
+import ezdxf
+
+try:
+    from shapely.geometry import Point, Polygon
+    HAS_SHAPELY = True
+except ImportError:
+    HAS_SHAPELY = False
+
+# CSV 없을 때 폴백 규칙 (정규식, 카테고리, 파라미터)
+DEFAULT_LAYER_RULES = [
+    (r"WALL|벽", "wall", {}),
+    (r"COL|기둥", "column", {}),
+    (r"SLAB|FLOOR|바닥|슬래브", "slab", {}),
+    (r"ZONE|ROOM|실|구역", "zone", {}),
+    (r"DOOR|WIND|문|창", "opening", {}),
+    # [Phase 2.7] MEP — 데이터 추출만(3D 빌드 후속). 중심선 + 치수.
+    (r"PIPE|배관|PIPING", "pipe", {}),
+    (r"DUCT|덕트", "duct", {}),
+    (r"TRAY|트레이|CABLETRAY", "tray", {}),
+]
+# CSV 없을 때 폴백 블록 규칙 (블록명 정규식 → 카테고리)
+DEFAULT_BLOCK_RULES = [
+    (r"COL|기둥|PILLAR", "column", {}),
+    (r"DOOR|문", "opening", {}),
+    (r"WIND|창", "opening", {}),
+    # [Phase 2.7] MEP 장비는 블록 참조가 일반적
+    (r"PUMP|AHU|FAN|PANEL|VAV|FCU|장비|펌프|분전반", "equipment", {}),
+]
+# [Phase 2.7] MEP 카테고리 (벽 평행선 검출 제외, z·치수 주석 부착 대상)
+MEP_CATEGORIES = ("pipe", "duct", "tray", "equipment")
+DEFAULT_PARAMS = {
+    "wall": {"width": 200.0, "height": 2800.0},
+    "column": {"height": 3000.0},
+    "slab": {"thickness": 200.0},
+}
+ARC_SEG_PER_RAD = 8.0
+
+# ── [Phase 1] 평행선 벽 검출 튜닝 상수 ───────────────────────
+WALL_ANGLE_TOL_DEG = 5.0      # 평행 판정 허용 사이각(도)
+WALL_PAIR_MIN_MM = 50.0       # 벽 두께 최소(이보다 가까우면 같은 선 취급/무시)
+WALL_PAIR_MAX_MM = 500.0      # 벽 두께 최대(이보다 멀면 무관한 선)
+WALL_PAIR_OVERLAP_RATIO = 0.5 # 투영 겹침 최소 비율(짧은 세그먼트 기준)
+
+# ── [Phase 4.0] collinear 재병합 튜닝 상수 ───────────────────
+COLLINEAR_ANGLE_TOL_DEG = 2.0  # 같은 직선 판정 사이각(도) — 벽 짝보다 빡빡
+COLLINEAR_DIST_TOL_MM = 10.0   # 같은 직선 판정 수직오프셋 허용(mm)
+COLLINEAR_GAP_TOL_MM = 50.0    # 끝-끝 간격 이 이하면 한 벽으로 연쇄 병합(mm)
+CORNER_SNAP_TOL_MM = 25.0      # 끝점 이 거리 이내면 centroid로 스냅(mm)
+
+
+# ── [MEP 물량산출] 외부 CSV 매핑 테이블 로드 ──────────────────
+def load_layer_map(csv_path):
+    """layer_map.csv → 규칙 리스트. 파라미터(width/height/thickness)도 함께."""
+    rules = []
+    with open(csv_path, encoding="utf-8") as f:
+        for row in csv.DictReader(filter(lambda l: not l.startswith("#"), f)):
+            attrs = {}
+            for k in ("width", "height", "thickness"):
+                v = (row.get(k) or "").strip()
+                if v:
+                    attrs[k] = float(v)
+            rules.append((row["pattern"], row["category"], attrs))
+    return rules
+
+
+def classify(layer_name, rules):
+    for pattern, category, attrs in rules:
+        if re.search(pattern, layer_name, re.IGNORECASE):
+            return category, attrs
+    return None, {}
+
+
+# ── 엔티티 → 점열 (ATA 추출 로직 정비·통합) ──────────────────
+def arc_to_points(cx, cy, r, a0, a1):
+    a0r, a1r = math.radians(a0), math.radians(a1)
+    if a1r < a0r:
+        a1r += 2 * math.pi
+    n = max(2, int((a1r - a0r) * ARC_SEG_PER_RAD))
+    return [(cx + r * math.cos(a0r + (a1r - a0r) * i / n),
+             cy + r * math.sin(a0r + (a1r - a0r) * i / n)) for i in range(n + 1)]
+
+
+def lwpolyline_points(e):
+    pts, vertices, closed = [], list(e.get_points("xyb")), e.closed
+    n = len(vertices)
+    for i in range(n):
+        x, y, bulge = vertices[i]
+        pts.append((x, y))
+        if bulge and (i < n - 1 or closed):
+            x2, y2, _ = vertices[(i + 1) % n]
+            pts.extend(_bulge_points(x, y, x2, y2, bulge)[1:-1])
+    return pts, closed
+
+
+def _bulge_points(x1, y1, x2, y2, bulge):
+    chord = math.hypot(x2 - x1, y2 - y1)
+    if chord == 0 or bulge == 0:
+        return [(x1, y1), (x2, y2)]
+    sagitta = bulge * chord / 2.0
+    r = ((chord / 2.0) ** 2 + sagitta ** 2) / (2 * abs(sagitta))
+    theta = 4 * math.atan(abs(bulge))
+    n = max(2, int(theta * ARC_SEG_PER_RAD))
+    mx, my = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+    dx, dy = (x2 - x1) / chord, (y2 - y1) / chord
+    h = math.sqrt(max(r * r - (chord / 2.0) ** 2, 0.0))
+    sign = 1 if bulge > 0 else -1
+    ccx, ccy = mx - sign * h * dy, my + sign * h * dx
+    a0, a1 = math.atan2(y1 - ccy, x1 - ccx), math.atan2(y2 - ccy, x2 - ccx)
+    if bulge > 0 and a1 < a0:
+        a1 += 2 * math.pi
+    if bulge < 0 and a1 > a0:
+        a1 -= 2 * math.pi
+    return [(ccx + r * math.cos(a0 + (a1 - a0) * i / n),
+             ccy + r * math.sin(a0 + (a1 - a0) * i / n)) for i in range(n + 1)]
+
+
+def entity_to_record(e, scale):
+    """DXF 엔티티 → 정규화 레코드 (polyline/circle). 미지원이면 None."""
+    t = e.dxftype()
+    if t == "LINE":
+        s, d = e.dxf.start, e.dxf.end
+        return {"kind": "polyline", "closed": False,
+                "points": [[s.x * scale, s.y * scale], [d.x * scale, d.y * scale]]}
+    if t == "LWPOLYLINE":
+        pts, closed = lwpolyline_points(e)
+        return {"kind": "polyline", "closed": closed,
+                "points": [[p[0] * scale, p[1] * scale] for p in pts]}
+    if t == "POLYLINE":
+        pts = [[v.dxf.location.x * scale, v.dxf.location.y * scale] for v in e.vertices]
+        return {"kind": "polyline", "closed": e.is_closed, "points": pts}
+    if t == "CIRCLE":
+        c = e.dxf.center
+        return {"kind": "circle", "center": [c.x * scale, c.y * scale],
+                "radius": e.dxf.radius * scale}
+    if t == "ARC":
+        c = e.dxf.center
+        pts = arc_to_points(c.x, c.y, e.dxf.radius, e.dxf.start_angle, e.dxf.end_angle)
+        return {"kind": "polyline", "closed": False,
+                "points": [[p[0] * scale, p[1] * scale] for p in pts]}
+    if t == "SPLINE":  # ATA cad_parser: 컨트롤 포인트로 근사
+        pts = [[p[0] * scale, p[1] * scale] for p in e.control_points]
+        return {"kind": "polyline", "closed": e.closed, "points": pts} if pts else None
+    return None
+
+
+def _centroid(rec):
+    if rec["kind"] == "circle":
+        return rec["center"]
+    pts = rec["points"]
+    return [sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts)]
+
+
+# ── [Phase 2.7] MEP 추출 보조 ────────────────────────────────
+def _entity_elevation(e, scale):
+    """엔티티의 Z 고저(mm). MEP 라우팅은 고저가 중요 → 2D 폴리라인 z 보존."""
+    t = e.dxftype()
+    try:
+        if t == "LINE":
+            z = e.dxf.start.z
+        elif t == "LWPOLYLINE":
+            z = e.dxf.elevation
+        elif t == "POLYLINE":
+            z = e.vertices[0].dxf.location.z
+        elif t in ("CIRCLE", "ARC"):
+            z = e.dxf.center.z
+        else:
+            z = 0.0
+    except Exception:
+        z = 0.0
+    return round(float(z) * scale, 3)
+
+
+def annotate_mep(rec, cat, attrs, elevation):
+    """MEP 레코드에 고저·치수 자기서술 필드 부착(데이터만, 3D 빌드는 후속).
+    pipe: diameter / duct·tray: width_mm·height_mm. 모두 layer_map width/height 에서."""
+    rec["elevation"] = elevation
+    if cat == "pipe":
+        rec["diameter"] = attrs.get("width")        # 배관 외경(mm)
+    elif cat in ("duct", "tray"):
+        rec["width_mm"] = attrs.get("width")
+        rec["height_mm"] = attrs.get("height")
+    return rec
+
+
+# ── [Phase 2] BLOCK(INSERT) 처리 ─────────────────────────────
+def _box_record(cx, cy, w, h, rot_deg):
+    """중심(cx,cy)·크기 w×h·회전 rot_deg 사각형 closed polyline."""
+    hw, hh = w / 2.0, h / 2.0
+    corners = [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)]
+    a = math.radians(rot_deg)
+    ca, sa = math.cos(a), math.sin(a)
+    pts = [[round(cx + x * ca - y * sa, 3), round(cy + x * sa + y * ca, 3)]
+           for x, y in corners]
+    return {"kind": "polyline", "closed": True, "points": pts}
+
+
+def insert_to_records(insert, scale, category, attrs):
+    """INSERT → geometry 레코드 리스트.
+    1) virtual_entities()로 블록 내부 형상을 실좌표 explode → entity_to_record.
+    2) column: closed polyline/circle만 채택. 없으면 width 박스 마커 폴백.
+       opening: circle 우선. 없으면 width 지름 원 마커.
+       기타: explode 레코드 그대로."""
+    exploded = []
+    try:
+        for ve in insert.virtual_entities():
+            r = entity_to_record(ve, scale)
+            if r:
+                exploded.append(r)
+    except Exception:
+        pass
+
+    c = insert.dxf.insert
+    cx, cy = c.x * scale, c.y * scale
+    rot = float(insert.dxf.get("rotation", 0.0) or 0.0)
+    size = attrs.get("width")  # 평면 크기(정사각 근사). None이면 기본값.
+
+    if category == "column":
+        solid = [r for r in exploded
+                 if r["kind"] == "circle" or (r["kind"] == "polyline" and r.get("closed"))]
+        if solid:
+            return solid
+        return [_box_record(cx, cy, (size or 400.0) * scale,
+                            (size or 400.0) * scale, rot)]
+    if category == "opening":
+        circ = [r for r in exploded if r["kind"] == "circle"]
+        if circ:
+            return circ
+        return [{"kind": "circle", "center": [round(cx, 3), round(cy, 3)],
+                 "radius": round((size or 900.0) * scale / 2.0, 3)}]
+    return exploded
+
+
+# ── [Phase 1] 평행선 쌍 → 벽 중심선+두께 검출 ────────────────
+def _seg_dir(p1, p2):
+    """세그먼트 단위 방향벡터 (ux, uy) 와 길이. 길이 0이면 (0,0,0)."""
+    dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+    ln = math.hypot(dx, dy)
+    if ln == 0:
+        return 0.0, 0.0, 0.0
+    return dx / ln, dy / ln, ln
+
+
+def _angle_deg(u1, u2):
+    """두 단위벡터 사이각(도). 평행/반평행(0°/180°) 모두 0에 수렴."""
+    dot = max(-1.0, min(1.0, abs(u1[0] * u2[0] + u1[1] * u2[1])))
+    return math.degrees(math.acos(dot))
+
+
+def _wall_segments(wall_records):
+    """벽 폴리라인 레코드들을 직선 세그먼트 단위로 분해."""
+    segs = []
+    for idx, rec in enumerate(wall_records):
+        if rec.get("kind") != "polyline":
+            continue
+        pts = rec.get("points", [])
+        if len(pts) < 2:
+            continue
+        n = len(pts)
+        edges = list(range(n - 1))
+        pairs = [(pts[i], pts[i + 1]) for i in edges]
+        if rec.get("closed") and n > 2:
+            pairs.append((pts[-1], pts[0]))
+        for a, b in pairs:
+            ux, uy, ln = _seg_dir(a, b)
+            if ln == 0:
+                continue
+            segs.append({"p1": a, "p2": b, "dir": (ux, uy), "len": ln,
+                         "src": idx, "overrides": rec.get("overrides", {}),
+                         "z_base": rec.get("z_base", 0.0)})
+    return segs
+
+
+def _pair_geometry(sa, sb):
+    """평행 후보 두 세그먼트 → (수직거리, 겹침길이, 중선[[],[]]) 또는 None."""
+    o = sa["p1"]
+    ux, uy = sa["dir"]
+    # 축(u) 투영 스칼라
+    def t(p):
+        return (p[0] - o[0]) * ux + (p[1] - o[1]) * uy
+    ta1, ta2 = t(sa["p1"]), t(sa["p2"])
+    tb1, tb2 = t(sb["p1"]), t(sb["p2"])
+    t_lo = max(min(ta1, ta2), min(tb1, tb2))
+    t_hi = min(max(ta1, ta2), max(tb1, tb2))
+    overlap = t_hi - t_lo
+    if overlap <= 0:
+        return None
+    # sb 한 점의 sa선상 수직 오프셋(평행선이므로 일정)
+    foot_t = tb1
+    foot = (o[0] + foot_t * ux, o[1] + foot_t * uy)
+    off = (sb["p1"][0] - foot[0], sb["p1"][1] - foot[1])
+    perp = math.hypot(off[0], off[1])
+    if not (WALL_PAIR_MIN_MM <= perp <= WALL_PAIR_MAX_MM):
+        return None
+    half = (off[0] * 0.5, off[1] * 0.5)
+    c_lo = (o[0] + t_lo * ux + half[0], o[1] + t_lo * uy + half[1])
+    c_hi = (o[0] + t_hi * ux + half[0], o[1] + t_hi * uy + half[1])
+    return perp, overlap, [[round(c_lo[0], 3), round(c_lo[1], 3)],
+                           [round(c_hi[0], 3), round(c_hi[1], 3)]]
+
+
+def _find_wall_pairs(segs):
+    """그리디 매칭: (i, j, perp, overlap, centerline) 확정쌍 리스트 + 매칭된 인덱스 집합."""
+    candidates = []
+    for i in range(len(segs)):
+        for j in range(i + 1, len(segs)):
+            if _angle_deg(segs[i]["dir"], segs[j]["dir"]) > WALL_ANGLE_TOL_DEG:
+                continue
+            geom = _pair_geometry(segs[i], segs[j])
+            if geom is None:
+                continue
+            perp, overlap, center = geom
+            min_len = min(segs[i]["len"], segs[j]["len"])
+            if min_len == 0 or overlap < WALL_PAIR_OVERLAP_RATIO * min_len:
+                continue
+            candidates.append((perp, overlap, i, j, center, min_len))
+    candidates.sort(key=lambda c: c[0])  # 가까운 쌍 우선
+    matched, pairs = set(), []
+    for perp, overlap, i, j, center, min_len in candidates:
+        if i in matched or j in matched:
+            continue
+        matched.add(i); matched.add(j)
+        conf = min(1.0, 0.7 + 0.3 * min(1.0, overlap / min_len))
+        pairs.append((i, j, perp, center, round(conf, 3)))
+    return pairs, matched
+
+
+def detect_wall_pairs(wall_records, params):
+    """벽 레코드 → 평행선 쌍은 중심선+두께로 병합, 단독선은 중심선 벽으로.
+    v1: 세그먼트 단위 출력(직선 1개 = 벽 레코드 1개)."""
+    segs = _wall_segments(wall_records)
+    if not segs:
+        return wall_records
+    pairs, matched = _find_wall_pairs(segs)
+    out = []
+    for i, j, perp, center, conf in pairs:
+        ov = segs[i]["overrides"] or segs[j]["overrides"]
+        zb = segs[i].get("z_base", 0.0)  # [4b] 층 Z 보존
+        out.append({"kind": "polyline", "closed": False,
+                    "points": [list(segs[i]["p1"]), list(segs[i]["p2"])],
+                    "centerline": center,
+                    "width_detected": round(perp, 3),
+                    "confidence": conf, "pairing": "paired",
+                    "needs_review": False, "z_base": zb,
+                    **({"overrides": ov} if ov else {})})
+    for k, s in enumerate(segs):
+        if k in matched:
+            continue
+        out.append({"kind": "polyline", "closed": False,
+                    "points": [list(s["p1"]), list(s["p2"])],
+                    "centerline": [list(s["p1"]), list(s["p2"])],
+                    "width_detected": None,
+                    "confidence": 0.5, "pairing": "single",
+                    "needs_review": True, "z_base": s.get("z_base", 0.0),
+                    **({"overrides": s["overrides"]} if s["overrides"] else {})})
+    return out
+
+
+# ── [Phase 4.0] collinear 벽 재병합 ─────────────────────────
+# detect_wall_pairs 는 세그먼트 단위(직선 1개=벽 1개)로 출력한다.
+# 한 벽이 여러 LINE/세그먼트로 쪼개졌으면 BIM 객체도 쪼개진다 → 같은 직선 위
+# 끝-끝이 가까운 세그먼트를 하나로 합친다.
+# 범위 주의: '같은 직선' 연쇄만 병합한다. 직각 코너 틈(사각방=벽4개)은
+#   여기서 안 메운다 — 코너 스냅/miter 는 별도(코너 정비).
+# 성능: 세그먼트를 '직선 키'(정규화 방향 + 원점 수직오프셋 + 두께 + pairing)로
+#   버킷팅 → 버킷 내 1D 사영 정렬 후 인접 갭<tol 단일 패스 연쇄. union-find 불필요,
+#   O(N log N). 결정론 유지(키·좌표 정렬, tie-break는 사영 t).
+def _get_normalized_direction(p1, p2):
+    """단위 방향벡터, 상반원 정규화(반대 방향도 같은 키)."""
+    dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+    n = math.hypot(dx, dy)
+    if n == 0:
+        return (0.0, 0.0)
+    dx, dy = dx / n, dy / n
+    if dy < 0 or (dy == 0 and dx < 0):  # 상반원으로 뒤집기
+        dx, dy = -dx, -dy
+    return (dx, dy)
+
+
+def _point_to_line_distance(pt, a, d):
+    """점 pt 와 점 a·단위방향 d 가 정의하는 무한직선의 수직거리."""
+    nx, ny = -d[1], d[0]
+    return abs((pt[0] - a[0]) * nx + (pt[1] - a[1]) * ny)
+
+
+def _check_collinear_connectable(seg1, seg2):
+    """두 세그먼트가 같은 직선(각도·수직오프셋 tol) + 1D 갭<tol 인가."""
+    d1 = _get_normalized_direction(seg1["c1"], seg1["c2"])
+    d2 = _get_normalized_direction(seg2["c1"], seg2["c2"])
+    if _angle_deg(d1, d2) > COLLINEAR_ANGLE_TOL_DEG:
+        return False
+    if _point_to_line_distance(seg2["c1"], seg1["c1"], d1) > COLLINEAR_DIST_TOL_MM:
+        return False
+    ts = sorted(p[0] * d1[0] + p[1] * d1[1]
+                for p in (seg1["c1"], seg1["c2"], seg2["c1"], seg2["c2"]))
+    l1 = math.dist(seg1["c1"], seg1["c2"])
+    l2 = math.dist(seg2["c1"], seg2["c2"])
+    gap = (ts[-1] - ts[0]) - (l1 + l2)  # 음수=겹침
+    return gap <= COLLINEAR_GAP_TOL_MM
+
+
+def _merge_two_segments(seg1, seg2):
+    """같은 직선 두 레코드 → 사영 양 끝점으로 합치고 overrides 보존."""
+    d = _get_normalized_direction(seg1["c1"], seg1["c2"])
+    pts = [seg1["c1"], seg1["c2"], seg2["c1"], seg2["c2"]]
+    pts.sort(key=lambda p: p[0] * d[0] + p[1] * d[1])
+    a, b = list(pts[0]), list(pts[-1])
+    rec1, rec2 = seg1["rec"], seg2["rec"]
+    ov = rec1.get("overrides") or rec2.get("overrides")  # 치수 보존(빌더 손실 방지)
+    merged = {"kind": "polyline", "closed": False,
+              "points": [a, b], "centerline": [a, b],
+              "width_detected": rec1.get("width_detected"),
+              "confidence": min(rec1.get("confidence", 0.5),
+                                rec2.get("confidence", 0.5)),
+              "pairing": rec1.get("pairing", "single"),
+              "needs_review": bool(rec1.get("needs_review") or rec2.get("needs_review")),
+              "z_base": rec1.get("z_base", 0.0),  # [4b]
+              **({"overrides": ov} if ov else {})}
+    return {"c1": a, "c2": b, "rec": merged}
+
+
+def merge_collinear_walls(wall_records, params):
+    """같은 직선 위 끝-끝이 가까운 벽 세그먼트를 한 벽으로 재병합(O(N log N))."""
+    if not wall_records:
+        return wall_records
+    items = []
+    for rec in wall_records:
+        cl = rec.get("centerline") or rec.get("points")
+        if not cl or len(cl) < 2:
+            return wall_records  # 비정형 → 보수적으로 원본 유지
+        items.append({"c1": cl[0], "c2": cl[-1], "rec": rec})
+    # 버킷 키: 방향(각도) + 원점 수직오프셋 + 두께 + pairing (모두 양자화)
+    buckets = {}
+    for it in items:
+        d = _get_normalized_direction(it["c1"], it["c2"])
+        ang = math.degrees(math.atan2(d[1], d[0]))            # [0,180)
+        off = -d[1] * it["c1"][0] + d[0] * it["c1"][1]        # 원점→직선 부호거리
+        w = it["rec"].get("width_detected")
+        key = (round(ang / COLLINEAR_ANGLE_TOL_DEG),
+               round(off / COLLINEAR_DIST_TOL_MM),
+               round(w, 1) if w is not None else None,
+               it["rec"].get("pairing", "single"))
+        buckets.setdefault(key, []).append(it)
+    out = []
+    for key in sorted(buckets, key=lambda k: (k[0], k[1], k[3], k[2] or -1)):
+        bucket = buckets[key]
+        dref = _get_normalized_direction(bucket[0]["c1"], bucket[0]["c2"])
+        bucket.sort(key=lambda it: min(it["c1"][0] * dref[0] + it["c1"][1] * dref[1],
+                                       it["c2"][0] * dref[0] + it["c2"][1] * dref[1]))
+        cur = bucket[0]
+        for nxt in bucket[1:]:
+            if _check_collinear_connectable(cur, nxt):
+                cur = _merge_two_segments(cur, nxt)
+            else:
+                out.append(cur["rec"])
+                cur = nxt
+        out.append(cur["rec"])
+    return out
+
+
+# ── [Phase 4.1] 코너 스냅 ────────────────────────────────────
+# [4] boolean void(Part.makeCut)는 벽 끝점이 정확히 일치해야 solid 교차 연산이 성공한다.
+# detect_wall_pairs + merge_collinear_walls 이후에도 끝점이 수 mm 어긋나면 void 뚫기 실패.
+# 알고리즘: 끝점 목록을 x 정렬 후 슬라이딩 윈도우 → euclidean dist < snap_tol 쌍 union-find
+# → 클러스터 centroid 로 일괄 치환. O(N log N), 결정론(정렬+작은인덱스-root union-find).
+# 범위: 같은 직선 아닌 코너(T자, ㄱ자 접점) 스냅. collinear 재병합과 독립적으로 동작.
+def snap_wall_corners(wall_records, snap_tol=None):
+    """벽 끝점 CORNER_SNAP_TOL_MM 이내 클러스터 → centroid 스냅.
+    centerline·points 양쪽 동기화. deepcopy 로 원본 불변."""
+    if snap_tol is None:
+        snap_tol = CORNER_SNAP_TOL_MM
+    if not wall_records:
+        return wall_records
+
+    # [x, y, rec_idx, ep_idx(0=c1,1=c2)]
+    eps = []
+    for i, rec in enumerate(wall_records):
+        cl = rec.get("centerline") or rec.get("points", [])
+        if len(cl) >= 2:
+            eps.append([float(cl[0][0]),  float(cl[0][1]),  i, 0])
+            eps.append([float(cl[-1][0]), float(cl[-1][1]), i, 1])
+
+    if not eps:
+        return wall_records
+
+    # union-find (작은 인덱스가 root → 결정론)
+    parent = list(range(len(eps)))
+
+    def _find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def _union(a, b):
+        ra, rb = _find(a), _find(b)
+        if ra == rb:
+            return
+        if ra < rb:
+            parent[rb] = ra
+        else:
+            parent[ra] = rb
+
+    # x 정렬 후 슬라이딩 윈도우
+    order = sorted(range(len(eps)), key=lambda k: (eps[k][0], eps[k][1]))
+    lo = 0
+    for hi, i in enumerate(order):
+        while eps[order[lo]][0] < eps[i][0] - snap_tol:
+            lo += 1
+        for j_idx in range(lo, hi):
+            j = order[j_idx]
+            if abs(eps[j][0] - eps[i][0]) > snap_tol:
+                continue
+            if abs(eps[j][1] - eps[i][1]) > snap_tol:
+                continue
+            dx = eps[i][0] - eps[j][0]
+            dy = eps[i][1] - eps[j][1]
+            if dx * dx + dy * dy <= snap_tol * snap_tol:
+                _union(i, j)
+
+    # 클러스터별 centroid
+    clusters: dict = {}
+    for k in range(len(eps)):
+        r = _find(k)
+        clusters.setdefault(r, []).append(k)
+
+    new_pos = {}
+    n_snapped = 0
+    for members in clusters.values():
+        if len(members) < 2:
+            continue
+        cx = round(sum(eps[m][0] for m in members) / len(members), 3)
+        cy = round(sum(eps[m][1] for m in members) / len(members), 3)
+        for m in members:
+            new_pos[m] = [cx, cy]
+        n_snapped += 1
+
+    if not new_pos:
+        return wall_records
+
+    out = copy.deepcopy(wall_records)
+    for k, ep in enumerate(eps):
+        if k not in new_pos:
+            continue
+        ri, ei = ep[2], ep[3]
+        rec = out[ri]
+        for field in ("centerline", "points"):
+            lst = rec.get(field)
+            if not lst or len(lst) < 2:
+                continue
+            if ei == 0:
+                lst[0] = new_pos[k]
+            else:
+                lst[-1] = new_pos[k]
+    return out
+
+
+# ── [Phase 4a] opening → 벽 연결 ────────────────────────────
+# geometry.json 파싱 시 각 opening에 wall_indices 태깅.
+# builder(freecad_builder.py)가 Part.makeCut boolean void 적용할 때 사용.
+def _pt_to_seg_dist(px, py, x1, y1, x2, y2):
+    """점(px,py) → 선분(x1,y1)-(x2,y2) 최소 euclidean 거리."""
+    dx, dy = x2 - x1, y2 - y1
+    ln = dx * dx + dy * dy
+    if ln == 0:
+        return math.hypot(px - x1, py - y1)
+    t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / ln))
+    return math.hypot(x1 + t * dx - px, y1 + t * dy - py)
+
+
+def link_openings_to_walls(elements, params):
+    """각 opening이 교차하는 벽 index 목록을 opening["wall_indices"]에 기록.
+    판정: opening 중심→벽 중심선 수직거리 < opening 반경 + 벽두께/2 + 10mm 여유."""
+    openings = elements.get("opening", [])
+    walls = elements.get("wall", [])
+    # 항상 wall_indices 초기화(벽 없을 때도 스키마 일관성 유지)
+    for op in openings:
+        op.setdefault("wall_indices", [])
+    if not openings or not walls:
+        return
+    default_w = float(params.get("wall", {}).get("width", 200.0))
+    for op in openings:
+        c = op.get("center") or [0, 0]
+        cx, cy = float(c[0]), float(c[1])
+        r = float(op.get("radius", 50.0))
+        indices = []
+        for i, wall in enumerate(walls):
+            cl = wall.get("centerline") or wall.get("points", [])
+            if len(cl) < 2:
+                continue
+            ww = float(wall.get("width_detected")
+                       or wall.get("overrides", {}).get("width", default_w))
+            dist = _pt_to_seg_dist(cx, cy,
+                                   float(cl[0][0]), float(cl[0][1]),
+                                   float(cl[-1][0]), float(cl[-1][1]))
+            if dist < r + ww * 0.5 + 10.0:
+                indices.append(i)
+        op["wall_indices"] = sorted(indices)
+
+
+# ── [Phase 3] 레이어명 비의존 기하 분류기 + 미매핑 fuzzy 제안 ──
+def _bbox(pts):
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def classify_geometry(rec):
+    """레이어명 무시, 기하만으로 (category, confidence, reason). 모르면 (None, 0, '')."""
+    k = rec.get("kind")
+    if k == "circle":
+        r = rec.get("radius", 0.0)
+        if r <= 1000:
+            return ("column", 0.5, f"소형 원 r={r:.0f} (기둥/개구부 모호)")
+        return (None, 0.0, "")
+    pts = rec.get("points", [])
+    if len(pts) < 2:
+        return (None, 0.0, "")
+    x0, y0, x1, y1 = _bbox(pts)
+    w, h = x1 - x0, y1 - y0
+    if rec.get("closed"):
+        area = w * h  # bbox 근사
+        aspect = (min(w, h) / max(w, h)) if max(w, h) > 0 else 0.0
+        if len(pts) <= 6 and aspect >= 0.7 and 40_000 <= area <= 1_000_000:
+            return ("column", 0.85, f"소형 정사각 닫힘폴리 {w:.0f}x{h:.0f}")
+        if area >= 10_000_000:
+            return ("slab", 0.7, f"대형 닫힘폴리 {w:.0f}x{h:.0f} (슬래브/존)")
+        return ("zone", 0.4, f"중형 닫힘폴리 {w:.0f}x{h:.0f}")
+    return ("wall", 0.45, "열린 선/폴리 (벽/배관 중심선 모호)")
+
+
+def fuzzy_layer_suggestion(layer, rules):
+    """레이어명 vs 규칙 패턴 토큰 difflib 최고 유사도 → (score, token, category)."""
+    best = (0.0, None, None)
+    up = (layer or "").upper()
+    for pattern, cat, _ in rules:
+        for tok in re.split(r"[|]", pattern):
+            tok = tok.strip()
+            if not tok:
+                continue
+            s = difflib.SequenceMatcher(None, up, tok.upper()).ratio()
+            if s > best[0]:
+                best = (s, tok, cat)
+    return best
+
+
+def build_suggestions(unmapped_recs, rules):
+    """미매핑 레이어별: 기하 투표 + 이름 fuzzy → 비강제 제안(사람이 CSV 작성용)."""
+    out = []
+    for layer, recs in sorted(unmapped_recs.items()):
+        votes = {}
+        for r in recs:
+            cat, conf, _ = classify_geometry(r)
+            if cat:
+                votes.setdefault(cat, []).append(conf)
+        geom_cat, geom_conf, geom_reason = None, 0.0, ""
+        if votes:
+            geom_cat = max(votes, key=lambda c: (len(votes[c]), sum(votes[c])))
+            geom_conf = round(sum(votes[geom_cat]) / len(votes[geom_cat]), 2)
+            geom_reason = classify_geometry(
+                next(r for r in recs if classify_geometry(r)[0] == geom_cat))[2]
+        score, tok, name_cat = fuzzy_layer_suggestion(layer, rules)
+        out.append({"layer": layer, "count": len(recs),
+                    "geom_guess": geom_cat, "geom_confidence": geom_conf,
+                    "geom_reason": geom_reason,
+                    "name_guess": name_cat if score >= 0.5 else None,
+                    "name_match": tok if score >= 0.5 else None,
+                    "name_score": round(score, 2)})
+    return out
+
+
+# ── [MEP 물량산출] shapely 존 귀속 ───────────────────────────
+def assign_zones(elements, zones):
+    """각 요소의 무게중심이 어느 zone 폴리곤에 들어가는지 태깅."""
+    if not HAS_SHAPELY or not zones:
+        return
+    polys = []
+    for i, z in enumerate(zones):
+        if z["kind"] == "polyline" and len(z["points"]) >= 3:
+            polys.append((i, Polygon([(p[0], p[1]) for p in z["points"]])))
+    for cat, items in elements.items():
+        if cat == "zone":
+            continue
+        for rec in items:
+            cx, cy = _centroid(rec)
+            pt = Point(cx, cy)
+            rec["zone"] = next((i for i, poly in polys if poly.contains(pt)), None)
+
+
+def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAMS):
+    doc = ezdxf.readfile(dxf_path)
+    msp = doc.modelspace()
+    scale = 1000.0 if doc.header.get("$INSUNITS", 0) == 6 else 1.0
+    result = {"source": dxf_path, "units": "mm", "scale_applied": scale, "params": params,
+              "elements": {"wall": [], "column": [], "slab": [], "zone": [], "opening": [],
+                           "pipe": [], "duct": [], "tray": [], "equipment": []},
+              "warnings": []}
+    unmapped, unmapped_blocks, n_inserts, unmapped_recs = {}, {}, 0, {}
+    for e in msp:
+        # [Phase 2] INSERT: 블록명 분류 → explode/마커. 레이어 폴백.
+        if e.dxftype() == "INSERT":
+            n_inserts += 1
+            bname = e.dxf.get("name", "") or ""
+            cat, attrs = classify(bname, block_rules) if block_rules else (None, {})
+            if cat is None:
+                cat, attrs = classify(e.dxf.layer, rules)  # 레이어 폴백
+            if cat is None:
+                unmapped_blocks[bname] = unmapped_blocks.get(bname, 0) + 1
+                continue
+            elev = _entity_elevation(e, scale)
+            for rec in insert_to_records(e, scale, cat, attrs):
+                if attrs:
+                    rec["overrides"] = attrs
+                if cat in MEP_CATEGORIES:
+                    annotate_mep(rec, cat, attrs, elev)
+                else:
+                    rec["z_base"] = elev  # [4b] 층 분리용 Z 기준
+                result["elements"].setdefault(cat, []).append(rec)
+            continue
+        cat, attrs = classify(e.dxf.layer, rules)
+        if cat is None:
+            unmapped[e.dxf.layer] = unmapped.get(e.dxf.layer, 0) + 1
+            bucket = unmapped_recs.setdefault(e.dxf.layer, [])
+            if len(bucket) < 50:  # [Phase 3] 기하 제안용 샘플(레이어당 최대 50)
+                try:
+                    sr = entity_to_record(e, scale)
+                    if sr:
+                        bucket.append(sr)
+                except Exception:
+                    pass
+            continue
+        rec = entity_to_record(e, scale)
+        if rec is None:
+            result["warnings"].append(f"unhandled {e.dxftype()} @ {e.dxf.layer}")
+            continue
+        if attrs:
+            rec["overrides"] = attrs
+        elev = _entity_elevation(e, scale)
+        if cat in MEP_CATEGORIES:
+            annotate_mep(rec, cat, attrs, elev)
+        else:
+            rec["z_base"] = elev  # [4b] 층 분리용 Z 기준(단층=0.0)
+        result["elements"].setdefault(cat, []).append(rec)
+    # [Phase 1] 평행선 쌍 → 벽 중심선+두께 (zone 귀속 전에 재구성)
+    result["elements"]["wall"] = detect_wall_pairs(result["elements"]["wall"], params)
+    # [Phase 4.0] 같은 직선 위 쪼개진 세그먼트 재병합(코너 틈은 제외)
+    _n_before = len(result["elements"]["wall"])
+    result["elements"]["wall"] = merge_collinear_walls(result["elements"]["wall"], params)
+    result["wall_merge"] = {"before": _n_before, "after": len(result["elements"]["wall"])}
+    # [Phase 4.1] 코너 스냅: 끝점 불일치 → [4] boolean void 실패 방지
+    _walls_pre_snap = result["elements"]["wall"]
+    result["elements"]["wall"] = snap_wall_corners(result["elements"]["wall"])
+    _snapped = sum(
+        1 for a, b in zip(_walls_pre_snap, result["elements"]["wall"])
+        if a.get("centerline") != b.get("centerline"))
+    result["wall_merge"]["snapped_corners"] = _snapped
+    # [Phase 4a] opening → 교차 벽 연결 (builder boolean void 전처리)
+    link_openings_to_walls(result["elements"], params)
+    paired = sum(1 for w in result["elements"]["wall"] if w.get("pairing") == "paired")
+    single = sum(1 for w in result["elements"]["wall"] if w.get("pairing") == "single")
+    result["wall_pairing"] = {"paired": paired, "single": single}
+    result["blocks"] = {"inserts": n_inserts, "unmapped": sum(unmapped_blocks.values())}
+    result["mep"] = {c: len(result["elements"].get(c, [])) for c in MEP_CATEGORIES}
+    # [Phase 4b] 층 감지: structural z_base 값 수집 → 100mm tol 양자화 → floors 목록
+    _FLOOR_TOL = 100.0
+    _z_vals = set()
+    for _cat in ("wall", "column", "slab", "zone"):
+        for _el in result["elements"].get(_cat, []):
+            _z = _el.get("z_base", 0.0)
+            _z_vals.add(round(_z / _FLOOR_TOL) * _FLOOR_TOL)
+    if not _z_vals:
+        _z_vals = {0.0}
+    result["floors"] = [{"z": float(z), "label": f"Level_{i+1}"}
+                        for i, z in enumerate(sorted(_z_vals))]
+    assign_zones(result["elements"], result["elements"].get("zone", []))
+    if unmapped:  # [MEP Phase 4] 미매핑 로그
+        result["warnings"].append("미매핑 레이어: " +
+                                  ", ".join(f"{k}({v})" for k, v in unmapped.items()))
+        # [Phase 3] 미매핑 → 기하/이름 기반 비강제 제안
+        result["suggestions"] = build_suggestions(unmapped_recs, rules)
+    if unmapped_blocks:  # [Phase 2] 미매핑 블록 로그
+        result["warnings"].append("미매핑 블록: " +
+                                  ", ".join(f"{k}({v})" for k, v in unmapped_blocks.items()))
+    return result
+
+
+# ── [MEP Phase 1] 인벤토리 스캐너 ────────────────────────────
+def scan(dxf_path):
+    doc = ezdxf.readfile(dxf_path)
+    msp = doc.modelspace()
+    layers, types, xs, ys, poly_recs, blocks = {}, {}, [], [], [], {}
+    for e in msp:
+        layers[e.dxf.layer] = layers.get(e.dxf.layer, 0) + 1
+        types[e.dxftype()] = types.get(e.dxftype(), 0) + 1
+        if e.dxftype() == "INSERT":
+            bn = e.dxf.get("name", "") or "?"
+            blocks[bn] = blocks.get(bn, 0) + 1
+        try:
+            rec = entity_to_record(e, 1.0)
+            if rec and rec["kind"] == "polyline":
+                poly_recs.append(rec)
+                for p in rec["points"]:
+                    xs.append(p[0]); ys.append(p[1])
+        except Exception:
+            pass
+    print(f"[인벤토리] {dxf_path}")
+    print(f"  단위코드 $INSUNITS={doc.header.get('$INSUNITS', 0)}")
+    if xs:
+        print(f"  좌표범위 X[{min(xs):.0f}~{max(xs):.0f}] Y[{min(ys):.0f}~{max(ys):.0f}]")
+    print("  레이어별 객체 수:")
+    for k, v in sorted(layers.items(), key=lambda x: -x[1]):
+        print(f"    {k:20s} {v}")
+    print("  엔티티 타입별:")
+    for k, v in sorted(types.items(), key=lambda x: -x[1]):
+        print(f"    {k:20s} {v}")
+    if blocks:
+        print("  블록(INSERT) 참조별:")
+        for k, v in sorted(blocks.items(), key=lambda x: -x[1]):
+            print(f"    {k:20s} {v}")
+    # [Phase 1] 평행선 쌍 후보 개략 추정(전체 폴리라인 대상, O(n²) 가드)
+    segs = _wall_segments(poly_recs)
+    if len(segs) <= 2000:
+        pairs, _ = _find_wall_pairs(segs)
+        print(f"  평행선 쌍 후보: {len(pairs)}개 (세그먼트 {len(segs)}개 중)")
+    else:
+        print(f"  평행선 쌍 후보: 생략(세그먼트 {len(segs)}개 > 2000)")
+
+
+# ── [Phase 6a] LLM tie-break (모호 레이어 분류 보조) ─────────
+# 원칙: LLM은 geometry.json의 category 값만 제안. FreeCAD 코드 생성 절대 금지.
+#       자동매핑 없음 — 사용자가 제안을 검토해 layer_map.csv 에 직접 추가.
+# 의존: anthropic SDK (선택). 없으면 graceful fallback(제안 없음).
+# 트리거: geom_confidence < 0.7 AND name_score < 0.6 (둘 다 모호한 항목만 호출).
+# API key: 환경변수 ANTHROPIC_API_KEY.
+_VALID_CATEGORIES = ("wall", "column", "slab", "zone", "opening",
+                     "pipe", "duct", "tray", "equipment")
+_LLM_SYSTEM = (
+    "You are a BIM/MEP layer classifier for DXF drawings. "
+    "Given a layer name and geometry hints, suggest the most likely category. "
+    "Reply ONLY with valid JSON: "
+    "{\"category\": \"<one of: wall column slab zone opening pipe duct tray equipment>\", "
+    "\"reason\": \"<one concise sentence in Korean>\", "
+    "\"confidence\": <0.0-1.0>}. "
+    "NEVER generate FreeCAD code. NEVER auto-apply mappings. Suggestion only."
+)
+
+
+def _llm_one(layer, count, geom_guess, geom_conf, name_guess, name_score, api_key):
+    """LLM 1회 호출 → (category, reason, confidence) or None."""
+    try:
+        import anthropic  # optional dep
+    except ImportError:
+        return None
+    prompt = (
+        f"레이어명: \"{layer}\" (엔티티 {count}개)\n"
+        f"기하 추정: {geom_guess or '불명'} (신뢰도 {geom_conf:.2f})\n"
+        f"이름 유사: {name_guess or '불명'} (유사도 {name_score:.2f})\n"
+        f"가능한 카테고리: {', '.join(_VALID_CATEGORIES)}\n"
+        "위 정보를 바탕으로 가장 적합한 카테고리를 JSON으로 답하세요."
+    )
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=120,
+            system=_LLM_SYSTEM,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = msg.content[0].text.strip()
+        # JSON 파싱 — 마크다운 코드블록 제거
+        import re as _re
+        raw = _re.sub(r"```[a-z]*\n?", "", raw).strip().rstrip("`").strip()
+        parsed = json.loads(raw)
+        cat = parsed.get("category", "").lower()
+        if cat not in _VALID_CATEGORIES:
+            return None
+        return (cat,
+                str(parsed.get("reason", ""))[:120],
+                float(parsed.get("confidence", 0.5)))
+    except Exception as e:
+        return None
+
+
+def llm_tiebreak_suggestions(suggestions, api_key=None):
+    """모호(기하·이름 둘 다 낮은 신뢰도) 제안에만 LLM 호출 → llm_guess 필드 추가.
+    ★ 자동매핑 안 함 — 사용자가 검토 후 layer_map.csv 에 추가할 것."""
+    if not api_key:
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return  # API key 없으면 조용히 스킵
+    for s in suggestions:
+        geom_conf = float(s.get("geom_confidence") or 0.0)
+        name_score = float(s.get("name_score") or 0.0)
+        if geom_conf >= 0.7 or name_score >= 0.6:
+            continue  # 이미 충분히 자명 → LLM 불필요
+        result = _llm_one(
+            s["layer"], s["count"],
+            s.get("geom_guess"), geom_conf,
+            s.get("name_guess"), name_score,
+            api_key)
+        if result:
+            cat, reason, conf = result
+            s["llm_guess"] = cat
+            s["llm_reason"] = reason
+            s["llm_confidence"] = round(conf, 2)
+
+
+DWG_DXF_CHECKLIST = (
+    "========================================================\n"
+    "  DWG -> DXF 내보내기 체크리스트  (MEP Parser 전용)\n"
+    "========================================================\n"
+    "\n"
+    "[1] 저장 형식\n"
+    "  [ ] AutoCAD DXF 형식으로 저장 (*.dxf)\n"
+    "  [ ] 버전: AutoCAD 2010 (R18) 이상 권장 (ezdxf 호환)\n"
+    "  [ ] ASCII DXF 사용 (Binary DXF 지양)\n"
+    "\n"
+    "[2] 단위 설정  <- 가장 흔한 실수\n"
+    "  [ ] $INSUNITS 를 반드시 확인:\n"
+    "        4 = mm  (권장)\n"
+    "        6 = m   (파서가 x1000 자동 보정)\n"
+    "        0 = 무단위 (보정 없음 -> 크기 이상)\n"
+    "  [ ] AutoCAD: '도면 단위' 대화상자에서 삽입 단위 = 밀리미터 설정\n"
+    "\n"
+    "[3] 레이어 보존\n"
+    "  [ ] 레이어 이름 한글/특수문자 최소화 (ezdxf 인코딩 이슈 방지)\n"
+    "  [ ] 레이어 동결/잠금 해제 후 저장 (동결 레이어 엔티티 누락)\n"
+    "  [ ] 레이어 0 에 실제 요소 없도록 (분류 불가)\n"
+    "\n"
+    "[4] 엔티티 유형\n"
+    "  [ ] 포함 확인: LINE, LWPOLYLINE, POLYLINE, CIRCLE, ARC, INSERT\n"
+    "  [ ] XREF(외부참조) -> 바인딩(Bind) 후 저장, 또는 별도 DXF로 분리\n"
+    "  [ ] SOLID/3DFACE 등 솔리드 엔티티는 파서가 무시함(경고로 표시)\n"
+    "  [ ] MTEXT/TEXT -> 파서 무시(정상). 치수선도 무시.\n"
+    "\n"
+    "[5] 블록(INSERT) 처리\n"
+    "  [ ] 기둥/문/창/장비를 블록으로 사용한 경우 block_map.csv 에 등록\n"
+    "  [ ] EXPLODE 하지 말 것 - 블록 정보 유지해야 분류 정확\n"
+    "  [ ] 동적 블록(Dynamic Block) -> 정적 블록으로 변환 권장\n"
+    "\n"
+    "[6] 좌표계\n"
+    "  [ ] WCS(World Coordinate System) 기준으로 저장\n"
+    "  [ ] UCS가 돌아가 있으면 WCS 로 전환 후 저장\n"
+    "  [ ] 기준점(Origin) 확인: 너무 먼 좌표(e.g. 위경도) -> 파서 경고\n"
+    "\n"
+    "[7] 저장 전 점검\n"
+    "  [ ] AUDIT 명령 실행 -> 오류 수정\n"
+    "  [ ] PURGE 실행 -> 미사용 레이어/블록 정리\n"
+    "  [ ] 저장 후 MEP Parser --scan 으로 레이어 목록 확인\n"
+    "\n"
+    "[8] 변환 검증 (MEP Parser)\n"
+    "  [ ] python dxf_parser.py plan.dxf --scan\n"
+    "        -> 레이어 목록 / 좌표범위 / 블록 목록 확인\n"
+    "  [ ] 레이어 이름이 layer_map.csv 패턴과 매칭되는지 확인\n"
+    "  [ ] 경고(미매핑 레이어) -> layer_map.csv 에 패턴 추가\n"
+    "\n"
+    "========================================================\n"
+)
+
+
+def print_checklist():
+    """DWG→DXF 내보내기 체크리스트 출력."""
+    print(DWG_DXF_CHECKLIST)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("dxf", nargs="?", default=None,
+                    help="DXF 도면 경로 (--checklist 시 생략 가능)")
+    ap.add_argument("-m", "--map", default=None, help="layer_map.csv (없으면 기본규칙)")
+    ap.add_argument("-b", "--blockmap", default=None, help="block_map.csv (없으면 기본규칙)")
+    ap.add_argument("-o", "--out", default="geometry.json")
+    ap.add_argument("--scan", action="store_true", help="인벤토리 통계만 출력")
+    ap.add_argument("--checklist", action="store_true",
+                    help="DWG->DXF 내보내기 체크리스트 출력 후 종료")
+    ap.add_argument("--llm", action="store_true",
+                    help="모호 레이어 LLM tie-break (ANTHROPIC_API_KEY 필요)")
+    args = ap.parse_args()
+
+    if args.checklist:
+        print_checklist()
+        return
+
+    if not args.dxf:
+        ap.error("DXF 파일을 지정하세요 (또는 --checklist 사용)")
+
+    if args.scan:
+        scan(args.dxf)
+        return
+
+    rules = load_layer_map(args.map) if args.map else DEFAULT_LAYER_RULES
+    block_rules = load_layer_map(args.blockmap) if args.blockmap else DEFAULT_BLOCK_RULES
+    data = parse(args.dxf, rules, block_rules)
+    if args.llm and data.get("suggestions"):
+        llm_tiebreak_suggestions(data["suggestions"])
+        # LLM 결과 반영 후 json 재저장(아래 dump 에서 처리)
+    with open(args.out, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    el = data["elements"]
+    zoned = sum(1 for c in ("wall", "column") for r in el[c] if r.get("zone") is not None)
+    wp = data.get("wall_pairing", {})
+    print(f"파싱 완료 -> {args.out}  (shapely={'on' if HAS_SHAPELY else 'off'})")
+    print(f"  walls={len(el['wall'])} columns={len(el['column'])} "
+          f"slabs={len(el['slab'])} zones={len(el['zone'])} openings={len(el['opening'])}")
+    print(f"  벽 쌍 검출: paired={wp.get('paired', 0)} single={wp.get('single', 0)}")
+    bk = data.get("blocks", {})
+    print(f"  블록(INSERT): {bk.get('inserts', 0)}개 (미매핑 {bk.get('unmapped', 0)}개)")
+    mep = data.get("mep", {})
+    if any(mep.values()):
+        print(f"  MEP 추출(데이터만): pipe={mep.get('pipe',0)} duct={mep.get('duct',0)} "
+              f"tray={mep.get('tray',0)} equipment={mep.get('equipment',0)}")
+    print(f"  존 귀속된 요소: {zoned}")
+    for w in data["warnings"]:
+        print("  [warn]", w)
+    for s in data.get("suggestions", []):
+        g = f"기하={s['geom_guess']}({s['geom_confidence']})" if s.get('geom_guess') else "기하=?"
+        nm = (f"이름~{s['name_match']}->{s['name_guess']}({s['name_score']})"
+              if s.get('name_guess') else "이름=?")
+        llm = (f" [LLM->{s['llm_guess']}({s['llm_confidence']}) {s['llm_reason']}]"
+               if s.get("llm_guess") else "")
+        print(f"  [제안] '{s['layer']}'x{s['count']}: {g} {nm}{llm}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# 생성 파일
+*.geometry.json
+geometry.json
+*_model.FCStd
+*_model.ifc
+*.FCStd
+*.ifc
+
+# 개인 설정
+.env
+*.env
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
