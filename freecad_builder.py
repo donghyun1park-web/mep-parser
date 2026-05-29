@@ -16,6 +16,13 @@ import json
 import os
 import sys
 
+# Windows 한글 출력 크래시 방지
+if sys.stdout.encoding.lower() != 'utf-8':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
 import FreeCAD as App
 import Part
 import Draft
@@ -27,9 +34,20 @@ def vec(p, z=0.0):
 
 
 def make_wire(points, closed):
-    pts = [vec(p) for p in points]
-    w = Draft.makeWire(pts, closed=closed, face=False)
-    return w
+    pts = []
+    for p in points:
+        v = vec(p)
+        if not pts or (pts[-1] - v).Length > 1.0:
+            pts.append(v)
+    if closed and len(pts) > 1 and (pts[-1] - pts[0]).Length <= 1.0:
+        pts.pop()
+    if len(pts) < 2:
+        return None
+    try:
+        w = Draft.makeWire(pts, closed=closed, face=False)
+        return w
+    except Exception:
+        return None
 
 
 def build_walls(doc, walls, params):
@@ -37,6 +55,10 @@ def build_walls(doc, walls, params):
     objs = []
     src_els = []  # 각 obj 에 대응하는 원본 element (층 그룹핑용)
     idx_map = {}  # element index → wall obj (opening void 연결용)
+    
+    # 에러 요소 저장용 그룹 (빌더 크래시 방지 및 시각화)
+    error_group = None
+
     for i, el in enumerate(walls):
         # baseline: 검출된 중심선 우선, 없으면 원본 points
         baseline = el.get("centerline") or el.get("points")
@@ -47,14 +69,44 @@ def build_walls(doc, walls, params):
         width = float(el.get("width_detected")
                       or ov.get("width", d.get("width", 200.0)))
         height = float(ov.get("height", d.get("height", 2800.0)))
-        base = make_wire(baseline, el.get("closed", False))
-        base.Label = f"WallAxis_{i}"
-        wall = Arch.makeWall(base, width=width, height=height)
-        wall.Label = f"Wall_{i}"
-        wall.Placement.Base.z = float(el.get("z_base", 0.0))  # [4b] 층 Z 오프셋
-        objs.append(wall)
-        src_els.append(el)
-        idx_map[i] = wall
+        
+        # 라운드트립용 핸들(ID)이 파싱단계에서 부여된 경우 가져오기
+        dxf_id = el.get("handle") or f"WALL_{i}"
+
+        try:
+            base = make_wire(baseline, el.get("closed", False))
+            if not base:
+                raise ValueError("make_wire returned None")
+            base.Label = f"WallAxis_{i}"
+            wall = Arch.makeWall(base, width=width, height=height)
+            if not wall:
+                raise ValueError("Arch.makeWall returned None")
+                
+            wall.Label = f"Wall_{i}"
+            wall.Placement.Base.z = float(el.get("z_base", 0.0))  # [4b] 층 Z 오프셋
+            
+            # [라운드트립 기반] DXF Handle 주입
+            wall.addProperty("App::PropertyString", "DxfId", "Metadata", "Original DXF Handle")
+            wall.DxfId = dxf_id
+
+            objs.append(wall)
+            src_els.append(el)
+            idx_map[i] = wall
+        except Exception as e:
+            print(f"[warn] Wall_{i} 생성 실패: {e}")
+            # 에러 발생 시 단순 선(빨간색)으로 시각적 롤백 (Graceful Degradation)
+            try:
+                if not error_group:
+                    error_group = doc.addObject("App::DocumentObjectGroup", "Error_Elements")
+                pts = [vec(p, float(el.get("z_base", 0.0))) for p in baseline]
+                if len(pts) >= 2:
+                    err_line = Draft.makeWire(pts, closed=el.get("closed", False), face=False)
+                    err_line.Label = f"Error_Wall_{i}"
+                    err_line.ViewObject.LineColor = (1.0, 0.0, 0.0, 0.0) # 빨간색
+                    err_line.ViewObject.LineWidth = 3.0
+                    error_group.addObject(err_line)
+            except Exception as ex:
+                pass
     return objs, idx_map, src_els
 
 
@@ -114,6 +166,11 @@ def build_columns(doc, columns, params):
         col.IfcType = "Column"
         col.Label = f"Column_{i}"
         col.Placement.Base.z = float(el.get("z_base", 0.0))  # [4b]
+        
+        # [라운드트립 기반] DXF Handle 주입
+        col.addProperty("App::PropertyString", "DxfId", "Metadata", "Original DXF Handle")
+        col.DxfId = el.get("handle") or f"COLUMN_{i}"
+        
         objs.append(col)
         src_els.append(el)
     return objs, src_els
@@ -135,6 +192,11 @@ def build_slabs(doc, slabs, params):
         slab.Label = f"Slab_{i}"
         z_b = float(el.get("z_base", 0.0))
         slab.Placement.Base.z = z_b - thk  # [4b] 층 Z + 슬래브 하향 오프셋
+        
+        # [라운드트립 기반] DXF Handle 주입
+        slab.addProperty("App::PropertyString", "DxfId", "Metadata", "Original DXF Handle")
+        slab.DxfId = el.get("handle") or f"SLAB_{i}"
+        
         objs.append(slab)
         src_els.append(el)
     return objs, src_els

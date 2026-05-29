@@ -20,6 +20,14 @@ import json
 import math
 import os
 import re
+import sys
+
+# Windows 한글 출력 크래시 방지
+if sys.stdout.encoding.lower() != 'utf-8':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
 
 import ezdxf
 
@@ -31,11 +39,12 @@ except ImportError:
 
 # CSV 없을 때 폴백 규칙 (정규식, 카테고리, 파라미터)
 DEFAULT_LAYER_RULES = [
-    (r"WALL|벽", "wall", {}),
+    (r"WALL|벽|CON", "wall", {}),
     (r"COL|기둥", "column", {}),
-    (r"SLAB|FLOOR|바닥|슬래브", "slab", {}),
+    (r"SLAB|FLOOR|바닥|슬래브|STAIR|계단", "slab", {}),
     (r"ZONE|ROOM|실|구역", "zone", {}),
-    (r"DOOR|WIND|문|창", "opening", {}),
+    (r"DOOR|WIND|문|창|OPEN", "opening", {}),
+    (r"CEN|중심", "wall", {}),  # 중심선도 벽체로 간주하는 경우
     # [Phase 2.7] MEP — 데이터 추출만(3D 빌드 후속). 중심선 + 치수.
     (r"PIPE|배관|PIPING", "pipe", {}),
     (r"DUCT|덕트", "duct", {}),
@@ -997,6 +1006,8 @@ def main():
                     help="DWG->DXF 내보내기 체크리스트 출력 후 종료")
     ap.add_argument("--llm", action="store_true",
                     help="모호 레이어 LLM tie-break (ANTHROPIC_API_KEY 필요)")
+    ap.add_argument("--auto-map", action="store_true",
+                    help="신뢰도 높은(0.8이상) 제안을 layer_map.csv에 자동 추가")
     args = ap.parse_args()
 
     if args.checklist:
@@ -1015,6 +1026,20 @@ def main():
     data = parse(args.dxf, rules, block_rules)
     if args.llm and data.get("suggestions"):
         llm_tiebreak_suggestions(data["suggestions"])
+        
+    if args.auto_map and args.map and data.get("suggestions"):
+        appended_count = 0
+        with open(args.map, "a", encoding="utf-8") as f:
+            for s in data["suggestions"]:
+                # LLM 또는 기하/이름 추론 중 신뢰도 높은 카테고리 채택
+                best_cat = s.get("llm_guess") or s.get("geom_guess") or s.get("name_guess")
+                conf = float(s.get("llm_confidence") or s.get("geom_confidence") or s.get("name_score") or 0.0)
+                if best_cat and conf >= 0.8:
+                    f.write(f"\n{s['layer']},{best_cat},,,")
+                    appended_count += 1
+        if appended_count > 0:
+            print(f"  [Auto-Map] {appended_count}개 레이어를 {args.map} 파일에 자동 추가했습니다.")
+            
         # LLM 결과 반영 후 json 재저장(아래 dump 에서 처리)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)

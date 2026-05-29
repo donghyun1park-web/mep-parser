@@ -3,7 +3,7 @@
 # pattern: 레이어명 정규식(대소문자 무시) / category: wall|column|slab|zone|opening
 # width/height/thickness: mm (비우면 params 기본값 사용)
 pattern,category,width,height,thickness
-WALL|벽,wall,200,2800,
+WALL|벽|CON,wall,200,2800,
 COL|기둥,column,,3000,
 SLAB|FLOOR|바닥|슬래브,slab,,,200
 ZONE|ROOM|실|구역,zone,,,
