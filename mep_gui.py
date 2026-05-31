@@ -1,22 +1,23 @@
 """
-mep_gui.py  —  [Phase 2.5] 사용성 껍데기 + 수정 루프
-CLI 모르는 현장 사용자용 GUI. 더블클릭(run_gui.bat) → 파일 선택 →
-스캔 → 파싱 → needs_review 수정 → 3D 빌드까지 한 창에서.
+mep_gui.py  --  [Phase 2.5] GUI shell + edit loop
+Double-click (run_gui.bat) -> file select -> scan -> parse -> review -> 3D build.
 
-설계:
-- 새 의존성 0 (tkinter = 파이썬 표준). 엔진은 dxf_parser 모듈을 그대로 재사용.
-- 수정 루프: needs_review 요소를 목록에 띄우고 폭/높이를 고쳐 geometry.json 에 반영·저장.
-  빌드는 '저장된 geometry.json'에서 함 → 사람이 고친 값이 그대로 3D 로 감(보존).
-  (주의: DXF 재파싱은 수정을 덮어씀 → 재파싱 버튼은 경고 후 진행.)
-- FreeCAD 빌드는 freecadcmd.exe 자동 탐지 후 subprocess + 환경변수(MEP_GEOMETRY/MEP_OUT).
+Design:
+- Zero new dependencies (tkinter = Python stdlib). Engine reuses dxf_parser module.
+- Review loop: needs_review items shown in list; user edits width/height -> saved to geometry.json.
+  Build reads saved geometry.json -> preserves manual edits.
+  (Warning: re-parsing overwrites edits -> re-parse button warns before proceeding.)
+- FreeCAD build: auto-detect freecadcmd.exe -> subprocess + env vars (MEP_GEOMETRY/MEP_OUT).
+- Layer map editor: add/delete/save layer_map.csv rows inside GUI.
+  Shows unmapped layers from last parse for quick one-click add.
 """
 import contextlib
+import csv
 import glob
 import io
 import json
 import os
 import subprocess
-import sys
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -25,9 +26,11 @@ import dxf_parser as P
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+CATEGORIES = ["wall", "column", "slab", "zone", "opening", "pipe", "duct", "tray"]
+
 
 def find_freecadcmd():
-    """freecadcmd.exe 자동 탐지. 없으면 None."""
+    """Auto-detect freecadcmd.exe. Returns None if not found."""
     cands = [r"C:\Program Files\FreeCAD 1.1\bin\freecadcmd.exe"]
     cands += glob.glob(r"C:\Program Files\FreeCAD*\bin\freecadcmd.exe")
     cands += glob.glob(r"C:\Program Files (x86)\FreeCAD*\bin\freecadcmd.exe")
@@ -37,54 +40,264 @@ def find_freecadcmd():
     return None
 
 
+# ── Layer Map CSV helpers ─────────────────────────────────────────────────────
+
+def _read_csv_rows(csv_path):
+    """Read layer_map.csv -> list of dicts {pattern, category, width, height, thickness}."""
+    rows = []
+    if not os.path.exists(csv_path):
+        return rows
+    with open(csv_path, encoding="utf-8") as f:
+        for row in csv.DictReader(filter(lambda l: not l.startswith("#"), f)):
+            rows.append({
+                "pattern": row.get("pattern", "").strip(),
+                "category": row.get("category", "").strip(),
+                "width": row.get("width", "").strip(),
+                "height": row.get("height", "").strip(),
+                "thickness": row.get("thickness", "").strip(),
+            })
+    return rows
+
+
+def _write_csv_rows(csv_path, rows):
+    """Write rows back to layer_map.csv (overwrites, keeps header comment)."""
+    header_comment = (
+        "# layer_map.csv  --  layer pattern -> category/parameter mapping\n"
+        "# pattern: regex (case-insensitive) / "
+        "category: wall|column|slab|zone|opening|pipe|duct|tray\n"
+        "# width/height/thickness: mm (leave blank to use param defaults)\n"
+    )
+    with open(csv_path, "w", encoding="utf-8", newline="") as f:
+        f.write(header_comment)
+        writer = csv.DictWriter(f, fieldnames=["pattern", "category", "width", "height", "thickness"])
+        writer.writeheader()
+        for r in rows:
+            writer.writerow(r)
+
+
+# ── Layer Map Editor Window ───────────────────────────────────────────────────
+
+class LayerMapEditor:
+    """Popup window: view/add/delete layer_map.csv rows + quick-add unmapped layers."""
+
+    def __init__(self, parent, csv_path, unmapped_suggestions=None):
+        self.csv_path = csv_path
+        self.rows = _read_csv_rows(csv_path)
+        self.unmapped = unmapped_suggestions or []  # list of suggestion dicts
+
+        self.win = tk.Toplevel(parent)
+        self.win.title(f"Layer Map Editor — {os.path.basename(csv_path)}")
+        self.win.geometry("860x540")
+        self.win.grab_set()  # modal
+
+        self._build_ui()
+        self._refresh_tree()
+
+    def _build_ui(self):
+        # ── Top: treeview of current rules ────────────────────
+        top = ttk.LabelFrame(self.win, text="Current layer rules (editable)")
+        top.pack(fill="both", expand=True, padx=8, pady=6)
+
+        cols = ("pattern", "category", "width", "height", "thickness")
+        self.tree = ttk.Treeview(top, columns=cols, show="headings", height=10)
+        col_widths = (220, 90, 70, 70, 80)
+        for c, w in zip(cols, col_widths):
+            self.tree.heading(c, text=c)
+            self.tree.column(c, width=w, anchor="w")
+        sb = ttk.Scrollbar(top, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self.tree.pack(fill="both", expand=True, padx=4, pady=4)
+        self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
+
+        ttk.Button(top, text="Delete selected row",
+                   command=self._delete_row).pack(side="right", padx=4, pady=2)
+
+        # ── Middle: add new row ────────────────────────────────
+        mid = ttk.LabelFrame(self.win, text="Add new rule")
+        mid.pack(fill="x", padx=8, pady=4)
+
+        fields = [("Pattern (regex)", 28), ("Category", 12), ("Width mm", 8),
+                  ("Height mm", 8), ("Thickness mm", 10)]
+        self.v_pat = tk.StringVar()
+        self.v_cat = tk.StringVar(value="column")
+        self.v_wid = tk.StringVar()
+        self.v_hei = tk.StringVar()
+        self.v_thk = tk.StringVar()
+        vars_ = [self.v_pat, self.v_cat, self.v_wid, self.v_hei, self.v_thk]
+
+        for col, ((lbl, w), var) in enumerate(zip(fields, vars_)):
+            ttk.Label(mid, text=lbl).grid(row=0, column=col, padx=4, sticky="w")
+            if lbl == "Category":
+                cb = ttk.Combobox(mid, textvariable=var, values=CATEGORIES, width=w, state="readonly")
+                cb.grid(row=1, column=col, padx=4, pady=2)
+            else:
+                ttk.Entry(mid, textvariable=var, width=w).grid(row=1, column=col, padx=4, pady=2)
+
+        ttk.Button(mid, text="Add row", command=self._add_row).grid(
+            row=1, column=len(fields), padx=8, pady=2)
+
+        # ── Bottom: unmapped layers from last parse ────────────
+        if self.unmapped:
+            bot = ttk.LabelFrame(self.win,
+                                 text="Unmapped layers from last parse — click to pre-fill")
+            bot.pack(fill="x", padx=8, pady=4)
+            canvas = tk.Canvas(bot, height=60)
+            hscroll = ttk.Scrollbar(bot, orient="horizontal", command=canvas.xview)
+            canvas.configure(xscrollcommand=hscroll.set)
+            hscroll.pack(side="bottom", fill="x")
+            canvas.pack(fill="x", padx=4)
+            inner = ttk.Frame(canvas)
+            canvas.create_window((0, 0), window=inner, anchor="nw")
+            for s in self.unmapped:
+                layer = s.get("layer", "")
+                guess = s.get("llm_guess") or s.get("geom_guess") or s.get("name_guess") or "column"
+                lbl = f"{layer} [{guess}]"
+                ttk.Button(inner, text=lbl,
+                           command=lambda l=layer, g=guess: self._prefill(l, g)
+                           ).pack(side="left", padx=3, pady=4)
+            inner.update_idletasks()
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        # ── Save button ────────────────────────────────────────
+        btn_bar = ttk.Frame(self.win)
+        btn_bar.pack(fill="x", padx=8, pady=6)
+        ttk.Button(btn_bar, text="Save to CSV", command=self._save).pack(side="right", padx=4)
+        ttk.Button(btn_bar, text="Cancel", command=self.win.destroy).pack(side="right", padx=4)
+        self.status = ttk.Label(btn_bar, text="")
+        self.status.pack(side="left", padx=4)
+
+    def _refresh_tree(self):
+        self.tree.delete(*self.tree.get_children())
+        for i, r in enumerate(self.rows):
+            self.tree.insert("", "end", iid=str(i),
+                             values=(r["pattern"], r["category"],
+                                     r["width"], r["height"], r["thickness"]))
+
+    def _on_tree_select(self, _evt):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        r = self.rows[int(sel[0])]
+        self.v_pat.set(r["pattern"])
+        self.v_cat.set(r["category"])
+        self.v_wid.set(r["width"])
+        self.v_hei.set(r["height"])
+        self.v_thk.set(r["thickness"])
+
+    def _prefill(self, layer, guess):
+        """Pre-fill pattern and category from unmapped layer chip."""
+        import re
+        escaped = re.escape(layer)
+        self.v_pat.set(escaped)
+        cat = guess if guess in CATEGORIES else "column"
+        self.v_cat.set(cat)
+        self.v_wid.set("")
+        self.v_hei.set("")
+        self.v_thk.set("")
+        self.status.config(text=f"Pre-filled: {layer} -> {cat}. Adjust and click [Add row].")
+
+    def _add_row(self):
+        pat = self.v_pat.get().strip()
+        cat = self.v_cat.get().strip()
+        if not pat:
+            messagebox.showwarning("Input error", "Pattern cannot be empty.", parent=self.win)
+            return
+        if cat not in CATEGORIES:
+            messagebox.showwarning("Input error",
+                                   f"Category must be one of: {', '.join(CATEGORIES)}",
+                                   parent=self.win)
+            return
+        self.rows.append({
+            "pattern": pat,
+            "category": cat,
+            "width": self.v_wid.get().strip(),
+            "height": self.v_hei.get().strip(),
+            "thickness": self.v_thk.get().strip(),
+        })
+        self._refresh_tree()
+        # clear inputs
+        self.v_pat.set("")
+        self.v_wid.set("")
+        self.v_hei.set("")
+        self.v_thk.set("")
+        self.status.config(text=f"Added: {pat} -> {cat}")
+
+    def _delete_row(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo("Info", "Select a row first.", parent=self.win)
+            return
+        idx = int(sel[0])
+        removed = self.rows.pop(idx)
+        self._refresh_tree()
+        self.status.config(text=f"Deleted: {removed['pattern']}")
+
+    def _save(self):
+        try:
+            _write_csv_rows(self.csv_path, self.rows)
+            self.status.config(text=f"Saved {len(self.rows)} rows -> {os.path.basename(self.csv_path)}")
+            messagebox.showinfo("Saved",
+                                f"Saved {len(self.rows)} rules to:\n{self.csv_path}",
+                                parent=self.win)
+            self.win.destroy()
+        except Exception as e:
+            messagebox.showerror("Save error", str(e), parent=self.win)
+
+
+# ── Main App ──────────────────────────────────────────────────────────────────
+
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("MEP Parser — DXF → 3D BIM (현장용)")
-        root.geometry("820x640")
-        self.data = None          # 파싱 결과 dict
-        self.geom_path = None     # 저장된 geometry.json 경로
+        root.title("MEP Parser -- DXF to 3D BIM")
+        root.geometry("820x660")
+        self.data = None          # parsed result dict
+        self.geom_path = None     # path to saved geometry.json
 
         self.v_dxf = tk.StringVar()
         self.v_map = tk.StringVar(value=os.path.join(HERE, "layer_map.csv"))
         self.v_block = tk.StringVar(value=os.path.join(HERE, "block_map.csv"))
-        # LLM tie-break: API key 있을 때만 기본 활성
         self.v_llm = tk.BooleanVar(value=bool(os.environ.get("ANTHROPIC_API_KEY")))
 
         self._build_file_row()
         self._build_buttons()
         self._build_review()
         self._build_log()
-        self._log(f"FreeCAD: {find_freecadcmd() or '미탐지(빌드 비활성)'}")
+        self._log(f"FreeCAD: {find_freecadcmd() or 'not found (build disabled)'}")
 
-    # ── UI 구성 ──────────────────────────────────────────────
+    # ── UI builders ───────────────────────────────────────────
     def _build_file_row(self):
-        f = ttk.LabelFrame(self.root, text="1) 파일 선택")
+        f = ttk.LabelFrame(self.root, text="1) File selection")
         f.pack(fill="x", padx=8, pady=6)
-        rows = [("DXF 도면", self.v_dxf, self._pick_dxf, "*.dxf"),
-                ("레이어 맵", self.v_map, lambda: self._pick_csv(self.v_map), "*.csv"),
-                ("블록 맵", self.v_block, lambda: self._pick_csv(self.v_block), "*.csv")]
-        for i, (lbl, var, cmd, _) in enumerate(rows):
-            ttk.Label(f, text=lbl, width=10).grid(row=i, column=0, sticky="w", padx=4, pady=2)
-            ttk.Entry(f, textvariable=var, width=78).grid(row=i, column=1, padx=4)
-            ttk.Button(f, text="찾기", command=cmd).grid(row=i, column=2, padx=4)
+        rows = [("DXF drawing", self.v_dxf, self._pick_dxf),
+                ("Layer map", self.v_map, lambda: self._pick_csv(self.v_map)),
+                ("Block map", self.v_block, lambda: self._pick_csv(self.v_block))]
+        for i, (lbl, var, cmd) in enumerate(rows):
+            ttk.Label(f, text=lbl, width=12).grid(row=i, column=0, sticky="w", padx=4, pady=2)
+            ttk.Entry(f, textvariable=var, width=74).grid(row=i, column=1, padx=4)
+            ttk.Button(f, text="Browse", command=cmd).grid(row=i, column=2, padx=2)
+            if lbl == "Layer map":
+                ttk.Button(f, text="Edit",
+                           command=self._open_layer_editor).grid(row=i, column=3, padx=2)
 
     def _build_buttons(self):
         f = ttk.Frame(self.root)
         f.pack(fill="x", padx=8)
-        ttk.Button(f, text="① 도면 점검(스캔)", command=self._do_scan).pack(side="left", padx=4)
-        ttk.Button(f, text="② 파싱 → geometry.json", command=self._do_parse).pack(side="left", padx=4)
-        self.btn_build = ttk.Button(f, text="④ 3D 빌드(FreeCAD)", command=self._do_build)
+        ttk.Button(f, text="(1) Scan drawing", command=self._do_scan).pack(side="left", padx=4)
+        ttk.Button(f, text="(2) Parse -> geometry.json", command=self._do_parse).pack(side="left", padx=4)
+        self.btn_build = ttk.Button(f, text="(4) 3D Build (FreeCAD)", command=self._do_build)
         self.btn_build.pack(side="left", padx=4)
         if find_freecadcmd() is None:
             self.btn_build.state(["disabled"])
-        ttk.Button(f, text="DWG->DXF 체크리스트",
+        ttk.Button(f, text="DWG->DXF checklist",
                    command=self._show_checklist).pack(side="right", padx=4)
-        ttk.Checkbutton(f, text="LLM 분류 보조",
+        ttk.Checkbutton(f, text="LLM assist",
                         variable=self.v_llm).pack(side="right", padx=2)
 
     def _build_review(self):
-        f = ttk.LabelFrame(self.root, text="③ 검토 필요 항목 (needs_review) — 고치고 [적용] 누르면 저장")
+        f = ttk.LabelFrame(self.root,
+                           text="(3) Items needing review (needs_review) -- edit and click [Apply]")
         f.pack(fill="both", expand=True, padx=8, pady=6)
         cols = ("idx", "cat", "pairing", "width", "conf")
         self.tree = ttk.Treeview(f, columns=cols, show="headings", height=7)
@@ -95,21 +308,21 @@ class App:
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
         e = ttk.Frame(f)
         e.pack(side="right", fill="y", padx=6)
-        ttk.Label(e, text="폭/지름 width(mm)").pack(anchor="w")
+        ttk.Label(e, text="Width/diameter (mm)").pack(anchor="w")
         self.v_w = tk.StringVar()
         ttk.Entry(e, textvariable=self.v_w, width=12).pack(anchor="w", pady=2)
-        ttk.Label(e, text="높이 height(mm)").pack(anchor="w")
+        ttk.Label(e, text="Height (mm)").pack(anchor="w")
         self.v_h = tk.StringVar()
         ttk.Entry(e, textvariable=self.v_h, width=12).pack(anchor="w", pady=2)
-        ttk.Button(e, text="적용·저장", command=self._apply_review).pack(anchor="w", pady=6)
+        ttk.Button(e, text="Apply & Save", command=self._apply_review).pack(anchor="w", pady=6)
 
     def _build_log(self):
-        f = ttk.LabelFrame(self.root, text="로그")
+        f = ttk.LabelFrame(self.root, text="Log")
         f.pack(fill="both", padx=8, pady=6)
         self.txt = tk.Text(f, height=9, wrap="none")
         self.txt.pack(fill="both", expand=True, padx=4, pady=4)
 
-    # ── 동작 ─────────────────────────────────────────────────
+    # ── Actions ───────────────────────────────────────────────
     def _log(self, msg):
         self.txt.insert("end", str(msg) + "\n")
         self.txt.see("end")
@@ -131,10 +344,20 @@ class App:
         brules = P.load_layer_map(b) if b and os.path.exists(b) else P.DEFAULT_BLOCK_RULES
         return rules, brules
 
+    def _open_layer_editor(self):
+        """Open the layer map editor popup."""
+        csv_path = self.v_map.get().strip()
+        if not csv_path:
+            csv_path = os.path.join(HERE, "layer_map.csv")
+            self.v_map.set(csv_path)
+        unmapped = []
+        if self.data:
+            unmapped = [s for s in self.data.get("suggestions", [])]
+        LayerMapEditor(self.root, csv_path, unmapped_suggestions=unmapped)
+
     def _show_checklist(self):
-        """DWG→DXF 체크리스트 팝업 창."""
         win = tk.Toplevel(self.root)
-        win.title("DWG → DXF 내보내기 체크리스트")
+        win.title("DWG -> DXF export checklist")
         win.geometry("640x560")
         txt = tk.Text(win, wrap="word", font=("Consolas", 9))
         sb = ttk.Scrollbar(win, command=txt.yview)
@@ -147,55 +370,58 @@ class App:
     def _do_scan(self):
         dxf = self.v_dxf.get().strip()
         if not dxf or not os.path.exists(dxf):
-            messagebox.showwarning("확인", "DXF 도면을 먼저 선택하세요.")
+            messagebox.showwarning("Check", "Please select a DXF drawing first.")
             return
         buf = io.StringIO()
         try:
             with contextlib.redirect_stdout(buf):
                 P.scan(dxf)
         except Exception as e:
-            self._log(f"[오류] 스캔 실패: {e}")
+            self._log(f"[Error] Scan failed: {e}")
             return
         self._log(buf.getvalue())
 
     def _do_parse(self):
         dxf = self.v_dxf.get().strip()
         if not dxf or not os.path.exists(dxf):
-            messagebox.showwarning("확인", "DXF 도면을 먼저 선택하세요.")
+            messagebox.showwarning("Check", "Please select a DXF drawing first.")
             return
         rules, brules = self._rules()
         try:
             self.data = P.parse(dxf, rules, brules)
         except Exception as e:
-            self._log(f"[오류] 파싱 실패: {e}")
+            self._log(f"[Error] Parse failed: {e}")
             return
         self.geom_path = os.path.splitext(dxf)[0] + ".geometry.json"
-        # [6a] LLM tie-break: 파싱 직후, 저장 전에 모호 제안 보강
+        # LLM tie-break
         if self.v_llm.get() and self.data.get("suggestions"):
-            self._log("  [LLM] 모호 레이어 분류 요청 중...")
+            self._log("  [LLM] Requesting ambiguous layer classification...")
             try:
                 P.llm_tiebreak_suggestions(self.data["suggestions"])
             except Exception as e:
-                self._log(f"  [LLM] 실패: {e}")
+                self._log(f"  [LLM] Failed: {e}")
         self._save()
         el = self.data["elements"]
         wp = self.data.get("wall_pairing", {})
         bk = self.data.get("blocks", {})
-        self._log(f"파싱 완료 -> {self.geom_path}")
+        self._log(f"Parse complete -> {self.geom_path}")
         self._log(f"  walls={len(el['wall'])} columns={len(el['column'])} "
                   f"slabs={len(el['slab'])} zones={len(el['zone'])} openings={len(el['opening'])}")
-        self._log(f"  벽 쌍: paired={wp.get('paired',0)} single={wp.get('single',0)} | "
-                  f"블록 {bk.get('inserts',0)}개(미매핑 {bk.get('unmapped',0)})")
+        self._log(f"  wall pairs: paired={wp.get('paired',0)} single={wp.get('single',0)} | "
+                  f"blocks {bk.get('inserts',0)} (unmapped {bk.get('unmapped',0)})")
         for w in self.data.get("warnings", []):
             self._log(f"  [warn] {w}")
-        for s in self.data.get("suggestions", []):
-            g = f"기하={s['geom_guess']}({s['geom_confidence']})" if s.get("geom_guess") else "기하=?"
-            nm = (f"이름~{s['name_match']}->{s['name_guess']}({s['name_score']})"
-                  if s.get("name_guess") else "이름=?")
+
+        sugg = self.data.get("suggestions", [])
+        if sugg:
+            self._log(f"  [{len(sugg)} unmapped layer(s)] — click [Edit] next to Layer map to add:")
+        for s in sugg:
+            g = f"geom={s['geom_guess']}({s['geom_confidence']})" if s.get("geom_guess") else "geom=?"
+            nm = (f"name~{s['name_match']}->{s['name_guess']}({s['name_score']})"
+                  if s.get("name_guess") else "name=?")
             llm = (f" [LLM->{s['llm_guess']}({s['llm_confidence']}) {s['llm_reason']}]"
                    if s.get("llm_guess") else "")
-            self._log(f"  [제안] '{s['layer']}'x{s['count']}: {g} {nm}{llm}"
-                      "  -> layer_map.csv 에 추가 검토")
+            self._log(f"  [suggest] '{s['layer']}'x{s['count']}: {g} {nm}{llm}")
         self._populate_review()
 
     def _populate_review(self):
@@ -209,10 +435,10 @@ class App:
                     wd = el.get("width_detected")
                     self.tree.insert("", "end", iid=f"{cat}:{idx}",
                                      values=(idx, cat, el.get("pairing", "-"),
-                                             wd if wd is not None else "(기본)",
+                                             wd if wd is not None else "(default)",
                                              el.get("confidence", "-")))
                     n += 1
-        self._log(f"검토 필요 항목: {n}개" + ("" if n else " — 모두 자동 검출 OK"))
+        self._log(f"Review items: {n}" + ("" if n else " -- all auto-detected OK"))
 
     def _on_select(self, _evt):
         sel = self.tree.selection()
@@ -227,7 +453,7 @@ class App:
     def _apply_review(self):
         sel = self.tree.selection()
         if not sel or not self.data:
-            messagebox.showinfo("안내", "목록에서 항목을 먼저 고르세요.")
+            messagebox.showinfo("Info", "Select an item from the list first.")
             return
         cat, idx = sel[0].split(":")
         el = self.data["elements"][cat][int(idx)]
@@ -238,11 +464,11 @@ class App:
             if self.v_h.get().strip():
                 ov["height"] = float(self.v_h.get())
         except ValueError:
-            messagebox.showwarning("확인", "숫자만 입력하세요.")
+            messagebox.showwarning("Check", "Numbers only.")
             return
         el["needs_review"] = False
         self._save()
-        self._log(f"[적용] {cat}[{idx}] overrides={ov} → 저장")
+        self._log(f"[Applied] {cat}[{idx}] overrides={ov} -> saved")
         self._populate_review()
 
     def _save(self):
@@ -252,17 +478,17 @@ class App:
 
     def _do_build(self):
         if not self.geom_path or not os.path.exists(self.geom_path):
-            messagebox.showwarning("확인", "먼저 파싱하세요.")
+            messagebox.showwarning("Check", "Please parse first.")
             return
         fc = find_freecadcmd()
         if not fc:
-            messagebox.showerror("FreeCAD 없음", "freecadcmd.exe 를 찾지 못했습니다.")
+            messagebox.showerror("FreeCAD not found", "freecadcmd.exe not found.")
             return
         out = os.path.splitext(self.geom_path)[0].replace(".geometry", "") + "_model"
         env = dict(os.environ, MEP_GEOMETRY=self.geom_path, MEP_OUT=out,
                    PYTHONIOENCODING="utf-8")
         self.btn_build.state(["disabled"])
-        self._log(f"빌드 시작… (freecadcmd) → {out}.FCStd / .ifc")
+        self._log(f"Build started... (freecadcmd) -> {out}.FCStd / .ifc")
 
         def run():
             try:
@@ -272,7 +498,7 @@ class App:
                                    timeout=300)
                 self.root.after(0, lambda: self._build_done(r, out))
             except Exception as e:
-                self.root.after(0, lambda: (self._log(f"[오류] 빌드 실패: {e}"),
+                self.root.after(0, lambda: (self._log(f"[Error] Build failed: {e}"),
                                             self.btn_build.state(["!disabled"])))
         threading.Thread(target=run, daemon=True).start()
 
@@ -282,7 +508,7 @@ class App:
         if r.returncode != 0 and r.stderr:
             self._log("[stderr] " + r.stderr.strip()[:500])
         ok = os.path.exists(out + ".FCStd")
-        self._log(f"빌드 {'완료' if ok else '실패'}: {out}.FCStd"
+        self._log(f"Build {'complete' if ok else 'FAILED'}: {out}.FCStd"
                   + (" / " + out + ".ifc" if os.path.exists(out + ".ifc") else ""))
         self.btn_build.state(["!disabled"])
 
