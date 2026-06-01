@@ -76,8 +76,10 @@ WALL_PAIR_OVERLAP_RATIO = 0.5 # 투영 겹침 최소 비율(짧은 세그먼트 
 # ── [Phase 4.0] collinear 재병합 튜닝 상수 ───────────────────
 COLLINEAR_ANGLE_TOL_DEG = 2.0  # 같은 직선 판정 사이각(도) — 벽 짝보다 빡빡
 COLLINEAR_DIST_TOL_MM = 10.0   # 같은 직선 판정 수직오프셋 허용(mm)
-COLLINEAR_GAP_TOL_MM = 50.0    # 끝-끝 간격 이 이하면 한 벽으로 연쇄 병합(mm)
-CORNER_SNAP_TOL_MM = 25.0      # 끝점 이 거리 이내면 centroid로 스냅(mm)
+COLLINEAR_GAP_TOL_MM = 500.0   # 끝-끝 간격 이 이하면 한 벽으로 연쇄 병합(mm)
+                                # 실무 도면: T/십자 교차점 틈 = 벽두께(100~400mm)
+                                # 문 개구부 ≥800mm 이므로 500mm 는 안전
+CORNER_SNAP_TOL_MM = 50.0      # 끝점 이 거리 이내면 centroid로 스냅(mm)
 
 
 # ── [MEP 물량산출] 외부 CSV 매핑 테이블 로드 ──────────────────
