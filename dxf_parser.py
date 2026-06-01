@@ -280,6 +280,82 @@ def _angle_deg(u1, u2):
     return math.degrees(math.acos(dot))
 
 
+_JOIN_LINE_SNAP = 5.0  # 끝점 공유 판정 거리(mm). LINE 연결 pre-join용.
+
+def join_connected_lines(wall_records):
+    """같은 레이어의 2점 LINE 레코드들 중 끝점이 이어지는 것을 다중점 폴리라인으로 병합.
+    detect_wall_pairs 전에 실행. 개별 LINE export된 DXF의 벽 파편화 방지.
+    LWPOLYLINE / closed / 다중점 레코드는 변경 없이 통과."""
+    from collections import defaultdict
+
+    def ptkey(p):
+        t = _JOIN_LINE_SNAP
+        return (round(p[0] / t), round(p[1] / t))
+
+    two_pt = {i for i, r in enumerate(wall_records)
+              if len(r.get("points", [])) == 2 and not r.get("closed")}
+    keep   = [i for i in range(len(wall_records)) if i not in two_pt]
+
+    # 레이어별 끝점 맵
+    layer_ep = defaultdict(lambda: defaultdict(list))
+    for i in two_pt:
+        r = wall_records[i]
+        ly = r.get("layer", "")
+        pts = r["points"]
+        layer_ep[ly][ptkey(pts[0])].append((i, "start"))
+        layer_ep[ly][ptkey(pts[1])].append((i, "end"))
+
+    visited = set()
+    joined = []
+
+    for ly, ep_map in layer_ep.items():
+        for start in [i for i in two_pt if wall_records[i].get("layer","") == ly]:
+            if start in visited:
+                continue
+            visited.add(start)
+            pts0 = wall_records[start]["points"]
+            chain_pts = [list(pts0[0]), list(pts0[1])]
+            chain_seen = {ptkey(chain_pts[0]), ptkey(chain_pts[1])}
+
+            # tail 연장
+            while True:
+                cands = [x for x in ep_map.get(ptkey(chain_pts[-1]), [])
+                         if x[0] not in visited]
+                if not cands:
+                    break
+                j, end = cands[0]
+                nxt = wall_records[j]["points"]
+                new_pt = list(nxt[1]) if end == "start" else list(nxt[0])
+                if ptkey(new_pt) in chain_seen:
+                    break  # 루프 방지
+                visited.add(j)
+                chain_pts.append(new_pt)
+                chain_seen.add(ptkey(new_pt))
+
+            # head 연장
+            while True:
+                cands = [x for x in ep_map.get(ptkey(chain_pts[0]), [])
+                         if x[0] not in visited]
+                if not cands:
+                    break
+                j, end = cands[0]
+                nxt = wall_records[j]["points"]
+                new_pt = list(nxt[0]) if end == "end" else list(nxt[1])
+                if ptkey(new_pt) in chain_seen:
+                    break
+                visited.add(j)
+                chain_pts.insert(0, new_pt)
+                chain_seen.add(ptkey(new_pt))
+
+            nr = copy.deepcopy(wall_records[start])
+            nr["points"] = chain_pts
+            nr["closed"] = False
+            joined.append(nr)
+
+    # keep_idx 레코드(LWPOLYLINE 등) + 새 joined 레코드
+    return [copy.deepcopy(wall_records[i]) for i in keep] + joined
+
+
 def _wall_segments(wall_records):
     """벽 폴리라인 레코드들을 직선 세그먼트 단위로 분해."""
     segs = []
@@ -798,6 +874,12 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         else:
             rec["z_base"] = elev  # [4b] 층 분리용 Z 기준(단층=0.0)
         result["elements"].setdefault(cat, []).append(rec)
+    # [Phase 1-pre] 개별 LINE 연결: 끝점 공유 2점 레코드 → 다중점 폴리라인 병합
+    _n_raw = len(result["elements"]["wall"])
+    result["elements"]["wall"] = join_connected_lines(result["elements"]["wall"])
+    _n_joined = len(result["elements"]["wall"])
+    if _n_raw != _n_joined:
+        print(f"  [join] LINE 연결: {_n_raw}개 → {_n_joined}개 레코드")
     # [Phase 1] 평행선 쌍 → 벽 중심선+두께 (zone 귀속 전에 재구성)
     result["elements"]["wall"] = detect_wall_pairs(result["elements"]["wall"], params)
     # [Phase 4.0] 같은 직선 위 쪼개진 세그먼트 재병합(코너 틈은 제외)

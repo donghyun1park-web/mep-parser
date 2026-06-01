@@ -33,7 +33,9 @@ def vec(p, z=0.0):
     return App.Vector(p[0], p[1], z)
 
 
-def make_wire(points, closed):
+def make_wire(points, closed, doc=None, label="_wall_base"):
+    """Part.makePolygon 우선 사용 (DraftGeomUtils self-intersecting 검사 없음).
+    Draft.makeWire 는 self-intersecting 검사로 OCC 크래시 유발 → 폴백으로만 사용."""
     pts = []
     for p in points:
         v = vec(p)
@@ -44,10 +46,18 @@ def make_wire(points, closed):
     if len(pts) < 2:
         return None
     try:
-        w = Draft.makeWire(pts, closed=closed, face=False)
-        return w
+        poly_pts = pts + [pts[0]] if closed else pts
+        wire_shape = Part.makePolygon(poly_pts)
+        d = doc or App.ActiveDocument
+        feat = d.addObject("Part::Feature", label)
+        feat.Shape = wire_shape
+        return feat
     except Exception:
-        return None
+        # Part 실패 시 Draft 폴백
+        try:
+            return Draft.makeWire(pts, closed=closed, face=False)
+        except Exception:
+            return None
 
 
 # ── 벽 체이닝: 끝점이 연결된 세그먼트 → 하나의 다중선 벽으로 묶기 ──────────────
@@ -197,10 +207,9 @@ def build_walls(doc, walls, params):
         z_base = float(el.get("z_base", 0.0))
         dxf_id = el.get("handle") or f"WALL_{i}"
         try:
-            base = make_wire(baseline, False)
+            base = make_wire(baseline, False, doc=doc, label=f"WallAxis_{i}")
             if not base:
                 raise ValueError("make_wire returned None")
-            base.Label = f"WallAxis_{i}"
             wall = Arch.makeWall(base, width=width, height=height)
             if not wall:
                 raise ValueError("Arch.makeWall returned None")
