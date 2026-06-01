@@ -478,10 +478,19 @@ def check_clashes(struct_objs, mep_objs, vol_tol=1.0):
 
     # Broad-phase: BoundBox 교차 여부 확인 (cheap)
     def _bb(obj):
-        s = getattr(obj, "Shape", None)
-        if s and s.isValid():
-            return s.BoundBox
-        return None
+        try:
+            s = getattr(obj, "Shape", None)
+            if s is None or not s.isValid():
+                return None
+            bb = s.BoundBox
+            # isValid() 없는 FreeCAD 버전 대비 hasattr 확인
+            if hasattr(bb, "isValid") and not bb.isValid():
+                return None
+            if bb.XLength <= 0 and bb.YLength <= 0 and bb.ZLength <= 0:
+                return None  # 퇴화 bounding box
+            return bb
+        except Exception:
+            return None
 
     for so in struct_objs:
         sbb = _bb(so)
@@ -492,7 +501,10 @@ def check_clashes(struct_objs, mep_objs, vol_tol=1.0):
             if mbb is None:
                 continue
             # AABB 겹침 확인 (Intersect)
-            if not sbb.intersected(mbb):
+            try:
+                if not sbb.intersected(mbb):
+                    continue
+            except Exception:
                 continue
             try:
                 s_shape = so.Shape
