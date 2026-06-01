@@ -50,75 +50,170 @@ def make_wire(points, closed):
         return None
 
 
+# ── 벽 체이닝: 끝점이 연결된 세그먼트 → 하나의 다중선 벽으로 묶기 ──────────────
+# 계단형/노치 프로파일 벽, 꺾인 벽 등을 1개 Arch.makeWall 로 처리.
+_CHAIN_SNAP = 60.0  # 끝점 연결 판정 거리(mm). corner snap tol 보다 약간 크게.
+
+def _chain_wall_segments(walls):
+    """열린(non-closed) 벽 레코드들을 끝점 연결로 체이닝.
+    Returns: list of (representative_el, chained_centerline_pts, member_indices)
+      - representative_el : 체인의 첫 레코드(width/height 참조용)
+      - chained_centerline_pts : 이어붙인 다중점 리스트
+      - member_indices : 체인에 속한 원본 인덱스 리스트
+    분리된 벽(연결 없음)은 단독 체인으로 반환.
+    닫힌(pairing="closed") 레코드는 체이닝 대상 제외 — 별도 처리."""
+    import math
+
+    def cl(el):
+        return el.get("centerline") or el.get("points", [])
+
+    def pt_key(p):
+        return (round(p[0] / _CHAIN_SNAP), round(p[1] / _CHAIN_SNAP))
+
+    # 열린 벽만 체이닝 대상
+    open_idx = [i for i, w in enumerate(walls)
+                if not (w.get("closed") or w.get("pairing") == "closed")
+                and len(cl(w)) >= 2]
+
+    # 각 끝점 → (wall_idx, 'start'|'end') 매핑
+    from collections import defaultdict
+    ep_map = defaultdict(list)
+    for i in open_idx:
+        pts = cl(walls[i])
+        ep_map[pt_key(pts[0])].append((i, "start"))
+        ep_map[pt_key(pts[-1])].append((i, "end"))
+
+    visited = set()
+    chains = []
+
+    for start in open_idx:
+        if start in visited:
+            continue
+        visited.add(start)
+        pts0 = cl(walls[start])
+        chain_pts = list(pts0)
+        chain_ids = [start]
+
+        # 앞쪽(tail) 연장
+        while True:
+            tail = chain_pts[-1]
+            candidates = [x for x in ep_map.get(pt_key(tail), [])
+                          if x[0] not in visited]
+            if not candidates:
+                break
+            j, end = candidates[0]
+            visited.add(j)
+            chain_ids.append(j)
+            nxt = cl(walls[j])
+            if end == "start":
+                chain_pts.extend(nxt[1:])
+            else:
+                chain_pts.extend(list(reversed(nxt))[1:])
+
+        # 뒤쪽(head) 연장
+        while True:
+            head = chain_pts[0]
+            candidates = [x for x in ep_map.get(pt_key(head), [])
+                          if x[0] not in visited]
+            if not candidates:
+                break
+            j, end = candidates[0]
+            visited.add(j)
+            chain_ids.insert(0, j)
+            nxt = cl(walls[j])
+            if end == "end":
+                chain_pts = list(nxt) + chain_pts[1:]
+            else:
+                chain_pts = list(reversed(nxt)) + chain_pts[1:]
+
+        chains.append((walls[start], chain_pts, chain_ids))
+
+    return chains
+
+
 def build_walls(doc, walls, params):
     d = params.get("wall", {})
     objs = []
-    src_els = []  # 각 obj 에 대응하는 원본 element (층 그룹핑용)
-    idx_map = {}  # element index → wall obj (opening void 연결용)
-    
-    # 에러 요소 저장용 그룹 (빌더 크래시 방지 및 시각화)
+    src_els = []
+    idx_map = {}
     error_group = None
 
+    # ── ① 닫힌 폴리선(pairing="closed"): solid extrusion ────────────────────────
     for i, el in enumerate(walls):
-        # baseline: 검출된 중심선 우선, 없으면 원본 points
-        baseline = el.get("centerline") or el.get("points")
-        if el["kind"] != "polyline" or not baseline or len(baseline) < 2:
+        if not (el.get("closed", False) or el.get("pairing") == "closed"):
             continue
-        ov = el.get("overrides", {})  # CSV 요소별 오버라이드 우선
-        width = float(el.get("width_detected")
-                      or ov.get("width", d.get("width", 200.0)))
+        if el["kind"] != "polyline":
+            continue
+        baseline = el.get("centerline") or el.get("points", [])
+        if len(baseline) < 3:
+            continue
+        ov = el.get("overrides", {})
         height = float(ov.get("height", d.get("height", 2800.0)))
         z_base = float(el.get("z_base", 0.0))
-        dxf_id = el.get("handle") or f"WALL_{i}"
-
-        # ── 닫힌 폴리선(pairing="closed"): solid extrusion → 기둥/박스 형태 ──────
-        # 각 변을 개별 벽체로 만들면 겹침·파편화 발생 → 닫힌 면 돌출로 대체
-        if el.get("closed", False) or el.get("pairing") == "closed":
-            try:
-                pts_3d = [App.Vector(p[0], p[1], z_base) for p in baseline]
-                # 마지막 점이 첫 점과 다르면 닫아줌
-                if (pts_3d[-1] - pts_3d[0]).Length > 1.0:
-                    pts_3d.append(pts_3d[0])
-                if len(pts_3d) < 3:
-                    raise ValueError("closed wall: too few points")
-                wire = Part.makePolygon(pts_3d)
-                face = Part.Face(wire)
-                solid = face.extrude(App.Vector(0, 0, height))
-                feat = doc.addObject("Part::Feature", f"ClosedWall_{i}")
-                feat.Shape = solid
-                struct = Arch.makeStructure(feat)
-                struct.Label = f"ClosedWall_{i}"
-                struct.addProperty("App::PropertyString", "DxfId", "Metadata", "")
-                struct.DxfId = dxf_id
-                objs.append(struct)
-                src_els.append(el)
-                idx_map[i] = struct
-            except Exception as e:
-                print(f"[warn] ClosedWall_{i} 생성 실패: {e}")
-            continue  # 일반 Arch.makeWall 건너뜀
-
-        # ── 열린 폴리선: Arch.makeWall (기존 경로) ─────────────────────────────
+        dxf_id = el.get("handle") or f"CLOSEDWALL_{i}"
         try:
-            base = make_wire(baseline, False)
+            pts_3d = [App.Vector(p[0], p[1], z_base) for p in baseline]
+            if (pts_3d[-1] - pts_3d[0]).Length > 1.0:
+                pts_3d.append(pts_3d[0])
+            wire = Part.makePolygon(pts_3d)
+            face = Part.Face(wire)
+            solid = face.extrude(App.Vector(0, 0, height))
+            feat = doc.addObject("Part::Feature", f"ClosedWall_{i}")
+            feat.Shape = solid
+            struct = Arch.makeStructure(feat)
+            struct.Label = f"ClosedWall_{i}"
+            struct.addProperty("App::PropertyString", "DxfId", "Metadata", "")
+            struct.DxfId = dxf_id
+            objs.append(struct)
+            src_els.append(el)
+            idx_map[i] = struct
+        except Exception as e:
+            print(f"[warn] ClosedWall_{i} 생성 실패: {e}")
+
+    # ── ② 열린 폴리선: 체이닝 후 Arch.makeWall ──────────────────────────────────
+    # 끝점이 이어지는 세그먼트들 → 하나의 다중선 와이어 → Arch.makeWall 1개
+    # 계단형/노치 프로파일 벽이 수십 개 박스로 쪼개지는 문제 해결.
+    open_walls = [(i, el) for i, el in enumerate(walls)
+                  if not (el.get("closed") or el.get("pairing") == "closed")
+                  and el.get("kind") == "polyline"]
+
+    chains = _chain_wall_segments([el for _, el in open_walls])
+    # chains: list of (rep_el, chain_pts, local_indices)
+    # local_indices → open_walls index → actual walls index
+    open_map = {li: gi for li, (gi, _) in enumerate(open_walls)}
+
+    for chain_local_idx, (rep_el, chain_pts, local_ids) in enumerate(chains):
+        global_ids = [open_map[li] for li in local_ids]
+        # width/height: representative element(첫 멤버) 기준
+        ov = rep_el.get("overrides", {})
+        width = float(rep_el.get("width_detected")
+                      or ov.get("width", d.get("width", 200.0)))
+        height = float(ov.get("height", d.get("height", 2800.0)))
+        z_base = float(rep_el.get("z_base", 0.0))
+        label = f"Wall_C{chain_local_idx}"
+        try:
+            base = make_wire(chain_pts, False)
             if not base:
                 raise ValueError("make_wire returned None")
-            base.Label = f"WallAxis_{i}"
+            base.Label = f"WallAxis_C{chain_local_idx}"
             wall = Arch.makeWall(base, width=width, height=height)
             if not wall:
                 raise ValueError("Arch.makeWall returned None")
-            wall.Label = f"Wall_{i}"
+            wall.Label = label
             wall.Placement.Base.z = z_base
-            wall.addProperty("App::PropertyString", "DxfId", "Metadata", "Original DXF Handle")
-            wall.DxfId = dxf_id
+            wall.addProperty("App::PropertyString", "DxfId", "Metadata", "")
+            wall.DxfId = ",".join(str(g) for g in global_ids)
             objs.append(wall)
-            src_els.append(el)
-            idx_map[i] = wall
+            src_els.append(rep_el)
+            # idx_map: 체인의 모든 멤버 → 같은 wall obj (opening void 연결)
+            for gi in global_ids:
+                idx_map[gi] = wall
         except Exception as e:
-            print(f"[warn] Wall_{i} 생성 실패: {e}")
+            print(f"[warn] {label} 생성 실패: {e}")
             try:
                 if not error_group:
                     error_group = doc.addObject("App::DocumentObjectGroup", "Error_Elements")
-                pts = [vec(p, z_base) for p in baseline]
+                pts = [vec(p, z_base) for p in chain_pts]
                 if len(pts) >= 2:
                     err_line = Draft.makeWire(pts, closed=False, face=False)
                     err_line.Label = f"Error_Wall_{i}"
