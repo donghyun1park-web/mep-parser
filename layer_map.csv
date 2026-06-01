@@ -4,7 +4,7 @@
 pattern,category,width,height,thickness
 WALL|벽|CON,wall,200,2800,
 COL|기둥,column,,3000,
-SLAB|FLOOR|바닥|슬래브|STAIR|계단|S-STAIR|A-STAIR,slab,,,200
+SLAB|FLOOR|바닥|슬래브,slab,,,200
 ZONE|ROOM|실|구역,zone,,,
 DOOR|WIND|문|창,opening,,,
 PIPE|배관|PIP,pipe,100,,

@@ -498,8 +498,11 @@ class App:
                                    timeout=300)
                 self.root.after(0, lambda: self._build_done(r, out))
             except Exception as e:
-                self.root.after(0, lambda: (self._log(f"[Error] Build failed: {e}"),
-                                            self.btn_build.state(["!disabled"])))
+                # Python 3: 람다에서 except 변수 참조 시 소멸 → 명시적 캡처
+                _msg = str(e) or repr(type(e))
+                self.root.after(0, lambda msg=_msg: (
+                    self._log(f"[Error] Build failed: {msg}"),
+                    self.btn_build.state(["!disabled"])))
         threading.Thread(target=run, daemon=True).start()
 
     def _build_done(self, r, out):

@@ -263,7 +263,13 @@ def insert_to_records(insert, scale, category, attrs):
             return circ
         return [{"kind": "circle", "center": [round(cx, 3), round(cy, 3)],
                  "radius": round((size or 900.0) * scale / 2.0, 3)}]
-    return exploded
+    if category == "slab":
+        # 계단코어 등: 닫힌 폴리라인(윤곽선)만 슬래브로. 내부 LINE들(A-STAIR 등) 제외.
+        closed = [r for r in exploded
+                  if r["kind"] == "polyline" and r.get("closed") and len(r["points"]) >= 3]
+        return closed  # 없어도 OK(마커 불필요)
+    # wall/zone/equipment 등: 열린 선도 포함
+    return [r for r in exploded if r["kind"] == "polyline"]
 
 
 # ── [Phase 1] 평행선 쌍 → 벽 중심선+두께 검출 ────────────────
