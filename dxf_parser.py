@@ -299,7 +299,8 @@ def _wall_segments(wall_records):
             if ln == 0:
                 continue
             segs.append({"p1": a, "p2": b, "dir": (ux, uy), "len": ln,
-                         "src": idx, "overrides": rec.get("overrides", {}),
+                         "src": idx, "layer": rec.get("layer", ""),
+                         "overrides": rec.get("overrides", {}),
                          "z_base": rec.get("z_base", 0.0)})
     return segs
 
@@ -377,22 +378,28 @@ def detect_wall_pairs(wall_records, params):
     for i, j, perp, center, conf in pairs:
         ov = segs[i]["overrides"] or segs[j]["overrides"]
         zb = segs[i].get("z_base", 0.0)
+        seg_len = math.hypot(center[1][0]-center[0][0], center[1][1]-center[0][1])
         out.append({"kind": "polyline", "closed": False,
                     "points": [list(segs[i]["p1"]), list(segs[i]["p2"])],
                     "centerline": center,
                     "width_detected": round(perp, 3),
                     "confidence": conf, "pairing": "paired",
                     "needs_review": False, "z_base": zb,
+                    "layer": segs[i].get("layer", ""),
+                    "seg_length": round(seg_len, 1),
                     **({"overrides": ov} if ov else {})})
     for k, s in enumerate(segs):
         if k in matched:
             continue
+        seg_len = s["len"]
         out.append({"kind": "polyline", "closed": False,
                     "points": [list(s["p1"]), list(s["p2"])],
                     "centerline": [list(s["p1"]), list(s["p2"])],
                     "width_detected": None,
                     "confidence": 0.5, "pairing": "single",
                     "needs_review": True, "z_base": s.get("z_base", 0.0),
+                    "layer": s.get("layer", ""),
+                    "seg_length": round(seg_len, 1),
                     **({"overrides": s["overrides"]} if s["overrides"] else {})})
 
     # ② 닫힌 폴리선: 원본 레코드 그대로 추가 (pairing="closed" 마킹만)
@@ -831,6 +838,23 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
     if unmapped_blocks:  # [Phase 2] 미매핑 블록 로그
         result["warnings"].append("미매핑 블록: " +
                                   ", ".join(f"{k}({v})" for k, v in unmapped_blocks.items()))
+
+    # ── 짧은 벽 클러스터 감지: 계단/장식선 오분류 경고 ─────────────────
+    # 같은 레이어에 짧은 벽(< 400mm)이 5개 이상 → 계단/비구조선 의심
+    _STAIR_LEN_THRESHOLD = 400.0
+    _STAIR_COUNT_THRESHOLD = 5
+    _short_by_layer: dict = {}
+    for _w in result["elements"]["wall"]:
+        _ln = _w.get("seg_length", 0.0)
+        _ly = _w.get("layer", "")
+        if _ln > 0 and _ln < _STAIR_LEN_THRESHOLD:
+            _short_by_layer[_ly] = _short_by_layer.get(_ly, 0) + 1
+    for _ly, _cnt in _short_by_layer.items():
+        if _cnt >= _STAIR_COUNT_THRESHOLD:
+            result["warnings"].append(
+                f"[계단 의심] 레이어 '{_ly}': 짧은 벽 {_cnt}개 (<{int(_STAIR_LEN_THRESHOLD)}mm). "
+                "계단/장식선이면 layer_map.csv 에서 카테고리를 'slab' 으로 변경하세요.")
+
     return result
 
 

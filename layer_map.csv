@@ -1,14 +1,15 @@
-# layer_map.csv  —  레이어 패턴 -> 카테고리/파라미터 매핑 (툴의 '두뇌')
-# MEP 물량산출 계획의 layer_map.csv 패턴을 BIM 카테고리에 맞춰 차용.
-# pattern: 레이어명 정규식(대소문자 무시) / category: wall|column|slab|zone|opening
-# width/height/thickness: mm (비우면 params 기본값 사용)
+# layer_map.csv  --  layer pattern -> category/parameter mapping
+# pattern: regex (case-insensitive) / category: wall|column|slab|zone|opening|pipe|duct|tray
+# width/height/thickness: mm (leave blank to use param defaults)
 pattern,category,width,height,thickness
 WALL|벽|CON,wall,200,2800,
 COL|기둥,column,,3000,
-SLAB|FLOOR|바닥|슬래브,slab,,,200
+SLAB|FLOOR|바닥|슬래브|STAIR|계단|S-STAIR|A-STAIR,slab,,,200
 ZONE|ROOM|실|구역,zone,,,
 DOOR|WIND|문|창,opening,,,
-# [Phase 2.7] MEP — 데이터 추출만(3D 빌드 후속). pipe: width=외경 / duct·tray: width×height(mm)
 PIPE|배관|PIP,pipe,100,,
 DUCT|덕트,duct,400,300,
 TRAY|트레이|CABLE|전선,tray,300,100,
+A\-STEEL,wall,,,
+OPEN,opening,,,
+#chk_U_250212,column,,,
