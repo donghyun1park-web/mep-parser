@@ -45,6 +45,10 @@ def make_wire(points, closed, doc=None, label="_wall_base"):
         pts.pop()
     if len(pts) < 2:
         return None
+    # 세그먼트 길이 최소값 확인 (너무 짧은 세그먼트 → Part.makePolygon 실패)
+    total_len = sum((pts[i+1]-pts[i]).Length for i in range(len(pts)-1))
+    if total_len < 1.0:
+        return None
     try:
         poly_pts = pts + [pts[0]] if closed else pts
         wire_shape = Part.makePolygon(poly_pts)
