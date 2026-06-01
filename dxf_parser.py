@@ -151,29 +151,31 @@ def _bulge_points(x1, y1, x2, y2, bulge):
 def entity_to_record(e, scale):
     """DXF 엔티티 → 정규화 레코드 (polyline/circle). 미지원이면 None."""
     t = e.dxftype()
+    layer = getattr(e.dxf, "layer", "")
     if t == "LINE":
         s, d = e.dxf.start, e.dxf.end
-        return {"kind": "polyline", "closed": False,
+        return {"kind": "polyline", "closed": False, "layer": layer,
                 "points": [[s.x * scale, s.y * scale], [d.x * scale, d.y * scale]]}
     if t == "LWPOLYLINE":
         pts, closed = lwpolyline_points(e)
-        return {"kind": "polyline", "closed": closed,
+        return {"kind": "polyline", "closed": closed, "layer": layer,
                 "points": [[p[0] * scale, p[1] * scale] for p in pts]}
     if t == "POLYLINE":
         pts = [[v.dxf.location.x * scale, v.dxf.location.y * scale] for v in e.vertices]
-        return {"kind": "polyline", "closed": e.is_closed, "points": pts}
+        return {"kind": "polyline", "closed": e.is_closed, "layer": layer, "points": pts}
     if t == "CIRCLE":
         c = e.dxf.center
         return {"kind": "circle", "center": [c.x * scale, c.y * scale],
-                "radius": e.dxf.radius * scale}
+                "radius": e.dxf.radius * scale, "layer": layer}
     if t == "ARC":
         c = e.dxf.center
         pts = arc_to_points(c.x, c.y, e.dxf.radius, e.dxf.start_angle, e.dxf.end_angle)
-        return {"kind": "polyline", "closed": False,
+        return {"kind": "polyline", "closed": False, "layer": layer,
                 "points": [[p[0] * scale, p[1] * scale] for p in pts]}
-    if t == "SPLINE":  # ATA cad_parser: 컨트롤 포인트로 근사
+    if t == "SPLINE":
         pts = [[p[0] * scale, p[1] * scale] for p in e.control_points]
-        return {"kind": "polyline", "closed": e.closed, "points": pts} if pts else None
+        return ({"kind": "polyline", "closed": e.closed, "layer": layer,
+                 "points": pts} if pts else None)
     return None
 
 
