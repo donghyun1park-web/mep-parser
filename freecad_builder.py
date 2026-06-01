@@ -531,21 +531,47 @@ def _main_impl():
     print(f"  walls={len(el.get('wall',[]))} cols={len(el.get('column',[]))}"
           f" slabs={len(el.get('slab',[]))} openings={len(el.get('opening',[]))}")
 
-    print("[2/8] 문서 생성")
-    doc = App.newDocument("BIM")
+    import time as _time
 
+    print("[2/8] 문서 생성 + SkipRecompute 활성화")
+    doc = App.newDocument("BIM")
+    # Arch.makeWall/makeStructure 호출마다 내부 recompute → N×recompute = 타임아웃
+    # setSkipRecompute(True): 자동 recompute 비활성 → 마지막 명시적 1회만 수행
+    _skip_ok = False
+    try:
+        doc.setSkipRecompute(True)
+        _skip_ok = True
+        print("  setSkipRecompute(True) OK")
+    except Exception as _e:
+        print(f"  [warn] setSkipRecompute 미지원: {_e}")
+
+    _t0 = _time.time()
     print("[3/8] 벽체 빌드")
     walls, wall_idx_map, wall_src = build_walls(doc, el.get("wall", []), params)
-    print(f"  → {len(walls)}개 벽체 객체")
+    print(f"  → {len(walls)}개 벽체 ({_time.time()-_t0:.1f}s)")
 
-    print("[4/8] 기둥/슬래브/공간 빌드")
+    print("[4/8] 기둥/슬래브/공간/MEP 빌드")
+    _t1 = _time.time()
     cols,   col_src   = build_columns(doc, el.get("column", []), params)
     slabs,  slab_src  = build_slabs(doc, el.get("slab", []), params)
     spaces, space_src = build_spaces(doc, el.get("zone", []), params)
     mep_objs          = build_mep(doc, el)
-    print(f"  → cols={len(cols)} slabs={len(slabs)} spaces={len(spaces)} mep={len(mep_objs)}")
+    print(f"  → cols={len(cols)} slabs={len(slabs)} spaces={len(spaces)} mep={len(mep_objs)} ({_time.time()-_t1:.1f}s)")
 
-    print("[5/8] 층 컨테이너 생성")
+    print("[5/8] recompute (1회 배치)")
+    _t2 = _time.time()
+    if _skip_ok:
+        try:
+            doc.setSkipRecompute(False)
+        except Exception:
+            pass
+    try:
+        doc.recompute()
+        print(f"  → {len(doc.Objects)}개 객체 ({_time.time()-_t2:.1f}s)")
+    except Exception as _re:
+        print(f"  [warn] recompute 오류: {_re}")
+
+    print("[6/8] 층 컨테이너 생성 (recompute 이후)")
     _FLOOR_TOL  = 100.0
     floors_info = data.get("floors") or [{"z": 0.0, "label": "Level_1"}]
 
@@ -569,19 +595,12 @@ def _main_impl():
             print(f"  {flbl}: walls={len(fw)} cols={len(fc)}")
         except Exception as _fe:
             print(f"  [warn] makeFloor 실패({flbl}): {_fe}")
-
     try:
         building = Arch.makeBuilding(floor_containers)
         building.Label = "Building"
-    except Exception as _be:
-        print(f"  [warn] makeBuilding 실패: {_be}")
-
-    print("[6/8] recompute")
-    try:
         doc.recompute()
-        print(f"  → {len(doc.Objects)}개 객체")
-    except Exception as _re:
-        print(f"  [warn] recompute 오류: {_re}")
+    except Exception as _be:
+        print(f"  [warn] makeBuilding/recompute: {_be}")
 
     print("[7/8] Opening void + clash 검사")
     n_voids = apply_opening_voids(wall_idx_map, el.get("opening", []), params)
