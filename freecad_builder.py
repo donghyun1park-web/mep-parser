@@ -179,50 +179,44 @@ def build_walls(doc, walls, params):
         except Exception as e:
             print(f"[warn] ClosedWall_{i} 생성 실패: {e}")
 
-    # ── ② 열린 폴리선: 체이닝 후 Arch.makeWall ──────────────────────────────────
-    # 끝점이 이어지는 세그먼트들 → 하나의 다중선 와이어 → Arch.makeWall 1개
-    # 계단형/노치 프로파일 벽이 수십 개 박스로 쪼개지는 문제 해결.
-    open_walls = [(i, el) for i, el in enumerate(walls)
-                  if not (el.get("closed") or el.get("pairing") == "closed")
-                  and el.get("kind") == "polyline"]
-
-    chains = _chain_wall_segments([el for _, el in open_walls])
-    # chains: list of (rep_el, chain_pts, local_indices)
-    # local_indices → open_walls index → actual walls index
-    open_map = {li: gi for li, (gi, _) in enumerate(open_walls)}
-
-    for chain_local_idx, (rep_el, chain_pts, local_ids) in enumerate(chains):
-        global_ids = [open_map[li] for li in local_ids]
-        # width/height: representative element(첫 멤버) 기준
-        ov = rep_el.get("overrides", {})
-        width = float(rep_el.get("width_detected")
+    # ── ② 열린 폴리선: 세그먼트별 Arch.makeWall ────────────────────────────────
+    # 체이닝(multi-seg wire)은 self-intersecting → OCC 크래시 → Build FAILED 유발.
+    # 현재는 1 segment = 1 Arch.makeWall 로 안정성 우선. 벽 연결은 후속 과제.
+    for i, el in enumerate(walls):
+        if el.get("closed") or el.get("pairing") == "closed":
+            continue
+        if el["kind"] != "polyline":
+            continue
+        baseline = el.get("centerline") or el.get("points", [])
+        if len(baseline) < 2:
+            continue
+        ov = el.get("overrides", {})
+        width = float(el.get("width_detected")
                       or ov.get("width", d.get("width", 200.0)))
         height = float(ov.get("height", d.get("height", 2800.0)))
-        z_base = float(rep_el.get("z_base", 0.0))
-        label = f"Wall_C{chain_local_idx}"
+        z_base = float(el.get("z_base", 0.0))
+        dxf_id = el.get("handle") or f"WALL_{i}"
         try:
-            base = make_wire(chain_pts, False)
+            base = make_wire(baseline, False)
             if not base:
                 raise ValueError("make_wire returned None")
-            base.Label = f"WallAxis_C{chain_local_idx}"
+            base.Label = f"WallAxis_{i}"
             wall = Arch.makeWall(base, width=width, height=height)
             if not wall:
                 raise ValueError("Arch.makeWall returned None")
-            wall.Label = label
+            wall.Label = f"Wall_{i}"
             wall.Placement.Base.z = z_base
             wall.addProperty("App::PropertyString", "DxfId", "Metadata", "")
-            wall.DxfId = ",".join(str(g) for g in global_ids)
+            wall.DxfId = dxf_id
             objs.append(wall)
-            src_els.append(rep_el)
-            # idx_map: 체인의 모든 멤버 → 같은 wall obj (opening void 연결)
-            for gi in global_ids:
-                idx_map[gi] = wall
+            src_els.append(el)
+            idx_map[i] = wall
         except Exception as e:
-            print(f"[warn] {label} 생성 실패: {e}")
+            print(f"[warn] Wall_{i} 생성 실패: {e}")
             try:
                 if not error_group:
                     error_group = doc.addObject("App::DocumentObjectGroup", "Error_Elements")
-                pts = [vec(p, z_base) for p in chain_pts]
+                pts = [vec(p, z_base) for p in baseline]
                 if len(pts) >= 2:
                     err_line = Draft.makeWire(pts, closed=False, face=False)
                     err_line.Label = f"Error_Wall_{i}"
@@ -532,7 +526,11 @@ def main():
 
     # ★ recompute 1회: Arch 객체 shape 확정 후 opening void 적용.
     #   void 이후 recompute 금지(Arch 파라메트릭 재계산이 shape 덮어씀).
-    doc.recompute()
+    try:
+        doc.recompute()
+    except Exception as _re:
+        print(f"[warn] recompute 오류(일부 shape 무효): {_re}")
+        # 계속 진행 — 유효한 객체만 저장
 
     # [Phase 4a] opening void (문/창 위치에 원통 절단)
     n_voids = apply_opening_voids(wall_idx_map, el.get("opening", []), params)
