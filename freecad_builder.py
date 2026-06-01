@@ -52,7 +52,9 @@ def make_wire(points, closed):
 
 # ── 벽 체이닝: 끝점이 연결된 세그먼트 → 하나의 다중선 벽으로 묶기 ──────────────
 # 계단형/노치 프로파일 벽, 꺾인 벽 등을 1개 Arch.makeWall 로 처리.
-_CHAIN_SNAP = 60.0  # 끝점 연결 판정 거리(mm). corner snap tol 보다 약간 크게.
+_CHAIN_SNAP = 5.0   # 끝점 연결 판정 거리(mm).
+# snap_wall_corners 이후 실제 연결된 끝점은 거의 동일 좌표 → 5mm로 충분.
+# 60mm 처럼 크면 T접합 등 연결 안 된 세그먼트까지 묶여 self-intersecting 발생.
 
 def _chain_wall_segments(walls):
     """열린(non-closed) 벽 레코드들을 끝점 연결로 체이닝.
@@ -94,6 +96,9 @@ def _chain_wall_segments(walls):
         chain_pts = list(pts0)
         chain_ids = [start]
 
+        # 루프 감지용: 체인의 모든 점을 key set으로 관리
+        chain_pt_keys = {pt_key(p) for p in chain_pts}
+
         # 앞쪽(tail) 연장
         while True:
             tail = chain_pts[-1]
@@ -102,13 +107,15 @@ def _chain_wall_segments(walls):
             if not candidates:
                 break
             j, end = candidates[0]
+            nxt = cl(walls[j])
+            # 추가될 새 점들 중 이미 체인에 있는 점이 있으면 루프 → 중단
+            new_pts = nxt[1:] if end == "start" else list(reversed(nxt))[1:]
+            if any(pt_key(p) in chain_pt_keys for p in new_pts):
+                break
             visited.add(j)
             chain_ids.append(j)
-            nxt = cl(walls[j])
-            if end == "start":
-                chain_pts.extend(nxt[1:])
-            else:
-                chain_pts.extend(list(reversed(nxt))[1:])
+            chain_pts.extend(new_pts)
+            chain_pt_keys.update(pt_key(p) for p in new_pts)
 
         # 뒤쪽(head) 연장
         while True:
@@ -118,13 +125,15 @@ def _chain_wall_segments(walls):
             if not candidates:
                 break
             j, end = candidates[0]
+            nxt = cl(walls[j])
+            new_pts = list(nxt) if end == "end" else list(reversed(nxt))
+            new_pts = new_pts[:-1]  # 마지막 점(=head)은 이미 체인에 있음
+            if any(pt_key(p) in chain_pt_keys for p in new_pts):
+                break
             visited.add(j)
             chain_ids.insert(0, j)
-            nxt = cl(walls[j])
-            if end == "end":
-                chain_pts = list(nxt) + chain_pts[1:]
-            else:
-                chain_pts = list(reversed(nxt)) + chain_pts[1:]
+            chain_pts = new_pts + chain_pts
+            chain_pt_keys.update(pt_key(p) for p in new_pts)
 
         chains.append((walls[start], chain_pts, chain_ids))
 
@@ -540,7 +549,20 @@ def main():
 
     fcstd = f"{out_base}.FCStd"
     ifc = f"{out_base}.ifc"
-    doc.saveAs(os.path.abspath(fcstd))
+    # saveAs: 한글/특수문자 경로 실패 시 ASCII 임시 경로로 저장 후 이동
+    _fcstd_abs = os.path.abspath(fcstd)
+    try:
+        doc.saveAs(_fcstd_abs)
+    except Exception as _e1:
+        print(f"[warn] saveAs 직접 실패({_e1}), ASCII 경로 우회 시도...")
+        import tempfile, shutil
+        _tmp = os.path.join(tempfile.gettempdir(), "_mep_freecad_tmp.FCStd")
+        try:
+            doc.saveAs(_tmp)
+            shutil.move(_tmp, _fcstd_abs)
+            print(f"  -> 우회 저장 성공: {_fcstd_abs}")
+        except Exception as _e2:
+            print(f"[ERROR] saveAs 완전 실패: {_e2}")
 
     # IFC 내보내기. FreeCAD 버전별 익스포터 경로가 달라 폴백 체인으로 시도.
     #   1.1+: importers.exportIFC  /  구버전: exportIFC, importIFC
