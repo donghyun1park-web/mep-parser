@@ -619,24 +619,31 @@ def main():
         print("  [CLASH] 간섭 없음")
 
     fcstd = f"{out_base}.FCStd"
-    ifc = f"{out_base}.ifc"
-    # saveAs: 한글/특수문자 경로 실패 시 ASCII 임시 경로로 저장 후 이동
-    _fcstd_abs = os.path.abspath(fcstd)
-    try:
-        doc.saveAs(_fcstd_abs)
-    except Exception as _e1:
-        print(f"[warn] saveAs 직접 실패({_e1}), ASCII 경로 우회 시도...")
-        import tempfile, shutil
-        _tmp = os.path.join(tempfile.gettempdir(), "_mep_freecad_tmp.FCStd")
-        try:
-            doc.saveAs(_tmp)
-            shutil.move(_tmp, _fcstd_abs)
-            print(f"  -> 우회 저장 성공: {_fcstd_abs}")
-        except Exception as _e2:
-            print(f"[ERROR] saveAs 완전 실패: {_e2}")
+    ifc   = f"{out_base}.ifc"
 
-    # IFC 내보내기. FreeCAD 버전별 익스포터 경로가 달라 폴백 체인으로 시도.
-    #   1.1+: importers.exportIFC  /  구버전: exportIFC, importIFC
+    # ── saveAs: ASCII 임시경로 저장 → GUI Python이 최종경로로 이동 ────────────
+    # FreeCAD C++ saveAs 는 한글/공백 경로에서 조용히 실패하거나 빈 파일 생성.
+    # 해결책: builder는 항상 ASCII 경로인 스크립트 디렉토리에 저장하고,
+    #         stdout 으로 임시경로를 알려준다 → GUI가 shutil.move 로 이동.
+    import shutil as _shutil
+    _HERE_B = os.path.dirname(os.path.abspath(__file__))
+    _tmp_fcstd = os.path.join(_HERE_B, "_mep_tmp_out.FCStd")
+    _tmp_ifc   = os.path.join(_HERE_B, "_mep_tmp_out.ifc")
+    _saved_fcstd = False
+    try:
+        doc.saveAs(_tmp_fcstd)
+        _saved_fcstd = os.path.exists(_tmp_fcstd) and os.path.getsize(_tmp_fcstd) > 0
+    except Exception as _se:
+        print(f"[ERROR] saveAs 실패: {_se}")
+
+    if _saved_fcstd:
+        # GUI 가 이 마커를 읽어 파일을 이동시킴
+        print(f"FCSTD_TMP:{_tmp_fcstd}")
+        print(f"FCSTD_DST:{os.path.abspath(fcstd)}")
+    else:
+        print(f"[ERROR] FCStd 저장 실패 — 파일 없음: {_tmp_fcstd}")
+
+    # IFC 내보내기 (임시 ASCII 경로 → 이동)
     _exporter = None
     for _imp in ("importers.exportIFC", "exportIFC", "importIFC"):
         try:
@@ -649,7 +656,10 @@ def main():
     try:
         if _exporter is None:
             raise ImportError("IFC exporter 모듈을 찾지 못함")
-        _exporter.export([building], os.path.abspath(ifc))
+        _exporter.export([building], _tmp_ifc)
+        if os.path.exists(_tmp_ifc):
+            print(f"IFC_TMP:{_tmp_ifc}")
+            print(f"IFC_DST:{os.path.abspath(ifc)}")
     except Exception as e:
         print("[warn] IFC export 실패:", e)
 

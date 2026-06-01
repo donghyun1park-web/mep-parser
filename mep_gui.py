@@ -506,13 +506,45 @@ class App:
         threading.Thread(target=run, daemon=True).start()
 
     def _build_done(self, r, out):
+        import shutil
+        # stdout 파싱: FCSTD_TMP/FCSTD_DST 마커로 임시파일 → 최종경로 이동
+        fcstd_tmp = fcstd_dst = ifc_tmp = ifc_dst = None
         for line in (r.stdout or "").splitlines():
-            self._log("  " + line)
+            if line.startswith("FCSTD_TMP:"):
+                fcstd_tmp = line[len("FCSTD_TMP:"):].strip()
+            elif line.startswith("FCSTD_DST:"):
+                fcstd_dst = line[len("FCSTD_DST:"):].strip()
+            elif line.startswith("IFC_TMP:"):
+                ifc_tmp = line[len("IFC_TMP:"):].strip()
+            elif line.startswith("IFC_DST:"):
+                ifc_dst = line[len("IFC_DST:"):].strip()
+            else:
+                self._log("  " + line)
+
+        # FCStd 이동
+        if fcstd_tmp and fcstd_dst and os.path.exists(fcstd_tmp):
+            try:
+                os.makedirs(os.path.dirname(fcstd_dst) or ".", exist_ok=True)
+                shutil.move(fcstd_tmp, fcstd_dst)
+                self._log(f"  [저장] {fcstd_dst}")
+            except Exception as _me:
+                self._log(f"  [오류] 파일 이동 실패: {_me}")
+                self._log(f"  임시경로: {fcstd_tmp}")
+
+        # IFC 이동
+        if ifc_tmp and ifc_dst and os.path.exists(ifc_tmp):
+            try:
+                shutil.move(ifc_tmp, ifc_dst)
+                self._log(f"  [저장] {ifc_dst}")
+            except Exception as _me:
+                self._log(f"  [warn] IFC 이동 실패: {_me}")
+
         if r.returncode != 0 and r.stderr:
             self._log("[stderr] " + r.stderr.strip()[:500])
-        ok = os.path.exists(out + ".FCStd")
-        self._log(f"Build {'complete' if ok else 'FAILED'}: {out}.FCStd"
-                  + (" / " + out + ".ifc" if os.path.exists(out + ".ifc") else ""))
+
+        ok = os.path.exists(fcstd_dst or (out + ".FCStd"))
+        self._log(f"Build {'complete' if ok else 'FAILED'}: {fcstd_dst or out + '.FCStd'}"
+                  + (" ✓ IFC" if ifc_dst and os.path.exists(ifc_dst) else ""))
         self.btn_build.state(["!disabled"])
 
 
