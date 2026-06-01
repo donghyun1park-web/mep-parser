@@ -469,100 +469,127 @@ def build_mep(doc, mep_elements):
 
 # ── [Phase 5b] 구조 vs MEP 간섭(clash) 검사 ─────────────────
 def check_clashes(struct_objs, mep_objs, vol_tol=1.0):
-    """구조·MEP 솔리드 페어별 shape.common() 볼륨 > vol_tol → clash 목록 반환.
-    O(S×M): S=구조 객체 수, M=MEP 객체 수. 실무 도면에서도 수백개 수준이므로 충분."""
+    """구조·MEP 솔리드 페어별 clash 목록 반환.
+    AABB Broad-phase 먼저 → 겹침 후보만 shape.common() 수행 → O(S×M) 최악에서
+    실제로는 O(겹침 후보)로 대폭 축소."""
     clashes = []
+    if not mep_objs:
+        return clashes
+
+    # Broad-phase: BoundBox 교차 여부 확인 (cheap)
+    def _bb(obj):
+        s = getattr(obj, "Shape", None)
+        if s and s.isValid():
+            return s.BoundBox
+        return None
+
     for so in struct_objs:
-        s_shape = getattr(so, "Shape", None)
-        if s_shape is None or not s_shape.isValid():
+        sbb = _bb(so)
+        if sbb is None:
             continue
         for mo in mep_objs:
-            m_shape = getattr(mo, "Shape", None)
-            if m_shape is None or not m_shape.isValid():
+            mbb = _bb(mo)
+            if mbb is None:
+                continue
+            # AABB 겹침 확인 (Intersect)
+            if not sbb.intersected(mbb):
                 continue
             try:
+                s_shape = so.Shape
+                m_shape = mo.Shape
                 common = s_shape.common(m_shape)
                 if common.Volume > vol_tol:
                     clashes.append({"struct": so.Label, "mep": mo.Label,
                                     "volume_mm3": round(common.Volume, 1)})
             except Exception:
-                pass  # 형상 오류는 무시(이미 warn 출력됨)
+                pass
     return clashes
 
 
 def main():
-    # freecadcmd 는 argv 의 .json/파일명을 '열 문서'로 오인하므로 환경변수를 우선 사용.
-    #   권장:  MEP_GEOMETRY=geometry.json MEP_OUT=out_model freecadcmd freecad_builder.py
-    #   호환:  freecadcmd freecad_builder.py geometry.json out_model
+    import traceback as _tb
+    try:
+        _main_impl()
+    except Exception as _fatal:
+        print("[FATAL] 빌드 중 예외 발생:")
+        _tb.print_exc()
+        sys.exit(1)
+
+
+def _main_impl():
     geom_path = os.environ.get("MEP_GEOMETRY") or (sys.argv[1] if len(sys.argv) > 1 else None)
-    out_base = os.environ.get("MEP_OUT") or (sys.argv[2] if len(sys.argv) > 2 else "out_model")
+    out_base  = os.environ.get("MEP_OUT")      or (sys.argv[2] if len(sys.argv) > 2 else "out_model")
     if not geom_path:
         print("usage: MEP_GEOMETRY=geometry.json MEP_OUT=out freecadcmd freecad_builder.py")
         sys.exit(1)
 
+    print(f"[1/8] JSON 로드: {geom_path}")
     with open(geom_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     params = data.get("params", {})
     el = data["elements"]
+    print(f"  walls={len(el.get('wall',[]))} cols={len(el.get('column',[]))}"
+          f" slabs={len(el.get('slab',[]))} openings={len(el.get('opening',[]))}")
 
+    print("[2/8] 문서 생성")
     doc = App.newDocument("BIM")
-    _skip_recompute_supported = False  # Part::Feature 사용 시 불필요
 
+    print("[3/8] 벽체 빌드")
     walls, wall_idx_map, wall_src = build_walls(doc, el.get("wall", []), params)
-    cols,  col_src              = build_columns(doc, el.get("column", []), params)
-    slabs, slab_src             = build_slabs(doc, el.get("slab", []), params)
-    spaces, space_src           = build_spaces(doc, el.get("zone", []), params)  # [4c]
-    mep_objs = build_mep(doc, el)                                                # [5a]
+    print(f"  → {len(walls)}개 벽체 객체")
 
-    # [4b] 층별 Arch.makeFloor 생성. floors 없으면 단층 폴백.
-    # _at_floor: src_els는 build_* 가 실제 빌드한 원본 element 리스트(skip 제외)
-    # → zip(objs, src_els) 가 항상 1:1 대응 보장
-    _FLOOR_TOL = 100.0
+    print("[4/8] 기둥/슬래브/공간 빌드")
+    cols,   col_src   = build_columns(doc, el.get("column", []), params)
+    slabs,  slab_src  = build_slabs(doc, el.get("slab", []), params)
+    spaces, space_src = build_spaces(doc, el.get("zone", []), params)
+    mep_objs          = build_mep(doc, el)
+    print(f"  → cols={len(cols)} slabs={len(slabs)} spaces={len(spaces)} mep={len(mep_objs)}")
+
+    print("[5/8] 층 컨테이너 생성")
+    _FLOOR_TOL  = 100.0
     floors_info = data.get("floors") or [{"z": 0.0, "label": "Level_1"}]
 
     def _at_floor(obj_list, src_list, fz):
-        """src element 의 z_base ≈ fz 인 obj 필터링."""
         return [obj for obj, el_r in zip(obj_list, src_list)
                 if abs(float(el_r.get("z_base", 0.0)) - fz) < _FLOOR_TOL]
 
     floor_containers = []
     for fi, finfo in enumerate(floors_info):
-        fz = float(finfo.get("z", 0.0))
-        flabel = finfo.get("label", f"Level_{fi+1}")
+        fz    = float(finfo.get("z", 0.0))
+        flbl  = finfo.get("label", f"Level_{fi+1}")
         fw  = _at_floor(walls,  wall_src,  fz)
         fc  = _at_floor(cols,   col_src,   fz)
         fs  = _at_floor(slabs,  slab_src,  fz)
         fsp = _at_floor(spaces, space_src, fz)
-        fl = Arch.makeFloor(fw + fc + fs + fsp)
-        fl.Label = flabel
-        fl.Placement.Base.z = fz
-        floor_containers.append(fl)
-
-    building = Arch.makeBuilding(floor_containers)
-    building.Label = "Building"
-
-    # ★ recompute 1회: 모든 객체 생성 완료 후 한 번에 수행
-    if _skip_recompute_supported:
         try:
-            doc.setSkipRecompute(False)
-        except Exception:
-            pass
+            fl = Arch.makeFloor(fw + fc + fs + fsp)
+            fl.Label = flbl
+            fl.Placement.Base.z = fz
+            floor_containers.append(fl)
+            print(f"  {flbl}: walls={len(fw)} cols={len(fc)}")
+        except Exception as _fe:
+            print(f"  [warn] makeFloor 실패({flbl}): {_fe}")
+
+    try:
+        building = Arch.makeBuilding(floor_containers)
+        building.Label = "Building"
+    except Exception as _be:
+        print(f"  [warn] makeBuilding 실패: {_be}")
+
+    print("[6/8] recompute")
     try:
         doc.recompute()
-        print(f"  recompute 완료: {len(doc.Objects)}개 객체")
+        print(f"  → {len(doc.Objects)}개 객체")
     except Exception as _re:
-        print(f"[warn] recompute 오류(일부 shape 무효): {_re}")
+        print(f"  [warn] recompute 오류: {_re}")
 
-    # [Phase 4a] opening void (문/창 위치에 원통 절단)
+    print("[7/8] Opening void + clash 검사")
     n_voids = apply_opening_voids(wall_idx_map, el.get("opening", []), params)
-
-    # [Phase 5b] 구조 vs MEP 간섭(clash) 검사
+    print(f"  void 적용: {n_voids}개")
     struct_objs = walls + cols + slabs
     clashes = check_clashes(struct_objs, mep_objs)
     if clashes:
-        print(f"  [CLASH] 간섭 {len(clashes)}건:")
-        for c in clashes:
-            print(f"    {c['struct']} ↔ {c['mep']}  {c['volume_mm3']:.0f} mm³")
+        print(f"  [CLASH] 간섭 {len(clashes)}건")
     else:
         print("  [CLASH] 간섭 없음")
 
@@ -573,16 +600,20 @@ def main():
     # FreeCAD C++ saveAs 는 한글/공백 경로에서 조용히 실패하거나 빈 파일 생성.
     # 해결책: builder는 항상 ASCII 경로인 스크립트 디렉토리에 저장하고,
     #         stdout 으로 임시경로를 알려준다 → GUI가 shutil.move 로 이동.
+    print("[8/8] 저장")
     import shutil as _shutil
     _HERE_B = os.path.dirname(os.path.abspath(__file__))
     _tmp_fcstd = os.path.join(_HERE_B, "_mep_tmp_out.FCStd")
     _tmp_ifc   = os.path.join(_HERE_B, "_mep_tmp_out.ifc")
+    print(f"  saveAs → {_tmp_fcstd}")
     _saved_fcstd = False
     try:
         doc.saveAs(_tmp_fcstd)
         _saved_fcstd = os.path.exists(_tmp_fcstd) and os.path.getsize(_tmp_fcstd) > 0
+        print(f"  파일 크기: {os.path.getsize(_tmp_fcstd) if _saved_fcstd else 0} bytes")
     except Exception as _se:
         print(f"[ERROR] saveAs 실패: {_se}")
+        import traceback as _tb2; _tb2.print_exc()
 
     if _saved_fcstd:
         # GUI 가 이 마커를 읽어 파일을 이동시킴
