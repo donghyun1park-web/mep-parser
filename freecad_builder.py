@@ -65,47 +65,67 @@ def build_walls(doc, walls, params):
         if el["kind"] != "polyline" or not baseline or len(baseline) < 2:
             continue
         ov = el.get("overrides", {})  # CSV 요소별 오버라이드 우선
-        # width: 검출 두께 > CSV 오버라이드 > params 기본
         width = float(el.get("width_detected")
                       or ov.get("width", d.get("width", 200.0)))
         height = float(ov.get("height", d.get("height", 2800.0)))
-        
-        # 라운드트립용 핸들(ID)이 파싱단계에서 부여된 경우 가져오기
+        z_base = float(el.get("z_base", 0.0))
         dxf_id = el.get("handle") or f"WALL_{i}"
 
+        # ── 닫힌 폴리선(pairing="closed"): solid extrusion → 기둥/박스 형태 ──────
+        # 각 변을 개별 벽체로 만들면 겹침·파편화 발생 → 닫힌 면 돌출로 대체
+        if el.get("closed", False) or el.get("pairing") == "closed":
+            try:
+                pts_3d = [App.Vector(p[0], p[1], z_base) for p in baseline]
+                # 마지막 점이 첫 점과 다르면 닫아줌
+                if (pts_3d[-1] - pts_3d[0]).Length > 1.0:
+                    pts_3d.append(pts_3d[0])
+                if len(pts_3d) < 3:
+                    raise ValueError("closed wall: too few points")
+                wire = Part.makePolygon(pts_3d)
+                face = Part.Face(wire)
+                solid = face.extrude(App.Vector(0, 0, height))
+                feat = doc.addObject("Part::Feature", f"ClosedWall_{i}")
+                feat.Shape = solid
+                struct = Arch.makeStructure(feat)
+                struct.Label = f"ClosedWall_{i}"
+                struct.addProperty("App::PropertyString", "DxfId", "Metadata", "")
+                struct.DxfId = dxf_id
+                objs.append(struct)
+                src_els.append(el)
+                idx_map[i] = struct
+            except Exception as e:
+                print(f"[warn] ClosedWall_{i} 생성 실패: {e}")
+            continue  # 일반 Arch.makeWall 건너뜀
+
+        # ── 열린 폴리선: Arch.makeWall (기존 경로) ─────────────────────────────
         try:
-            base = make_wire(baseline, el.get("closed", False))
+            base = make_wire(baseline, False)
             if not base:
                 raise ValueError("make_wire returned None")
             base.Label = f"WallAxis_{i}"
             wall = Arch.makeWall(base, width=width, height=height)
             if not wall:
                 raise ValueError("Arch.makeWall returned None")
-                
             wall.Label = f"Wall_{i}"
-            wall.Placement.Base.z = float(el.get("z_base", 0.0))  # [4b] 층 Z 오프셋
-            
-            # [라운드트립 기반] DXF Handle 주입
+            wall.Placement.Base.z = z_base
             wall.addProperty("App::PropertyString", "DxfId", "Metadata", "Original DXF Handle")
             wall.DxfId = dxf_id
-
             objs.append(wall)
             src_els.append(el)
             idx_map[i] = wall
         except Exception as e:
             print(f"[warn] Wall_{i} 생성 실패: {e}")
-            # 에러 발생 시 단순 선(빨간색)으로 시각적 롤백 (Graceful Degradation)
             try:
                 if not error_group:
                     error_group = doc.addObject("App::DocumentObjectGroup", "Error_Elements")
-                pts = [vec(p, float(el.get("z_base", 0.0))) for p in baseline]
+                pts = [vec(p, z_base) for p in baseline]
                 if len(pts) >= 2:
-                    err_line = Draft.makeWire(pts, closed=el.get("closed", False), face=False)
+                    err_line = Draft.makeWire(pts, closed=False, face=False)
                     err_line.Label = f"Error_Wall_{i}"
-                    err_line.ViewObject.LineColor = (1.0, 0.0, 0.0, 0.0) # 빨간색
+                    err_line.ViewObject.LineColor = (1.0, 0.0, 0.0, 0.0)
                     err_line.ViewObject.LineWidth = 3.0
                     error_group.addObject(err_line)
-            except Exception as ex:
+            except Exception:
                 pass
     return objs, idx_map, src_els
 

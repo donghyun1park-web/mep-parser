@@ -360,15 +360,23 @@ def _find_wall_pairs(segs):
 
 def detect_wall_pairs(wall_records, params):
     """벽 레코드 → 평행선 쌍은 중심선+두께로 병합, 단독선은 중심선 벽으로.
-    v1: 세그먼트 단위 출력(직선 1개 = 벽 레코드 1개)."""
-    segs = _wall_segments(wall_records)
-    if not segs:
+    v1: 세그먼트 단위 출력(직선 1개 = 벽 레코드 1개).
+    닫힌 폴리선(closed=True): 세그먼트 분해·짝맺기 건너뜀 → pairing='closed' 로 원본 통과.
+      FreeCAD builder 에서 solid extrusion(기둥 형태) 으로 처리."""
+    # ① 닫힌 폴리선은 세그먼트 분해 대상에서 제외 ─ 교차 벽 파편화 방지
+    closed_recs = [r for r in wall_records if r.get("closed", False)]
+    open_recs   = [r for r in wall_records if not r.get("closed", False)]
+
+    segs = _wall_segments(open_recs)
+    if not segs and not closed_recs:
         return wall_records
-    pairs, matched = _find_wall_pairs(segs)
+
+    pairs, matched = _find_wall_pairs(segs) if segs else ([], set())
     out = []
+
     for i, j, perp, center, conf in pairs:
         ov = segs[i]["overrides"] or segs[j]["overrides"]
-        zb = segs[i].get("z_base", 0.0)  # [4b] 층 Z 보존
+        zb = segs[i].get("z_base", 0.0)
         out.append({"kind": "polyline", "closed": False,
                     "points": [list(segs[i]["p1"]), list(segs[i]["p2"])],
                     "centerline": center,
@@ -386,6 +394,15 @@ def detect_wall_pairs(wall_records, params):
                     "confidence": 0.5, "pairing": "single",
                     "needs_review": True, "z_base": s.get("z_base", 0.0),
                     **({"overrides": s["overrides"]} if s["overrides"] else {})})
+
+    # ② 닫힌 폴리선: 원본 레코드 그대로 추가 (pairing="closed" 마킹만)
+    for r in closed_recs:
+        nr = copy.deepcopy(r)
+        nr["pairing"] = "closed"
+        nr.setdefault("confidence", 0.7)
+        nr.setdefault("needs_review", False)
+        out.append(nr)
+
     return out
 
 
