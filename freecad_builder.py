@@ -209,81 +209,38 @@ def build_walls(doc, walls, params):
         except Exception as e:
             print(f"[warn] ClosedWall_{i} 생성 실패: {e}")
 
-    # ── ② 열린 폴리선: 체이닝 → Draft.make_wire → Arch.makeWall (코너 Miter 자동) ──
-    # snap_wall_corners 이후 연결된 끝점은 1mm 이내 → 체이닝으로 연속 Wire 생성.
-    # Draft.make_wire(multi-point) → Arch.makeWall: 코너에서 Miter 자동 처리.
-    # 2점(직선) 세그먼트: Part.makePolygon 유지(Draft 불필요, 빠름).
-    open_walls = [(i, el) for i, el in enumerate(walls)
-                  if not (el.get("closed") or el.get("pairing") == "closed")
-                  and el.get("kind") == "polyline"]
-
-    chains = _chain_wall_segments([el for _, el in open_walls])
-    open_map = {li: gi for li, (gi, _) in enumerate(open_walls)}
-
-    for chain_idx, (rep_el, chain_pts, local_ids) in enumerate(chains):
-        global_ids = [open_map[li] for li in local_ids]
-        ov = rep_el.get("overrides", {})
-        width = float(rep_el.get("width_detected")
-                      or ov.get("width", d.get("width", 200.0)))
-        height = float(ov.get("height", d.get("height", 2800.0)))
-        z_base = float(rep_el.get("z_base", 0.0))
-        label = f"Wall_C{chain_idx}"
-
-        # 고유 점 필터
-        clean_pts = []
-        for p in chain_pts:
-            v = App.Vector(p[0], p[1], 0)
-            if not clean_pts or (clean_pts[-1] - v).Length > 1.0:
-                clean_pts.append(v)
-        if len(clean_pts) < 2:
+    # ── ② 열린 폴리선: Part.makePolygon → Arch.makeWall (안정 우선) ──────────────
+    # Draft.make_wire 는 setSkipRecompute 환경에서 shape 미계산 → Arch.makeWall 실패.
+    # Part::Feature 는 Shape 직접 할당 → recompute 없이도 유효 → 안정적 저장 보장.
+    for i, el in enumerate(walls):
+        if el.get("closed") or el.get("pairing") == "closed":
             continue
-
-        base = None
+        if el["kind"] != "polyline":
+            continue
+        baseline = el.get("centerline") or el.get("points", [])
+        if len(baseline) < 2:
+            continue
+        ov = el.get("overrides", {})
+        width  = float(el.get("width_detected")
+                       or ov.get("width", d.get("width", 200.0)))
+        height = float(ov.get("height", d.get("height", 2800.0)))
+        z_base = float(el.get("z_base", 0.0))
         try:
-            if len(clean_pts) >= 3:
-                # 3점 이상: Draft.make_wire → 코너 Miter 자동
-                base = make_draft_wire(
-                    [[p.x, p.y] for p in clean_pts], False,
-                    doc=doc, label=f"WallAxis_C{chain_idx}")
-            if base is None:
-                # 2점 또는 Draft 실패: Part.makePolygon (안전)
-                base = make_wire(
-                    [[p.x, p.y] for p in clean_pts], False,
-                    doc=doc, label=f"WallAxis_C{chain_idx}")
+            base = make_wire(baseline, False, doc=doc, label=f"WallAxis_{i}")
             if not base:
-                raise ValueError("baseline 생성 실패")
+                raise ValueError("make_wire returned None")
             wall = Arch.makeWall(base, width=width, height=height)
             if not wall:
                 raise ValueError("Arch.makeWall returned None")
-            wall.Label = label
+            wall.Label = f"Wall_{i}"
             wall.Placement.Base.z = z_base
             wall.addProperty("App::PropertyString", "DxfId", "Metadata", "")
-            wall.DxfId = ",".join(str(g) for g in global_ids)
+            wall.DxfId = el.get("handle") or f"WALL_{i}"
             objs.append(wall)
-            src_els.append(rep_el)
-            for gi in global_ids:
-                idx_map[gi] = wall
+            src_els.append(el)
+            idx_map[i] = wall
         except Exception as e:
-            print(f"[warn] {label} 생성 실패: {e}")
-            # 실패한 체인: 개별 세그먼트로 폴백
-            for li in local_ids:
-                gi = open_map[li]
-                el = open_walls[li][1]
-                bl = el.get("centerline") or el.get("points", [])
-                if len(bl) < 2:
-                    continue
-                try:
-                    fb = make_wire(bl, False, doc=doc, label=f"WallAxis_{gi}")
-                    if not fb:
-                        continue
-                    w = Arch.makeWall(fb, width=width, height=height)
-                    if not w:
-                        continue
-                    w.Label = f"Wall_{gi}"
-                    w.Placement.Base.z = float(el.get("z_base", 0.0))
-                    objs.append(w); src_els.append(el); idx_map[gi] = w
-                except Exception:
-                    pass
+            print(f"[warn] Wall_{i} 생성 실패: {e}")
     return objs, idx_map, src_els
 
 
@@ -549,16 +506,7 @@ def main():
     el = data["elements"]
 
     doc = App.newDocument("BIM")
-
-    # ── 성능 최적화: 객체 생성 중 개별 recompute 건너뜀 ─────────────────────────
-    # Arch.makeWall/makeStructure 호출마다 내부 recompute 발생 → N×recompute 시간.
-    # setSkipRecompute(True) 로 생성 단계 전체를 건너뛰고, 마지막 한 번만 수행.
-    # 대규모 도면(벽 900+)에서 10~50배 속도 향상.
-    try:
-        doc.setSkipRecompute(True)
-        _skip_recompute_supported = True
-    except Exception:
-        _skip_recompute_supported = False
+    _skip_recompute_supported = False  # Part::Feature 사용 시 불필요
 
     walls, wall_idx_map, wall_src = build_walls(doc, el.get("wall", []), params)
     cols,  col_src              = build_columns(doc, el.get("column", []), params)
