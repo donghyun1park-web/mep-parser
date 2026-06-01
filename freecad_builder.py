@@ -34,8 +34,8 @@ def vec(p, z=0.0):
 
 
 def make_wire(points, closed, doc=None, label="_wall_base"):
-    """Part.makePolygon 우선 사용 (DraftGeomUtils self-intersecting 검사 없음).
-    Draft.makeWire 는 self-intersecting 검사로 OCC 크래시 유발 → 폴백으로만 사용."""
+    """Part.makePolygon → Part::Feature 베이스라인 생성.
+    개별 직선 세그먼트(2점) 용. self-intersecting 없음."""
     pts = []
     for p in points:
         v = vec(p)
@@ -53,18 +53,38 @@ def make_wire(points, closed, doc=None, label="_wall_base"):
         feat.Shape = wire_shape
         return feat
     except Exception:
-        # Part 실패 시 Draft 폴백
-        try:
-            return Draft.makeWire(pts, closed=closed, face=False)
-        except Exception:
-            return None
+        return None
 
 
-# ── 벽 체이닝: 끝점이 연결된 세그먼트 → 하나의 다중선 벽으로 묶기 ──────────────
-# 계단형/노치 프로파일 벽, 꺾인 벽 등을 1개 Arch.makeWall 로 처리.
-_CHAIN_SNAP = 5.0   # 끝점 연결 판정 거리(mm).
-# snap_wall_corners 이후 실제 연결된 끝점은 거의 동일 좌표 → 5mm로 충분.
-# 60mm 처럼 크면 T접합 등 연결 안 된 세그먼트까지 묶여 self-intersecting 발생.
+def make_draft_wire(points, closed, doc=None, label="_wall_wire"):
+    """Draft.make_wire 로 베이스라인 생성.
+    다중점(3점 이상) 꺾인 벽 전용 — FreeCAD가 코너 Miter 자동 처리.
+    실패 시 None 반환(호출자가 Part 폴백 처리)."""
+    pts = []
+    for p in points:
+        v = vec(p)
+        if not pts or (pts[-1] - v).Length > 1.0:
+            pts.append(v)
+    if len(pts) < 2:
+        return None
+    try:
+        # FreeCAD 0.19+ snake_case API 시도, 구버전은 camelCase 폴백
+        if hasattr(Draft, "make_wire"):
+            w = Draft.make_wire(pts, closed=closed, face=False)
+        else:
+            w = Draft.makeWire(pts, closed=closed, face=False)
+        if w:
+            w.Label = label
+        return w
+    except Exception:
+        return None
+
+
+# ── 벽 체이닝: snap_wall_corners로 정렬된 끝점 기준 연결 ──────────────────────
+# 목적: 연속 세그먼트 → 하나의 Draft Wire → Arch.makeWall 1개 → 코너 Miter 자동
+# 핵심: snap_wall_corners(50mm tol) 이후 실제 연결된 끝점은 동일 좌표.
+#       1mm 판정으로 오연결(T접합 근처) 방지.
+_CHAIN_SNAP = 1.0   # 끝점 연결 판정 거리(mm) — snap 후 동일 좌표이므로 1mm 충분
 
 def _chain_wall_segments(walls):
     """열린(non-closed) 벽 레코드들을 끝점 연결로 체이닝.
@@ -189,51 +209,81 @@ def build_walls(doc, walls, params):
         except Exception as e:
             print(f"[warn] ClosedWall_{i} 생성 실패: {e}")
 
-    # ── ② 열린 폴리선: 세그먼트별 Arch.makeWall ────────────────────────────────
-    # 체이닝(multi-seg wire)은 self-intersecting → OCC 크래시 → Build FAILED 유발.
-    # 현재는 1 segment = 1 Arch.makeWall 로 안정성 우선. 벽 연결은 후속 과제.
-    for i, el in enumerate(walls):
-        if el.get("closed") or el.get("pairing") == "closed":
-            continue
-        if el["kind"] != "polyline":
-            continue
-        baseline = el.get("centerline") or el.get("points", [])
-        if len(baseline) < 2:
-            continue
-        ov = el.get("overrides", {})
-        width = float(el.get("width_detected")
+    # ── ② 열린 폴리선: 체이닝 → Draft.make_wire → Arch.makeWall (코너 Miter 자동) ──
+    # snap_wall_corners 이후 연결된 끝점은 1mm 이내 → 체이닝으로 연속 Wire 생성.
+    # Draft.make_wire(multi-point) → Arch.makeWall: 코너에서 Miter 자동 처리.
+    # 2점(직선) 세그먼트: Part.makePolygon 유지(Draft 불필요, 빠름).
+    open_walls = [(i, el) for i, el in enumerate(walls)
+                  if not (el.get("closed") or el.get("pairing") == "closed")
+                  and el.get("kind") == "polyline"]
+
+    chains = _chain_wall_segments([el for _, el in open_walls])
+    open_map = {li: gi for li, (gi, _) in enumerate(open_walls)}
+
+    for chain_idx, (rep_el, chain_pts, local_ids) in enumerate(chains):
+        global_ids = [open_map[li] for li in local_ids]
+        ov = rep_el.get("overrides", {})
+        width = float(rep_el.get("width_detected")
                       or ov.get("width", d.get("width", 200.0)))
         height = float(ov.get("height", d.get("height", 2800.0)))
-        z_base = float(el.get("z_base", 0.0))
-        dxf_id = el.get("handle") or f"WALL_{i}"
+        z_base = float(rep_el.get("z_base", 0.0))
+        label = f"Wall_C{chain_idx}"
+
+        # 고유 점 필터
+        clean_pts = []
+        for p in chain_pts:
+            v = App.Vector(p[0], p[1], 0)
+            if not clean_pts or (clean_pts[-1] - v).Length > 1.0:
+                clean_pts.append(v)
+        if len(clean_pts) < 2:
+            continue
+
+        base = None
         try:
-            base = make_wire(baseline, False, doc=doc, label=f"WallAxis_{i}")
+            if len(clean_pts) >= 3:
+                # 3점 이상: Draft.make_wire → 코너 Miter 자동
+                base = make_draft_wire(
+                    [[p.x, p.y] for p in clean_pts], False,
+                    doc=doc, label=f"WallAxis_C{chain_idx}")
+            if base is None:
+                # 2점 또는 Draft 실패: Part.makePolygon (안전)
+                base = make_wire(
+                    [[p.x, p.y] for p in clean_pts], False,
+                    doc=doc, label=f"WallAxis_C{chain_idx}")
             if not base:
-                raise ValueError("make_wire returned None")
+                raise ValueError("baseline 생성 실패")
             wall = Arch.makeWall(base, width=width, height=height)
             if not wall:
                 raise ValueError("Arch.makeWall returned None")
-            wall.Label = f"Wall_{i}"
+            wall.Label = label
             wall.Placement.Base.z = z_base
             wall.addProperty("App::PropertyString", "DxfId", "Metadata", "")
-            wall.DxfId = dxf_id
+            wall.DxfId = ",".join(str(g) for g in global_ids)
             objs.append(wall)
-            src_els.append(el)
-            idx_map[i] = wall
+            src_els.append(rep_el)
+            for gi in global_ids:
+                idx_map[gi] = wall
         except Exception as e:
-            print(f"[warn] Wall_{i} 생성 실패: {e}")
-            try:
-                if not error_group:
-                    error_group = doc.addObject("App::DocumentObjectGroup", "Error_Elements")
-                pts = [vec(p, z_base) for p in baseline]
-                if len(pts) >= 2:
-                    err_line = Draft.makeWire(pts, closed=False, face=False)
-                    err_line.Label = f"Error_Wall_{i}"
-                    err_line.ViewObject.LineColor = (1.0, 0.0, 0.0, 0.0)
-                    err_line.ViewObject.LineWidth = 3.0
-                    error_group.addObject(err_line)
-            except Exception:
-                pass
+            print(f"[warn] {label} 생성 실패: {e}")
+            # 실패한 체인: 개별 세그먼트로 폴백
+            for li in local_ids:
+                gi = open_map[li]
+                el = open_walls[li][1]
+                bl = el.get("centerline") or el.get("points", [])
+                if len(bl) < 2:
+                    continue
+                try:
+                    fb = make_wire(bl, False, doc=doc, label=f"WallAxis_{gi}")
+                    if not fb:
+                        continue
+                    w = Arch.makeWall(fb, width=width, height=height)
+                    if not w:
+                        continue
+                    w.Label = f"Wall_{gi}"
+                    w.Placement.Base.z = float(el.get("z_base", 0.0))
+                    objs.append(w); src_els.append(el); idx_map[gi] = w
+                except Exception:
+                    pass
     return objs, idx_map, src_els
 
 
