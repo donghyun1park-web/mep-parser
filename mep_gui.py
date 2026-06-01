@@ -495,7 +495,7 @@ class App:
                 r = subprocess.run([fc, os.path.join(HERE, "freecad_builder.py")],
                                    cwd=HERE, env=env, capture_output=True,
                                    text=True, encoding="utf-8", errors="replace",
-                                   timeout=300)
+                                   timeout=900)
                 self.root.after(0, lambda: self._build_done(r, out))
             except Exception as e:
                 # Python 3: 람다에서 except 변수 참조 시 소멸 → 명시적 캡처
