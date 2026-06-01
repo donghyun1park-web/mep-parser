@@ -545,17 +545,10 @@ def _main_impl():
 
     import time as _time
 
-    print("[2/8] 문서 생성 + SkipRecompute 활성화")
+    print("[2/8] 문서 생성")
     doc = App.newDocument("BIM")
-    # Arch.makeWall/makeStructure 호출마다 내부 recompute → N×recompute = 타임아웃
-    # setSkipRecompute(True): 자동 recompute 비활성 → 마지막 명시적 1회만 수행
-    _skip_ok = False
-    try:
-        doc.setSkipRecompute(True)
-        _skip_ok = True
-        print("  setSkipRecompute(True) OK")
-    except Exception as _e:
-        print(f"  [warn] setSkipRecompute 미지원: {_e}")
+    # Part::Feature.Shape = wire_shape 는 shape 직접 할당 → 개별 recompute 가 빠름.
+    # setSkipRecompute 는 오히려 배치 recompute 비용 증가 → 사용 안 함.
 
     _t0 = _time.time()
     print("[3/8] 벽체 빌드")
@@ -570,20 +563,15 @@ def _main_impl():
     mep_objs          = build_mep(doc, el)
     print(f"  → cols={len(cols)} slabs={len(slabs)} spaces={len(spaces)} mep={len(mep_objs)} ({_time.time()-_t1:.1f}s)")
 
-    print("[5/8] recompute (1회 배치)")
+    print("[5/8] recompute")
     _t2 = _time.time()
-    if _skip_ok:
-        try:
-            doc.setSkipRecompute(False)
-        except Exception:
-            pass
     try:
         doc.recompute()
         print(f"  → {len(doc.Objects)}개 객체 ({_time.time()-_t2:.1f}s)")
     except Exception as _re:
         print(f"  [warn] recompute 오류: {_re}")
 
-    print("[6/8] 층 컨테이너 생성 (recompute 이후)")
+    print("[6/8] 층 컨테이너 생성")
     _FLOOR_TOL  = 100.0
     floors_info = data.get("floors") or [{"z": 0.0, "label": "Level_1"}]
 
