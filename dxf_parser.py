@@ -85,7 +85,7 @@ def load_layer_map(csv_path):
     """layer_map.csv → 규칙 리스트. 파라미터(width/height/thickness)도 함께."""
     rules = []
     with open(csv_path, encoding="utf-8") as f:
-        for row in csv.DictReader(filter(lambda l: not l.startswith("#"), f)):
+        for row in csv.DictReader(filter(lambda l: not l.startswith("# "), f)):
             attrs = {}
             for k in ("width", "height", "thickness"):
                 v = (row.get(k) or "").strip()

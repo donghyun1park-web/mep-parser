@@ -48,7 +48,7 @@ def _read_csv_rows(csv_path):
     if not os.path.exists(csv_path):
         return rows
     with open(csv_path, encoding="utf-8") as f:
-        for row in csv.DictReader(filter(lambda l: not l.startswith("#"), f)):
+        for row in csv.DictReader(filter(lambda l: not l.startswith("# "), f)):
             rows.append({
                 "pattern": row.get("pattern", "").strip(),
                 "category": row.get("category", "").strip(),
