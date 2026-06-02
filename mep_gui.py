@@ -259,6 +259,7 @@ class App:
         self.v_map = tk.StringVar(value=os.path.join(HERE, "layer_map.csv"))
         self.v_block = tk.StringVar(value=os.path.join(HERE, "block_map.csv"))
         self.v_llm = tk.BooleanVar(value=bool(os.environ.get("ANTHROPIC_API_KEY")))
+        self.v_vision = tk.BooleanVar(value=False)  # Vision 폴백(실험적, 기본 OFF)
 
         self._build_file_row()
         self._build_buttons()
@@ -292,7 +293,9 @@ class App:
             self.btn_build.state(["disabled"])
         ttk.Button(f, text="DWG->DXF checklist",
                    command=self._show_checklist).pack(side="right", padx=4)
-        ttk.Checkbutton(f, text="LLM assist",
+        ttk.Checkbutton(f, text="Vision fallback",
+                        variable=self.v_vision).pack(side="right", padx=2)
+        ttk.Checkbutton(f, text="AI auto-classify",
                         variable=self.v_llm).pack(side="right", padx=2)
 
     def _build_review(self):
@@ -387,19 +390,20 @@ class App:
             messagebox.showwarning("Check", "Please select a DXF drawing first.")
             return
         rules, brules = self._rules()
+        use_ai = bool(self.v_llm.get())
+        use_vision = bool(self.v_vision.get())
+        if use_ai:
+            self._log("  [AI] 텍스트 분류 + 고신뢰 자동적용 활성")
+        if use_vision:
+            self._log("  [Vision] 저신뢰 레이어 이미지 분류 폴백 활성")
         try:
-            self.data = P.parse(dxf, rules, brules)
+            # parse() 내부에서 분류·자동적용(요소 합류 후 wall 후처리 보장)
+            self.data = P.parse(dxf, rules, brules,
+                                use_ai=use_ai, use_vision=use_vision)
         except Exception as e:
             self._log(f"[Error] Parse failed: {e}")
             return
         self.geom_path = os.path.splitext(dxf)[0] + ".geometry.json"
-        # LLM tie-break
-        if self.v_llm.get() and self.data.get("suggestions"):
-            self._log("  [LLM] Requesting ambiguous layer classification...")
-            try:
-                P.llm_tiebreak_suggestions(self.data["suggestions"])
-            except Exception as e:
-                self._log(f"  [LLM] Failed: {e}")
         self._save()
         el = self.data["elements"]
         wp = self.data.get("wall_pairing", {})
@@ -413,15 +417,26 @@ class App:
             self._log(f"  [warn] {w}")
 
         sugg = self.data.get("suggestions", [])
-        if sugg:
-            self._log(f"  [{len(sugg)} unmapped layer(s)] — click [Edit] next to Layer map to add:")
-        for s in sugg:
+        applied = [s for s in sugg if s.get("applied")]
+        if applied:
+            self._log(f"  [AI 자동적용 {len(applied)}건]:")
+            for s in applied:
+                self._log(f"    {s.get('source')} '{s['layer']}'x{s.get('applied_count')} "
+                          f"→ {s.get('final_guess')}"
+                          + (f"/{s.get('final_subtype')}" if s.get('final_subtype') else "")
+                          + f" ({s.get('final_confidence')}, {s.get('decided_by')})")
+        remain = [s for s in sugg if not s.get("applied")]
+        if remain:
+            self._log(f"  [{len(remain)} 미해결 — [Edit] 로 layer_map 검토]:")
+        for s in remain:
             g = f"geom={s['geom_guess']}({s['geom_confidence']})" if s.get("geom_guess") else "geom=?"
             nm = (f"name~{s['name_match']}->{s['name_guess']}({s['name_score']})"
                   if s.get("name_guess") else "name=?")
-            llm = (f" [LLM->{s['llm_guess']}({s['llm_confidence']}) {s['llm_reason']}]"
+            llm = (f" [LLM->{s['llm_guess']}({s['llm_confidence']})]"
                    if s.get("llm_guess") else "")
-            self._log(f"  [suggest] '{s['layer']}'x{s['count']}: {g} {nm}{llm}")
+            vis = (f" [Vision->{s['vision_guess']}({s['vision_confidence']})]"
+                   if s.get("vision_guess") else "")
+            self._log(f"  [suggest] '{s['layer']}'x{s['count']}: {g} {nm}{llm}{vis}")
         self._populate_review()
 
     def _populate_review(self):
