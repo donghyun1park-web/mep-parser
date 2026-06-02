@@ -16,6 +16,7 @@ import argparse
 import copy
 import csv
 import difflib
+import hashlib
 import json
 import math
 import os
@@ -727,6 +728,7 @@ def link_openings_to_walls(elements, params):
         cx, cy = float(c[0]), float(c[1])
         r = float(op.get("radius", 50.0))
         indices = []
+        nearest = (1e18, None)  # (거리, 벽방향단위벡터) — 가장 가까운 host 벽
         for i, wall in enumerate(walls):
             cl = wall.get("centerline") or wall.get("points", [])
             if len(cl) < 2:
@@ -738,7 +740,21 @@ def link_openings_to_walls(elements, params):
                                    float(cl[-1][0]), float(cl[-1][1]))
             if dist < r + ww * 0.5 + 10.0:
                 indices.append(i)
+                if dist < nearest[0]:
+                    ux, uy, _ln = _seg_dir(cl[0], cl[-1])
+                    nearest = (dist, (ux, uy), ww)
         op["wall_indices"] = sorted(indices)
+        # opening 스키마 확장: subtype/width/height/sill + host 벽 배향
+        op.setdefault("subtype", None)             # 'door'|'window'|None
+        # width: 명시 없으면 반경×2(원통 폴백) 또는 기본 문/창 폭
+        if "width" not in op:
+            op["width"] = round(r * 2, 1) if r > 1 else (
+                900.0 if op.get("subtype") == "door" else 1200.0)
+        op.setdefault("height", 2100.0 if op.get("subtype") == "door" else 1200.0)
+        op.setdefault("sill", 0.0 if op.get("subtype") == "door" else 900.0)
+        if nearest[1] is not None:
+            op["host_dir"] = [round(nearest[1][0], 5), round(nearest[1][1], 5)]
+            op["host_width"] = round(nearest[2], 1)
 
 
 # ── [Phase 3] 레이어명 비의존 기하 분류기 + 미매핑 fuzzy 제안 ──
@@ -849,7 +865,11 @@ def assign_zones(elements, zones):
             rec["zone"] = next((i for i, poly in polys if poly.contains(pt)), None)
 
 
-def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAMS):
+def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAMS,
+          use_ai=False, use_vision=False, api_key=None, ai_threshold=0.8):
+    """DXF → geometry.json dict.
+    use_ai: 텍스트 LLM 분류 + 고신뢰 자동적용. use_vision: Vision 폴백.
+    ai_threshold: best_classification confidence 이 값 초과면 자동 카테고리 적용."""
     doc = ezdxf.readfile(dxf_path)
     msp = doc.modelspace()
     scale = 1000.0 if doc.header.get("$INSUNITS", 0) == 6 else 1.0
@@ -858,7 +878,8 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
                            "pipe": [], "duct": [], "tray": [], "equipment": []},
               "warnings": []}
     unmapped, unmapped_blocks, n_inserts, unmapped_recs = {}, {}, 0, {}
-    unmapped_block_recs = {}  # 블록명 → explode 기하 샘플(AI/제안용)
+    unmapped_block_recs = {}      # 블록명 → explode 기하 샘플(제안 통계용)
+    unmapped_block_entities = {}  # 블록명 → INSERT 엔티티(AI 자동적용 재추출용)
     for e in msp:
         # [Phase 2] INSERT: 블록명 분류 → explode/마커. 레이어 폴백.
         if e.dxftype() == "INSERT":
@@ -869,7 +890,8 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
                 cat, attrs = classify(e.dxf.layer, rules)  # 레이어 폴백
             if cat is None:
                 unmapped_blocks[bname] = unmapped_blocks.get(bname, 0) + 1
-                # explode 기하 샘플 수집(블록당 최대 30) — AI 분류/제안용
+                unmapped_block_entities.setdefault(bname, []).append(e)
+                # explode 기하 샘플 수집(블록당 최대 30) — 제안 통계용
                 bk = unmapped_block_recs.setdefault(bname, [])
                 if len(bk) < 30:
                     try:
@@ -892,13 +914,14 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         if cat is None:
             unmapped[e.dxf.layer] = unmapped.get(e.dxf.layer, 0) + 1
             bucket = unmapped_recs.setdefault(e.dxf.layer, [])
-            if len(bucket) < 50:  # [Phase 3] 기하 제안용 샘플(레이어당 최대 50)
-                try:
-                    sr = entity_to_record(e, scale)
-                    if sr:
-                        bucket.append(sr)
-                except Exception:
-                    pass
+            # 전체 보관(AI 자동적용 재라우팅용). 제안 통계는 build_suggestions가 샘플링.
+            try:
+                sr = entity_to_record(e, scale)
+                if sr:
+                    sr["z_base"] = _entity_elevation(e, scale)
+                    bucket.append(sr)
+            except Exception:
+                pass
             continue
         rec = entity_to_record(e, scale)
         if rec is None:
@@ -912,6 +935,31 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         else:
             rec["z_base"] = elev  # [4b] 층 분리용 Z 기준(단층=0.0)
         result["elements"].setdefault(cat, []).append(rec)
+
+    # ── [Phase B] AI 분류 + 고신뢰 자동적용 (wall 후처리 전에 요소 합류) ─────────
+    # 미매핑 레이어/블록 → 제안 생성 → (옵션)LLM/Vision → confidence>임계 자동 카테고리.
+    # 자동적용된 wall/opening 도 아래 후처리(pairing/merge/snap/link)를 거치게 됨.
+    _layer_sug = build_suggestions(unmapped_recs, rules, kind="layer") if unmapped else []
+    _block_sug = (build_suggestions(unmapped_block_recs, block_rules, kind="block")
+                  if unmapped_blocks else [])
+    suggestions = _layer_sug + _block_sug
+    if suggestions and (use_ai or use_vision):
+        _ai_cache = _ai_cache_load(dxf_path)
+        if use_ai:
+            llm_tiebreak_suggestions(suggestions, api_key=api_key, cache=_ai_cache)
+        if use_vision:
+            try:
+                import vision_classify as _vc
+                _vc.vision_fallback(dxf_path, suggestions, unmapped_recs,
+                                    api_key=api_key, cache=_ai_cache)
+            except Exception as _ve:
+                result["warnings"].append(f"Vision 폴백 스킵: {_ve}")
+        _ai_cache_save(dxf_path, _ai_cache)
+        apply_ai_classifications(result, suggestions,
+                                 unmapped_recs, unmapped_block_entities,
+                                 scale, threshold=ai_threshold)
+    result["suggestions"] = suggestions
+
     # [Phase 1-pre] 개별 LINE 연결: 끝점 공유 2점 레코드 → 다중점 폴리라인 병합
     _n_raw = len(result["elements"]["wall"])
     result["elements"]["wall"] = join_connected_lines(result["elements"]["wall"])
@@ -950,18 +998,18 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
     result["floors"] = [{"z": float(z), "label": f"Level_{i+1}"}
                         for i, z in enumerate(sorted(_z_vals))]
     assign_zones(result["elements"], result["elements"].get("zone", []))
-    # [Phase 3] 미매핑 → 기하/이름 기반 비강제 제안 (레이어 + 블록)
-    _suggestions = []
-    if unmapped:  # [MEP Phase 4] 미매핑 레이어 로그
+    # 미매핑 로그 (suggestions 는 위 [Phase B] 에서 이미 result["suggestions"] 설정)
+    # AI 자동적용으로 해소된 항목은 suggestion 에 applied=True 표기됨.
+    _remain_layers = {k: v for k, v in unmapped.items()
+                      if not _is_applied(result.get("suggestions", []), k, "layer")}
+    _remain_blocks = {k: v for k, v in unmapped_blocks.items()
+                      if not _is_applied(result.get("suggestions", []), k, "block")}
+    if _remain_layers:
         result["warnings"].append("미매핑 레이어: " +
-                                  ", ".join(f"{k}({v})" for k, v in unmapped.items()))
-        _suggestions += build_suggestions(unmapped_recs, rules, kind="layer")
-    if unmapped_blocks:  # [Phase 2] 미매핑 블록 로그
+                                  ", ".join(f"{k}({v})" for k, v in _remain_layers.items()))
+    if _remain_blocks:
         result["warnings"].append("미매핑 블록: " +
-                                  ", ".join(f"{k}({v})" for k, v in unmapped_blocks.items()))
-        _suggestions += build_suggestions(unmapped_block_recs, block_rules, kind="block")
-    if _suggestions:
-        result["suggestions"] = _suggestions
+                                  ", ".join(f"{k}({v})" for k, v in _remain_blocks.items()))
 
     # ── 짧은 벽 클러스터 감지: 계단/장식선 오분류 경고 ─────────────────
     # 같은 레이어에 짧은 벽(< 400mm)이 5개 이상 → 계단/비구조선 의심
@@ -1033,74 +1081,232 @@ def scan(dxf_path):
 _VALID_CATEGORIES = ("wall", "column", "slab", "zone", "opening",
                      "pipe", "duct", "tray", "equipment")
 _LLM_SYSTEM = (
-    "You are a BIM/MEP layer classifier for DXF drawings. "
-    "Given a layer name and geometry hints, suggest the most likely category. "
+    "You are a BIM/MEP layer/block classifier for architectural DXF drawings. "
+    "Given a layer or block name and geometry statistics, suggest the most likely "
+    "building element category, and for openings whether it is a door or a window. "
     "Reply ONLY with valid JSON: "
     "{\"category\": \"<one of: wall column slab zone opening pipe duct tray equipment>\", "
+    "\"subtype\": \"<door|window|null>\", "
     "\"reason\": \"<one concise sentence in Korean>\", "
     "\"confidence\": <0.0-1.0>}. "
-    "NEVER generate FreeCAD code. NEVER auto-apply mappings. Suggestion only."
+    "subtype is only meaningful when category is opening (door/window); otherwise null. "
+    "NEVER generate FreeCAD code or geometry coordinates. Classification only."
 )
 
 
-def _llm_one(layer, count, geom_guess, geom_conf, name_guess, name_score, api_key):
-    """LLM 1회 호출 → (category, reason, confidence) or None."""
+def _llm_one(name, count, geom_guess, geom_conf, name_guess, name_score,
+             api_key, source="layer", geom_stats=None, geom_subtype=None):
+    """LLM 1회 호출 → (category, subtype, reason, confidence) or None."""
     try:
         import anthropic  # optional dep
     except ImportError:
         return None
+    stat_line = f"기하 통계: {geom_stats}\n" if geom_stats else ""
+    sub_line = f"기하 추정 서브타입: {geom_subtype}\n" if geom_subtype else ""
     prompt = (
-        f"레이어명: \"{layer}\" (엔티티 {count}개)\n"
+        f"{'블록명' if source == 'block' else '레이어명'}: \"{name}\" (엔티티 {count}개)\n"
         f"기하 추정: {geom_guess or '불명'} (신뢰도 {geom_conf:.2f})\n"
+        f"{sub_line}{stat_line}"
         f"이름 유사: {name_guess or '불명'} (유사도 {name_score:.2f})\n"
         f"가능한 카테고리: {', '.join(_VALID_CATEGORIES)}\n"
-        "위 정보를 바탕으로 가장 적합한 카테고리를 JSON으로 답하세요."
+        "위 정보를 바탕으로 가장 적합한 카테고리(개구부면 door/window)를 JSON으로 답하세요."
     )
     try:
         client = anthropic.Anthropic(api_key=api_key)
         msg = client.messages.create(
             model="claude-haiku-4-5",
-            max_tokens=120,
+            max_tokens=160,
             system=_LLM_SYSTEM,
             messages=[{"role": "user", "content": prompt}],
         )
         raw = msg.content[0].text.strip()
-        # JSON 파싱 — 마크다운 코드블록 제거
         import re as _re
         raw = _re.sub(r"```[a-z]*\n?", "", raw).strip().rstrip("`").strip()
         parsed = json.loads(raw)
         cat = parsed.get("category", "").lower()
         if cat not in _VALID_CATEGORIES:
             return None
-        return (cat,
+        subtype = parsed.get("subtype")
+        if isinstance(subtype, str):
+            subtype = subtype.lower().strip()
+            if subtype not in ("door", "window"):
+                subtype = None
+        else:
+            subtype = None
+        return (cat, subtype,
                 str(parsed.get("reason", ""))[:120],
                 float(parsed.get("confidence", 0.5)))
-    except Exception as e:
+    except Exception:
         return None
 
 
-def llm_tiebreak_suggestions(suggestions, api_key=None):
+def _geom_stats_str(sug):
+    """제안에 담긴 기하 추정 요약 → LLM feature 문자열."""
+    bits = []
+    if sug.get("geom_reason"):
+        bits.append(sug["geom_reason"])
+    return "; ".join(bits) if bits else None
+
+
+def llm_tiebreak_suggestions(suggestions, api_key=None, cache=None):
     """모호(기하·이름 둘 다 낮은 신뢰도) 제안에만 LLM 호출 → llm_guess 필드 추가.
-    ★ 자동매핑 안 함 — 사용자가 검토 후 layer_map.csv 에 추가할 것."""
+    레이어·블록 제안 모두 처리. cache: {sig_key: {...}} 재현성 캐시(있으면 우선)."""
     if not api_key:
         api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return  # API key 없으면 조용히 스킵
+    if cache is None:
+        cache = {}
     for s in suggestions:
         geom_conf = float(s.get("geom_confidence") or 0.0)
         name_score = float(s.get("name_score") or 0.0)
         if geom_conf >= 0.7 or name_score >= 0.6:
             continue  # 이미 충분히 자명 → LLM 불필요
-        result = _llm_one(
-            s["layer"], s["count"],
-            s.get("geom_guess"), geom_conf,
-            s.get("name_guess"), name_score,
-            api_key)
+        key = _sig_key("llm", s)
+        cached = cache.get(key)
+        if cached:
+            result = (cached["cat"], cached.get("subtype"),
+                      cached.get("reason", ""), cached.get("conf", 0.5))
+        else:
+            result = _llm_one(
+                s["layer"], s["count"],
+                s.get("geom_guess"), geom_conf,
+                s.get("name_guess"), name_score,
+                api_key, source=s.get("source", "layer"),
+                geom_stats=_geom_stats_str(s),
+                geom_subtype=s.get("geom_subtype"))
+            if result:
+                cache[key] = {"cat": result[0], "subtype": result[1],
+                              "reason": result[2], "conf": result[3]}
         if result:
-            cat, reason, conf = result
+            cat, subtype, reason, conf = result
             s["llm_guess"] = cat
+            s["llm_subtype"] = subtype
             s["llm_reason"] = reason
             s["llm_confidence"] = round(conf, 2)
+
+
+# ── [Phase B] AI 분류 자동적용 + 재현성 캐시 ────────────────────────────────
+def _sig_key(prefix, sug):
+    """제안의 시그니처 해시 키(캐시용). 이름+개수+기하추정 기반 → 동일 도면 동일 키."""
+    raw = f"{prefix}|{sug.get('source')}|{sug.get('layer')}|{sug.get('count')}|" \
+          f"{sug.get('geom_guess')}|{sug.get('geom_subtype')}"
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _ai_cache_path(dxf_path):
+    return os.path.splitext(dxf_path)[0] + ".ai_cache.json"
+
+
+def _ai_cache_load(dxf_path):
+    p = _ai_cache_path(dxf_path)
+    if os.path.exists(p):
+        try:
+            with open(p, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def _ai_cache_save(dxf_path, cache):
+    if not cache:
+        return
+    try:
+        with open(_ai_cache_path(dxf_path), "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def _is_applied(suggestions, name, source):
+    """해당 레이어/블록 제안이 AI 자동적용됐는지."""
+    for s in suggestions:
+        if s.get("layer") == name and s.get("source") == source and s.get("applied"):
+            return True
+    return False
+
+
+def apply_ai_classifications(result, suggestions, unmapped_recs,
+                             unmapped_block_entities, scale, threshold=0.8):
+    """confidence>threshold 제안 → 해당 미매핑 레코드를 elements[cat]로 자동 이동.
+    레이어: unmapped_recs[name] 의 보관 레코드 사용.
+    블록: unmapped_block_entities[name] 엔티티를 결정 카테고리로 재추출.
+    threshold 이하: needs_review=True 태깅(GUI 검토)."""
+    n_applied = 0
+    for s in suggestions:
+        best = best_classification(s)
+        if not best:
+            continue
+        s["final_guess"] = best["category"]
+        s["final_subtype"] = best.get("subtype")
+        s["final_confidence"] = best["confidence"]
+        s["decided_by"] = best["decided_by"]
+        if best["confidence"] <= threshold:
+            s["needs_review"] = True
+            continue
+        cat = best["category"]
+        subtype = best.get("subtype")
+        name = s["layer"]
+        recs = []
+        if s.get("source") == "block":
+            for e in unmapped_block_entities.get(name, []):
+                try:
+                    elev = _entity_elevation(e, scale)
+                    for rec in insert_to_records(e, scale, cat, {}):
+                        rec.setdefault("z_base", elev)
+                        recs.append(rec)
+                except Exception:
+                    pass
+        else:
+            recs = unmapped_recs.get(name, [])
+        for rec in recs:
+            if cat in MEP_CATEGORIES:
+                annotate_mep(rec, cat, {}, rec.get("z_base", 0.0))
+            if subtype and cat == "opening":
+                rec["subtype"] = subtype
+                # opening 은 중심/반경 필요 → 폴리/원 → 중심 산출
+                cen = _centroid(rec)
+                rec.setdefault("center", [round(cen[0], 3), round(cen[1], 3)])
+                rec.setdefault("radius", 50.0)
+            rec["ai_applied"] = True
+            result["elements"].setdefault(cat, []).append(rec)
+        if recs:
+            s["applied"] = True
+            s["applied_count"] = len(recs)
+            n_applied += 1
+            result["warnings"].append(
+                f"[AI 자동적용] {s.get('source')} '{name}' → {cat}"
+                + (f"/{subtype}" if subtype else "")
+                + f" ({best['confidence']:.2f}, {best['decided_by']}, {len(recs)}개)")
+    if n_applied:
+        result["warnings"].append(f"[AI] 자동적용 {n_applied}개 레이어/블록")
+    return n_applied
+
+
+def best_classification(sug):
+    """제안에서 최종 카테고리/서브타입/신뢰도/근거 결정.
+    우선순위: 이름 일치(>=0.6) > LLM > 기하. 4가지 신호 종합."""
+    name_score = float(sug.get("name_score") or 0.0)
+    geom_conf = float(sug.get("geom_confidence") or 0.0)
+    llm_conf = float(sug.get("llm_confidence") or 0.0)
+    cands = []  # (priority, conf, cat, subtype, reason, source)
+    if sug.get("name_guess") and name_score >= 0.6:
+        cands.append((3, name_score, sug["name_guess"], None,
+                      f"이름 유사 {sug.get('name_match')}", "name"))
+    if sug.get("llm_guess"):
+        cands.append((2, llm_conf, sug["llm_guess"], sug.get("llm_subtype"),
+                      sug.get("llm_reason", "LLM"), "llm"))
+    if sug.get("geom_guess"):
+        cands.append((1, geom_conf, sug["geom_guess"], sug.get("geom_subtype"),
+                      sug.get("geom_reason", "기하"), "geom"))
+    if not cands:
+        return None
+    # 우선순위 → 신뢰도 순
+    cands.sort(key=lambda c: (c[0], c[1]), reverse=True)
+    _pri, conf, cat, subtype, reason, src = cands[0]
+    return {"category": cat, "subtype": subtype, "confidence": round(conf, 2),
+            "reason": reason, "decided_by": src}
 
 
 DWG_DXF_CHECKLIST = (
@@ -1172,7 +1378,11 @@ def main():
     ap.add_argument("--checklist", action="store_true",
                     help="DWG->DXF 내보내기 체크리스트 출력 후 종료")
     ap.add_argument("--llm", action="store_true",
-                    help="모호 레이어 LLM tie-break (ANTHROPIC_API_KEY 필요)")
+                    help="텍스트 AI 분류 + 고신뢰 자동적용 (ANTHROPIC_API_KEY 필요)")
+    ap.add_argument("--vision", action="store_true",
+                    help="Vision 폴백: DXF 렌더 → Claude Vision 영역 분류 (실험적)")
+    ap.add_argument("--ai-threshold", type=float, default=0.8,
+                    help="AI 자동적용 신뢰도 임계값 (기본 0.8)")
     ap.add_argument("--auto-map", action="store_true",
                     help="신뢰도 높은(0.8이상) 제안을 layer_map.csv에 자동 추가")
     args = ap.parse_args()
@@ -1190,10 +1400,11 @@ def main():
 
     rules = load_layer_map(args.map) if args.map else DEFAULT_LAYER_RULES
     block_rules = load_layer_map(args.blockmap) if args.blockmap else DEFAULT_BLOCK_RULES
-    data = parse(args.dxf, rules, block_rules)
-    if args.llm and data.get("suggestions"):
-        llm_tiebreak_suggestions(data["suggestions"])
-        
+    # use_ai/use_vision: parse() 내부에서 분류·자동적용(요소 합류 후 wall 후처리 보장)
+    data = parse(args.dxf, rules, block_rules,
+                 use_ai=args.llm, use_vision=args.vision,
+                 ai_threshold=args.ai_threshold)
+
     if args.auto_map and args.map and data.get("suggestions"):
         appended_count = 0
         with open(args.map, "a", encoding="utf-8") as f:

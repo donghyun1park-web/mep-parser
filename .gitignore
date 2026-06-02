@@ -6,6 +6,8 @@ __pycache__/
 # 생성 파일
 *.geometry.json
 geometry.json
+*.ai_cache.json
+_mep_tmp_out.*
 *_model.FCStd
 *_model.ifc
 *.FCStd
