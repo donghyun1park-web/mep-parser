@@ -170,7 +170,9 @@ def entity_to_record(e, scale):
     if t == "ARC":
         c = e.dxf.center
         pts = arc_to_points(c.x, c.y, e.dxf.radius, e.dxf.start_angle, e.dxf.end_angle)
-        return {"kind": "polyline", "closed": False, "layer": layer,
+        # arc 식별자 보존: 문 스윙 호 판별(classify_geometry)에 사용
+        return {"kind": "polyline", "closed": False, "layer": layer, "from_arc": True,
+                "arc_radius": e.dxf.radius * scale,
                 "points": [[p[0] * scale, p[1] * scale] for p in pts]}
     if t == "SPLINE":
         pts = [[p[0] * scale, p[1] * scale] for p in e.control_points]
@@ -747,27 +749,39 @@ def _bbox(pts):
 
 
 def classify_geometry(rec):
-    """레이어명 무시, 기하만으로 (category, confidence, reason). 모르면 (None, 0, '')."""
+    """레이어명 무시, 기하만으로 (category, confidence, reason, subtype).
+    subtype: 'door'|'window'|None. 모르면 (None, 0, '', None).
+    하위호환: 호출부는 4-튜플 언팩 또는 [:3] 슬라이스로 사용."""
     k = rec.get("kind")
+    # ── 문 스윙 호: ARC 유래 열린 폴리 → opening/door ──────────────────────────
+    if rec.get("from_arc"):
+        ar = float(rec.get("arc_radius", 0.0))
+        if 300.0 <= ar <= 1500.0:  # 표준 문폭 범위(반경=문폭)
+            return ("opening", 0.7, f"문 스윙 호 r={ar:.0f}", "door")
     if k == "circle":
         r = rec.get("radius", 0.0)
         if r <= 1000:
-            return ("column", 0.5, f"소형 원 r={r:.0f} (기둥/개구부 모호)")
-        return (None, 0.0, "")
+            return ("column", 0.5, f"소형 원 r={r:.0f} (기둥/개구부 모호)", None)
+        return (None, 0.0, "", None)
     pts = rec.get("points", [])
     if len(pts) < 2:
-        return (None, 0.0, "")
+        return (None, 0.0, "", None)
     x0, y0, x1, y1 = _bbox(pts)
     w, h = x1 - x0, y1 - y0
     if rec.get("closed"):
         area = w * h  # bbox 근사
         aspect = (min(w, h) / max(w, h)) if max(w, h) > 0 else 0.0
         if len(pts) <= 6 and aspect >= 0.7 and 40_000 <= area <= 1_000_000:
-            return ("column", 0.85, f"소형 정사각 닫힘폴리 {w:.0f}x{h:.0f}")
+            return ("column", 0.85, f"소형 정사각 닫힘폴리 {w:.0f}x{h:.0f}", None)
+        # 얇고 긴 닫힘 박스 = 창(개구부): 폭 넓고 깊이 얇음
+        long_side, short_side = max(w, h), min(w, h)
+        if (len(pts) <= 6 and 600 <= long_side <= 3000 and short_side <= 400
+                and aspect <= 0.4):
+            return ("opening", 0.6, f"얇은 박스 {w:.0f}x{h:.0f} (창 추정)", "window")
         if area >= 10_000_000:
-            return ("slab", 0.7, f"대형 닫힘폴리 {w:.0f}x{h:.0f} (슬래브/존)")
-        return ("zone", 0.4, f"중형 닫힘폴리 {w:.0f}x{h:.0f}")
-    return ("wall", 0.45, "열린 선/폴리 (벽/배관 중심선 모호)")
+            return ("slab", 0.7, f"대형 닫힘폴리 {w:.0f}x{h:.0f} (슬래브/존)", None)
+        return ("zone", 0.4, f"중형 닫힘폴리 {w:.0f}x{h:.0f}", None)
+    return ("wall", 0.45, "열린 선/폴리 (벽/배관 중심선 모호)", None)
 
 
 def fuzzy_layer_suggestion(layer, rules):
@@ -785,25 +799,32 @@ def fuzzy_layer_suggestion(layer, rules):
     return best
 
 
-def build_suggestions(unmapped_recs, rules):
-    """미매핑 레이어별: 기하 투표 + 이름 fuzzy → 비강제 제안(사람이 CSV 작성용)."""
+def build_suggestions(unmapped_recs, rules, kind="layer"):
+    """미매핑 레이어/블록별: 기하 투표 + 이름 fuzzy → 비강제 제안(사람/AI 검토용).
+    kind: 'layer'|'block' — 제안에 source 표기. classify_geometry 4-튜플 사용."""
     out = []
-    for layer, recs in sorted(unmapped_recs.items()):
-        votes = {}
+    for name, recs in sorted(unmapped_recs.items()):
+        votes = {}            # category → [conf,...]
+        subtype_votes = {}    # subtype  → count
         for r in recs:
-            cat, conf, _ = classify_geometry(r)
+            cat, conf, _reason, subtype = classify_geometry(r)
             if cat:
                 votes.setdefault(cat, []).append(conf)
+            if subtype:
+                subtype_votes[subtype] = subtype_votes.get(subtype, 0) + 1
         geom_cat, geom_conf, geom_reason = None, 0.0, ""
         if votes:
             geom_cat = max(votes, key=lambda c: (len(votes[c]), sum(votes[c])))
             geom_conf = round(sum(votes[geom_cat]) / len(votes[geom_cat]), 2)
-            geom_reason = classify_geometry(
-                next(r for r in recs if classify_geometry(r)[0] == geom_cat))[2]
-        score, tok, name_cat = fuzzy_layer_suggestion(layer, rules)
-        out.append({"layer": layer, "count": len(recs),
+            geom_reason = next(
+                (classify_geometry(r)[2] for r in recs
+                 if classify_geometry(r)[0] == geom_cat), "")
+        geom_subtype = (max(subtype_votes, key=subtype_votes.get)
+                        if subtype_votes else None)
+        score, tok, name_cat = fuzzy_layer_suggestion(name, rules)
+        out.append({"layer": name, "count": len(recs), "source": kind,
                     "geom_guess": geom_cat, "geom_confidence": geom_conf,
-                    "geom_reason": geom_reason,
+                    "geom_reason": geom_reason, "geom_subtype": geom_subtype,
                     "name_guess": name_cat if score >= 0.5 else None,
                     "name_match": tok if score >= 0.5 else None,
                     "name_score": round(score, 2)})
@@ -837,6 +858,7 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
                            "pipe": [], "duct": [], "tray": [], "equipment": []},
               "warnings": []}
     unmapped, unmapped_blocks, n_inserts, unmapped_recs = {}, {}, 0, {}
+    unmapped_block_recs = {}  # 블록명 → explode 기하 샘플(AI/제안용)
     for e in msp:
         # [Phase 2] INSERT: 블록명 분류 → explode/마커. 레이어 폴백.
         if e.dxftype() == "INSERT":
@@ -847,6 +869,14 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
                 cat, attrs = classify(e.dxf.layer, rules)  # 레이어 폴백
             if cat is None:
                 unmapped_blocks[bname] = unmapped_blocks.get(bname, 0) + 1
+                # explode 기하 샘플 수집(블록당 최대 30) — AI 분류/제안용
+                bk = unmapped_block_recs.setdefault(bname, [])
+                if len(bk) < 30:
+                    try:
+                        for _r in insert_to_records(e, scale, "wall", {}):
+                            bk.append(_r)
+                    except Exception:
+                        pass
                 continue
             elev = _entity_elevation(e, scale)
             for rec in insert_to_records(e, scale, cat, attrs):
@@ -920,14 +950,18 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
     result["floors"] = [{"z": float(z), "label": f"Level_{i+1}"}
                         for i, z in enumerate(sorted(_z_vals))]
     assign_zones(result["elements"], result["elements"].get("zone", []))
-    if unmapped:  # [MEP Phase 4] 미매핑 로그
+    # [Phase 3] 미매핑 → 기하/이름 기반 비강제 제안 (레이어 + 블록)
+    _suggestions = []
+    if unmapped:  # [MEP Phase 4] 미매핑 레이어 로그
         result["warnings"].append("미매핑 레이어: " +
                                   ", ".join(f"{k}({v})" for k, v in unmapped.items()))
-        # [Phase 3] 미매핑 → 기하/이름 기반 비강제 제안
-        result["suggestions"] = build_suggestions(unmapped_recs, rules)
+        _suggestions += build_suggestions(unmapped_recs, rules, kind="layer")
     if unmapped_blocks:  # [Phase 2] 미매핑 블록 로그
         result["warnings"].append("미매핑 블록: " +
                                   ", ".join(f"{k}({v})" for k, v in unmapped_blocks.items()))
+        _suggestions += build_suggestions(unmapped_block_recs, block_rules, kind="block")
+    if _suggestions:
+        result["suggestions"] = _suggestions
 
     # ── 짧은 벽 클러스터 감지: 계단/장식선 오분류 경고 ─────────────────
     # 같은 레이어에 짧은 벽(< 400mm)이 5개 이상 → 계단/비구조선 의심
