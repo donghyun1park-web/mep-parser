@@ -392,6 +392,52 @@ def _wall_segments(wall_records):
     return segs
 
 
+_SEG_MERGE_GAP_MM = 50.0  # 끊긴 선 복원용 작은 갭(문 개구부 800mm+ 는 안 이음)
+
+def _merge_collinear_segments(segs, gap_tol=None):
+    """같은 직선(각도+수직오프셋) 위 끝-끝 가까운 세그먼트를 1개로 병합.
+    페어링 전에 호출 → 단편화(끊긴 선)된 면선을 복원해 그리디 매칭 어긋남 방지.
+    gap_tol 작게(50mm) → 제도 오차/끊김만 잇고 개구부는 보존. 결정론."""
+    if not segs:
+        return segs
+    if gap_tol is None:
+        gap_tol = _SEG_MERGE_GAP_MM
+    buckets = {}
+    for s in segs:
+        d = _get_normalized_direction(s["p1"], s["p2"])
+        ang = math.degrees(math.atan2(d[1], d[0]))          # [0,180)
+        off = -d[1] * s["p1"][0] + d[0] * s["p1"][1]         # 원점→직선 부호거리
+        key = (round(ang / COLLINEAR_ANGLE_TOL_DEG),
+               round(off / COLLINEAR_DIST_TOL_MM),
+               s.get("layer", ""))                           # 같은 레이어끼리만
+        buckets.setdefault(key, []).append(s)
+    out = []
+    for key in sorted(buckets, key=lambda k: (k[0], k[1], str(k[2]))):
+        b = buckets[key]
+        dref = _get_normalized_direction(b[0]["p1"], b[0]["p2"])
+        b.sort(key=lambda s: min(s["p1"][0]*dref[0]+s["p1"][1]*dref[1],
+                                 s["p2"][0]*dref[0]+s["p2"][1]*dref[1]))
+        cur = dict(b[0])
+        for nxt in b[1:]:
+            pts = [cur["p1"], cur["p2"], nxt["p1"], nxt["p2"]]
+            tproj = sorted(p[0]*dref[0]+p[1]*dref[1] for p in pts)
+            l1 = cur["len"]; l2 = nxt["len"]
+            gap = (tproj[-1] - tproj[0]) - (l1 + l2)
+            if gap <= gap_tol:
+                pts.sort(key=lambda p: p[0]*dref[0]+p[1]*dref[1])
+                a, bb = list(pts[0]), list(pts[-1])
+                ux, uy, ln = _seg_dir(a, bb)
+                cur = {"p1": a, "p2": bb, "dir": (ux, uy), "len": ln,
+                       "src": cur.get("src"), "layer": cur.get("layer", ""),
+                       "overrides": cur.get("overrides") or nxt.get("overrides", {}),
+                       "z_base": cur.get("z_base", 0.0)}
+            else:
+                out.append(cur)
+                cur = dict(nxt)
+        out.append(cur)
+    return out
+
+
 def _pair_geometry(sa, sb):
     """평행 후보 두 세그먼트 → (수직거리, 겹침길이, 중선[[],[]]) 또는 None."""
     o = sa["p1"]
@@ -459,7 +505,7 @@ def detect_wall_pairs(wall_records, params):
     open_recs   = [r for r in wall_records
                    if not (r.get("closed", False) and len(r.get("points", [])) >= 3)]
 
-    segs = _wall_segments(open_recs)
+    segs = _merge_collinear_segments(_wall_segments(open_recs))
     if not segs and not closed_recs:
         return wall_records
 
@@ -532,8 +578,8 @@ def repair_single_walls(wall_records, params):
     #   → 그 경우 잔여 single 은 centerline 그대로 둔다.
     n_others_paired = sum(1 for r in others if r.get("pairing") == "paired")
 
-    # ① 2차 페어링 (single 면선만 대상, 현 튜닝 그대로 = 균형)
-    segs = _wall_segments(singles)
+    # ① 2차 페어링 (single 면선만 대상, collinear 병합 후 = 단편화 복원)
+    segs = _merge_collinear_segments(_wall_segments(singles))
     pairs, matched = _find_wall_pairs(segs) if segs else ([], set())
     out = list(others)
     for i, j, perp, center, conf in pairs:
@@ -551,14 +597,37 @@ def repair_single_walls(wall_records, params):
 
     # face-style 여부: 기존 paired + 2차 페어링으로 생긴 paired 합으로 판단
     face_style = (n_others_paired + len(pairs)) > 0
+    pw = float(params.get("wall", {}).get("width", 200.0))
+
+    # 중복 제거용: 모든 paired centerline(기존 others + 방금 2차로 만든 것) 수집
+    paired_cls = []
+    for r in out:
+        if r.get("pairing") == "paired":
+            cl = r.get("centerline") or r.get("points", [])
+            if len(cl) >= 2:
+                paired_cls.append((cl[0], cl[-1], float(r.get("width_detected") or pw)))
+
+    def _near_paired(mx, my):
+        """면선 중점이 이미 만들어진 paired 벽의 면(width/2+여유) 위에 있나."""
+        for (a, b, w) in paired_cls:
+            dd = _pt_to_seg_dist(mx, my, a[0], a[1], b[0], b[1])
+            if dd <= w / 2.0 + 30.0:
+                return True
+        return False
 
     # ② 잔여 면선 처리
-    pw = float(params.get("wall", {}).get("width", 200.0))
+    n_dropped = 0
     for k, s in enumerate(segs):
         if k in matched:
             continue
         ov = s.get("overrides") or {}
         w = float(ov.get("width", pw))
+        mx0 = (s["p1"][0] + s["p2"][0]) / 2.0
+        my0 = (s["p1"][1] + s["p2"][1]) / 2.0
+        # 이미 paired 벽 면 위 = 중복 면선(벽은 이미 생성됨) → 버림
+        if face_style and _near_paired(mx0, my0):
+            n_dropped += 1
+            continue
         if not face_style:
             # centerline-style 도면(벽=중심선): offset 없이 그대로 centerline 유지
             out.append({"kind": "polyline", "closed": False,
