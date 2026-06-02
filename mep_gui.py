@@ -375,14 +375,21 @@ class App:
         if not dxf or not os.path.exists(dxf):
             messagebox.showwarning("Check", "Please select a DXF drawing first.")
             return
-        buf = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(buf):
-                P.scan(dxf)
-        except Exception as e:
-            self._log(f"[Error] Scan failed: {e}")
-            return
-        self._log(buf.getvalue())
+        self._log("Scanning...")
+        self._set_buttons("disabled")
+
+        def run():
+            buf = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(buf):
+                    P.scan(dxf)
+                self.root.after(0, lambda: (self._log(buf.getvalue()),
+                                            self._set_buttons("!disabled")))
+            except Exception as e:
+                self.root.after(0, lambda msg=str(e): (
+                    self._log(f"[Error] Scan failed: {msg}"),
+                    self._set_buttons("!disabled")))
+        threading.Thread(target=run, daemon=True).start()
 
     def _do_parse(self):
         dxf = self.v_dxf.get().strip()
@@ -396,13 +403,35 @@ class App:
             self._log("  [AI] 텍스트 분류 + 고신뢰 자동적용 활성")
         if use_vision:
             self._log("  [Vision] 저신뢰 레이어 이미지 분류 폴백 활성")
-        try:
-            # parse() 내부에서 분류·자동적용(요소 합류 후 wall 후처리 보장)
-            self.data = P.parse(dxf, rules, brules,
-                                use_ai=use_ai, use_vision=use_vision)
-        except Exception as e:
-            self._log(f"[Error] Parse failed: {e}")
-            return
+        self._log("Parsing...")
+        self._set_buttons("disabled")
+
+        def run():
+            try:
+                data = P.parse(dxf, rules, brules,
+                               use_ai=use_ai, use_vision=use_vision)
+                self.root.after(0, lambda: self._parse_done(data, dxf))
+            except Exception as e:
+                msg = str(e)
+                self.root.after(0, lambda m=msg: (
+                    self._log(f"[Error] Parse failed: {m}"),
+                    self._set_buttons("!disabled")))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _set_buttons(self, state):
+        """스캔·파싱 진행 중 버튼 비활성화(GUI 반응 보장)."""
+        for w in self.root.winfo_children():
+            try:
+                for btn in w.winfo_children():
+                    if isinstance(btn, ttk.Button):
+                        btn.state([state])
+            except Exception:
+                pass
+
+    def _parse_done(self, data, dxf):
+        """parse() 완료 후 메인 스레드에서 UI 업데이트."""
+        self.data = data
+        self._set_buttons("!disabled")
         self.geom_path = os.path.splitext(dxf)[0] + ".geometry.json"
         self._save()
         el = self.data["elements"]
@@ -415,19 +444,18 @@ class App:
                   f"blocks {bk.get('inserts',0)} (unmapped {bk.get('unmapped',0)})")
         for w in self.data.get("warnings", []):
             self._log(f"  [warn] {w}")
-
         sugg = self.data.get("suggestions", [])
         applied = [s for s in sugg if s.get("applied")]
         if applied:
             self._log(f"  [AI 자동적용 {len(applied)}건]:")
             for s in applied:
                 self._log(f"    {s.get('source')} '{s['layer']}'x{s.get('applied_count')} "
-                          f"→ {s.get('final_guess')}"
+                          f"-> {s.get('final_guess')}"
                           + (f"/{s.get('final_subtype')}" if s.get('final_subtype') else "")
                           + f" ({s.get('final_confidence')}, {s.get('decided_by')})")
         remain = [s for s in sugg if not s.get("applied")]
         if remain:
-            self._log(f"  [{len(remain)} 미해결 — [Edit] 로 layer_map 검토]:")
+            self._log(f"  [{len(remain)} unmapped — [Edit] layer_map]:")
         for s in remain:
             g = f"geom={s['geom_guess']}({s['geom_confidence']})" if s.get("geom_guess") else "geom=?"
             nm = (f"name~{s['name_match']}->{s['name_guess']}({s['name_score']})"
@@ -438,7 +466,6 @@ class App:
                    if s.get("vision_guess") else "")
             self._log(f"  [suggest] '{s['layer']}'x{s['count']}: {g} {nm}{llm}{vis}")
         self._populate_review()
-
     def _populate_review(self):
         self.tree.delete(*self.tree.get_children())
         if not self.data:
