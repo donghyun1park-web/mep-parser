@@ -452,8 +452,12 @@ def detect_wall_pairs(wall_records, params):
     닫힌 폴리선(closed=True): 세그먼트 분해·짝맺기 건너뜀 → pairing='closed' 로 원본 통과.
       FreeCAD builder 에서 solid extrusion(기둥 형태) 으로 처리."""
     # ① 닫힌 폴리선은 세그먼트 분해 대상에서 제외 ─ 교차 벽 파편화 방지
-    closed_recs = [r for r in wall_records if r.get("closed", False)]
-    open_recs   = [r for r in wall_records if not r.get("closed", False)]
+    #    단, npts<3 인 퇴화 closed(예: 2점 폴리라인)는 solid extrude 불가 →
+    #    open_recs 로 보내 일반 면선 페어링 경로를 태운다.
+    closed_recs = [r for r in wall_records
+                   if r.get("closed", False) and len(r.get("points", [])) >= 3]
+    open_recs   = [r for r in wall_records
+                   if not (r.get("closed", False) and len(r.get("points", [])) >= 3)]
 
     segs = _wall_segments(open_recs)
     if not segs and not closed_recs:
@@ -497,6 +501,103 @@ def detect_wall_pairs(wall_records, params):
         nr.setdefault("needs_review", False)
         out.append(nr)
 
+    return out
+
+
+def repair_single_walls(wall_records, params):
+    """[외곽선→센터선 정합] single(짝 못 찾은 면선) 2차 처리.
+    ① collinear 병합 이후 길어진 single 면선끼리 2차 페어링 → paired 승격(정확한 두께).
+    ② 잔여 면선: 법선방향 width/2 offset 으로 centerline 생성(벽 중심쪽). align=Center 통일.
+    → 모든 비-closed 벽이 centerline 기준이 되어 builder 의 centerline/면선 혼합 버그 제거."""
+    singles = [r for r in wall_records if r.get("pairing") == "single"]
+    others  = [r for r in wall_records if r.get("pairing") != "single"]
+    if not singles:
+        return wall_records
+
+    # 로컬 질량 기준점: 신뢰 가능한 others(paired 등) centerline 중점 모음
+    mass_pts = []
+    for r in others:
+        cl = r.get("centerline") or r.get("points", [])
+        if len(cl) >= 2:
+            mass_pts.append(((cl[0][0] + cl[-1][0]) / 2.0,
+                             (cl[0][1] + cl[-1][1]) / 2.0))
+    if mass_pts:
+        gx = sum(p[0] for p in mass_pts) / len(mass_pts)
+        gy = sum(p[1] for p in mass_pts) / len(mass_pts)
+    else:
+        gx = gy = 0.0
+
+    # face-style 판정: paired 벽이 충분히 존재 = 벽을 두 면선으로 그린 도면.
+    #   paired 가 거의 없으면(centerline-style: 벽=중심선 1개) offset 하면 오히려 어긋남
+    #   → 그 경우 잔여 single 은 centerline 그대로 둔다.
+    n_others_paired = sum(1 for r in others if r.get("pairing") == "paired")
+
+    # ① 2차 페어링 (single 면선만 대상, 현 튜닝 그대로 = 균형)
+    segs = _wall_segments(singles)
+    pairs, matched = _find_wall_pairs(segs) if segs else ([], set())
+    out = list(others)
+    for i, j, perp, center, conf in pairs:
+        ov = segs[i]["overrides"] or segs[j]["overrides"]
+        seg_len = math.hypot(center[1][0] - center[0][0], center[1][1] - center[0][1])
+        out.append({"kind": "polyline", "closed": False,
+                    "points": [list(segs[i]["p1"]), list(segs[i]["p2"])],
+                    "centerline": center,
+                    "width_detected": round(perp, 3),
+                    "confidence": round(conf, 3), "pairing": "paired",
+                    "needs_review": False, "z_base": segs[i].get("z_base", 0.0),
+                    "layer": segs[i].get("layer", ""),
+                    "seg_length": round(seg_len, 1),
+                    **({"overrides": ov} if ov else {})})
+
+    # face-style 여부: 기존 paired + 2차 페어링으로 생긴 paired 합으로 판단
+    face_style = (n_others_paired + len(pairs)) > 0
+
+    # ② 잔여 면선 처리
+    pw = float(params.get("wall", {}).get("width", 200.0))
+    for k, s in enumerate(segs):
+        if k in matched:
+            continue
+        ov = s.get("overrides") or {}
+        w = float(ov.get("width", pw))
+        if not face_style:
+            # centerline-style 도면(벽=중심선): offset 없이 그대로 centerline 유지
+            out.append({"kind": "polyline", "closed": False,
+                        "points": [list(s["p1"]), list(s["p2"])],
+                        "centerline": [list(s["p1"]), list(s["p2"])],
+                        "width_detected": None,
+                        "confidence": 0.5, "pairing": "single",
+                        "needs_review": True, "z_base": s.get("z_base", 0.0),
+                        "layer": s.get("layer", ""),
+                        "seg_length": round(s["len"], 1),
+                        **({"overrides": ov} if ov else {})})
+            continue
+        ux, uy = s["dir"]
+        nx, ny = -uy, ux  # 법선
+        mx = (s["p1"][0] + s["p2"][0]) / 2.0
+        my = (s["p1"][1] + s["p2"][1]) / 2.0
+        # 가장 가까운 others 중점(로컬 질량), 없으면 전역 centroid
+        tx, ty = gx, gy
+        best_d = None
+        for (px, py) in mass_pts:
+            dd = (px - mx) ** 2 + (py - my) ** 2
+            if best_d is None or dd < best_d:
+                best_d, tx, ty = dd, px, py
+        # +n / -n 중 목표점에 가까운 쪽으로 offset
+        d_plus = (mx + nx * w / 2 - tx) ** 2 + (my + ny * w / 2 - ty) ** 2
+        d_minus = (mx - nx * w / 2 - tx) ** 2 + (my - ny * w / 2 - ty) ** 2
+        sgn = 1.0 if d_plus <= d_minus else -1.0
+        ox, oy = nx * sgn * w / 2.0, ny * sgn * w / 2.0
+        cl = [[round(s["p1"][0] + ox, 3), round(s["p1"][1] + oy, 3)],
+              [round(s["p2"][0] + ox, 3), round(s["p2"][1] + oy, 3)]]
+        out.append({"kind": "polyline", "closed": False,
+                    "points": [list(s["p1"]), list(s["p2"])],
+                    "centerline": cl,
+                    "width_detected": round(w, 3),
+                    "confidence": 0.4, "pairing": "single_offset",
+                    "needs_review": True, "z_base": s.get("z_base", 0.0),
+                    "layer": s.get("layer", ""),
+                    "seg_length": round(s["len"], 1),
+                    **({"overrides": ov} if ov else {})})
     return out
 
 
@@ -987,6 +1088,14 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
     _n_before = len(result["elements"]["wall"])
     result["elements"]["wall"] = merge_collinear_walls(result["elements"]["wall"], params)
     result["wall_merge"] = {"before": _n_before, "after": len(result["elements"]["wall"])}
+    # [외곽선→센터선] single 2차 페어링 + 잔여 offset → 모든 비-closed 벽 centerline 통일
+    _n_single_pre = sum(1 for w in result["elements"]["wall"] if w.get("pairing") == "single")
+    result["elements"]["wall"] = repair_single_walls(result["elements"]["wall"], params)
+    _n_repaired_pair = sum(1 for w in result["elements"]["wall"] if w.get("pairing") == "paired")
+    _n_offset = sum(1 for w in result["elements"]["wall"] if w.get("pairing") == "single_offset")
+    if _n_single_pre:
+        print(f"  [single 정합] single {_n_single_pre}개 → 2차페어링 후 "
+              f"paired합={_n_repaired_pair}, offset={_n_offset}")
     # [Phase 4.1] 코너 스냅: 끝점 불일치 → [4] boolean void 실패 방지
     _walls_pre_snap = result["elements"]["wall"]
     result["elements"]["wall"] = snap_wall_corners(result["elements"]["wall"])
@@ -998,7 +1107,8 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
     link_openings_to_walls(result["elements"], params)
     paired = sum(1 for w in result["elements"]["wall"] if w.get("pairing") == "paired")
     single = sum(1 for w in result["elements"]["wall"] if w.get("pairing") == "single")
-    result["wall_pairing"] = {"paired": paired, "single": single}
+    offset = sum(1 for w in result["elements"]["wall"] if w.get("pairing") == "single_offset")
+    result["wall_pairing"] = {"paired": paired, "single": single, "single_offset": offset}
     result["blocks"] = {"inserts": n_inserts, "unmapped": sum(unmapped_blocks.values())}
     result["mep"] = {c: len(result["elements"].get(c, [])) for c in MEP_CATEGORIES}
     # [Phase 4b] 층 감지: structural z_base 값 수집 → 100mm tol 양자화 → floors 목록

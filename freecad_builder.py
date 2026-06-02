@@ -213,94 +213,40 @@ def build_walls(doc, walls, params):
         except Exception as e:
             print(f"[warn] ClosedWall_{i} 생성 실패: {e}")
 
-    # ── ② 열린 폴리선: 체이닝 → Draft.make_wire (3pt+) / Part.makePolygon (2pt) ──
-    # snap_wall_corners 이후 연결된 끝점 = 동일 좌표 → 1mm snap 으로 체인 그룹화.
-    # 연결된 세그먼트들 → Draft.make_wire 다중점 와이어 → Arch.makeWall 1개
-    #   → FreeCAD 가 코너 Miter 자동 처리 (끊긴 벽체 해소).
-    # 실패 시 개별 Part.makePolygon 폴백으로 안정성 보장.
-    open_walls = [(i, el) for i, el in enumerate(walls)
-                  if not (el.get("closed") or el.get("pairing") == "closed")
-                  and el.get("kind") == "polyline"]
-
-    chains = _chain_wall_segments([el for _, el in open_walls])
-    open_map = {li: gi for li, (gi, _) in enumerate(open_walls)}
-
-    for ci, (rep_el, chain_pts, local_ids) in enumerate(chains):
-        global_ids = [open_map[li] for li in local_ids]
-        ov = rep_el.get("overrides", {})
-        width  = float(rep_el.get("width_detected")
+    # ── ② 열린 폴리선: 레코드별 개별 벽 (체이닝 제거) ───────────────────────────
+    # 체이닝은 paired(centerline)과 single(면선)을 한 와이어에 혼합해 self-intersection
+    # 을 유발했음. repair_single_walls 로 모든 비-closed 벽이 centerline 기준이 되었으므로
+    # align="Center" 로 통일하고, collinear 병합(merge_collinear_walls)이 이미 직선 구간을
+    # 하나로 합쳤으므로 레코드별로 안정 생성한다(코너는 개별 벽, 위치 정확 우선).
+    for i, el in enumerate(walls):
+        if el.get("closed") or el.get("pairing") == "closed":
+            continue
+        if el.get("kind") != "polyline":
+            continue
+        baseline = el.get("centerline") or el.get("points", [])
+        if len(baseline) < 2:
+            continue
+        ov = el.get("overrides", {})
+        width  = float(el.get("width_detected")
                        or ov.get("width", d.get("width", 200.0)))
         height = float(ov.get("height", d.get("height", 2800.0)))
-        z_base = float(rep_el.get("z_base", 0.0))
-
-        # ── align 결정 ──────────────────────────────────────────────────────────
-        # DXF 벽체는 두 외곽선(면선)으로 표현됨.
-        #   paired: detect_wall_pairs가 두 면선의 중점을 centerline으로 계산
-        #           → Arch.makeWall(centerline, align="Center") 가 두 면선 사이에 정확히 생성.
-        #   single: 한 면선만 감지됨 → 이 선이 centerline이 아닌 한쪽 면선임
-        #           → align="Left" 로 벽이 DXF 선 한쪽에만 두께 생성 (겹침 최소화).
-        chain_els = [open_walls[li][1] for li in local_ids]
-        n_paired = sum(1 for e in chain_els if e.get("pairing") == "paired")
-        align = "Center" if n_paired >= len(chain_els) / 2 else "Left"
-
-        # 중복 점 제거
-        clean = []
-        for p in chain_pts:
-            v = App.Vector(p[0], p[1], 0)
-            if not clean or (clean[-1] - v).Length > 1.0:
-                clean.append(v)
-        if len(clean) < 2:
-            continue
-
-        base = None
+        z_base = float(el.get("z_base", 0.0))
         try:
-            if len(clean) >= 3:
-                pts_2d = [[v.x, v.y] for v in clean]
-                base = make_draft_wire(pts_2d, False, doc=doc,
-                                       label=f"WallAxis_C{ci}")
-            if base is None:
-                pts_2d = [[v.x, v.y] for v in clean]
-                base = make_wire(pts_2d, False, doc=doc,
-                                 label=f"WallAxis_C{ci}")
+            base = make_wire(baseline, False, doc=doc, label=f"WallAxis_{i}")
             if not base:
-                raise ValueError("baseline 생성 실패")
-
-            wall = Arch.makeWall(base, width=width, height=height, align=align)
+                raise ValueError("make_wire returned None")
+            wall = Arch.makeWall(base, width=width, height=height, align="Center")
             if not wall:
                 raise ValueError("Arch.makeWall returned None")
-            wall.Label = f"Wall_C{ci}"
+            wall.Label = f"Wall_{i}"
             wall.Placement.Base.z = z_base
             wall.addProperty("App::PropertyString", "DxfId", "Metadata", "")
-            wall.DxfId = ",".join(str(g) for g in global_ids)
+            wall.DxfId = el.get("handle") or f"WALL_{i}"
             objs.append(wall)
-            src_els.append(rep_el)
-            for gi in global_ids:
-                idx_map[gi] = wall
-
+            src_els.append(el)
+            idx_map[i] = wall
         except Exception as e:
-            print(f"[warn] Wall_C{ci} 실패({e}), 개별 폴백")
-            for li in local_ids:
-                gi = open_map[li]
-                fel = open_walls[li][1]
-                fbl = fel.get("centerline") or fel.get("points", [])
-                if len(fbl) < 2:
-                    continue
-                f_align = "Center" if fel.get("pairing") == "paired" else "Left"
-                try:
-                    fb = make_wire(fbl, False, doc=doc, label=f"WallAxis_{gi}")
-                    if not fb:
-                        continue
-                    fw = Arch.makeWall(fb,
-                                       width=float(fel.get("width_detected")
-                                              or ov.get("width", d.get("width", 200.0))),
-                                       height=height, align=f_align)
-                    if not fw:
-                        continue
-                    fw.Label = f"Wall_{gi}"
-                    fw.Placement.Base.z = float(fel.get("z_base", 0.0))
-                    objs.append(fw); src_els.append(fel); idx_map[gi] = fw
-                except Exception:
-                    pass
+            print(f"[warn] Wall_{i} 생성 실패: {e}")
     return objs, idx_map, src_els
 
 
