@@ -194,3 +194,25 @@ MEP는 "추출은 곧, 3D 빌드는 나중"으로 분할(D 합의). 스키마 �
       Graceful fallback: `anthropic` SDK 미설치 → ImportError 무시. API key 없음 → 조용히 스킵.
       CLI `--llm` 플래그. GUI "LLM 분류 보조" 체크박스(ANTHROPIC_API_KEY 있으면 기본 활성).
       출력: `[제안] 'X'x5: ... [LLM->wall(0.85) 벽으로 추정됨]`.
+
+## AI 기반 자동 요소 인식/생성 (2026-06-02)
+방향(사용자 결정): **하이브리드(텍스트 우선+Vision 폴백) + 고신뢰(>0.8) 자동적용 + 문/창 3D**.
+불변 제약: 기하 100% 결정론(ezdxf), AI는 category/subtype/치수만(코드생성 금지), `<dxf>.ai_cache.json` 재현성 캐시.
+- [x] **Phase A** — 문/창 기하 휴리스틱(결정론). `entity_to_record`가 ARC→`from_arc`/`arc_radius` 보존.
+      `classify_geometry()` **4-튜플 반환**(cat,conf,reason,subtype): ARC 스윙(r 300~1500)→`opening/door`,
+      얇은 닫힘박스(긴변 600~3000·짧은변≤400)→`opening/window`. `build_suggestions(kind=layer|block)` subtype 투표.
+      `parse()`가 미매핑 블록 explode 기하 수집(`unmapped_block_recs/entities`).
+- [x] **Phase B** — 텍스트 AI + 자동적용. `_llm_one`(기하통계 feature, subtype 반환),
+      `llm_tiebreak_suggestions`(레이어+블록, `cache`). `best_classification()`=name>vision>llm>geom 종합.
+      `apply_ai_classifications(threshold=0.8)`: conf>임계 → 미매핑 레코드를 `elements[cat]` 자동 합류(+subtype),
+      이하는 `needs_review`. **AI는 wall 후처리 前 실행** → 자동적용 wall/opening도 pairing/merge/snap/link 거침.
+      `parse(use_ai, use_vision, api_key, ai_threshold)`. CLI `--vision`, `--ai-threshold`.
+- [x] **Phase C** — `vision_classify.py`(자립, 옵션). `render_dxf_to_png()`=ezdxf matplotlib 백엔드 렌더 +
+      `ax.transData` 기반 DXF→픽셀 변환(aspect 자동조정 대응). `vision_fallback()`: 저신뢰 레이어 crop →
+      Claude Vision 분류(category/subtype만, 좌표/코드 생성 금지). 캐시 공유. graceful(의존/키 없으면 스킵).
+- [x] **Phase D** — `build_openings()`: 사각형 void(host_dir 배향, sill~sill+height)로 벽 cut +
+      subtype 시 문짝/창틀 솔리드(`IfcType` Door/Window). `apply_opening_voids`(원통) 대체.
+      `link_openings_to_walls`가 opening 스키마(subtype/center/radius/width/height/sill/host_dir) 항상 설정.
+      GUI: "AI auto-classify"+"Vision fallback" 체크박스, 자동적용 로그.
+- 검증: 샘플4종 회귀불변, 실무도면 walls=921/cols=76/openings=307(스키마 완비),
+      FreeCAD 빌드 OK(void=272, FCStd 3.37MB+IFC 587KB). AI/Vision 라이브 테스트는 ANTHROPIC_API_KEY 필요.
