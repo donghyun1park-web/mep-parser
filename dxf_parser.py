@@ -717,9 +717,31 @@ def link_openings_to_walls(elements, params):
     판정: opening 중심→벽 중심선 수직거리 < opening 반경 + 벽두께/2 + 10mm 여유."""
     openings = elements.get("opening", [])
     walls = elements.get("wall", [])
-    # 항상 wall_indices 초기화(벽 없을 때도 스키마 일관성 유지)
+    # 스키마 기본값(벽 유무와 무관하게 항상 설정 → build_openings 일관성)
     for op in openings:
         op.setdefault("wall_indices", [])
+        if not op.get("center"):
+            try:
+                cen = _centroid(op)
+                op["center"] = [round(cen[0], 3), round(cen[1], 3)]
+            except Exception:
+                op["center"] = [0, 0]
+        if not op.get("radius"):
+            pts = op.get("points", [])
+            if len(pts) >= 2:
+                x0, y0, x1, y1 = _bbox(pts)
+                op["radius"] = round(max(x1 - x0, y1 - y0) / 2.0, 1)
+            else:
+                op["radius"] = 50.0
+        op.setdefault("subtype", None)
+        if "width" not in op or op.get("width") is None:
+            r0 = float(op.get("radius", 50.0))
+            op["width"] = round(r0 * 2, 1) if r0 > 1 else (
+                900.0 if op.get("subtype") == "door" else 1200.0)
+        if op.get("height") is None:
+            op["height"] = 2100.0 if op.get("subtype") == "door" else 1200.0
+        if op.get("sill") is None:
+            op["sill"] = 0.0 if op.get("subtype") == "door" else 900.0
     if not openings or not walls:
         return
     default_w = float(params.get("wall", {}).get("width", 200.0))
@@ -728,7 +750,7 @@ def link_openings_to_walls(elements, params):
         cx, cy = float(c[0]), float(c[1])
         r = float(op.get("radius", 50.0))
         indices = []
-        nearest = (1e18, None)  # (거리, 벽방향단위벡터) — 가장 가까운 host 벽
+        nearest = (1e18, None, default_w)  # (거리, 벽방향단위벡터, 벽두께)
         for i, wall in enumerate(walls):
             cl = wall.get("centerline") or wall.get("points", [])
             if len(cl) < 2:
@@ -744,14 +766,7 @@ def link_openings_to_walls(elements, params):
                     ux, uy, _ln = _seg_dir(cl[0], cl[-1])
                     nearest = (dist, (ux, uy), ww)
         op["wall_indices"] = sorted(indices)
-        # opening 스키마 확장: subtype/width/height/sill + host 벽 배향
-        op.setdefault("subtype", None)             # 'door'|'window'|None
-        # width: 명시 없으면 반경×2(원통 폴백) 또는 기본 문/창 폭
-        if "width" not in op:
-            op["width"] = round(r * 2, 1) if r > 1 else (
-                900.0 if op.get("subtype") == "door" else 1200.0)
-        op.setdefault("height", 2100.0 if op.get("subtype") == "door" else 1200.0)
-        op.setdefault("sill", 0.0 if op.get("subtype") == "door" else 900.0)
+        # host 벽 배향(문/창 사각 void 방향 산출용)
         if nearest[1] is not None:
             op["host_dir"] = [round(nearest[1][0], 5), round(nearest[1][1], 5)]
             op["host_width"] = round(nearest[2], 1)

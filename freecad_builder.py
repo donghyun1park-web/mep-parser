@@ -342,6 +342,109 @@ def apply_opening_voids(idx_map, openings, params):
     return n_ok
 
 
+def _opening_axes(op):
+    """opening 의 host 벽 방향(u)·법선(n) 단위벡터. host_dir 없으면 X축 가정."""
+    hd = op.get("host_dir")
+    if hd and (abs(hd[0]) + abs(hd[1])) > 1e-6:
+        import math as _m
+        ln = _m.hypot(hd[0], hd[1])
+        ux, uy = hd[0] / ln, hd[1] / ln
+    else:
+        ux, uy = 1.0, 0.0
+    return (ux, uy), (-uy, ux)  # (along-wall, normal)
+
+
+def build_openings(doc, openings, wall_idx_map, params):
+    """[Phase D] 문/창 3D. 사각형 void 로 벽 cut + 문짝/창틀 솔리드(IfcDoor/Window).
+    - subtype='door'  : 바닥~height 개구, 얇은 문짝 판.
+    - subtype='window': sill~sill+height 개구, 창틀+유리 판.
+    - subtype 없음     : 사각 void 만(기존 동작 보강). radius 없을 때 원통 폴백.
+    recompute 이후·saveAs 이전 호출(비파라메트릭 cut). returns (n_void, n_leaf)."""
+    if not openings:
+        return (0, 0)
+    d = params.get("wall", {})
+    wall_h = float(d.get("height", 2800.0))
+    margin = 100.0
+    n_void = 0
+    n_leaf = 0
+    for oi, op in enumerate(openings):
+        c = op.get("center") or [0, 0]
+        cx, cy = float(c[0]), float(c[1])
+        subtype = op.get("subtype")
+        width = float(op.get("width") or (float(op.get("radius", 450.0)) * 2))
+        depth = float(op.get("host_width") or d.get("width", 200.0)) + margin
+        if subtype == "window":
+            sill = float(op.get("sill", 900.0))
+            oh = float(op.get("height", 1200.0))
+        elif subtype == "door":
+            sill = 0.0
+            oh = float(op.get("height", 2100.0))
+        else:
+            sill = -margin
+            oh = wall_h + margin * 2
+        (ux, uy), (nx, ny) = _opening_axes(op)
+
+        # 사각형 cutter: along-wall=width, normal=depth, z=sill..sill+oh
+        try:
+            hw, hd_ = width / 2.0, depth / 2.0
+            corners = [
+                App.Vector(cx - ux * hw - nx * hd_, cy - uy * hw - ny * hd_, sill),
+                App.Vector(cx + ux * hw - nx * hd_, cy + uy * hw - ny * hd_, sill),
+                App.Vector(cx + ux * hw + nx * hd_, cy + uy * hw + ny * hd_, sill),
+                App.Vector(cx - ux * hw + nx * hd_, cy - uy * hw + ny * hd_, sill),
+            ]
+            wire = Part.makePolygon(corners + [corners[0]])
+            cutter = Part.Face(wire).extrude(App.Vector(0, 0, oh))
+        except Exception as e:
+            print(f"[warn] opening_{oi} cutter 실패: {e}")
+            continue
+
+        # 벽 cut
+        for wi in op.get("wall_indices", []):
+            wobj = wall_idx_map.get(wi)
+            if wobj is None:
+                continue
+            try:
+                cut = wobj.Shape.cut(cutter)
+                if cut.isValid():
+                    wobj.Shape = cut
+                    n_void += 1
+            except Exception as e:
+                print(f"[warn] opening void 실패 Wall_{wi}: {e}")
+
+        # 문짝/창틀 솔리드 (얇은 판) — IfcType 태깅
+        if subtype in ("door", "window"):
+            try:
+                leaf_t = 40.0  # 판 두께
+                lh = leaf_t / 2.0
+                lc = [
+                    App.Vector(cx - ux * hw - nx * lh, cy - uy * hw - ny * lh, sill),
+                    App.Vector(cx + ux * hw - nx * lh, cy + uy * hw - ny * lh, sill),
+                    App.Vector(cx + ux * hw + nx * lh, cy + uy * hw + ny * lh, sill),
+                    App.Vector(cx - ux * hw + nx * lh, cy - uy * hw + ny * lh, sill),
+                ]
+                lw = Part.makePolygon(lc + [lc[0]])
+                leaf = Part.Face(lw).extrude(App.Vector(0, 0, oh))
+                feat = doc.addObject("Part::Feature",
+                                     f"{'Door' if subtype=='door' else 'Window'}_{oi}")
+                feat.Shape = leaf
+                try:
+                    arch_obj = Arch.makeEquipment(feat) if hasattr(Arch, "makeEquipment") else feat
+                except Exception:
+                    arch_obj = feat
+                target = arch_obj if arch_obj is not None else feat
+                try:
+                    target.Label = f"{'Door' if subtype=='door' else 'Window'}_{oi}"
+                    if hasattr(target, "IfcType"):
+                        target.IfcType = "Door" if subtype == "door" else "Window"
+                except Exception:
+                    pass
+                n_leaf += 1
+            except Exception as e:
+                print(f"[warn] {subtype}_{oi} leaf 실패: {e}")
+    return (n_void, n_leaf)
+
+
 def build_columns(doc, columns, params):
     d = params.get("column", {})
     objs = []
@@ -662,9 +765,9 @@ def _main_impl():
     except Exception as _be:
         print(f"  [warn] makeBuilding/recompute: {_be}")
 
-    print("[7/8] Opening void + clash 검사")
-    n_voids = apply_opening_voids(wall_idx_map, el.get("opening", []), params)
-    print(f"  void 적용: {n_voids}개")
+    print("[7/8] 문/창 3D (사각형 void + 문짝/창틀) + clash 검사")
+    n_voids, n_leaf = build_openings(doc, el.get("opening", []), wall_idx_map, params)
+    print(f"  개구부 void={n_voids}개, 문짝/창틀={n_leaf}개")
     struct_objs = walls + cols + slabs
     clashes = check_clashes(struct_objs, mep_objs)
     if clashes:
