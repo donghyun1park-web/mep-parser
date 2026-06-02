@@ -1290,10 +1290,14 @@ def best_classification(sug):
     name_score = float(sug.get("name_score") or 0.0)
     geom_conf = float(sug.get("geom_confidence") or 0.0)
     llm_conf = float(sug.get("llm_confidence") or 0.0)
+    vision_conf = float(sug.get("vision_confidence") or 0.0)
     cands = []  # (priority, conf, cat, subtype, reason, source)
     if sug.get("name_guess") and name_score >= 0.6:
         cands.append((3, name_score, sug["name_guess"], None,
                       f"이름 유사 {sug.get('name_match')}", "name"))
+    if sug.get("vision_guess"):
+        cands.append((2, vision_conf, sug["vision_guess"], sug.get("vision_subtype"),
+                      sug.get("vision_reason", "Vision"), "vision"))
     if sug.get("llm_guess"):
         cands.append((2, llm_conf, sug["llm_guess"], sug.get("llm_subtype"),
                       sug.get("llm_reason", "LLM"), "llm"))
