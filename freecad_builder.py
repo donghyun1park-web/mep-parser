@@ -213,38 +213,94 @@ def build_walls(doc, walls, params):
         except Exception as e:
             print(f"[warn] ClosedWall_{i} 생성 실패: {e}")
 
-    # ── ② 열린 폴리선: Part.makePolygon → Arch.makeWall (안정 우선) ──────────────
-    # Draft.make_wire 는 setSkipRecompute 환경에서 shape 미계산 → Arch.makeWall 실패.
-    # Part::Feature 는 Shape 직접 할당 → recompute 없이도 유효 → 안정적 저장 보장.
-    for i, el in enumerate(walls):
-        if el.get("closed") or el.get("pairing") == "closed":
-            continue
-        if el["kind"] != "polyline":
-            continue
-        baseline = el.get("centerline") or el.get("points", [])
-        if len(baseline) < 2:
-            continue
-        ov = el.get("overrides", {})
-        width  = float(el.get("width_detected")
+    # ── ② 열린 폴리선: 체이닝 → Draft.make_wire (3pt+) / Part.makePolygon (2pt) ──
+    # snap_wall_corners 이후 연결된 끝점 = 동일 좌표 → 1mm snap 으로 체인 그룹화.
+    # 연결된 세그먼트들 → Draft.make_wire 다중점 와이어 → Arch.makeWall 1개
+    #   → FreeCAD 가 코너 Miter 자동 처리 (끊긴 벽체 해소).
+    # 실패 시 개별 Part.makePolygon 폴백으로 안정성 보장.
+    open_walls = [(i, el) for i, el in enumerate(walls)
+                  if not (el.get("closed") or el.get("pairing") == "closed")
+                  and el.get("kind") == "polyline"]
+
+    chains = _chain_wall_segments([el for _, el in open_walls])
+    open_map = {li: gi for li, (gi, _) in enumerate(open_walls)}
+
+    for ci, (rep_el, chain_pts, local_ids) in enumerate(chains):
+        global_ids = [open_map[li] for li in local_ids]
+        ov = rep_el.get("overrides", {})
+        width  = float(rep_el.get("width_detected")
                        or ov.get("width", d.get("width", 200.0)))
         height = float(ov.get("height", d.get("height", 2800.0)))
-        z_base = float(el.get("z_base", 0.0))
+        z_base = float(rep_el.get("z_base", 0.0))
+
+        # ── align 결정 ──────────────────────────────────────────────────────────
+        # DXF 벽체는 두 외곽선(면선)으로 표현됨.
+        #   paired: detect_wall_pairs가 두 면선의 중점을 centerline으로 계산
+        #           → Arch.makeWall(centerline, align="Center") 가 두 면선 사이에 정확히 생성.
+        #   single: 한 면선만 감지됨 → 이 선이 centerline이 아닌 한쪽 면선임
+        #           → align="Left" 로 벽이 DXF 선 한쪽에만 두께 생성 (겹침 최소화).
+        chain_els = [open_walls[li][1] for li in local_ids]
+        n_paired = sum(1 for e in chain_els if e.get("pairing") == "paired")
+        align = "Center" if n_paired >= len(chain_els) / 2 else "Left"
+
+        # 중복 점 제거
+        clean = []
+        for p in chain_pts:
+            v = App.Vector(p[0], p[1], 0)
+            if not clean or (clean[-1] - v).Length > 1.0:
+                clean.append(v)
+        if len(clean) < 2:
+            continue
+
+        base = None
         try:
-            base = make_wire(baseline, False, doc=doc, label=f"WallAxis_{i}")
+            if len(clean) >= 3:
+                pts_2d = [[v.x, v.y] for v in clean]
+                base = make_draft_wire(pts_2d, False, doc=doc,
+                                       label=f"WallAxis_C{ci}")
+            if base is None:
+                pts_2d = [[v.x, v.y] for v in clean]
+                base = make_wire(pts_2d, False, doc=doc,
+                                 label=f"WallAxis_C{ci}")
             if not base:
-                raise ValueError("make_wire returned None")
-            wall = Arch.makeWall(base, width=width, height=height)
+                raise ValueError("baseline 생성 실패")
+
+            wall = Arch.makeWall(base, width=width, height=height, align=align)
             if not wall:
                 raise ValueError("Arch.makeWall returned None")
-            wall.Label = f"Wall_{i}"
+            wall.Label = f"Wall_C{ci}"
             wall.Placement.Base.z = z_base
             wall.addProperty("App::PropertyString", "DxfId", "Metadata", "")
-            wall.DxfId = el.get("handle") or f"WALL_{i}"
+            wall.DxfId = ",".join(str(g) for g in global_ids)
             objs.append(wall)
-            src_els.append(el)
-            idx_map[i] = wall
+            src_els.append(rep_el)
+            for gi in global_ids:
+                idx_map[gi] = wall
+
         except Exception as e:
-            print(f"[warn] Wall_{i} 생성 실패: {e}")
+            print(f"[warn] Wall_C{ci} 실패({e}), 개별 폴백")
+            for li in local_ids:
+                gi = open_map[li]
+                fel = open_walls[li][1]
+                fbl = fel.get("centerline") or fel.get("points", [])
+                if len(fbl) < 2:
+                    continue
+                f_align = "Center" if fel.get("pairing") == "paired" else "Left"
+                try:
+                    fb = make_wire(fbl, False, doc=doc, label=f"WallAxis_{gi}")
+                    if not fb:
+                        continue
+                    fw = Arch.makeWall(fb,
+                                       width=float(fel.get("width_detected")
+                                              or ov.get("width", d.get("width", 200.0))),
+                                       height=height, align=f_align)
+                    if not fw:
+                        continue
+                    fw.Label = f"Wall_{gi}"
+                    fw.Placement.Base.z = float(fel.get("z_base", 0.0))
+                    objs.append(fw); src_els.append(fel); idx_map[gi] = fw
+                except Exception:
+                    pass
     return objs, idx_map, src_els
 
 
@@ -639,11 +695,11 @@ def _main_impl():
         import traceback as _tb2; _tb2.print_exc()
 
     if _saved_fcstd:
-        # GUI 가 이 마커를 읽어 파일을 이동시킴
-        print(f"FCSTD_TMP:{_tmp_fcstd}")
-        print(f"FCSTD_DST:{os.path.abspath(fcstd)}")
+        # GUI 가 이 마커를 읽어 파일을 이동시킴. flush: 이후 크래시에도 마커 전달 보장.
+        print(f"FCSTD_TMP:{_tmp_fcstd}", flush=True)
+        print(f"FCSTD_DST:{os.path.abspath(fcstd)}", flush=True)
     else:
-        print(f"[ERROR] FCStd 저장 실패 — 파일 없음: {_tmp_fcstd}")
+        print(f"[ERROR] FCStd 저장 실패 — 파일 없음: {_tmp_fcstd}", flush=True)
 
     # IFC 내보내기 (임시 ASCII 경로 → 이동)
     _exporter = None
@@ -665,8 +721,12 @@ def _main_impl():
     except Exception as e:
         print("[warn] IFC export 실패:", e)
 
-    n_err = sum(1 for o in doc.Objects if getattr(o, "Shape", None)
-                and not o.Shape.isValid())
+    try:
+        n_err = sum(1 for o in doc.Objects
+                    if _shape_ok(o) is False)
+    except Exception:
+        n_err = 0
+
     print(f"빌드 완료: floors={len(floor_containers)} walls={len(walls)}"
           f" columns={len(cols)} slabs={len(slabs)} spaces={len(spaces)}"
           f" mep={len(mep_objs)}"
@@ -676,6 +736,17 @@ def _main_impl():
     print(f"  -> {ifc}")
     if n_err:
         print(f"  [warn] 형상 검증 실패 객체 {n_err}개 (자가수정 루프 대상)")
+
+
+def _shape_ok(o):
+    """Shape 유효성 검사. 예외 발생 시 None 반환."""
+    try:
+        s = getattr(o, "Shape", None)
+        if s is None:
+            return None
+        return s.isValid()
+    except Exception:
+        return None
 
 
 # freecadcmd 는 __name__ 을 모듈명("freecad_builder")으로 설정하므로 둘 다 허용.
