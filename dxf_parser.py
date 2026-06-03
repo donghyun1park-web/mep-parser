@@ -70,9 +70,11 @@ ARC_SEG_PER_RAD = 8.0
 
 # ── [Phase 1] 평행선 벽 검출 튜닝 상수 ───────────────────────
 WALL_ANGLE_TOL_DEG = 5.0      # 평행 판정 허용 사이각(도)
-WALL_PAIR_MIN_MM = 50.0       # 벽 두께 최소(이보다 가까우면 같은 선 취급/무시)
+WALL_PAIR_MIN_MM = 1.0        # 벽 두께 최소. 1mm → 밀착 철골(A-STEEL, <10mm)도 페어링.
+                               # 이전 50mm 로 182개 절반이 필터링됨.
 WALL_PAIR_MAX_MM = 500.0      # 벽 두께 최대(이보다 멀면 무관한 선)
-WALL_PAIR_OVERLAP_RATIO = 0.5 # 투영 겹침 최소 비율(짧은 세그먼트 기준)
+WALL_PAIR_OVERLAP_RATIO = 0.3 # 투영 겹침 최소 비율. 0.5→0.3: 세그먼트 길이 불일치로
+                               # 페어링 실패하던 88개 중 상당수 구제.
 
 # ── [Phase 4.0] collinear 재병합 튜닝 상수 ───────────────────
 COLLINEAR_ANGLE_TOL_DEG = 2.0  # 같은 직선 판정 사이각(도) — 벽 짝보다 빡빡
