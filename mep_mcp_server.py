@@ -23,7 +23,7 @@ except ImportError:
     print("Error: 'mcp' package is required. Run 'pip install mcp'", file=sys.stderr)
     sys.exit(1)
 
-mcp = FastMCP("MEP_Parser_Bridge")
+mcp = FastMCP("MEP_Parser_Bridge", timeout=600)  # FreeCAD 빌드 최대 10분 허용
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_JSON = os.path.join(HERE, "geometry.json")
