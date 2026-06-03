@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "mep-parser": {
+      "command": "python",
+      "args": [
+        "c:/AI program/3D Modeling/mep-parser/mep_mcp_server.py"
+      ]
+    }
+  }
+}

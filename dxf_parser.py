@@ -271,7 +271,20 @@ def insert_to_records(insert, scale, category, attrs):
         closed = [r for r in exploded
                   if r["kind"] == "polyline" and r.get("closed") and len(r["points"]) >= 3]
         return closed  # 없어도 OK(마커 불필요)
-    # wall/zone/equipment 등: 열린 선도 포함
+    if category == "equipment":
+        # 장비는 위치 1개만 필요 — 블록 내부 detail 선 전부 채택하면 폭발(엘리베이터 690선).
+        # 닫힌 윤곽 1개 우선, 없으면 size 박스 마커 1개로 폴백.
+        closed = [r for r in exploded
+                  if r["kind"] == "polyline" and r.get("closed") and len(r["points"]) >= 3]
+        if closed:
+            # 가장 큰 윤곽(bbox 면적) 1개만 = 장비 외형
+            def _area(r):
+                xs = [p[0] for p in r["points"]]; ys = [p[1] for p in r["points"]]
+                return (max(xs) - min(xs)) * (max(ys) - min(ys))
+            return [max(closed, key=_area)]
+        return [_box_record(cx, cy, (size or 800.0) * scale,
+                            (size or 800.0) * scale, rot)]
+    # wall/zone 등: 열린 선도 포함
     return [r for r in exploded if r["kind"] == "polyline"]
 
 
