@@ -30,6 +30,11 @@ DEFAULT_JSON = os.path.join(HERE, "geometry.json")
 LAYER_MAP = os.path.join(HERE, "layer_map.csv")
 BLOCK_MAP = os.path.join(HERE, "block_map.csv")
 
+# 엔진을 직접 import(in-process) — subprocess 재실행보다 빠르고 안정적.
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+import dxf_parser as _P  # noqa: E402
+
 
 def _find_freecadcmd():
     """freecadcmd.exe 자동 탐지(mep_gui 패턴 재사용). 없으면 None."""
@@ -78,26 +83,20 @@ def parse_dxf(dxf_path: str, json_out_path: str = "", use_ai: bool = False,
     if not json_out_path:
         json_out_path = os.path.splitext(dxf_path)[0] + ".geometry.json"
 
-    cmd = [sys.executable, os.path.join(HERE, "dxf_parser.py"), dxf_path,
-           "--out", json_out_path]
-    if os.path.exists(LAYER_MAP):
-        cmd += ["-m", LAYER_MAP]
-    if os.path.exists(BLOCK_MAP):
-        cmd += ["-b", BLOCK_MAP]
-    if use_ai:
-        cmd.append("--llm")          # 실제 CLI 플래그는 --llm
-    if use_vision:
-        cmd.append("--vision")
-
-    success, output = _run_cmd(cmd)
-    if not success:
-        return f"Failed to parse DXF:\n{output}"
-
+    # in-process 호출(subprocess 재실행 없음 → 빠르고 안정적).
+    # ★ parse()의 print()가 MCP stdout(JSON-RPC)을 오염시키므로 반드시 리다이렉트.
+    import contextlib
+    import io as _io
     try:
-        with open(json_out_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        rules = _P.load_layer_map(LAYER_MAP) if os.path.exists(LAYER_MAP) else _P.DEFAULT_LAYER_RULES
+        brules = _P.load_layer_map(BLOCK_MAP) if os.path.exists(BLOCK_MAP) else _P.DEFAULT_BLOCK_RULES
+        with contextlib.redirect_stdout(_io.StringIO()):
+            data = _P.parse(dxf_path, rules, brules, use_ai=use_ai, use_vision=use_vision)
+        with open(json_out_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        return f"Parse succeeded but JSON read failed: {e}\n\nParser output:\n{output}"
+        import traceback
+        return f"Failed to parse DXF: {e}\n{traceback.format_exc()[-800:]}"
 
     lines = [f"Parsed '{dxf_path}' -> '{json_out_path}'", "Elements:"]
     for cat, items in data.get("elements", {}).items():
