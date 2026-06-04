@@ -95,15 +95,14 @@ def _banner(msg, err=False):
 
 
 def run_in_main_thread(func, *args, **kwargs):
-    """백그라운드 스레드에서 호출 → 메인스레드 실행 예약(invokeMethod) 후 결과 대기."""
+    """백그라운드 스레드 → 큐에 작업 추가 후 결과 대기.
+    App._live_drain_timer (50ms, App 에 저장 = ai_listener.py 패턴) 가
+    메인 스레드에서 자동으로 process_next() 를 호출해 처리."""
     box = {"value": None, "error": None}
     ev = threading.Event()
     _task_queue.put((lambda: func(*args, **kwargs), box, ev))
-    # Qt 보장 크로스스레드 호출: _dispatcher 의 스레드(메인)에서 process_next 실행
-    QMetaObject.invokeMethod(_dispatcher, "process_next",
-                             Qt.ConnectionType.QueuedConnection
-                             if hasattr(Qt, "ConnectionType")
-                             else Qt.QueuedConnection)
+    # invokeMethod 를 제거: FreeCAD Python 3.11 에서 Qt 크로스스레드 자동발화 실패.
+    # 대신 App._live_drain_timer (50ms) 가 메인 스레드에서 process_next() 를 호출.
     if not ev.wait(timeout=600.0):
         raise TimeoutError("Main-thread execution timed out.")
     if box["error"] is not None:
@@ -300,11 +299,16 @@ def start_server(port=8081):
         except Exception:
             pass
 
-    # 메인 스레드에서 _WorkDispatcher 생성 — invokeMethod 의 anchor
+    # 메인 스레드에서 _WorkDispatcher 생성 + App 저장 50ms 자동 드레인 타이머
+    # App 에 저장 = GC 방지 + ai_listener.py 와 동일 패턴 (작동 보장)
     global _dispatcher, _main_timer
     _dispatcher = _WorkDispatcher()
-    _main_timer = None
-    _banner("[Live Add-on] Dispatcher ready (QMetaObject cross-thread).")
+    App._live_dispatcher = _dispatcher          # App 에도 저장(강참조)
+    _main_timer = QtCore.QTimer()
+    _main_timer.timeout.connect(_dispatcher.process_next)
+    _main_timer.start(50)                        # 50ms 주기 — 응답 지연 최대 50ms
+    App._live_drain_timer = _main_timer          # App 에 저장 → GC 없음
+    _banner("[Live Add-on] Auto-drain timer started (50ms, stored on App).")
 
     # 포트 재사용 허용(이전 소켓 잔류 대비)
     HTTPServer.allow_reuse_address = True
@@ -331,7 +335,18 @@ def stop_server():
         server_instance.server_close()
         server_instance = None
         print("[Live Add-on] Server stopped.")
-    global _dispatcher
+    global _dispatcher, _main_timer
+    try:
+        if _main_timer:
+            _main_timer.stop()
+            _main_timer = None
+        for attr in ("_live_drain_timer", "_live_dispatcher"):
+            try:
+                delattr(App, attr)
+            except Exception:
+                pass
+    except Exception:
+        pass
     _dispatcher = None
 
 # 매크로/콘솔에서 직접 실행 시 서버 기동(메인 스레드에서 호출되어야 함).
