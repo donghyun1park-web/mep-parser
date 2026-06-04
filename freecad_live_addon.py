@@ -247,26 +247,41 @@ class LiveRPCHandler(BaseHTTPRequestHandler):
 server_instance = None
 _main_timer = None
 
+
 def start_server(port=8081):
     """★ 반드시 FreeCAD GUI 메인 스레드(매크로/콘솔)에서 호출할 것.
-    메인스레드 QTimer(_drain_tasks)를 시작해야 GUI 작업이 안전하게 실행된다."""
+    매크로 재실행에 안전: 기존 서버/타이머를 App 에 저장해 먼저 정리한다."""
     global server_instance, _main_timer
 
-    # 메인스레드 작업 처리 QTimer 시작(여기가 메인 스레드여야 함)
-    if _main_timer is None:
-        _main_timer = QtCore.QTimer()
-        _main_timer.timeout.connect(_drain_tasks)
-        _main_timer.start(30)  # 30ms 주기로 큐 처리
-        print("[Live Add-on] Main-thread task timer started.")
+    # ── 재실행 안전: 같은 FreeCAD 프로세스에 남은 이전 서버/타이머 정리 ──
+    prev = getattr(App, "_live_addon_state", None)
+    if prev:
+        try:
+            if prev.get("server"):
+                prev["server"].shutdown(); prev["server"].server_close()
+                print("[Live Add-on] Previous server stopped (re-run).")
+        except Exception:
+            pass
+        try:
+            if prev.get("timer"):
+                prev["timer"].stop()
+        except Exception:
+            pass
 
-    if server_instance is not None:
-        print("[Live Add-on] Server is already running.")
-        return
+    # 메인스레드 작업 처리 QTimer 시작(여기가 메인 스레드여야 함)
+    _main_timer = QtCore.QTimer()
+    _main_timer.timeout.connect(_drain_tasks)
+    _main_timer.start(30)  # 30ms 주기로 큐 처리
+    print("[Live Add-on] Main-thread task timer started.")
+
+    # 포트 재사용 허용(이전 소켓 잔류 대비)
+    HTTPServer.allow_reuse_address = True
 
     def serve():
         global server_instance
         try:
             server_instance = HTTPServer(('127.0.0.1', port), LiveRPCHandler)
+            App._live_addon_state = {"server": server_instance, "timer": _main_timer}
             print(f"[Live Add-on] Listening on http://127.0.0.1:{port} ...")
             server_instance.serve_forever()
         except OSError as e:
