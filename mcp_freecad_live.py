@@ -20,7 +20,7 @@ except ImportError:
 
 mcp = FastMCP("FreeCAD_Live_Bridge", timeout=600)
 
-RPC_URL = "http://127.0.0.1:8081"
+RPC_URL = "http://127.0.0.1:8082"
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)

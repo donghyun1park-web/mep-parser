@@ -293,7 +293,7 @@ server_instance = None
 _main_timer = None
 
 
-def start_server(port=8081):
+def start_server(port=8082):
     """★ 반드시 FreeCAD GUI 메인 스레드(매크로/콘솔)에서 호출할 것.
     매크로 재실행에 안전: 기존 서버/타이머를 App 에 저장해 먼저 정리한다."""
     global server_instance, _main_timer
