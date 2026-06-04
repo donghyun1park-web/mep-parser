@@ -46,41 +46,19 @@ except ImportError as e:
     print(f"Warning: could not import freecad_builder ({e})")
 
 
-# ── 스레드 안전 메인스레드 위임 (QMetaObject.invokeMethod + @Slot) ────────────
-# Qt 공식 보장 크로스스레드 패턴.
-# @Slot() 로 등록된 슬롯 + QMetaObject.invokeMethod(Qt.QueuedConnection) →
-# _dispatcher 가 사는 스레드(메인)의 이벤트루프에서 실행 보장.
-# singleShot(context, callable) 은 PySide2 에서 callable 의 스레드 친화성을
-# 보장하지 않아 실패 → 제거.
-
-_task_queue = queue.Queue()
 
 
-class _WorkDispatcher(QObject):
-    """메인 스레드에서 HTTP 요청을 처리하는 디스패처."""
+# ── 메인스레드 위임: 파일 기반 IPC (ai_listener.py 패턴, 작동 보장) ─────────
+# ev.wait() + Qt 크로스스레드 방식 모두 FreeCAD Python 3.11 에서 자동 발화 실패.
+# 해결: HTTP 핸들러(백그라운드)가 작업을 파일로 쓰고 결과 파일을 폴링(0.1s sleep).
+# 메인 스레드의 50ms QTimer 가 작업 파일을 읽어 실행, 결과 파일 작성.
+# HTTP 핸들러 폴링은 백그라운드 스레드이므로 메인 스레드/이벤트루프 미차단.
+import uuid as _uuid
 
-    @Slot()
-    def process_next(self):
-        """QMetaObject.invokeMethod(Qt.QueuedConnection) 으로 메인 스레드에서 호출됨."""
-        while True:
-            try:
-                func, box, ev = _task_queue.get_nowait()
-            except queue.Empty:
-                return
-            try:
-                box["value"] = func()
-            except Exception as e:
-                box["error"] = e
-                traceback.print_exc()
-            finally:
-                ev.set()
-
-
-_dispatcher = None   # start_server() 에서 메인 스레드로 생성
+_TASK_DIR = HERE   # 작업/결과 파일 저장 위치
 
 
 def _banner(msg, err=False):
-    """Report view(App.Console) + Python console(print) 양쪽에 출력 → 확실히 보이게."""
     try:
         if err:
             App.Console.PrintError(msg + "\n")
@@ -94,20 +72,57 @@ def _banner(msg, err=False):
         pass
 
 
-def run_in_main_thread(func, *args, **kwargs):
-    """백그라운드 스레드 → 큐에 작업 추가 후 결과 대기.
-    App._live_drain_timer (50ms, App 에 저장 = ai_listener.py 패턴) 가
-    메인 스레드에서 자동으로 process_next() 를 호출해 처리."""
-    box = {"value": None, "error": None}
-    ev = threading.Event()
-    _task_queue.put((lambda: func(*args, **kwargs), box, ev))
-    # invokeMethod 를 제거: FreeCAD Python 3.11 에서 Qt 크로스스레드 자동발화 실패.
-    # 대신 App._live_drain_timer (50ms) 가 메인 스레드에서 process_next() 를 호출.
-    if not ev.wait(timeout=600.0):
-        raise TimeoutError("Main-thread execution timed out.")
-    if box["error"] is not None:
-        raise box["error"]
-    return box["value"]
+def _drain_file_tasks():
+    """50ms QTimer 콜백 — 작업 파일을 읽어 실행하고 결과 파일 기록."""
+    import glob
+    for cmd_path in glob.glob(os.path.join(_TASK_DIR, "_live_cmd_*.json")):
+        try:
+            with open(cmd_path, encoding="utf-8") as f:
+                task = json.load(f)
+            os.remove(cmd_path)
+        except Exception:
+            continue
+        res_path = os.path.join(_TASK_DIR, f"_live_res_{task['tid']}.json")
+        fn_name = task.get("fn")
+        payload = task.get("payload", {})
+        fn = globals().get(fn_name)
+        if fn is None:
+            out = {"error": f"Unknown function: {fn_name}"}
+        else:
+            try:
+                out = fn(payload)
+            except Exception as e:
+                traceback.print_exc()
+                out = {"error": str(e)}
+        try:
+            with open(res_path, "w", encoding="utf-8") as f:
+                json.dump(out, f, ensure_ascii=False)
+        except Exception as e:
+            _banner(f"[Live Add-on] Result write error: {e}", err=True)
+
+
+def run_in_main_thread(fn_name, payload, timeout=60):
+    """HTTP 핸들러 → 파일로 작업 쓰기 → 결과 파일 폴링."""
+    tid = _uuid.uuid4().hex[:8]
+    cmd_path = os.path.join(_TASK_DIR, f"_live_cmd_{tid}.json")
+    res_path = os.path.join(_TASK_DIR, f"_live_res_{tid}.json")
+    with open(cmd_path, "w", encoding="utf-8") as f:
+        json.dump({"tid": tid, "fn": fn_name, "payload": payload}, f)
+    import time as _time
+    deadline = _time.time() + timeout
+    while _time.time() < deadline:
+        if os.path.exists(res_path):
+            with open(res_path, encoding="utf-8") as f:
+                result = json.load(f)
+            os.remove(res_path)
+            return result
+        _time.sleep(0.05)
+    try:
+        os.remove(cmd_path)
+    except Exception:
+        pass
+    raise TimeoutError(f"Task {tid} timed out after {timeout}s")
+
 
 # ----------------- Main Thread Functions ----------------- #
 
@@ -231,9 +246,8 @@ class LiveRPCHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"status": "ok"}).encode('utf-8'))
             
         elif self.path == '/screenshot':
-            # GET 방식 스크린샷 
             try:
-                res = run_in_main_thread(cmd_get_screenshot, {"fit_all": False})
+                res = run_in_main_thread("cmd_get_screenshot", {"fit_all": False})
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
                 self.end_headers()
@@ -256,13 +270,13 @@ class LiveRPCHandler(BaseHTTPRequestHandler):
         res = None
         try:
             if self.path == '/import_dxf':
-                res = run_in_main_thread(cmd_import_dxf, payload)
+                res = run_in_main_thread("cmd_import_dxf", payload)
             elif self.path == '/make_wall':
-                res = run_in_main_thread(cmd_make_wall, payload)
+                res = run_in_main_thread("cmd_make_wall", payload)
             elif self.path == '/build_geometry':
-                res = run_in_main_thread(cmd_build_geometry, payload)
+                res = run_in_main_thread("cmd_build_geometry", payload)
             elif self.path == '/screenshot':
-                res = run_in_main_thread(cmd_get_screenshot, payload)
+                res = run_in_main_thread("cmd_get_screenshot", payload)
             else:
                 self.send_error(404, "Not Found")
                 return
@@ -299,16 +313,14 @@ def start_server(port=8081):
         except Exception:
             pass
 
-    # 메인 스레드에서 _WorkDispatcher 생성 + App 저장 50ms 자동 드레인 타이머
-    # App 에 저장 = GC 방지 + ai_listener.py 와 동일 패턴 (작동 보장)
+    # 파일 기반 IPC 드레인 타이머 (ai_listener.py 동일 패턴, 작동 보장)
     global _dispatcher, _main_timer
-    _dispatcher = _WorkDispatcher()
-    App._live_dispatcher = _dispatcher          # App 에도 저장(강참조)
+    _dispatcher = None
     _main_timer = QtCore.QTimer()
-    _main_timer.timeout.connect(_dispatcher.process_next)
-    _main_timer.start(50)                        # 50ms 주기 — 응답 지연 최대 50ms
-    App._live_drain_timer = _main_timer          # App 에 저장 → GC 없음
-    _banner("[Live Add-on] Auto-drain timer started (50ms, stored on App).")
+    _main_timer.timeout.connect(_drain_file_tasks)
+    _main_timer.start(50)
+    App._live_drain_timer = _main_timer   # App 저장 → GC 없음
+    _banner("[Live Add-on] File-IPC drain timer started (50ms).")
 
     # 포트 재사용 허용(이전 소켓 잔류 대비)
     HTTPServer.allow_reuse_address = True
