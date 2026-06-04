@@ -22,11 +22,14 @@ import Part
 # PySide 호환성 처리 (FreeCAD 0.20+ / 1.0+)
 try:
     from PySide6 import QtCore
+    from PySide6.QtCore import QObject, Slot, Qt, QMetaObject
 except ImportError:
     try:
         from PySide2 import QtCore
+        from PySide2.QtCore import QObject, Slot, Qt, QMetaObject
     except ImportError:
         from PySide import QtCore
+        from PySide.QtCore import QObject, Slot, Qt, QMetaObject
 
 # 동일 폴더의 freecad_builder 임포트용
 try:
@@ -43,11 +46,37 @@ except ImportError as e:
     print(f"Warning: could not import freecad_builder ({e})")
 
 
-# ── 스레드 안전 메인스레드 위임 (Qt cross-thread singleShot) ──────────────────
-# Qt 표준 패턴: QTimer.singleShot(0, owner, func) 는 owner 가 사는 스레드에서
-# func 를 실행한다. owner 가 메인 스레드 소유 QObject 이면 항상 메인 스레드 실행.
-# 30ms QTimer + queue 폴링은 sleep 중 메인 스레드가 막히면 발화 실패 — 제거.
-_main_thread_owner = None   # start_server 에서 QObject 생성 (메인 스레드 소유)
+# ── 스레드 안전 메인스레드 위임 (QMetaObject.invokeMethod + @Slot) ────────────
+# Qt 공식 보장 크로스스레드 패턴.
+# @Slot() 로 등록된 슬롯 + QMetaObject.invokeMethod(Qt.QueuedConnection) →
+# _dispatcher 가 사는 스레드(메인)의 이벤트루프에서 실행 보장.
+# singleShot(context, callable) 은 PySide2 에서 callable 의 스레드 친화성을
+# 보장하지 않아 실패 → 제거.
+
+_task_queue = queue.Queue()
+
+
+class _WorkDispatcher(QObject):
+    """메인 스레드에서 HTTP 요청을 처리하는 디스패처."""
+
+    @Slot()
+    def process_next(self):
+        """QMetaObject.invokeMethod(Qt.QueuedConnection) 으로 메인 스레드에서 호출됨."""
+        while True:
+            try:
+                func, box, ev = _task_queue.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                box["value"] = func()
+            except Exception as e:
+                box["error"] = e
+                traceback.print_exc()
+            finally:
+                ev.set()
+
+
+_dispatcher = None   # start_server() 에서 메인 스레드로 생성
 
 
 def _banner(msg, err=False):
@@ -66,22 +95,15 @@ def _banner(msg, err=False):
 
 
 def run_in_main_thread(func, *args, **kwargs):
-    """백그라운드 스레드 → 메인스레드 실행(singleShot) 후 결과 대기."""
+    """백그라운드 스레드에서 호출 → 메인스레드 실행 예약(invokeMethod) 후 결과 대기."""
     box = {"value": None, "error": None}
     ev = threading.Event()
-
-    def _do():
-        try:
-            box["value"] = func(*args, **kwargs)
-        except Exception as e:
-            box["error"] = e
-            traceback.print_exc()
-        finally:
-            ev.set()
-
-    # owner 를 context 로 지정 → owner 가 사는 스레드(메인)에서 _do 실행
-    QtCore.QTimer.singleShot(0, _main_thread_owner, _do)
-
+    _task_queue.put((lambda: func(*args, **kwargs), box, ev))
+    # Qt 보장 크로스스레드 호출: _dispatcher 의 스레드(메인)에서 process_next 실행
+    QMetaObject.invokeMethod(_dispatcher, "process_next",
+                             Qt.ConnectionType.QueuedConnection
+                             if hasattr(Qt, "ConnectionType")
+                             else Qt.QueuedConnection)
     if not ev.wait(timeout=600.0):
         raise TimeoutError("Main-thread execution timed out.")
     if box["error"] is not None:
@@ -278,11 +300,11 @@ def start_server(port=8081):
         except Exception:
             pass
 
-    # 메인 스레드 소유 QObject 생성 — singleShot 크로스스레드 dispatch 의 anchor
-    global _main_thread_owner, _main_timer
-    _main_thread_owner = QtCore.QObject()
-    _main_timer = None   # 폴링 타이머 불필요(singleShot 방식으로 변경)
-    _banner("[Live Add-on] Main-thread owner created (cross-thread dispatch ready).")
+    # 메인 스레드에서 _WorkDispatcher 생성 — invokeMethod 의 anchor
+    global _dispatcher, _main_timer
+    _dispatcher = _WorkDispatcher()
+    _main_timer = None
+    _banner("[Live Add-on] Dispatcher ready (QMetaObject cross-thread).")
 
     # 포트 재사용 허용(이전 소켓 잔류 대비)
     HTTPServer.allow_reuse_address = True
@@ -309,8 +331,8 @@ def stop_server():
         server_instance.server_close()
         server_instance = None
         print("[Live Add-on] Server stopped.")
-    global _main_thread_owner
-    _main_thread_owner = None   # QObject 해제
+    global _dispatcher
+    _dispatcher = None
 
 # 매크로/콘솔에서 직접 실행 시 서버 기동(메인 스레드에서 호출되어야 함).
 start_server()
