@@ -17,7 +17,7 @@ import os
 import sys
 
 # Windows 한글 출력 크래시 방지
-if sys.stdout.encoding.lower() != 'utf-8':
+if hasattr(sys.stdout, 'encoding') and sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
     try:
         sys.stdout.reconfigure(encoding='utf-8')
     except Exception:
@@ -798,6 +798,9 @@ def _shape_ok(o):
         return None
 
 
-# freecadcmd 는 __name__ 을 모듈명("freecad_builder")으로 설정하므로 둘 다 허용.
-if __name__ in ("__main__", "freecad_builder"):
+# main() 실행 조건:
+#   - python freecad_builder.py 직접 실행 (__name__=="__main__")
+#   - freecadcmd freecad_builder.py (이때 __name__=="freecad_builder", MEP_GEOMETRY 환경변수 설정됨)
+# 라이브 애드온이 `import freecad_builder` 할 때(MEP_GEOMETRY 없음)는 main() 실행 안 됨.
+if __name__ == "__main__" or os.environ.get("MEP_GEOMETRY"):
     main()

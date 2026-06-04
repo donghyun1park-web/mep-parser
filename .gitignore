@@ -21,3 +21,8 @@ _mep_tmp_out.*
 .DS_Store
 Thumbs.db
 desktop.ini
+ai_cmd.py
+ai_res.json
+_live_screenshot_tmp.png
+flake8*.txt
+test.json
