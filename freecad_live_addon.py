@@ -51,6 +51,21 @@ except ImportError as e:
 _task_queue = queue.Queue()
 
 
+def _banner(msg, err=False):
+    """Report view(App.Console) + Python console(print) 양쪽에 출력 → 확실히 보이게."""
+    try:
+        if err:
+            App.Console.PrintError(msg + "\n")
+        else:
+            App.Console.PrintMessage(msg + "\n")
+    except Exception:
+        pass
+    try:
+        print(msg)
+    except Exception:
+        pass
+
+
 def run_in_main_thread(func, *args, **kwargs):
     """HTTP 백그라운드 스레드에서 호출 → 메인스레드 실행을 예약하고 결과 대기."""
     box = {"value": None, "error": None}
@@ -272,7 +287,7 @@ def start_server(port=8081):
     _main_timer = QtCore.QTimer()
     _main_timer.timeout.connect(_drain_tasks)
     _main_timer.start(30)  # 30ms 주기로 큐 처리
-    print("[Live Add-on] Main-thread task timer started.")
+    _banner("[Live Add-on] Main-thread task timer started.")
 
     # 포트 재사용 허용(이전 소켓 잔류 대비)
     HTTPServer.allow_reuse_address = True
@@ -282,10 +297,11 @@ def start_server(port=8081):
         try:
             server_instance = HTTPServer(('127.0.0.1', port), LiveRPCHandler)
             App._live_addon_state = {"server": server_instance, "timer": _main_timer}
-            print(f"[Live Add-on] Listening on http://127.0.0.1:{port} ...")
+            _banner(f"[Live Add-on] Listening on http://127.0.0.1:{port} ...")
             server_instance.serve_forever()
         except OSError as e:
-            print(f"[Live Add-on] Could not start server: {e}")
+            _banner(f"[Live Add-on] PORT {port} BUSY ({e}). FreeCAD 를 완전히 "
+                    f"종료 후 재시작하세요(이전 서버가 포트 점유 중).", err=True)
             server_instance = None
 
     t = threading.Thread(target=serve, daemon=True)
