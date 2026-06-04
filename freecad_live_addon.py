@@ -10,6 +10,7 @@ import os
 import json
 import base64
 import threading
+import queue
 import traceback
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -42,55 +43,40 @@ except ImportError as e:
     print(f"Warning: could not import freecad_builder ({e})")
 
 
+# ── 스레드 안전 메인스레드 위임 (큐 + 메인스레드 QTimer) ──────────────────────
+# FreeCAD/Qt GUI API 는 메인 스레드에서만 호출해야 한다. HTTP 핸들러(백그라운드
+# 스레드)는 작업을 _task_queue 에 넣고 Event 로 대기만 한다. 메인 스레드의 QTimer
+# (_drain_tasks)가 큐를 비우며 실제 GUI 작업을 실행하고 결과/Event 를 설정한다.
+# (이전의 Gui.doCommand 백그라운드 호출은 크래시 위험이 있어 제거.)
+_task_queue = queue.Queue()
+
+
 def run_in_main_thread(func, *args, **kwargs):
-    """
-    백그라운드 스레드에서 호출 시, FreeCADGui.doCommand를 이용해 
-    메인 GUI 스레드의 명령 큐에 func 실행을 안전하게 밀어넣고 결과를 동기적으로 반환함.
-    """
-    import uuid
-    import time
-    
-    result_key = f"task_{uuid.uuid4().hex}"
-    
-    # 전역 모듈(App) 객체를 활용해 스레드 간 데이터 공유
-    if not hasattr(App, '_live_addon_tasks'):
-        App._live_addon_tasks = {}
-        
-    App._live_addon_tasks[result_key] = {
-        'func': func,
-        'args': args,
-        'kwargs': kwargs,
-        'done': False,
-        'result': None,
-        'error': None
-    }
-    
-    cmd = f"""
-import FreeCAD as App
-import traceback
-task = App._live_addon_tasks['{result_key}']
-try:
-    task['result'] = task['func'](*task['args'], **task['kwargs'])
-except Exception as e:
-    traceback.print_exc()
-    task['error'] = e
-finally:
-    task['done'] = True
-"""
-    # GUI 스레드에 명령 실행 예약
-    Gui.doCommand(cmd)
-    
-    # 백그라운드 스레드에서 완료 대기 (최대 10분)
-    start_t = time.time()
-    while not App._live_addon_tasks[result_key]['done']:
-        time.sleep(0.05)
-        if time.time() - start_t > 600.0:
-            raise TimeoutError("Execution on main thread timed out (doCommand).")
-            
-    task = App._live_addon_tasks.pop(result_key)
-    if task['error']:
-        raise task['error']
-    return task['result']
+    """HTTP 백그라운드 스레드에서 호출 → 메인스레드 실행을 예약하고 결과 대기."""
+    box = {"value": None, "error": None}
+    ev = threading.Event()
+    _task_queue.put((func, args, kwargs, box, ev))
+    if not ev.wait(timeout=600.0):
+        raise TimeoutError("Main-thread execution timed out (queue).")
+    if box["error"] is not None:
+        raise box["error"]
+    return box["value"]
+
+
+def _drain_tasks():
+    """메인 스레드 QTimer 콜백. 큐에 쌓인 GUI 작업을 안전하게 실행."""
+    while True:
+        try:
+            func, args, kwargs, box, ev = _task_queue.get_nowait()
+        except queue.Empty:
+            return
+        try:
+            box["value"] = func(*args, **kwargs)
+        except Exception as e:
+            box["error"] = e
+            traceback.print_exc()
+        finally:
+            ev.set()
 
 # ----------------- Main Thread Functions ----------------- #
 
@@ -259,13 +245,24 @@ class LiveRPCHandler(BaseHTTPRequestHandler):
             self.send_error(500, str(e))
 
 server_instance = None
+_main_timer = None
 
 def start_server(port=8081):
-    global server_instance
+    """★ 반드시 FreeCAD GUI 메인 스레드(매크로/콘솔)에서 호출할 것.
+    메인스레드 QTimer(_drain_tasks)를 시작해야 GUI 작업이 안전하게 실행된다."""
+    global server_instance, _main_timer
+
+    # 메인스레드 작업 처리 QTimer 시작(여기가 메인 스레드여야 함)
+    if _main_timer is None:
+        _main_timer = QtCore.QTimer()
+        _main_timer.timeout.connect(_drain_tasks)
+        _main_timer.start(30)  # 30ms 주기로 큐 처리
+        print("[Live Add-on] Main-thread task timer started.")
+
     if server_instance is not None:
-        print(f"[Live Add-on] Server is already running.")
+        print("[Live Add-on] Server is already running.")
         return
-        
+
     def serve():
         global server_instance
         try:
@@ -275,17 +272,23 @@ def start_server(port=8081):
         except OSError as e:
             print(f"[Live Add-on] Could not start server: {e}")
             server_instance = None
-            
+
     t = threading.Thread(target=serve, daemon=True)
     t.start()
 
 def stop_server():
-    global server_instance
+    global server_instance, _main_timer
     if server_instance:
         server_instance.shutdown()
         server_instance.server_close()
         server_instance = None
         print("[Live Add-on] Server stopped.")
+    if _main_timer is not None:
+        try:
+            _main_timer.stop()
+        except Exception:
+            pass
+        _main_timer = None
 
-if __name__ == "__main__":
-    start_server()
+# 매크로/콘솔에서 직접 실행 시 서버 기동(메인 스레드에서 호출되어야 함).
+start_server()
