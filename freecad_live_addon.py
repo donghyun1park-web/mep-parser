@@ -43,12 +43,11 @@ except ImportError as e:
     print(f"Warning: could not import freecad_builder ({e})")
 
 
-# ── 스레드 안전 메인스레드 위임 (큐 + 메인스레드 QTimer) ──────────────────────
-# FreeCAD/Qt GUI API 는 메인 스레드에서만 호출해야 한다. HTTP 핸들러(백그라운드
-# 스레드)는 작업을 _task_queue 에 넣고 Event 로 대기만 한다. 메인 스레드의 QTimer
-# (_drain_tasks)가 큐를 비우며 실제 GUI 작업을 실행하고 결과/Event 를 설정한다.
-# (이전의 Gui.doCommand 백그라운드 호출은 크래시 위험이 있어 제거.)
-_task_queue = queue.Queue()
+# ── 스레드 안전 메인스레드 위임 (Qt cross-thread singleShot) ──────────────────
+# Qt 표준 패턴: QTimer.singleShot(0, owner, func) 는 owner 가 사는 스레드에서
+# func 를 실행한다. owner 가 메인 스레드 소유 QObject 이면 항상 메인 스레드 실행.
+# 30ms QTimer + queue 폴링은 sleep 중 메인 스레드가 막히면 발화 실패 — 제거.
+_main_thread_owner = None   # start_server 에서 QObject 생성 (메인 스레드 소유)
 
 
 def _banner(msg, err=False):
@@ -67,24 +66,11 @@ def _banner(msg, err=False):
 
 
 def run_in_main_thread(func, *args, **kwargs):
-    """HTTP 백그라운드 스레드에서 호출 → 메인스레드 실행을 예약하고 결과 대기."""
+    """백그라운드 스레드 → 메인스레드 실행(singleShot) 후 결과 대기."""
     box = {"value": None, "error": None}
     ev = threading.Event()
-    _task_queue.put((func, args, kwargs, box, ev))
-    if not ev.wait(timeout=600.0):
-        raise TimeoutError("Main-thread execution timed out (queue).")
-    if box["error"] is not None:
-        raise box["error"]
-    return box["value"]
 
-
-def _drain_tasks():
-    """메인 스레드 QTimer 콜백. 큐에 쌓인 GUI 작업을 안전하게 실행."""
-    while True:
-        try:
-            func, args, kwargs, box, ev = _task_queue.get_nowait()
-        except queue.Empty:
-            return
+    def _do():
         try:
             box["value"] = func(*args, **kwargs)
         except Exception as e:
@@ -92,6 +78,15 @@ def _drain_tasks():
             traceback.print_exc()
         finally:
             ev.set()
+
+    # owner 를 context 로 지정 → owner 가 사는 스레드(메인)에서 _do 실행
+    QtCore.QTimer.singleShot(0, _main_thread_owner, _do)
+
+    if not ev.wait(timeout=600.0):
+        raise TimeoutError("Main-thread execution timed out.")
+    if box["error"] is not None:
+        raise box["error"]
+    return box["value"]
 
 # ----------------- Main Thread Functions ----------------- #
 
@@ -283,11 +278,11 @@ def start_server(port=8081):
         except Exception:
             pass
 
-    # 메인스레드 작업 처리 QTimer 시작(여기가 메인 스레드여야 함)
-    _main_timer = QtCore.QTimer()
-    _main_timer.timeout.connect(_drain_tasks)
-    _main_timer.start(30)  # 30ms 주기로 큐 처리
-    _banner("[Live Add-on] Main-thread task timer started.")
+    # 메인 스레드 소유 QObject 생성 — singleShot 크로스스레드 dispatch 의 anchor
+    global _main_thread_owner, _main_timer
+    _main_thread_owner = QtCore.QObject()
+    _main_timer = None   # 폴링 타이머 불필요(singleShot 방식으로 변경)
+    _banner("[Live Add-on] Main-thread owner created (cross-thread dispatch ready).")
 
     # 포트 재사용 허용(이전 소켓 잔류 대비)
     HTTPServer.allow_reuse_address = True
@@ -314,12 +309,8 @@ def stop_server():
         server_instance.server_close()
         server_instance = None
         print("[Live Add-on] Server stopped.")
-    if _main_timer is not None:
-        try:
-            _main_timer.stop()
-        except Exception:
-            pass
-        _main_timer = None
+    global _main_thread_owner
+    _main_thread_owner = None   # QObject 해제
 
 # 매크로/콘솔에서 직접 실행 시 서버 기동(메인 스레드에서 호출되어야 함).
 start_server()
