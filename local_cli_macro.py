@@ -492,6 +492,13 @@ class LocalCLIMacro(QtWidgets.QDockWidget):
             thick_cap = 800.0   # 벽 두께 상한(mm). 이보다 두꺼운 면 = 방/외부 → 제외
         count = 0
         skipped = 0
+        # ★ 생성 중 재계산 잠금 → GUI view provider 중복 갱신(Access violation RTTI)
+        #   방지. 재계산은 마지막에 단 1회만.
+        prev_lock = getattr(doc, "RecomputeLocked", False)
+        try:
+            doc.RecomputeLocked = True
+        except Exception:
+            pass
         for poly in regions:
             area = poly.area
             per = poly.length
@@ -506,10 +513,13 @@ class LocalCLIMacro(QtWidgets.QDockWidget):
                     skipped += 1; continue
             try:
                 vecs = [App.Vector(x, y, 0.0) for x, y in poly.exterior.coords]
+                if len(vecs) < 4:
+                    continue
                 # ★ 2D 면을 base 로 주고 Arch 가 height 만큼 돌출하게 한다.
-                #   (미리 솔리드로 extrude 후 Arch.makeWall 에 넘기면 재계산 중
-                #    Part::FaceMaker null 에러 발생 → 2D face base 가 정답.)
                 face = Part.Face(Part.makePolygon(vecs))
+                # 불량 면(자기교차·영면적) 스킵 → view provider 크래시 방지
+                if not face.isValid() or face.Area < 1000.0:
+                    skipped += 1; continue
                 feat = doc.addObject("Part::Feature", f"{obj_type}Base_{count}")
                 feat.Shape = face
                 if is_wall:
@@ -520,12 +530,18 @@ class LocalCLIMacro(QtWidgets.QDockWidget):
                     bim.Label = f"Col_{layer_name}_{count}"
                 count += 1
             except Exception as e:
-                self.log(f"  영역 빌드 실패(점 {len(list(poly.exterior.coords))}): {e}")
+                self.log(f"  영역 빌드 실패: {e}")
 
-        # 5) 원본 2D 숨김
+        # 원본 2D 숨김
         for ln in lines:
             if getattr(ln, "ViewObject", None):
                 ln.ViewObject.Visibility = False
+
+        # 재계산 잠금 해제 → 단 1회 재계산(on_enter 의 recompute 와 중복 안 되게 여기서 1회만)
+        try:
+            doc.RecomputeLocked = prev_lock
+        except Exception:
+            pass
         doc.recompute()
         self.log(f"✅ 빌드 완료! {obj_type} {count}개 생성 (방/대형영역 {skipped}개 제외).")
 
