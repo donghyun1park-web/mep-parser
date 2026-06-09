@@ -78,13 +78,14 @@ for poly in regions:
         n_closed += 1
 
 # ── 3) 누락 복구: 열린끝 면선 평행 페어링 ────────────────────────
-# degree 계산 → free end(차수1) 가진 세그먼트만 = polygonize 가 못 닫은 면선
+# degree 계산 → free end(차수1) 가진 세그먼트 인덱스 = polygonize 가 못 닫은 면선
 def qkey(p, t=5.0): return (round(p[0] / t), round(p[1] / t))
 deg = {}
 for a, b in segs:
     deg[qkey(a)] = deg.get(qkey(a), 0) + 1
     deg[qkey(b)] = deg.get(qkey(b), 0) + 1
-open_segs = [(a, b) for a, b in segs if deg[qkey(a)] == 1 or deg[qkey(b)] == 1]
+open_idx = [i for i, (a, b) in enumerate(segs)
+            if deg[qkey(a)] == 1 or deg[qkey(b)] == 1]
 
 def dirv(a, b):
     dx, dy = b[0]-a[0], b[1]-a[1]; n = math.hypot(dx, dy)
@@ -110,10 +111,13 @@ def pair_geo(s1, s2):
     cl_hi = (a[0]+hi*ux + half[0], a[1]+hi*uy + half[1])
     return perp, ov, cl_lo, cl_hi
 
+# 열린끝 면선 ↔ 모든 면선 페어링 (파트너가 닫힌영역 소속이어도 복구).
+# 가까운 두께 우선 그리디, 각 세그먼트는 1회만 사용.
 cands = []
-for i in range(len(open_segs)):
-    for j in range(i+1, len(open_segs)):
-        g = pair_geo(open_segs[i], open_segs[j])
+for i in open_idx:
+    for j in range(len(segs)):
+        if j == i: continue
+        g = pair_geo(segs[i], segs[j])
         if g: cands.append((g[0], i, j, g[2], g[3]))
 cands.sort(key=lambda x: x[0])
 used = set(); n_rec = 0
@@ -135,4 +139,4 @@ try: Gui.updateGui()
 except Exception: pass
 
 print(f"✅ 빌드 완료: 닫힌벽 {n_closed}개 + 복구벽 {n_rec}개 = {n_closed+n_rec}개")
-print(f"   (열린끝 면선 {len(open_segs)}개 중 {n_rec*2}개를 페어링으로 복구)")
+print(f"   (열린끝 면선 {len(open_idx)}개 → 페어링 복구 {n_rec}쌍)")
