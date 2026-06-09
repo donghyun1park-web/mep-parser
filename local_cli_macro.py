@@ -377,8 +377,6 @@ class LocalCLIMacro(QtWidgets.QDockWidget):
             if len(args) < 4:
                 self.log("사용법: 층추가 [\"DXF경로\"] [높이] [층이름]\n예: 층추가 \"C:\\도면\\지하3층.dxf\" 3500 B3")
                 return
-                
-            dxf_path = args[1]
             try:
                 z_offset = float(args[2])
             except ValueError:
@@ -463,6 +461,10 @@ class LocalCLIMacro(QtWidgets.QDockWidget):
         # 2) 모든 edge → shapely LineString (좌표 1mm 반올림 → 노드 정합)
         segs = []
         for ln in lines:
+            if hasattr(ln, "ViewObject") and ln.ViewObject and not ln.ViewObject.Visibility:
+                # 사용자가 스페이스바를 눌러 숨김 처리한 선은 빌드에서 제외합니다.
+                continue
+                
             sh = getattr(ln, "Shape", None)
             if not sh:
                 continue
@@ -474,59 +476,154 @@ class LocalCLIMacro(QtWidgets.QDockWidget):
                     if a != b:
                         segs.append(LineString([a, b]))
         if not segs:
-            self.log("edge 가 없습니다.")
+            self.log("edge 가 없거나 모두 숨김 처리되어 있습니다.")
             return
         self.log(f"레이어 '{layer_name}': 객체 {len(lines)}개 / edge {len(segs)}개 → 면추출 중...")
 
-        # 3) 교차점 자동분할(noding) + 닫힌 면 추출
+        # 3) 교차점 자동분할(noding) + 닫힌 면 추출 및 PAIRFACE 병행
         try:
-            regions = list(polygonize(unary_union(segs)))
-        except Exception as e:
-            self.log(f"❌ polygonize 실패: {e}")
-            return
-        self.log(f"  닫힌 영역 {len(regions)}개 추출.")
+            import shapely
+            from shapely.ops import polygonize_full
+            # 1mm 단위로 스냅하여 미세하게 벌어진 도면의 선들을 완벽하게 연결
+            snapped_geom = shapely.set_precision(unary_union(segs), grid_size=1.0)
+            polys, dangles, cuts, invalids = polygonize_full(snapped_geom)
+            
+            valid_regions = []
+            unclosed_segs = []
+            
+            def add_to_unclosed(geom_coords):
+                c = list(geom_coords)
+                for idx in range(len(c)-1):
+                    unclosed_segs.append((c[idx], c[idx+1]))
 
-        # 4) 필터 (벽: 얇은 단면 / 기둥: 소형 영역)
-        is_wall = obj_type in ("벽", "wall")
-        if thick_cap is None:
-            thick_cap = 800.0   # 벽 두께 상한(mm). 이보다 두꺼운 면 = 방/외부 → 제외
+            is_wall = obj_type in ("벽", "wall")
+            if thick_cap is None:
+                thick_cap = 800.0   # 벽 두께 상한(mm)
+
+            # 먼저 폴리곤을 필터링 (두꺼운 방/영역은 분해하여 PAIRFACE로 보냄)
+            for poly in polys.geoms:
+                area = poly.area
+                per = poly.length
+                if per <= 0 or area < 5000:
+                    add_to_unclosed(poly.exterior.coords)
+                    for interior in poly.interiors:
+                        add_to_unclosed(interior.coords)
+                    continue
+                
+                thick = 2.0 * area / per
+                if is_wall and thick > thick_cap:
+                    add_to_unclosed(poly.exterior.coords)
+                    for interior in poly.interiors:
+                        add_to_unclosed(interior.coords)
+                    continue
+                elif not is_wall and area > 1_500_000:
+                    add_to_unclosed(poly.exterior.coords)
+                    for interior in poly.interiors:
+                        add_to_unclosed(interior.coords)
+                    continue
+                    
+                valid_regions.append(poly)
+
+            # 남아있는 열린 선들도 PAIRFACE로 보냄
+            for collection in [dangles, cuts, invalids]:
+                for geom in collection.geoms:
+                    if geom.is_empty: continue
+                    if geom.geom_type == 'LineString':
+                        add_to_unclosed(geom.coords)
+                    elif geom.geom_type == 'MultiLineString':
+                        for subgeom in geom.geoms:
+                            add_to_unclosed(subgeom.coords)
+                    
+            import math
+            def dv(a, b):
+                dx, dy = b[0]-a[0], b[1]-a[1]
+                n = math.hypot(dx, dy)
+                return (dx/n, dy/n) if n else (0, 0)
+                
+            def pair_rect(s1, s2, pair_min=30, pair_max=800, ovl_min=0.1):
+                a, b = s1; c, d = s2
+                ux, uy = dv(a, b)
+                if abs(ux*dv(c, d)[0] + uy*dv(c, d)[1]) < 0.985: return None
+                def t(p): return (p[0]-a[0])*ux + (p[1]-a[1])*uy
+                lo = max(min(t(a), t(b)), min(t(c), t(d)))
+                hi = min(max(t(a), t(b)), max(t(c), t(d)))
+                ov = hi - lo
+                if ov <= 0: return None
+                perp = abs((c[0]-a[0])*(-uy) + (c[1]-a[1])*ux)
+                if not (pair_min <= perp <= pair_max): return None
+                L = min(math.hypot(b[0]-a[0], b[1]-a[1]), math.hypot(d[0]-c[0], d[1]-c[1]))
+                if L <= 0 or ov < ovl_min * L: return None
+                
+                p1 = (a[0]+lo*ux, a[1]+lo*uy)
+                p2 = (a[0]+hi*ux, a[1]+hi*uy)
+                def tc(p): return (p[0]-c[0])*ux + (p[1]-c[1])*uy
+                bo = tc((a[0]+lo*ux, a[1]+lo*uy))
+                q1 = (c[0]+bo*ux, c[1]+bo*uy)
+                q2 = (c[0]+(bo+ov)*ux, c[1]+(bo+ov)*uy)
+                return [p1, p2, q2, q1]
+                
+            cands = []
+            from shapely.geometry import Polygon
+            
+            for i in range(len(unclosed_segs)):
+                for j in range(i+1, len(unclosed_segs)):
+                    r = pair_rect(unclosed_segs[i], unclosed_segs[j])
+                    if r:
+                        perp = math.dist(r[0], r[3])
+                        cands.append((perp, i, j, r))
+            cands.sort()
+            
+            pair_count = 0
+            # 하나의 긴 선이 여러 짧은 선과 각각 짝을 맺을 수 있도록 허용
+            for perp, i, j, rect in cands:
+                valid_regions.append(Polygon(rect))
+                pair_count += 1
+                
+            original_poly_count = len(valid_regions) - pair_count
+            self.log(f"  닫힌 영역 {original_poly_count}개 추출 (1mm 스냅 적용), PAIRFACE 평행쌍 {pair_count}개 복구.")
+        except Exception as e:
+            import traceback
+            self.log(f"❌ polygonize/PAIRFACE 실패:\n{traceback.format_exc()}")
+            return
+
         count = 0
         skipped = 0
-        # ★ 생성 중 재계산 잠금 → GUI view provider 중복 갱신(Access violation RTTI)
-        #   방지. 재계산은 마지막에 단 1회만.
+        # ★ 생성 중 재계산 잠금 → GUI view provider 중복 갱신(Access violation RTTI) 방지
         prev_lock = getattr(doc, "RecomputeLocked", False)
         try:
             doc.RecomputeLocked = True
         except Exception:
             pass
-        for poly in regions:
-            area = poly.area
-            per = poly.length
-            if per <= 0 or area < 5000:   # 노이즈(<50cm²) 제외
-                continue
-            thick = 2.0 * area / per       # 얇은 직사각형의 두께 근사
-            if is_wall:
-                if thick > thick_cap:      # 방/큰 영역 제외
-                    skipped += 1; continue
-            else:  # 기둥: 소형 영역만(1.5m² 이하)
-                if area > 1_500_000:
-                    skipped += 1; continue
+        for poly in valid_regions:
             try:
-                vecs = [App.Vector(x, y, 0.0) for x, y in poly.exterior.coords]
-                if len(vecs) < 4:
-                    continue
-                # ★ 2D 면을 base 로 주고 Arch 가 height 만큼 돌출하게 한다.
-                face = Part.Face(Part.makePolygon(vecs))
-                # 불량 면(자기교차·영면적) 스킵 → view provider 크래시 방지
+                wires = []
+                # 외부 경계선
+                ext_vecs = [App.Vector(x, y, 0.0) for x, y in poly.exterior.coords]
+                if len(ext_vecs) < 4: continue
+                wires.append(Part.makePolygon(ext_vecs))
+                
+                # 내부 구멍(Hole) 처리 (예: ㅁ자형 벽체)
+                for interior in poly.interiors:
+                    int_vecs = [App.Vector(x, y, 0.0) for x, y in interior.coords]
+                    if len(int_vecs) >= 4:
+                        wires.append(Part.makePolygon(int_vecs))
+                        
+                # ★ 2D 면(Hole 포함)을 +Z 방향으로 강제 돌출시켜 솔리드를 만듭니다 (winding order 문제 해결)
+                face = Part.Face(wires)
                 if not face.isValid() or face.Area < 1000.0:
                     skipped += 1; continue
-                feat = doc.addObject("Part::Feature", f"{obj_type}Base_{count}")
-                feat.Shape = face
+                    
+                # 강제로 +Z 방향으로 높이만큼 돌출
+                solid = face.extrude(App.Vector(0, 0, height))
+                
+                feat = doc.addObject("Part::Feature", f"{obj_type}Solid_{count}")
+                feat.Shape = solid
+                
                 if is_wall:
-                    bim = Arch.makeWall(feat, height=height)
+                    bim = Arch.makeWall(feat)
                     bim.Label = f"Wall_{layer_name}_{count}"
                 else:
-                    bim = Arch.makeStructure(feat, height=height)
+                    bim = Arch.makeStructure(feat)
                     bim.Label = f"Col_{layer_name}_{count}"
                 count += 1
             except Exception as e:
