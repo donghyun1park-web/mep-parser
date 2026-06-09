@@ -506,15 +506,18 @@ class LocalCLIMacro(QtWidgets.QDockWidget):
                     skipped += 1; continue
             try:
                 vecs = [App.Vector(x, y, 0.0) for x, y in poly.exterior.coords]
-                solid = Part.Face(Part.makePolygon(vecs)).extrude(App.Vector(0, 0, height))
-                if not (solid.isValid() and solid.Volume > 0):
-                    continue
-                feat = doc.addObject("Part::Feature", f"{obj_type}Solid_{count}")
-                feat.Shape = solid
+                # ★ 2D 면을 base 로 주고 Arch 가 height 만큼 돌출하게 한다.
+                #   (미리 솔리드로 extrude 후 Arch.makeWall 에 넘기면 재계산 중
+                #    Part::FaceMaker null 에러 발생 → 2D face base 가 정답.)
+                face = Part.Face(Part.makePolygon(vecs))
+                feat = doc.addObject("Part::Feature", f"{obj_type}Base_{count}")
+                feat.Shape = face
                 if is_wall:
-                    bim = Arch.makeWall(feat); bim.Label = f"Wall_{layer_name}_{count}"
+                    bim = Arch.makeWall(feat, height=height)
+                    bim.Label = f"Wall_{layer_name}_{count}"
                 else:
-                    bim = Arch.makeStructure(feat); bim.Label = f"Col_{layer_name}_{count}"
+                    bim = Arch.makeStructure(feat, height=height)
+                    bim.Label = f"Col_{layer_name}_{count}"
                 count += 1
             except Exception as e:
                 self.log(f"  영역 빌드 실패(점 {len(list(poly.exterior.coords))}): {e}")
