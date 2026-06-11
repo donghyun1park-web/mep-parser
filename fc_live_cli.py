@@ -11,7 +11,7 @@ import urllib.error
 import argparse
 import os
 
-RPC_URL = "http://127.0.0.1:8081"
+RPC_URL = "http://127.0.0.1:8082"
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
@@ -25,7 +25,7 @@ def _rpc_request(endpoint: str, payload: dict = None):
         else:
             req = urllib.request.Request(url, method='GET')
             
-        with urllib.request.urlopen(req, timeout=120.0) as response:
+        with urllib.request.urlopen(req, timeout=600.0) as response:
             res_body = response.read().decode('utf-8')
             return json.loads(res_body)
     except Exception as e:
@@ -77,11 +77,24 @@ def do_screenshot(args):
         f.write(base64.b64decode(res["image_base64"]))
     print(json.dumps({"status": "ok", "saved_to": out_path}))
 
+def do_exec(args):
+    script_path = os.path.abspath(args.path)
+    if not os.path.exists(script_path):
+        print(json.dumps({"error": f"File not found: {script_path}"}))
+        return
+    with open(script_path, "r", encoding="utf-8") as f:
+        code = f.read()
+    res = _rpc_request("exec_python", {"code": code})
+    print(json.dumps(res, indent=2))
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Antigravity Live FreeCAD Controller")
     subparsers = parser.add_subparsers(dest="command", required=True)
     
     subparsers.add_parser("ping")
+    
+    p_exec = subparsers.add_parser("exec")
+    p_exec.add_argument("path", help="Path to Python script to execute")
     
     p_import = subparsers.add_parser("import")
     p_import.add_argument("path", help="DXF path")
@@ -106,6 +119,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     if args.command == "ping": do_ping(args)
+    elif args.command == "exec": do_exec(args)
     elif args.command == "import": do_import(args)
     elif args.command == "make_wall": do_make_wall(args)
     elif args.command == "auto_build": do_auto_build(args)

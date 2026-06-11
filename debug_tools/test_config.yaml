@@ -1,0 +1,6 @@
+mappings:
+- default_thickness: 200
+  height: 3000
+  label: TestWall
+  layer: A-WALL
+  type: Wall

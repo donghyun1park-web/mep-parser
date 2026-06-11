@@ -1,0 +1,175 @@
+import ezdxf
+import FreeCAD as App
+import FreeCADGui as Gui
+import Arch
+import Draft
+from shapely.geometry import LineString
+import math
+
+# ============================================================
+# ====================== 설정 부분 ======================
+# ============================================================
+
+DXF_PATH = r"C:\Users\YourName\Documents\test.dxf"   # ← 반드시 수정하세요
+
+# 처리할 벽 레이어와 기본 속성
+WALL_LAYERS = {
+    "A-CON": {
+        "default_thickness": 300,
+        "height": 3000,
+        "label": "콘크리트벽"
+    },
+    "A-WALL": {
+        "default_thickness": 150,
+        "height": 2700,
+        "label": "조적벽"
+    },
+    "A-STEEL": {
+        "default_thickness": 100,
+        "height": 2800,
+        "label": "금속벽"
+    },
+}
+
+# 중심선 추출 파라미터
+MIN_THICKNESS = 50       # 최소 벽 두께 (mm)
+MAX_THICKNESS = 600      # 최대 벽 두께 (mm)
+ANGLE_TOLERANCE = 8      # 평행 허용 각도 차이 (도)
+MIN_LINE_LENGTH = 150    # 이 길이 이하 선은 무시 (노이즈 제거)
+
+# ============================================================
+# ================== 중심선 추출 함수 ==================
+# ============================================================
+
+def get_angle(line):
+    coords = list(line.coords)
+    dx = coords[-1][0] - coords[0][0]
+    dy = coords[-1][1] - coords[0][1]
+    angle = math.degrees(math.atan2(dy, dx))
+    return angle % 180
+
+
+def extract_centerlines(lines):
+    """평행선 쌍을 찾아 중심선과 두께 추출"""
+    shapely_lines = []
+    for line in lines:
+        ls = LineString([(line[0], line[1]), (line[2], line[3])])
+        if ls.length >= MIN_LINE_LENGTH:
+            shapely_lines.append(ls)
+
+    centerlines = []
+    used = set()
+
+    for i, line1 in enumerate(shapely_lines):
+        if i in used:
+            continue
+
+        best_match = None
+        best_dist = float('inf')
+
+        for j, line2 in enumerate(shapely_lines):
+            if j <= i or j in used:
+                continue
+
+            dist = line1.distance(line2)
+            if not (MIN_THICKNESS <= dist <= MAX_THICKNESS):
+                continue
+
+            angle_diff = min(abs(get_angle(line1) - get_angle(line2)),
+                             180 - abs(get_angle(line1) - get_angle(line2)))
+
+            if angle_diff > ANGLE_TOLERANCE:
+                continue
+
+            if dist < best_dist:
+                best_dist = dist
+                best_match = j
+
+        if best_match is not None:
+            line2 = shapely_lines[best_match]
+
+            # 더 정확한 중심선 생성 (두 선의 중간 지점 연결)
+            mid1 = line1.interpolate(0.5, normalized=True)
+            mid2 = line2.interpolate(0.5, normalized=True)
+            centerline = LineString([mid1, mid2])
+
+            centerlines.append({
+                'centerline': centerline,
+                'thickness': best_dist
+            })
+            used.add(i)
+            used.add(best_match)
+
+    return centerlines
+
+
+# ============================================================
+# ====================== 메인 실행 ======================
+# ============================================================
+
+def main():
+    print("=== DXF → FreeCAD 벽 생성 시작 ===")
+    
+    try:
+        doc = ezdxf.readfile(DXF_PATH)
+    except Exception as e:
+        print(f"DXF 파일을 열 수 없습니다: {e}")
+        return
+
+    msp = doc.modelspace()
+
+    for layer_name, props in WALL_LAYERS.items():
+        print(f"\n[{layer_name}] 레이어 처리 중...")
+
+        lines = []
+
+        # LINE과 LWPOLYLINE 추출
+        for entity in msp.query(f'LINE LWPOLYLINE[layer=="{layer_name}"]'):
+            if entity.dxftype() == 'LINE':
+                s = entity.dxf.start
+                e = entity.dxf.end
+                lines.append((s.x, s.y, e.x, e.y))
+            elif entity.dxftype() == 'LWPOLYLINE':
+                pts = [(p[0], p[1]) for p in entity]
+                for i in range(len(pts) - 1):
+                    lines.append((pts[i][0], pts[i][1], pts[i+1][0], pts[i+1][1]))
+
+        if not lines:
+            print(f"  → 선이 없습니다.")
+            continue
+
+        print(f"  → 원본 선 {len(lines)}개")
+
+        # 중심선 추출
+        centerlines = extract_centerlines(lines)
+        print(f"  → 중심선 {len(centerlines)}개 추출됨")
+
+        # FreeCAD에 생성
+        for idx, cl in enumerate(centerlines):
+            coords = list(cl['centerline'].coords)
+            if len(coords) < 2:
+                continue
+
+            points = [App.Vector(x, y, 0) for x, y in coords]
+
+            # Draft Wire 생성
+            wire = Draft.makeWire(points, closed=False, face=False)
+            wire.Label = f"Center_{layer_name}_{idx}"
+
+            # Arch.Wall 생성 (중심 정렬)
+            wall = Arch.makeWall(
+                wire,
+                length=0,
+                width=cl['thickness'],
+                height=props["height"],
+                align="Center"
+            )
+            wall.Label = f"{props['label']}_{idx}"
+
+    App.ActiveDocument.recompute()
+    print("\n=== 작업 완료 ===")
+
+
+if __name__ == "__main__":
+    main()
+

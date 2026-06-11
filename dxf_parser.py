@@ -41,7 +41,7 @@ except ImportError:
 # CSV 없을 때 폴백 규칙 (정규식, 카테고리, 파라미터)
 DEFAULT_LAYER_RULES = [
     (r"WALL|벽|CON", "wall", {}),
-    (r"COL|기둥", "column", {}),
+    (r"COL|기둥|Block_C", "column", {}),
     (r"SLAB|FLOOR|바닥|슬래브|STAIR|계단", "slab", {}),
     (r"ZONE|ROOM|실|구역", "zone", {}),
     (r"DOOR|WIND|문|창|OPEN", "opening", {}),
@@ -1166,6 +1166,70 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
     _n_joined = len(result["elements"]["wall"])
     if _n_raw != _n_joined:
         print(f"  [join] LINE 연결: {_n_raw}개 → {_n_joined}개 레코드")
+        
+    # --- [Column Bounding Box Grouping] ---
+    # FreeCAD DXF export groups 6 lines (4 outline + 2 X-lines) into one unique layer (e.g. Block_C_600X835)
+    # Group these lines by layer, and convert them to a single closed bounding box.
+    col_by_layer = {}
+    new_cols = []
+    for c in result["elements"]["column"]:
+        if c.get("closed") or c.get("kind") == "circle":
+            new_cols.append(c)
+        else:
+            layer = c.get("layer", "")
+            if layer:
+                col_by_layer.setdefault(layer, []).append(c)
+            else:
+                new_cols.append(c)
+                
+    for layer, recs in col_by_layer.items():
+        all_pts = []
+        for r in recs:
+            all_pts.extend(r.get("points", []))
+        if not all_pts:
+            continue
+            
+        try:
+            from shapely.geometry import MultiPoint
+            hull = MultiPoint(all_pts).convex_hull
+            if hull.geom_type == 'Polygon':
+                coords = list(hull.exterior.coords)
+                pts = [[c[0], c[1]] for c in coords]
+            else:
+                pts = None
+        except ImportError:
+            pts = None
+            
+        if not pts:
+            # Fallback to AABB if shapely fails or shape is invalid
+            min_x = min(p[0] for p in all_pts)
+            max_x = max(p[0] for p in all_pts)
+            min_y = min(p[1] for p in all_pts)
+            max_y = max(p[1] for p in all_pts)
+            pts = [[min_x, min_y], [max_x, min_y], [max_x, max_y], [min_x, max_y], [min_x, min_y]]
+            
+        # Get width estimate
+        xs = [p[0] for p in pts]
+        min_x, max_x = min(xs), max(xs)
+        
+        merged = {
+            "kind": "polyline",
+            "closed": True,
+            "points": pts,
+            "centerline": pts,
+            "width_detected": max_x - min_x,
+            "confidence": 1.0,
+            "pairing": "closed",
+            "layer": layer,
+            "z_base": recs[0].get("z_base", 0.0),
+            "overrides": recs[0].get("overrides", {})
+        }
+        new_cols.append(merged)
+
+    
+    result["elements"]["column"] = new_cols
+    # --------------------------------------
+
     # [Phase 1] 평행선 쌍 → 벽 중심선+두께 (zone 귀속 전에 재구성)
     result["elements"]["wall"] = detect_wall_pairs(result["elements"]["wall"], params)
     # [Phase 4.0] 같은 직선 위 쪼개진 세그먼트 재병합(코너 틈은 제외)

@@ -213,40 +213,46 @@ def build_walls(doc, walls, params):
         except Exception as e:
             print(f"[warn] ClosedWall_{i} 생성 실패: {e}")
 
-    # ── ② 열린 폴리선: 레코드별 개별 벽 (체이닝 제거) ───────────────────────────
-    # 체이닝은 paired(centerline)과 single(면선)을 한 와이어에 혼합해 self-intersection
-    # 을 유발했음. repair_single_walls 로 모든 비-closed 벽이 centerline 기준이 되었으므로
-    # align="Center" 로 통일하고, collinear 병합(merge_collinear_walls)이 이미 직선 구간을
-    # 하나로 합쳤으므로 레코드별로 안정 생성한다(코너는 개별 벽, 위치 정확 우선).
+    # ── ② 열린 폴리선: 체이닝으로 묶어서 생성 (사용자 요청: 잘게 나누지 말고 하나의 벽체로) ───────────────────────────
+    # repair_single_walls 로 모든 비-closed 벽이 centerline 기준이 되었으므로 체이닝을 복원합니다.
+    open_walls = []
+    open_wall_global_indices = []
     for i, el in enumerate(walls):
         if el.get("closed") or el.get("pairing") == "closed":
             continue
         if el.get("kind") != "polyline":
             continue
-        baseline = el.get("centerline") or el.get("points", [])
-        if len(baseline) < 2:
+        open_walls.append(el)
+        open_wall_global_indices.append(i)
+        
+    chains = _chain_wall_segments(open_walls)
+    
+    for c_idx, (base_el, chain_pts, chain_ids) in enumerate(chains):
+        if len(chain_pts) < 2:
             continue
-        ov = el.get("overrides", {})
-        width  = float(el.get("width_detected")
-                       or ov.get("width", d.get("width", 200.0)))
+        ov = base_el.get("overrides", {})
+        width  = float(base_el.get("width_detected") or ov.get("width", d.get("width", 200.0)))
         height = float(ov.get("height", d.get("height", 2800.0)))
-        z_base = float(el.get("z_base", 0.0))
+        z_base = float(base_el.get("z_base", 0.0))
         try:
-            base = make_wire(baseline, False, doc=doc, label=f"WallAxis_{i}")
+            base = make_wire(chain_pts, False, doc=doc, label=f"WallAxis_{c_idx}")
             if not base:
-                raise ValueError("make_wire returned None")
+                continue
             wall = Arch.makeWall(base, width=width, height=height, align="Center")
             if not wall:
-                raise ValueError("Arch.makeWall returned None")
-            wall.Label = f"Wall_{i}"
+                continue
+            wall.Label = f"Wall_{c_idx}"
             wall.Placement.Base.z = z_base
             wall.addProperty("App::PropertyString", "DxfId", "Metadata", "")
-            wall.DxfId = el.get("handle") or f"WALL_{i}"
+            wall.DxfId = base_el.get("handle") or f"WALL_CHAIN_{c_idx}"
             objs.append(wall)
-            src_els.append(el)
-            idx_map[i] = wall
+            src_els.append(base_el)
+            for cid in chain_ids:
+                global_i = open_wall_global_indices[cid]
+                idx_map[global_i] = wall
         except Exception as e:
-            print(f"[warn] Wall_{i} 생성 실패: {e}")
+            print(f"[warn] Wall_{c_idx} 체인 생성 실패: {e}")
+            
     return objs, idx_map, src_els
 
 
@@ -313,20 +319,22 @@ def build_openings(doc, openings, wall_idx_map, params):
     margin = 100.0
     n_void = 0
     n_leaf = 0
+    log = ""
     for oi, op in enumerate(openings):
         c = op.get("center") or [0, 0]
         cx, cy = float(c[0]), float(c[1])
         subtype = op.get("subtype")
         width = float(op.get("width") or (float(op.get("radius", 450.0)) * 2))
         depth = float(op.get("host_width") or d.get("width", 200.0)) + margin
+        z_base = float(op.get("z_base", 0.0))
         if subtype == "window":
-            sill = float(op.get("sill", 900.0))
+            sill = float(op.get("sill", 900.0)) + z_base
             oh = float(op.get("height", 1200.0))
         elif subtype == "door":
-            sill = 0.0
+            sill = z_base
             oh = float(op.get("height", 2100.0))
         else:
-            sill = -margin
+            sill = z_base - margin
             oh = wall_h + margin * 2
         (ux, uy), (nx, ny) = _opening_axes(op)
 
@@ -355,8 +363,10 @@ def build_openings(doc, openings, wall_idx_map, params):
                 if cut.isValid():
                     wobj.Shape = cut
                     n_void += 1
+                else:
+                    log += f"[warn] opening void 형상 오류: Wall_{wi}\n"
             except Exception as e:
-                print(f"[warn] opening void 실패 Wall_{wi}: {e}")
+                log += f"[warn] opening void 실패 Wall_{wi}: {e}\n"
 
         # 문짝/창틀 솔리드 (얇은 판) — IfcType 태깅
         if subtype in ("door", "window"):
@@ -387,8 +397,8 @@ def build_openings(doc, openings, wall_idx_map, params):
                     pass
                 n_leaf += 1
             except Exception as e:
-                print(f"[warn] {subtype}_{oi} leaf 실패: {e}")
-    return (n_void, n_leaf)
+                log += f"[warn] {subtype}_{oi} leaf 실패: {e}\n"
+    return (n_void, n_leaf, log)
 
 
 def build_columns(doc, columns, params):
@@ -408,6 +418,7 @@ def build_columns(doc, columns, params):
         col = Arch.makeStructure(base, height=height)
         col.IfcType = "Column"
         col.Label = f"Column_{i}"
+        col.Normal = App.Vector(0, 0, 1)  # Force upward extrusion regardless of polyline winding
         col.Placement.Base.z = float(el.get("z_base", 0.0))  # [4b]
         
         # [라운드트립 기반] DXF Handle 주입

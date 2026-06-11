@@ -142,6 +142,20 @@ def cmd_import_dxf(payload):
     Gui.updateGui()
     return {"status": "ok", "message": f"Imported {path}"}
 
+def cmd_exec_python(payload):
+    code = payload.get("code", "")
+    if not code:
+        return {"error": "No code provided"}
+    try:
+        # Execute the code in the global namespace of this module
+        exec(code, globals(), globals())
+        return {"status": "ok", "message": "Code executed successfully"}
+    except Exception as e:
+        import traceback
+        err = traceback.format_exc()
+        return {"error": err}
+
+
 def cmd_make_wall(payload):
     doc = ensure_active_document()
     pts = payload.get("points", [])
@@ -277,6 +291,8 @@ class LiveRPCHandler(BaseHTTPRequestHandler):
                 res = run_in_main_thread("cmd_build_geometry", payload)
             elif self.path == '/screenshot':
                 res = run_in_main_thread("cmd_get_screenshot", payload)
+            elif self.path == '/exec_python':
+                res = run_in_main_thread("cmd_exec_python", payload, timeout=300)
             else:
                 self.send_error(404, "Not Found")
                 return

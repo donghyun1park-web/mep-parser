@@ -1,9 +1,7 @@
-# layer_map.csv  --  layer pattern -> category/parameter mapping
-# pattern: regex (case-insensitive) / category: wall|column|slab|zone|opening|pipe|duct|tray
-# width/height/thickness: mm (leave blank to use param defaults)
 pattern,category,width,height,thickness
+#chk_U_250212,column,,,
 WALL|벽|CON,wall,200,2800,
-COL|기둥,column,,3000,
+COL|기둥|Block_C,column,,3000,
 SLAB|FLOOR|바닥|슬래브,slab,,,200
 ZONE|ROOM|실|구역,zone,,,
 DOOR|WIND|문|창,opening,,,
@@ -12,8 +10,8 @@ DUCT|덕트,duct,400,300,
 TRAY|트레이|CABLE|전선,tray,300,100,
 A\-STEEL,wall,,,
 OPEN,opening,,,
-#chk_U_250212,column,,,
-배수판_벽체|배수판,wall,200,2800,
-A-CEN$|A-CEN-SUB,wall,200,2800,
+배수판_벽체|배수판,ignore,,,
+A-CEN$|A-CEN-SUB,ignore,,,
+A-HAT,ignore,,,
 A-ELE,wall,200,2800,
 A-INSUL,wall,100,2800,

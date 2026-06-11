@@ -1,0 +1,26 @@
+# MEP-Parser Layer Configuration
+# 이 파일에서 레이어별로 추출할 건축 객체의 타입과 기본 속성을 지정합니다.
+
+mappings:
+  - layer: "A-WALL"
+    type: "Wall"
+    height: 3000
+    default_thickness: 150
+    label: "벽체_일반"
+
+  - layer: "A-CON"
+    type: "Wall"
+    height: 3000
+    default_thickness: 200
+    label: "벽체_콘크리트"
+
+  - layer: "A-STEEL"
+    type: "Wall"
+    height: 3000
+    default_thickness: 100
+    label: "벽체_금속"
+
+  - layer: "A-COLS"
+    type: "Column"
+    height: 3000
+    label: "기둥"
