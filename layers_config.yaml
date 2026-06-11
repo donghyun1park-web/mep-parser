@@ -1,26 +1,107 @@
-# MEP-Parser Layer Configuration
-# 이 파일에서 레이어별로 추출할 건축 객체의 타입과 기본 속성을 지정합니다.
+# ============================================
+# MEP-Parser Layer Configuration (Phase 3)
+# ============================================
 
-mappings:
-  - layer: "A-WALL"
-    type: "Wall"
-    height: 3000
-    default_thickness: 150
-    label: "벽체_일반"
+project:
+  name: "Default Project"
+  unit: mm
+  default_height: 2800
 
-  - layer: "A-CON"
-    type: "Wall"
-    height: 3000
-    default_thickness: 200
-    label: "벽체_콘크리트"
+# ============================================
+# 레이어 매핑 및 객체 생성 설정
+# ============================================
+layers:
+  wall:
+    concrete:
+      patterns: 
+        - "A-CON"
+        - "*CONCRETE*"
+      default_thickness: 300
+      height: 3000
+      material: "Concrete"
+      priority: 1                    # 겹칠 때 우선 처리 순위 (높을수록 먼저)
 
-  - layer: "A-STEEL"
-    type: "Wall"
-    height: 3000
-    default_thickness: 100
-    label: "벽체_금속"
+    masonry:
+      patterns:
+        - "A-WALL"
+        - "*WALL*"
+      default_thickness: 150
+      height: 2700
+      material: "Masonry"
+      priority: 2
 
-  - layer: "A-COLS"
-    type: "Column"
-    height: 3000
-    label: "기둥"
+    steel:
+      patterns:
+        - "A-STEEL"
+        - "*STEEL*"
+      default_thickness: 100
+      height: 2800
+      material: "Steel"
+      priority: 3
+
+  column:
+    patterns:
+      - "*CHK*"
+      - "*COLUMN*"
+      - "*기둥*"
+    default_width: 400
+    default_depth: 400
+    use_block: true                  # 블록(INSERT) 분석 여부
+    material: "Concrete"
+
+  floor_opening:
+    patterns:
+      - "A-DA"
+      - "*DRY*"
+      - "*OPENING*"
+    type: "rectangular"
+    description: "바닥 개구부 (슬라브 구멍)"
+
+# ============================================
+# 무시할 레이어 (필터링)
+# ============================================
+ignore:
+  patterns:
+    - "*CEN*"
+    - "*DIM*"
+    - "*TEXT*"
+    - "*HATCH*"
+    - "#CHK_*"          # 기둥 블록 레이어는 column에서 별도 처리하므로 무시
+
+# ============================================
+# Phase 3 기하학적 처리 설정 (중요)
+# ============================================
+processing:
+  pre_merge:
+    enabled: true
+    angle_tolerance: 1.0            # 각도 오차 허용 범위 (도)
+    collinear_tolerance: 15         # 동일 직선상 판단 거리 (mm)
+    max_gap: 300                    # 이 거리 이하의 짧은 선분은 병합 시도
+
+  statistical_filter:
+    enabled: true
+    method: "clustering"            # "mode" | "clustering" | "percentile"
+    min_thickness: 50
+    max_thickness: 650
+    outlier_threshold: 0.4          # 대표 두께 대비 이 비율 이상 차이나면 노이즈로 간주 (0.4 = 40%)
+
+  post_merge:
+    enabled: true
+    max_gap_distance: 1200          # 문/창호로 인한 최대 Gap 허용 거리 (mm)
+    angle_tolerance: 3.0            # 병합 시 방향 일치 허용 각도
+    only_same_layer: true           # 같은 레이어의 중심선끼리만 병합할지 여부
+
+  corner_extension:
+    enabled: true
+    extension_length: 50            # 코너에서 중심선을 연장할 길이 (mm)
+
+  single_line_fallback:
+    enabled: true
+    default_thickness: 120          # 평행선을 못 찾았을 때 사용할 기본 두께
+
+# ============================================
+# 기타 옵션
+# ============================================
+options:
+  create_slab_from_walls: true      # 벽 외곽선으로 슬라브 자동 생성 여부
+  log_level: "info"                 # debug / info / warning

@@ -397,22 +397,22 @@ def process_cli_command(ui_instance, cmd_text):
             log(traceback.format_exc())
 
     elif cmd in ("층추가", "add_floor"):
-        try:
-            args = shlex.split(cmd_text)
-        except Exception:
-            args = cmd_text.split()
+        args = cmd_text.split()
             
         if len(args) < 4:
             log("사용법: 층추가 [\"DXF경로\"] [높이] [층이름]\n예: 층추가 \"C:\\도면\\지하3층.dxf\" 3500 B3")
             return
             
-        dxf_path = args[1]
+        # 뒤에서부터 파싱 (경로에 띄어쓰기가 있고 따옴표를 안 썼을 경우 대비)
+        prefix = args[-1]
         try:
-            z_offset = float(args[2])
+            z_offset = float(args[-2])
         except ValueError:
-            log("높이 값은 숫자여야 합니다.")
+            log("높이 값은 숫자여야 합니다. (예: 층추가 \"경로\" 3000 1F)")
             return
-        prefix = args[3]
+            
+        # 경로 부분을 띄어쓰기 포함하여 합치고 앞뒤 따옴표 제거
+        dxf_path = " ".join(args[1:-2]).strip('"').strip("'")
         
         if not os.path.exists(dxf_path):
             log(f"❌ 파일이 존재하지 않습니다: {dxf_path}")
@@ -475,7 +475,66 @@ def process_cli_command(ui_instance, cmd_text):
             except ValueError:
                 pass
                 
-        build_polygonized_layer(App.ActiveDocument, layer_name, obj_type, height, thick_cap, logger=log)
+        doc = App.ActiveDocument
+        
+        if obj_type.lower() in ("벽", "wall"):
+            log(f"⏳ 화면(뷰포트)에서 '{layer_name}' 레이어의 선들을 수집 중...")
+            from .freecad_utils import get_lines_from_fc_layer
+            
+            # 1. 뷰포트에서 화면에 보이는(only_visible=True) 선분 추출
+            raw_lines, target_objs = get_lines_from_fc_layer(doc, layer_name, only_visible=True)
+            if not raw_lines:
+                log(f"❌ 화면에서 '{layer_name}' 레이어의 선을 찾을 수 없거나 모두 숨김 처리되어 있습니다.")
+                return
+                
+            log(f"⏳ 총 {len(raw_lines)}개의 선분 조각이 발견되었습니다. Phase 3 중심선 엔진을 가동합니다...")
+            
+            import extractors
+            # 설정 파일 없이 기본값 셋팅
+            props = {
+                'label': layer_name,
+                'height': height,
+                'default_thickness': 200
+            }
+            
+            try:
+                extractor = extractors.WallExtractor(None) # YAML 없이 초기화
+                extractor.wall_mappings = {} # 빈 매핑
+                wall_data = extractor.extract_from_raw_lines(raw_lines, props)
+                
+                log(f"✅ 엔진 분석 완료! {len(wall_data)}개의 스마트 벽체 생성 시작...")
+                count = 0
+                for idx, w in enumerate(wall_data):
+                    coords = list(w['centerline'].coords)
+                    if len(coords) < 2:
+                        continue
+    
+                    points = [App.Vector(x, y, 0) for x, y in coords]
+                    wire = Draft.make_wire(points, closed=False, face=False)
+                    wire_label = f"Center_{w['label']}_{idx}"
+                    wire.Label = wire_label
+    
+                    wall = Arch.makeWall(wire, length=0, width=w['thickness'], 
+                                         height=w['height'], align="Center")
+                    wall.Label = f"Wall_{w['label']}_{idx}"
+                    count += 1
+                    
+                # 원본 선들 가리기
+                for obj in target_objs:
+                    if hasattr(obj, "ViewObject") and obj.ViewObject:
+                        obj.ViewObject.Visibility = False
+                        
+                safe_recompute(doc)
+                Gui.updateGui()
+                log(f"✅ 성공! 화면의 선들을 분석하여 {count}개의 스마트 벽체를 세웠습니다.")
+            except Exception as e:
+                log(f"❌ 중심선 추출 엔진 실행 중 오류 발생: {e}")
+                import traceback
+                log(traceback.format_exc())
+        else:
+            # 기둥 등 다른 타입은 기존 다각형 폴백 방식 사용
+            log("⏳ 기둥 빌드는 기존 다각형 다각형 영역 추출 방식으로 진행합니다...")
+            build_polygonized_layer(App.ActiveDocument, layer_name, obj_type, height, thick_cap, logger=log)
 
     else:
         log(f"알 수 없는 명령어: {cmd}")

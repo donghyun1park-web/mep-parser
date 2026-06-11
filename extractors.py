@@ -203,7 +203,23 @@ class WallExtractor:
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
                 data = yaml.safe_load(f)
-                if data and 'mappings' in data:
+                
+                # 지원 포맷 1: 계층형 (layers -> wall -> [종류] -> patterns)
+                if data and 'layers' in data and 'wall' in data['layers']:
+                    for wtype, props in data['layers']['wall'].items():
+                        patterns = props.get('patterns', [])
+                        for pat in patterns:
+                            # 와일드카드 일단 제거해서 정확한 이름으로 취급
+                            clean_name = pat.replace('*', '').strip()
+                            if clean_name:
+                                self.wall_mappings[clean_name] = {
+                                    'layer': clean_name,
+                                    'default_thickness': props.get('default_thickness', 200),
+                                    'height': props.get('height', 3000),
+                                    'label': f"Wall_{wtype}"
+                                }
+                # 지원 포맷 2: 플랫 배열형 (mappings)
+                elif data and 'mappings' in data:
                     for mapping in data['mappings']:
                         if mapping.get('type') == 'Wall':
                             self.wall_mappings[mapping['layer']] = mapping
@@ -243,6 +259,26 @@ class WallExtractor:
             results.extend(post_merged)
             
         return results
+
+    def extract_from_raw_lines(self, raw_lines, props):
+        """Extracts walls directly from a list of raw 2D line segments."""
+        if not raw_lines:
+            return []
+            
+        print(f"\n[Viewport Extraction]")
+        # 1. Pre-merge
+        pre_merged_lines = pre_merge_lines(raw_lines)
+        print(f"  [Pre-merge] 원본 선분 {len(raw_lines)}개 -> 병합 후 {len(pre_merged_lines)}개")
+        
+        # 2. Extract pairs (Pass 1 & Pass 2 with Statistical Filtering)
+        centerlines = self._extract_centerlines(pre_merged_lines, props)
+        
+        # 3. Post-merge
+        post_merged = post_merge_centerlines(centerlines)
+        if centerlines:
+            print(f"  [Post-merge] 중심선 {len(centerlines)}개 -> 병합 후 {len(post_merged)}개")
+        
+        return post_merged
 
     def _get_lines_from_layer(self, msp, layer_name):
         lines = []

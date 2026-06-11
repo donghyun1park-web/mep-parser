@@ -20,6 +20,65 @@ def find_objects(name_str):
             found.append(obj)
     return found
 
+def get_lines_from_fc_layer(doc, layer_name, only_visible=True):
+    """
+    Extracts raw 2D line segments from FreeCAD objects matching the layer_name.
+    Returns: list of ((x1, y1), (x2, y2)) and the list of source objects.
+    """
+    target_objs = []
+    for obj in doc.Objects:
+        # Check if it's a group
+        if (layer_name in obj.Label or layer_name in obj.Name) and hasattr(obj, "Group"):
+            target_objs.extend(list(obj.Group))
+            break
+            
+    if not target_objs:
+        # Fallback to loose matching
+        for obj in doc.Objects:
+            if layer_name in obj.Label or layer_name in obj.Name:
+                if getattr(obj, "Shape", None) and obj.Shape.Edges:
+                    target_objs.append(obj)
+                    
+    segs = []
+    for obj in target_objs:
+        if only_visible and hasattr(obj, "ViewObject") and obj.ViewObject and not obj.ViewObject.Visibility:
+            continue
+            
+        sh = getattr(obj, "Shape", None)
+        if not sh:
+            continue
+            
+        for ed in sh.Edges:
+            is_line = False
+            if hasattr(ed, "Curve") and ed.Curve:
+                if getattr(ed.Curve, "TypeId", "") == "Part::GeomLine":
+                    is_line = True
+            
+            if is_line:
+                vs = ed.Vertexes
+                if len(vs) >= 2:
+                    pts = [vs[0].Point, vs[-1].Point]
+                else:
+                    continue
+            else:
+                try:
+                    num_pts = max(2, int(ed.Length / 100.0) + 1)
+                    pts = ed.discretize(Number=num_pts)
+                except Exception:
+                    vs = ed.Vertexes
+                    if len(vs) >= 2:
+                        pts = [vs[0].Point, vs[-1].Point]
+                    else:
+                        continue
+                        
+            for i in range(len(pts) - 1):
+                a = (round(pts[i].x, 1), round(pts[i].y, 1))
+                b = (round(pts[i+1].x, 1), round(pts[i+1].y, 1))
+                if a != b:
+                    segs.append((a, b))
+                    
+    return segs, target_objs
+
 def hide_base_solids(doc):
     """
     Hides internal Part::Feature base solids and Draft wires to prevent overlapping and selection issues.
