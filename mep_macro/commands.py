@@ -490,6 +490,12 @@ def process_cli_command(ui_instance, cmd_text):
             log(f"⏳ 총 {len(raw_lines)}개의 선분 조각이 발견되었습니다. Phase 3 중심선 엔진을 가동합니다...")
             
             import extractors
+            from . import geometry
+            from . import freecad_utils
+            import importlib
+            importlib.reload(geometry)
+            importlib.reload(freecad_utils)
+            importlib.reload(extractors)
             # 설정 파일 없이 기본값 셋팅
             props = {
                 'label': layer_name,
@@ -500,24 +506,49 @@ def process_cli_command(ui_instance, cmd_text):
             try:
                 extractor = extractors.WallExtractor(None) # YAML 없이 초기화
                 extractor.wall_mappings = {} # 빈 매핑
-                wall_data = extractor.extract_from_raw_lines(raw_lines, props)
                 
-                log(f"✅ 엔진 분석 완료! {len(wall_data)}개의 스마트 벽체 생성 시작...")
+                import time as _time
+                _t0 = _time.time()
+                wall_data = extractor.extract_from_raw_lines(raw_lines, props)
+                _elapsed = _time.time() - _t0
+                
+                log(f"✅ 엔진 분석 완료! {len(wall_data)}개의 스마트 벽체 생성 시작... (분석 {_elapsed:.1f}초)")
+                
+                # Debug log 경로 출력
+                _debug_log = os.path.join(HERE, "debug_extractors.log")
+                if os.path.exists(_debug_log):
+                    log(f"📋 디버그 로그: {_debug_log}")
+                
                 count = 0
+                skipped = 0
                 for idx, w in enumerate(wall_data):
                     coords = list(w['centerline'].coords)
                     if len(coords) < 2:
+                        skipped += 1
+                        continue
+                    
+                    # 중심선이 벽 두께보다 짧으면 FreeCAD가 형상을 만들 수 없음
+                    cl_len = w['centerline'].length
+                    if cl_len < w['thickness']:
+                        skipped += 1
                         continue
     
-                    points = [App.Vector(x, y, 0) for x, y in coords]
-                    wire = Draft.make_wire(points, closed=False, face=False)
-                    wire_label = f"Center_{w['label']}_{idx}"
-                    wire.Label = wire_label
-    
-                    wall = Arch.makeWall(wire, length=0, width=w['thickness'], 
-                                         height=w['height'], align="Center")
-                    wall.Label = f"Wall_{w['label']}_{idx}"
-                    count += 1
+                    try:
+                        points = [App.Vector(x, y, 0) for x, y in coords]
+                        wire = Draft.make_wire(points, closed=False, face=False)
+                        wire_label = f"Center_{w['label']}_{idx}"
+                        wire.Label = wire_label
+        
+                        wall = Arch.makeWall(wire, length=0, width=w['thickness'], 
+                                             height=w['height'], align="Center")
+                        wall.Label = f"Wall_{w['label']}_{idx}"
+                        count += 1
+                    except Exception:
+                        skipped += 1
+                    
+                    # 매 10개마다 GUI 갱신 (응답 없음 방지)
+                    if (count + skipped) % 10 == 0:
+                        Gui.updateGui()
                     
                 # 원본 선들 가리기
                 for obj in target_objs:
@@ -526,11 +557,15 @@ def process_cli_command(ui_instance, cmd_text):
                         
                 safe_recompute(doc)
                 Gui.updateGui()
-                log(f"✅ 성공! 화면의 선들을 분석하여 {count}개의 스마트 벽체를 세웠습니다.")
+                log(f"✅ 성공! {count}개의 스마트 벽체 생성 완료. (짧은 조각 {skipped}개 제외)")
             except Exception as e:
                 log(f"❌ 중심선 추출 엔진 실행 중 오류 발생: {e}")
                 import traceback
                 log(traceback.format_exc())
+                # Debug log 경로 출력
+                _debug_log = os.path.join(HERE, "debug_extractors.log")
+                if os.path.exists(_debug_log):
+                    log(f"📋 디버그 로그 확인: {_debug_log}")
         else:
             # 기둥 등 다른 타입은 기존 다각형 폴백 방식 사용
             log("⏳ 기둥 빌드는 기존 다각형 다각형 영역 추출 방식으로 진행합니다...")

@@ -26,16 +26,25 @@ def get_lines_from_fc_layer(doc, layer_name, only_visible=True):
     Returns: list of ((x1, y1), (x2, y2)) and the list of source objects.
     """
     target_objs = []
+    
+    # 1. 1순위: 그룹 이름이 정확히 layer_name과 일치하는 경우
     for obj in doc.Objects:
-        # Check if it's a group
-        if (layer_name in obj.Label or layer_name in obj.Name) and hasattr(obj, "Group"):
-            target_objs.extend(list(obj.Group))
+        if (obj.Label == layer_name or obj.Name == layer_name.replace("-", "_")) and hasattr(obj, "Group"):
+            # 그룹 내의 객체들 중 3D 벽체/기둥이 아닌 것만 수집
+            for child in obj.Group:
+                if not any(child.Name.startswith(prefix) for prefix in ["Wall_", "Col_", "Center_", "BaseSolid_"]):
+                    target_objs.append(child)
             break
             
+    # 2. 2순위: 단일 객체의 이름이 정확히 일치하거나, layer_name을 포함하는 2D 객체들
     if not target_objs:
-        # Fallback to loose matching
         for obj in doc.Objects:
-            if layer_name in obj.Label or layer_name in obj.Name:
+            # 이미 생성된 3D 객체는 무조건 스킵
+            if any(obj.Name.startswith(prefix) for prefix in ["Wall_", "Col_", "Center_", "BaseSolid_"]):
+                continue
+                
+            # 이름이 정확히 일치하거나, 느슨한 포함 관계 허용
+            if layer_name == obj.Label or layer_name.replace("-", "_") == obj.Name or layer_name in obj.Label:
                 if getattr(obj, "Shape", None) and obj.Shape.Edges:
                     target_objs.append(obj)
                     
@@ -49,9 +58,12 @@ def get_lines_from_fc_layer(doc, layer_name, only_visible=True):
             continue
             
         for ed in sh.Edges:
+            if ed.Length < 50: # Filter out tiny hatch lines and noise
+                continue
+                
             is_line = False
             if hasattr(ed, "Curve") and ed.Curve:
-                if getattr(ed.Curve, "TypeId", "") == "Part::GeomLine":
+                if "Line" in getattr(ed.Curve, "TypeId", ""):
                     is_line = True
             
             if is_line:
@@ -71,11 +83,20 @@ def get_lines_from_fc_layer(doc, layer_name, only_visible=True):
                     else:
                         continue
                         
-            for i in range(len(pts) - 1):
-                a = (round(pts[i].x, 1), round(pts[i].y, 1))
-                b = (round(pts[i+1].x, 1), round(pts[i+1].y, 1))
+            if is_line:
+                a = (round(pts[0].x, 1), round(pts[0].y, 1))
+                b = (round(pts[-1].x, 1), round(pts[-1].y, 1))
                 if a != b:
                     segs.append((a, b))
+            else:
+                curve_pts = tuple((round(p.x, 1), round(p.y, 1)) for p in pts)
+                # Remove consecutive duplicates
+                clean_pts = []
+                for p in curve_pts:
+                    if not clean_pts or clean_pts[-1] != p:
+                        clean_pts.append(p)
+                if len(clean_pts) > 1:
+                    segs.append(tuple(clean_pts))
                     
     return segs, target_objs
 

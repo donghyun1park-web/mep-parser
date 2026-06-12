@@ -15,8 +15,8 @@ def pair_rect(s1, s2, pair_min=30, pair_max=800, ovl_min=0.1):
     can form a parallel wall segment. If so, returns the 4 corner points of the wall.
     Includes corner filling logic.
     """
-    a, b = s1
-    c, d = s2
+    a, b = s1[0], s1[-1]
+    c, d = s2[0], s2[-1]
     ux, uy = dv(a, b)
     cx_dir, cy_dir = dv(c, d)
     
