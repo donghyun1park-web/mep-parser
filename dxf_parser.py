@@ -32,6 +32,8 @@ if sys.stdout.encoding.lower() != 'utf-8':
 
 import ezdxf
 
+from element_id import raw_entity_sig, element_eid
+
 try:
     from shapely.geometry import Point, Polygon
     HAS_SHAPELY = True
@@ -61,6 +63,11 @@ DEFAULT_BLOCK_RULES = [
 ]
 # [Phase 2.7] MEP 카테고리 (벽 평행선 검출 제외, z·치수 주석 부착 대상)
 MEP_CATEGORIES = ("pipe", "duct", "tray", "equipment")
+# [라운드트립] element_id.element_eid 의 geom_prefix — 카테고리별 EID 접두
+ELEMENT_EID_PREFIX = {
+    "wall": "w", "column": "c", "slab": "s", "zone": "z", "opening": "o",
+    "pipe": "p", "duct": "d", "tray": "t", "equipment": "e",
+}
 DEFAULT_PARAMS = {
     "wall": {"width": 200.0, "height": 2800.0},
     "column": {"height": 3000.0},
@@ -151,36 +158,44 @@ def _bulge_points(x1, y1, x2, y2, bulge):
              ccy + r * math.sin(a0 + (a1 - a0) * i / n)) for i in range(n + 1)]
 
 
+def _tag_sig(rec):
+    """레코드에 원본 raw 시그니처 부착(EID 산정용). element_id.raw_entity_sig 사용."""
+    if rec is not None:
+        rec["_sigs"] = [raw_entity_sig(rec)]
+    return rec
+
+
 def entity_to_record(e, scale):
-    """DXF 엔티티 → 정규화 레코드 (polyline/circle). 미지원이면 None."""
+    """DXF 엔티티 → 정규화 레코드 (polyline/circle). 미지원이면 None.
+    반환 레코드는 raw_entity_sig 기반 _sigs(EID 산정용 시그니처 목록)를 포함한다."""
     t = e.dxftype()
     layer = getattr(e.dxf, "layer", "")
     if t == "LINE":
         s, d = e.dxf.start, e.dxf.end
-        return {"kind": "polyline", "closed": False, "layer": layer,
-                "points": [[s.x * scale, s.y * scale], [d.x * scale, d.y * scale]]}
+        return _tag_sig({"kind": "polyline", "closed": False, "layer": layer,
+                "points": [[s.x * scale, s.y * scale], [d.x * scale, d.y * scale]]})
     if t == "LWPOLYLINE":
         pts, closed = lwpolyline_points(e)
-        return {"kind": "polyline", "closed": closed, "layer": layer,
-                "points": [[p[0] * scale, p[1] * scale] for p in pts]}
+        return _tag_sig({"kind": "polyline", "closed": closed, "layer": layer,
+                "points": [[p[0] * scale, p[1] * scale] for p in pts]})
     if t == "POLYLINE":
         pts = [[v.dxf.location.x * scale, v.dxf.location.y * scale] for v in e.vertices]
-        return {"kind": "polyline", "closed": e.is_closed, "layer": layer, "points": pts}
+        return _tag_sig({"kind": "polyline", "closed": e.is_closed, "layer": layer, "points": pts})
     if t == "CIRCLE":
         c = e.dxf.center
-        return {"kind": "circle", "center": [c.x * scale, c.y * scale],
-                "radius": e.dxf.radius * scale, "layer": layer}
+        return _tag_sig({"kind": "circle", "center": [c.x * scale, c.y * scale],
+                "radius": e.dxf.radius * scale, "layer": layer})
     if t == "ARC":
         c = e.dxf.center
         pts = arc_to_points(c.x, c.y, e.dxf.radius, e.dxf.start_angle, e.dxf.end_angle)
         # arc 식별자 보존: 문 스윙 호 판별(classify_geometry)에 사용
-        return {"kind": "polyline", "closed": False, "layer": layer, "from_arc": True,
+        return _tag_sig({"kind": "polyline", "closed": False, "layer": layer, "from_arc": True,
                 "arc_radius": e.dxf.radius * scale,
-                "points": [[p[0] * scale, p[1] * scale] for p in pts]}
+                "points": [[p[0] * scale, p[1] * scale] for p in pts]})
     if t == "SPLINE":
         pts = [[p[0] * scale, p[1] * scale] for p in e.control_points]
-        return ({"kind": "polyline", "closed": e.closed, "layer": layer,
-                 "points": pts} if pts else None)
+        return (_tag_sig({"kind": "polyline", "closed": e.closed, "layer": layer,
+                 "points": pts}) if pts else None)
     return None
 
 
@@ -232,7 +247,7 @@ def _box_record(cx, cy, w, h, rot_deg):
     ca, sa = math.cos(a), math.sin(a)
     pts = [[round(cx + x * ca - y * sa, 3), round(cy + x * sa + y * ca, 3)]
            for x, y in corners]
-    return {"kind": "polyline", "closed": True, "points": pts}
+    return _tag_sig({"kind": "polyline", "closed": True, "points": pts})
 
 
 def insert_to_records(insert, scale, category, attrs):
@@ -266,8 +281,8 @@ def insert_to_records(insert, scale, category, attrs):
         circ = [r for r in exploded if r["kind"] == "circle"]
         if circ:
             return circ
-        return [{"kind": "circle", "center": [round(cx, 3), round(cy, 3)],
-                 "radius": round((size or 900.0) * scale / 2.0, 3)}]
+        return [_tag_sig({"kind": "circle", "center": [round(cx, 3), round(cy, 3)],
+                 "radius": round((size or 900.0) * scale / 2.0, 3)})]
     if category == "slab":
         # 계단코어 등: 닫힌 폴리라인(윤곽선)만 슬래브로. 내부 LINE들(A-STAIR 등) 제외.
         closed = [r for r in exploded
@@ -342,6 +357,7 @@ def join_connected_lines(wall_records):
             pts0 = wall_records[start]["points"]
             chain_pts = [list(pts0[0]), list(pts0[1])]
             chain_seen = {ptkey(chain_pts[0]), ptkey(chain_pts[1])}
+            chain_idxs = [start]
 
             # tail 연장
             while True:
@@ -357,6 +373,7 @@ def join_connected_lines(wall_records):
                 visited.add(j)
                 chain_pts.append(new_pt)
                 chain_seen.add(ptkey(new_pt))
+                chain_idxs.append(j)
 
             # head 연장
             while True:
@@ -372,10 +389,13 @@ def join_connected_lines(wall_records):
                 visited.add(j)
                 chain_pts.insert(0, new_pt)
                 chain_seen.add(ptkey(new_pt))
+                chain_idxs.append(j)
 
             nr = copy.deepcopy(wall_records[start])
             nr["points"] = chain_pts
             nr["closed"] = False
+            nr["_sigs"] = [sig for idx in chain_idxs
+                           for sig in wall_records[idx].get("_sigs", [])]
             joined.append(nr)
 
     # keep_idx 레코드(LWPOLYLINE 등) + 새 joined 레코드
@@ -402,6 +422,7 @@ def _wall_segments(wall_records):
                 continue
             segs.append({"p1": a, "p2": b, "dir": (ux, uy), "len": ln,
                          "src": idx, "layer": rec.get("layer", ""),
+                         "sigs": rec.get("_sigs", []),
                          "overrides": rec.get("overrides", {}),
                          "z_base": rec.get("z_base", 0.0)})
     return segs
@@ -444,6 +465,7 @@ def _merge_collinear_segments(segs, gap_tol=None):
                 ux, uy, ln = _seg_dir(a, bb)
                 cur = {"p1": a, "p2": bb, "dir": (ux, uy), "len": ln,
                        "src": cur.get("src"), "layer": cur.get("layer", ""),
+                       "sigs": cur.get("sigs", []) + nxt.get("sigs", []),
                        "overrides": cur.get("overrides") or nxt.get("overrides", {}),
                        "z_base": cur.get("z_base", 0.0)}
             else:
@@ -539,6 +561,7 @@ def detect_wall_pairs(wall_records, params):
                     "needs_review": False, "z_base": zb,
                     "layer": segs[i].get("layer", ""),
                     "seg_length": round(seg_len, 1),
+                    "_sigs": segs[i].get("sigs", []) + segs[j].get("sigs", []),
                     **({"overrides": ov} if ov else {})})
     for k, s in enumerate(segs):
         if k in matched:
@@ -552,6 +575,7 @@ def detect_wall_pairs(wall_records, params):
                     "needs_review": True, "z_base": s.get("z_base", 0.0),
                     "layer": s.get("layer", ""),
                     "seg_length": round(seg_len, 1),
+                    "_sigs": list(s.get("sigs", [])),
                     **({"overrides": s["overrides"]} if s["overrides"] else {})})
 
     # ② 닫힌 폴리선: 원본 레코드 그대로 추가 (pairing="closed" 마킹만)
@@ -608,6 +632,7 @@ def repair_single_walls(wall_records, params):
                     "needs_review": False, "z_base": segs[i].get("z_base", 0.0),
                     "layer": segs[i].get("layer", ""),
                     "seg_length": round(seg_len, 1),
+                    "_sigs": segs[i].get("sigs", []) + segs[j].get("sigs", []),
                     **({"overrides": ov} if ov else {})})
 
     # face-style 여부: 기존 paired + 2차 페어링으로 생긴 paired 합으로 판단
@@ -653,6 +678,7 @@ def repair_single_walls(wall_records, params):
                         "needs_review": True, "z_base": s.get("z_base", 0.0),
                         "layer": s.get("layer", ""),
                         "seg_length": round(s["len"], 1),
+                        "_sigs": list(s.get("sigs", [])),
                         **({"overrides": ov} if ov else {})})
             continue
         ux, uy = s["dir"]
@@ -681,6 +707,7 @@ def repair_single_walls(wall_records, params):
                     "needs_review": True, "z_base": s.get("z_base", 0.0),
                     "layer": s.get("layer", ""),
                     "seg_length": round(s["len"], 1),
+                    "_sigs": list(s.get("sigs", [])),
                     **({"overrides": ov} if ov else {})})
     return out
 
@@ -744,6 +771,7 @@ def _merge_two_segments(seg1, seg2):
               "pairing": rec1.get("pairing", "single"),
               "needs_review": bool(rec1.get("needs_review") or rec2.get("needs_review")),
               "z_base": rec1.get("z_base", 0.0),  # [4b]
+              "_sigs": rec1.get("_sigs", []) + rec2.get("_sigs", []),
               **({"overrides": ov} if ov else {})}
     return {"c1": a, "c2": b, "rec": merged}
 
@@ -1222,7 +1250,8 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
             "pairing": "closed",
             "layer": layer,
             "z_base": recs[0].get("z_base", 0.0),
-            "overrides": recs[0].get("overrides", {})
+            "overrides": recs[0].get("overrides", {}),
+            "_sigs": [sig for r in recs for sig in r.get("_sigs", [])],
         }
         new_cols.append(merged)
 
@@ -1299,6 +1328,14 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
             result["warnings"].append(
                 f"[계단 의심] 레이어 '{_ly}': 짧은 벽 {_cnt}개 (<{int(_STAIR_LEN_THRESHOLD)}mm). "
                 "계단/장식선이면 layer_map.csv 에서 카테고리를 'slab' 으로 변경하세요.")
+
+    # [라운드트립] 각 요소에 EID 부여 — 원본 raw 엔티티 시그니처 기반(element_id.py).
+    # 파라미터(폭/높이 등) 변경에 불변, grouping이 실제로 바뀔 때만 EID 변경.
+    for _cat, _recs in result["elements"].items():
+        prefix = ELEMENT_EID_PREFIX.get(_cat, _cat[:1])
+        for _rec in _recs:
+            sigs = _rec.pop("_sigs", None) or [raw_entity_sig(_rec)]
+            _rec["eid"] = element_eid(prefix, sigs)
 
     return result
 
