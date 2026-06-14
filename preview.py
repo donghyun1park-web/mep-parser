@@ -17,10 +17,42 @@ preview.py — FreeCAD 없는 즉석 3D 미리보기 + 클릭 수정 루프
   python dxf_parser.py plan.dxf -m layer_map.csv -o geometry.json --edits edits.json
 """
 import argparse
+import base64
 import json
 import os
 import sys
 import webbrowser
+
+_VENDOR_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor")
+# CDN 폴백(vendor 없을 때). 오프라인 현장이면 vendor/ 동봉으로 무인터넷 동작.
+_CDN_IMPORTMAP = """<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+}}
+</script>"""
+
+
+def _data_url(path):
+    with open(path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("ascii")
+    return "data:text/javascript;base64," + b64
+
+
+def importmap_section():
+    """vendor/three.module.js + OrbitControls.js 있으면 base64 data-URL importmap
+    (완전 오프라인 단일 HTML). 없으면 CDN importmap 폴백."""
+    three = os.path.join(_VENDOR_DIR, "three.module.js")
+    orbit = os.path.join(_VENDOR_DIR, "OrbitControls.js")
+    if os.path.exists(three) and os.path.exists(orbit):
+        imports = {
+            "three": _data_url(three),
+            "three/addons/controls/OrbitControls.js": _data_url(orbit),
+        }
+        return ('<script type="importmap">\n'
+                + json.dumps({"imports": imports})
+                + "\n</script>")
+    return _CDN_IMPORTMAP
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     try:
@@ -65,7 +97,9 @@ def build_html(data):
     data_json = json.dumps(payload, ensure_ascii=False)
     # JS 안전: </script> 분리
     data_json = data_json.replace("</", "<\\/")
-    return _TEMPLATE.replace("/*__DATA__*/null", data_json)
+    html = _TEMPLATE.replace("/*__DATA__*/null", data_json)
+    html = html.replace("<!--__IMPORTMAP__-->", importmap_section())
+    return html
 
 
 def load_data(path, layer_map=None, block_map=None):
@@ -148,7 +182,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
       <button id="bwire">와이어</button>
     </div>
     <div id="legend"></div>
-    <div id="err">three.js 로드 실패(인터넷 필요). 오프라인이면 사내망/CDN 확인.</div>
+    <div id="err">three.js 로드 실패. (CDN 모드면 인터넷 필요 · 오프라인 모드면 vendor/ 동봉 확인)</div>
   </div>
   <div id="panel">
     <h2>3D 미리보기 <span class="muted" id="src"></span></h2>
@@ -174,12 +208,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<script type="importmap">
-{ "imports": {
-  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
-}}
-</script>
+<!--__IMPORTMAP__-->
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';

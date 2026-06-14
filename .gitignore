@@ -7,6 +7,8 @@ __pycache__/
 *.geometry.json
 geometry.json
 *.ai_cache.json
+*_preview.html
+edits.json
 _mep_tmp_out.*
 *_model.FCStd
 *_model.ifc
