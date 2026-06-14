@@ -23,7 +23,12 @@ import os
 import sys
 import webbrowser
 
-_VENDOR_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor")
+def _vendor_dir():
+    """three.js 동봉 폴더. PyInstaller onefile 이면 sys._MEIPASS, 아니면 소스 dir."""
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, "vendor")
+
+
 # CDN 폴백(vendor 없을 때). 오프라인 현장이면 vendor/ 동봉으로 무인터넷 동작.
 _CDN_IMPORTMAP = """<script type="importmap">
 { "imports": {
@@ -42,8 +47,9 @@ def _data_url(path):
 def importmap_section():
     """vendor/three.module.js + OrbitControls.js 있으면 base64 data-URL importmap
     (완전 오프라인 단일 HTML). 없으면 CDN importmap 폴백."""
-    three = os.path.join(_VENDOR_DIR, "three.module.js")
-    orbit = os.path.join(_VENDOR_DIR, "OrbitControls.js")
+    vd = _vendor_dir()
+    three = os.path.join(vd, "three.module.js")
+    orbit = os.path.join(vd, "OrbitControls.js")
     if os.path.exists(three) and os.path.exists(orbit):
         imports = {
             "three": _data_url(three),
@@ -54,7 +60,8 @@ def importmap_section():
                 + "\n</script>")
     return _CDN_IMPORTMAP
 
-if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+if sys.stdout is not None and getattr(sys.stdout, "encoding", None) \
+        and sys.stdout.encoding.lower() != "utf-8":
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:

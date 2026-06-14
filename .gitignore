@@ -15,6 +15,12 @@ _mep_tmp_out.*
 *.FCStd
 *.ifc
 
+# PyInstaller 빌드 산출물
+build/
+dist/
+build_log.txt
+selftest_result.txt
+
 # 개인 설정
 .env
 *.env

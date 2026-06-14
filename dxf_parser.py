@@ -24,7 +24,9 @@ import re
 import sys
 
 # Windows 한글 출력 크래시 방지
-if sys.stdout.encoding.lower() != 'utf-8':
+# (PyInstaller windowed/.exe 에서는 sys.stdout 이 None → None-safe 가드)
+if sys.stdout is not None and getattr(sys.stdout, "encoding", None) \
+        and sys.stdout.encoding.lower() != 'utf-8':
     try:
         sys.stdout.reconfigure(encoding='utf-8')
     except Exception:

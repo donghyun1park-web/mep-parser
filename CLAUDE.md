@@ -103,6 +103,31 @@ MEP_GEOMETRY=geometry.json MEP_OUT=out_model freecadcmd freecad_builder.py
 # → out_model.FCStd, out_model.ifc
 ```
 
+### 6. 3D 미리보기 (FreeCAD 불필요, 무설치·오프라인)
+```
+python preview.py geometry.json            # 파싱된 json
+python preview.py sample_plan.dxf -m layer_map.csv -b block_map.csv  # DXF 즉시
+# → <입력>_preview.html (three.js, 카테고리·신뢰도 색 + 클릭 수정)
+```
+브라우저에서 요소 클릭 → 카테고리/치수 수정 → `edits.json` 다운로드 →
+재파싱 시 EID로 재적용(수정 보존):
+```
+python dxf_parser.py plan.dxf -m layer_map.csv -o geometry.json --edits edits.json
+```
+
+### 7. 단일 .exe 빌드 (현장 PC = Python 불필요)
+개발 PC(Python 3.11 권장)에서 1회 빌드 → 현장 PC 더블클릭 실행.
+```
+build_exe.bat            # = py -3.11 -m pip install ezdxf shapely pyinstaller
+                         #   + py -3.11 -m PyInstaller mep_parser.spec --noconfirm
+# → dist\MEP-Parser.exe (onefile, 윈도우 GUI, ~31MB)
+dist\MEP-Parser.exe --selftest   # 헤드리스 스모크(번들 건전성, exit 0=정상)
+```
+- `mep_parser.spec`: layer/block csv·freecad_builder.py·sample·vendor 동봉,
+  ezdxf/shapely collect_all, matplotlib/anthropic/vision 제외(graceful 폴백).
+- 런타임 리소스는 `resource_path()`(`sys._MEIPASS`)로, 편집 csv는 `user_csv()`로
+  exe 폴더에 영구 사본 보장. windowed(.exe)는 `sys.stdout=None` → None-safe 가드 필수.
+
 ## zone 귀속 방식
 zone은 별도 파일 없이 **DXF의 `A-ZONE` 레이어**(closed LWPOLYLINE)를 직접 사용.  
 shapely point-in-polygon으로 각 요소의 중심이 어느 구역인지 자동 판정 → `"zone": 0` (인덱스).

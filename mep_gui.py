@@ -17,7 +17,9 @@ import glob
 import io
 import json
 import os
+import shutil
 import subprocess
+import sys
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -25,6 +27,28 @@ from tkinter import filedialog, messagebox, ttk
 import dxf_parser as P
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def resource_path(rel):
+    """동봉 리소스(읽기 전용) 경로. PyInstaller onefile 이면 sys._MEIPASS(임시 추출
+    dir), 아니면 소스 디렉터리. layer_map/block_map/freecad_builder.py/vendor 용."""
+    base = getattr(sys, "_MEIPASS", None) or HERE
+    return os.path.join(base, rel)
+
+
+def user_csv(name):
+    """사용자 편집 가능한 CSV 경로. frozen(.exe) 이면 exe 폴더에 영구 사본 보장
+    (없으면 번들본 복사) → 편집·저장이 재시작 후에도 유지. 소스 실행이면 그대로."""
+    if not getattr(sys, "frozen", False):
+        return os.path.join(HERE, name)
+    dst = os.path.join(os.path.dirname(sys.executable), name)
+    if not os.path.exists(dst):
+        try:
+            shutil.copyfile(resource_path(name), dst)
+        except Exception:
+            return resource_path(name)
+    return dst
+
 
 CATEGORIES = ["wall", "column", "slab", "zone", "opening", "pipe", "duct", "tray"]
 
@@ -256,8 +280,8 @@ class App:
         self.geom_path = None     # path to saved geometry.json
 
         self.v_dxf = tk.StringVar()
-        self.v_map = tk.StringVar(value=os.path.join(HERE, "layer_map.csv"))
-        self.v_block = tk.StringVar(value=os.path.join(HERE, "block_map.csv"))
+        self.v_map = tk.StringVar(value=user_csv("layer_map.csv"))
+        self.v_block = tk.StringVar(value=user_csv("block_map.csv"))
         self.v_llm = tk.BooleanVar(value=bool(os.environ.get("ANTHROPIC_API_KEY")))
         self.v_vision = tk.BooleanVar(value=False)  # Vision 폴백(실험적, 기본 OFF)
 
@@ -353,7 +377,7 @@ class App:
         """Open the layer map editor popup."""
         csv_path = self.v_map.get().strip()
         if not csv_path:
-            csv_path = os.path.join(HERE, "layer_map.csv")
+            csv_path = user_csv("layer_map.csv")
             self.v_map.set(csv_path)
         unmapped = []
         if self.data:
@@ -555,10 +579,13 @@ class App:
         self.btn_build.state(["disabled"])
         self._log(f"Build started... (freecadcmd) -> {out}.FCStd / .ifc")
 
+        builder_py = resource_path("freecad_builder.py")
+        build_cwd = os.path.dirname(builder_py)
+
         def run():
             try:
-                r = subprocess.run([fc, os.path.join(HERE, "freecad_builder.py")],
-                                   cwd=HERE, env=env, capture_output=True,
+                r = subprocess.run([fc, builder_py],
+                                   cwd=build_cwd, env=env, capture_output=True,
                                    text=True, encoding="utf-8", errors="replace",
                                    timeout=900)
                 self.root.after(0, lambda: self._build_done(r, out))
@@ -613,7 +640,54 @@ class App:
         self.btn_build.state(["!disabled"])
 
 
+def _selftest():
+    """헤드리스 자가검증(번들 .exe 스모크 테스트용). GUI 창 없이:
+    동봉 리소스 해석 → 샘플 DXF 파싱 → 미리보기 HTML 생성까지 확인 후 종료.
+    결과/트레이스백을 selftest_result.txt 에도 기록(windowed exe 는 stdout 없음).
+    번들 누락(모듈/리소스)이 있으면 비정상 종료(exit 1)로 드러난다."""
+    import traceback
+    base = (os.path.dirname(sys.executable)
+            if getattr(sys, "frozen", False) else HERE)
+    logf = os.path.join(base, "selftest_result.txt")
+    try:
+        import preview as PV
+        sample = resource_path("sample_plan.dxf")
+        rules = P.load_layer_map(resource_path("layer_map.csv"))
+        brules = P.load_layer_map(resource_path("block_map.csv"))
+        data = P.parse(sample, rules, brules)
+        n = sum(len(v) for v in data["elements"].values())
+        html = PV.build_html(data)
+        offline = "data:text/javascript;base64" in html
+        msg = (f"[selftest] parse OK: elements={n}, "
+               f"shapely={'on' if P.HAS_SHAPELY else 'off'}\n"
+               f"[selftest] preview OK: html={len(html)} bytes, "
+               f"offline_three={offline}\n[selftest] PASS\n")
+        rc = 0
+    except Exception:
+        msg = "[selftest] FAIL\n" + traceback.format_exc()
+        rc = 1
+    try:
+        with open(logf, "w", encoding="utf-8") as f:
+            f.write(msg)
+    except Exception:
+        pass
+    print(msg)
+    return rc
+
+
+def _guard_std_streams():
+    """PyInstaller windowed(.exe, --noconsole) 모드에서 sys.stdout/stderr 가 None.
+    파서 등 코드 곳곳의 print() 가 None 에 쓰다 크래시 → 버퍼로 치환해 무력화."""
+    if sys.stdout is None:
+        sys.stdout = io.StringIO()
+    if sys.stderr is None:
+        sys.stderr = io.StringIO()
+
+
 def main():
+    _guard_std_streams()
+    if "--selftest" in sys.argv:
+        sys.exit(_selftest())
     root = tk.Tk()
     App(root)
     root.mainloop()
