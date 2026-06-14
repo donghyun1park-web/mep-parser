@@ -19,7 +19,9 @@
 | `layer_map.csv` | 레이어명 정규식 → 카테고리·치수 매핑 |
 | `block_map.csv` | **블록(INSERT)명 정규식 → 카테고리·치수 매핑** (Phase 2) |
 | `freecad_builder.py` | geometry.json → FreeCAD .FCStd + .ifc |
-| `mep_gui.py` | **현장용 GUI** (Phase 2.5): 파일선택→스캔→파싱→needs_review 수정→3D빌드 (tkinter, 무의존) |
+| `element_id.py` | **EID(원본 raw 좌표 기반 식별자) + 수정 사이드카 라운드트립** — 파라미터 변경에 불변, grouping 변경 시에만 EID 변경. `apply_edits()`로 재파싱 후 수정 보존. |
+| `preview.py` | **FreeCAD 없는 즉석 3D 미리보기** — geometry.json/DXF → 자립 `*_preview.html`(three.js). 카테고리·신뢰도 색 오버레이 + 요소 클릭 수정→`edits.json` 다운로드(EID 기반). |
+| `mep_gui.py` | **현장용 GUI** (Phase 2.5): 파일선택→스캔→파싱→**3D 미리보기(브라우저)**→needs_review 수정→3D빌드 (tkinter, 무의존) |
 | `run_gui.bat` | GUI 더블클릭 런처 (CLI 불필요) |
 | `make_sample_dxf.py` | 테스트용 샘플 DXF 생성 (A-WALL/A-COLS/A-SLAB/A-ZONE) |
 | `sample_plan.dxf` | 단선 벽 샘플 (회귀용) |

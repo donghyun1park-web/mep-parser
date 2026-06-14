@@ -1699,6 +1699,8 @@ def main():
                     help="AI 자동적용 신뢰도 임계값 (기본 0.8)")
     ap.add_argument("--auto-map", action="store_true",
                     help="신뢰도 높은(0.8이상) 제안을 layer_map.csv에 자동 추가")
+    ap.add_argument("--edits", default=None,
+                    help="EID 기반 수정 사이드카(edits.json) 적용 — preview.py 다운로드 파일")
     args = ap.parse_args()
 
     if args.checklist:
@@ -1718,6 +1720,22 @@ def main():
     data = parse(args.dxf, rules, block_rules,
                  use_ai=args.llm, use_vision=args.vision,
                  ai_threshold=args.ai_threshold)
+
+    # [라운드트립] EID 기반 수정 사이드카 적용 (preview.py 가 만든 edits.json).
+    # 재파싱으로 새로 산정된 elements 에, 저장된 사용자 수정을 EID 로 재적용한다.
+    if args.edits:
+        if os.path.exists(args.edits):
+            with open(args.edits, encoding="utf-8") as f:
+                _edits = json.load(f)
+            from element_id import apply_edits
+            _rep = apply_edits(data["elements"], _edits)
+            data["edits_report"] = _rep
+            print(f"  [edits] 적용 {len(_rep['applied'])}건, "
+                  f"고아(요소 사라짐) {len(_rep['orphaned'])}건")
+            for _oid in _rep["orphaned"]:
+                print(f"    [고아] {_oid} — grouping 변경으로 매칭 실패(검토 필요)")
+        else:
+            print(f"  [edits] 파일 없음: {args.edits} (스킵)")
 
     if args.auto_map and args.map and data.get("suggestions"):
         appended_count = 0

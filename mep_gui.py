@@ -287,6 +287,8 @@ class App:
         f.pack(fill="x", padx=8)
         ttk.Button(f, text="(1) Scan drawing", command=self._do_scan).pack(side="left", padx=4)
         ttk.Button(f, text="(2) Parse -> geometry.json", command=self._do_parse).pack(side="left", padx=4)
+        ttk.Button(f, text="(3) 3D 미리보기(브라우저)",
+                   command=self._do_preview).pack(side="left", padx=4)
         self.btn_build = ttk.Button(f, text="(4) 3D Build (FreeCAD)", command=self._do_build)
         self.btn_build.pack(side="left", padx=4)
         if find_freecadcmd() is None:
@@ -517,6 +519,27 @@ class App:
         if self.geom_path and self.data:
             with open(self.geom_path, "w", encoding="utf-8") as f:
                 json.dump(self.data, f, ensure_ascii=False, indent=2)
+
+    def _do_preview(self):
+        """FreeCAD 없이 브라우저로 즉석 3D 미리보기(preview.py 재사용).
+        파싱 결과(self.data)를 자립 HTML 로 만들고 기본 브라우저로 연다."""
+        if not self.data:
+            messagebox.showwarning("Check", "먼저 (2) Parse 를 실행하세요.")
+            return
+        try:
+            import webbrowser
+            import preview as PV
+            html = PV.build_html(self.data)
+            base = self.geom_path or os.path.join(HERE, "preview")
+            out = os.path.splitext(base)[0] + "_preview.html"
+            with open(out, "w", encoding="utf-8") as f:
+                f.write(html)
+            self._log(f"3D 미리보기 생성 -> {out} (브라우저에서 열림)")
+            self._log("  요소 클릭 → 카테고리/치수 수정 → edits.json 다운로드 → "
+                      "재파싱 시 --edits 로 적용됨")
+            webbrowser.open("file://" + os.path.abspath(out))
+        except Exception as e:
+            messagebox.showerror("Preview 실패", str(e))
 
     def _do_build(self):
         if not self.geom_path or not os.path.exists(self.geom_path):
