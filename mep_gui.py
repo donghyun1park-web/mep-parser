@@ -313,7 +313,10 @@ class App:
         ttk.Button(f, text="(2) Parse -> geometry.json", command=self._do_parse).pack(side="left", padx=4)
         ttk.Button(f, text="(3) 3D 미리보기(브라우저)",
                    command=self._do_preview).pack(side="left", padx=4)
-        self.btn_build = ttk.Button(f, text="(4) 3D Build (FreeCAD)", command=self._do_build)
+        self.btn_ifc = ttk.Button(f, text="(4) IFC 빌드 (FreeCAD 불필요)",
+                                  command=self._do_ifc_build)
+        self.btn_ifc.pack(side="left", padx=4)
+        self.btn_build = ttk.Button(f, text="(4b) 3D Build (FreeCAD)", command=self._do_build)
         self.btn_build.pack(side="left", padx=4)
         if find_freecadcmd() is None:
             self.btn_build.state(["disabled"])
@@ -564,6 +567,46 @@ class App:
             webbrowser.open("file://" + os.path.abspath(out))
         except Exception as e:
             messagebox.showerror("Preview 실패", str(e))
+
+    def _do_ifc_build(self):
+        """IfcOpenShell 로 geometry.json → .ifc 빌드 (FreeCAD 불필요).
+        저장된 geometry.json(수정 보존)에서 빌드. 백그라운드 스레드로 GUI 반응 유지."""
+        if not self.geom_path or not os.path.exists(self.geom_path):
+            messagebox.showwarning("Check", "먼저 (2) Parse 를 실행하세요.")
+            return
+        try:
+            import ifc_builder  # noqa: F401
+        except ImportError:
+            messagebox.showerror("IFC 빌드 불가",
+                                 "ifcopenshell 미설치.\n  pip install ifcopenshell numpy")
+            return
+        out = os.path.splitext(self.geom_path)[0].replace(".geometry", "") + ".ifc"
+        self.btn_ifc.state(["disabled"])
+        self._log(f"IFC 빌드 시작 (FreeCAD 불필요) → {out}")
+
+        def run():
+            try:
+                import ifc_builder as IB
+                stats = IB.build(self.geom_path, out, storey="Level")
+                self.root.after(0, lambda: self._ifc_done(out, stats))
+            except Exception as e:
+                msg = str(e)
+                self.root.after(0, lambda m=msg: (
+                    self._log(f"[오류] IFC 빌드 실패: {m}"),
+                    self.btn_ifc.state(["!disabled"])))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _ifc_done(self, out, stats):
+        ok = os.path.exists(out)
+        if ok:
+            sz = os.path.getsize(out)
+            self._log(f"✅ IFC 빌드 완료: {out} ({sz//1024}KB)")
+            self._log(f"   walls={stats.get('wall',0)} columns={stats.get('column',0)} "
+                      f"slabs={stats.get('slab',0)} (skipped {stats.get('skip',0)})")
+            self._log("   → Revit/ArchiCAD/BlenderBIM 또는 (3) 3D 미리보기 로 확인")
+        else:
+            self._log("[오류] IFC 파일 생성 실패")
+        self.btn_ifc.state(["!disabled"])
 
     def _do_build(self):
         if not self.geom_path or not os.path.exists(self.geom_path):
