@@ -84,6 +84,10 @@ WALL_PAIR_MIN_MM = 1.0        # 벽 두께 최소. 1mm → 밀착 철골(A-STEEL
 WALL_PAIR_MAX_MM = 500.0      # 벽 두께 최대(이보다 멀면 무관한 선)
 WALL_PAIR_OVERLAP_RATIO = 0.3 # 투영 겹침 최소 비율. 0.5→0.3: 세그먼트 길이 불일치로
                                # 페어링 실패하던 88개 중 상당수 구제.
+WALL_PAIR_CLAIM_FRAC = 0.6    # [interval-greedy] 겹침구간이 이 비율 이상 이미 점유됐으면
+                               # 스킵. 가까운 쌍이 구간 선점(거짓 원거리쌍 방지) + 1:N 면선의
+                               # 잔여 구간은 다음 파트너가 차지(긴 면선↔짧은 면선 다수 해결).
+                               # 실측 지하3층 A-CON: greedy 56% → interval-greedy 85% 커버.
 
 # ── [Phase 4.0] collinear 재병합 튜닝 상수 ───────────────────
 COLLINEAR_ANGLE_TOL_DEG = 2.0  # 같은 직선 판정 사이각(도) — 벽 짝보다 빡빡
@@ -478,7 +482,9 @@ def _merge_collinear_segments(segs, gap_tol=None):
 
 
 def _pair_geometry(sa, sb):
-    """평행 후보 두 세그먼트 → (수직거리, 겹침길이, 중선[[],[]]) 또는 None."""
+    """평행 후보 두 세그먼트 → (수직거리, 겹침길이, 중선[[],[]], sa_t범위, sb_t범위) 또는 None.
+    sa_t=(lo,hi)는 sa.p1 기준 sa.dir 사영, sb_t는 sb.p1 기준 sb.dir 사영.
+    interval-greedy 가 세그먼트별 점유 구간을 추적하는 데 사용(1:N 면선 처리)."""
     o = sa["p1"]
     ux, uy = sa["dir"]
     # 축(u) 투영 스칼라
@@ -501,12 +507,40 @@ def _pair_geometry(sa, sb):
     half = (off[0] * 0.5, off[1] * 0.5)
     c_lo = (o[0] + t_lo * ux + half[0], o[1] + t_lo * uy + half[1])
     c_hi = (o[0] + t_hi * ux + half[0], o[1] + t_hi * uy + half[1])
-    return perp, overlap, [[round(c_lo[0], 3), round(c_lo[1], 3)],
-                           [round(c_hi[0], 3), round(c_hi[1], 3)]]
+    # sb 파라미터 기준 겹침 구간(sb 점유 추적용)
+    ob = sb["p1"]; vx, vy = sb["dir"]
+    pa_lo = (o[0] + t_lo * ux, o[1] + t_lo * uy)
+    pa_hi = (o[0] + t_hi * ux, o[1] + t_hi * uy)
+    sb_a = (pa_lo[0] - ob[0]) * vx + (pa_lo[1] - ob[1]) * vy
+    sb_b = (pa_hi[0] - ob[0]) * vx + (pa_hi[1] - ob[1]) * vy
+    sb_lo, sb_hi = (sb_a, sb_b) if sb_a <= sb_b else (sb_b, sb_a)
+    return (perp, overlap,
+            [[round(c_lo[0], 3), round(c_lo[1], 3)],
+             [round(c_hi[0], 3), round(c_hi[1], 3)]],
+            (t_lo, t_hi), (sb_lo, sb_hi))
+
+
+def _interval_cover_frac(intervals, lo, hi):
+    """[lo,hi] 구간 중 이미 점유(intervals)된 비율. interval-greedy 선점 판정용."""
+    span = hi - lo
+    if span <= 0:
+        return 1.0
+    c = 0.0
+    for a, b in intervals:
+        c += max(0.0, min(hi, b) - max(lo, a))
+    return min(1.0, c / span)
 
 
 def _find_wall_pairs(segs):
-    """그리디 매칭: (i, j, perp, overlap, centerline) 확정쌍 리스트 + 매칭된 인덱스 집합."""
+    """[interval-greedy] 평행쌍 매칭. 거리순(가까운 쌍 우선)으로 받되, 세그먼트 '전체'가
+    아니라 '겹침 구간'만 점유한다. 긴 면선이 구간별로 다른 파트너와 매칭되어 1:N(긴 면선 1개
+    ↔ 짧은 면선 다수)을 해결하고, 각 구간은 가장 가까운 파트너가 선점해 거짓 원거리쌍을 막는다.
+    반환 (pairs, matched):
+      pairs : (i, j, perp, center, conf, fclip). i가 여러 구간이면 여러 번 등장. fclip=면선 i를
+              겹침구간으로 클립한 양 끝점(레코드 points/EID 용 — 동일 좌표 중복 방지).
+      matched: 자기 길이의 CLAIM_FRAC 이상 점유된 세그먼트 집합(=single 로 내보내지 않음).
+    구버전(그리디 1:1) 대비: 지하3층 A-CON 면선커버 56% → 85%, 센터선 총길이는 이상값(면선/2)
+    이하로 유지(거짓 중복 없음). 시그니처는 구버전과 호환(callers 무수정)."""
     candidates = []
     for i in range(len(segs)):
         for j in range(i + 1, len(segs)):
@@ -515,19 +549,31 @@ def _find_wall_pairs(segs):
             geom = _pair_geometry(segs[i], segs[j])
             if geom is None:
                 continue
-            perp, overlap, center = geom
+            perp, overlap, center, ta, tb = geom
             min_len = min(segs[i]["len"], segs[j]["len"])
             if min_len == 0 or overlap < WALL_PAIR_OVERLAP_RATIO * min_len:
                 continue
-            candidates.append((perp, overlap, i, j, center, min_len))
-    candidates.sort(key=lambda c: c[0])  # 가까운 쌍 우선
-    matched, pairs = set(), []
-    for perp, overlap, i, j, center, min_len in candidates:
-        if i in matched or j in matched:
+            candidates.append((perp, overlap, i, j, center, min_len, ta, tb))
+    candidates.sort(key=lambda c: c[0])  # 가까운 쌍 우선 → 구간 선점
+    cov = [[] for _ in segs]             # 세그먼트별 점유 t-구간
+    pairs = []
+    for perp, overlap, i, j, center, min_len, ta, tb in candidates:
+        # 이 겹침구간이 양쪽 모두 이미 충분히 점유됐으면 스킵(가까운 쌍이 이미 처리)
+        if (_interval_cover_frac(cov[i], ta[0], ta[1]) > WALL_PAIR_CLAIM_FRAC and
+                _interval_cover_frac(cov[j], tb[0], tb[1]) > WALL_PAIR_CLAIM_FRAC):
             continue
-        matched.add(i); matched.add(j)
+        cov[i].append(ta); cov[j].append(tb)
         conf = min(1.0, 0.7 + 0.3 * min(1.0, overlap / min_len))
-        pairs.append((i, j, perp, center, round(conf, 3)))
+        # 면선 i 를 겹침구간으로 클립(EID/참조용 points — i 가 여러 쌍이어도 좌표 구분)
+        o = segs[i]["p1"]; ux, uy = segs[i]["dir"]
+        fclip = [[round(o[0] + ta[0] * ux, 3), round(o[1] + ta[0] * uy, 3)],
+                 [round(o[0] + ta[1] * ux, 3), round(o[1] + ta[1] * uy, 3)]]
+        pairs.append((i, j, perp, center, round(conf, 3), fclip))
+    matched = set()
+    for k, s in enumerate(segs):
+        claimed = sum(b - a for a, b in cov[k])
+        if s["len"] > 0 and claimed >= WALL_PAIR_CLAIM_FRAC * s["len"]:
+            matched.add(k)
     return pairs, matched
 
 
@@ -551,12 +597,12 @@ def detect_wall_pairs(wall_records, params):
     pairs, matched = _find_wall_pairs(segs) if segs else ([], set())
     out = []
 
-    for i, j, perp, center, conf in pairs:
+    for i, j, perp, center, conf, fclip in pairs:
         ov = segs[i]["overrides"] or segs[j]["overrides"]
         zb = segs[i].get("z_base", 0.0)
         seg_len = math.hypot(center[1][0]-center[0][0], center[1][1]-center[0][1])
         out.append({"kind": "polyline", "closed": False,
-                    "points": [list(segs[i]["p1"]), list(segs[i]["p2"])],
+                    "points": [list(fclip[0]), list(fclip[1])],
                     "centerline": center,
                     "width_detected": round(perp, 3),
                     "confidence": conf, "pairing": "paired",
@@ -623,11 +669,11 @@ def repair_single_walls(wall_records, params):
     segs = _merge_collinear_segments(_wall_segments(singles))
     pairs, matched = _find_wall_pairs(segs) if segs else ([], set())
     out = list(others)
-    for i, j, perp, center, conf in pairs:
+    for i, j, perp, center, conf, fclip in pairs:
         ov = segs[i]["overrides"] or segs[j]["overrides"]
         seg_len = math.hypot(center[1][0] - center[0][0], center[1][1] - center[0][1])
         out.append({"kind": "polyline", "closed": False,
-                    "points": [list(segs[i]["p1"]), list(segs[i]["p2"])],
+                    "points": [list(fclip[0]), list(fclip[1])],
                     "centerline": center,
                     "width_detected": round(perp, 3),
                     "confidence": round(conf, 3), "pairing": "paired",
