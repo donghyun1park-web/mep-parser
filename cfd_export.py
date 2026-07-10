@@ -38,11 +38,33 @@ def _hdr(cls, obj):
     return _FOAM_HDR.format(cls=cls, obj=obj)
 
 
+# 공기 물성(발열 kW ↔ 온도 변환용). Boussinesq 는 kinematic 이라 ρ0·cp 로 W↔K·m³/s 환산.
+RHO0_AIR = 1.2      # kg/m³ (~20°C)
+CP_AIR = 1005.0     # J/(kg·K)
+RHO_CP = RHO0_AIR * CP_AIR   # 1206 J/(m³·K)
+
+
+def _heat_mode(cfg):
+    """발열 방식 판정.
+    - volume: heat.power_kw 지정 → 바닥층 체적 발열원(fvOptions). 계산서 kW 직결, 에너지 폐합 검증 가능.
+    - surface: heat.floor_T 지정 → 바닥 고정온도(구식, 하위호환).
+    - none: 발열 없음."""
+    heat = cfg.get("heat", {})
+    if heat.get("power_kw") is not None:
+        return {"mode": "volume", "power_w": float(heat["power_kw"]) * 1000.0,
+                "zone_frac": float(heat.get("zone_frac", 0.4))}
+    if heat.get("floor_T") is not None:
+        return {"mode": "surface", "floor_T": heat["floor_T"]}
+    return {"mode": "none"}
+
+
 def _roles(cfg):
-    """config → {face_name: role}. role: wall|heated|inlet|outlet."""
+    """config → {face_name: role}. role: wall|heated|inlet|outlet.
+    발열이 surface(고정온도) 모드일 때만 벽을 heated 로 표시. volume(kW) 모드는
+    벽 전부 단열 → 발열은 체적원으로 주입."""
     roles = {name: base for name, (_, base) in _FACES.items()}
     heat = cfg.get("heat", {})
-    if "wall" in heat:
+    if _heat_mode(cfg)["mode"] == "surface" and "wall" in heat:
         roles[heat["wall"]] = "heated"
     for key in ("inlet", "outlet"):
         spec = cfg.get(key)
@@ -87,6 +109,50 @@ def gen_g(cfg):
     return (_hdr("uniformDimensionedVectorField", "g")
             + "dimensions [0 1 -2 0 0 0 0];\n"
             + f"value ({g[0]} {g[1]} {g[2]});\n")
+
+
+def gen_toposet(cfg):
+    """바닥층 cellZone(heatZone) — 체적 발열원을 넣을 영역. 방 바닥~zone_frac·H 높이."""
+    L, W, H = cfg["room"]["L"], cfg["room"]["W"], cfg["room"]["H"]
+    zh = round(_heat_mode(cfg)["zone_frac"] * H, 4)
+    return (_hdr("dictionary", "topoSetDict") + "actions\n(\n"
+            f"    {{ name heatZone; type cellSet;     action new; source boxToCell; box (0 0 0) ({L} {W} {zh}); }}\n"
+            "    { name heatZone; type cellZoneSet; action new; source setToCellZone; set heatZone; }\n"
+            ");\n")
+
+
+def gen_fvoptions(cfg):
+    """체적 발열원(scalarSemiImplicitSource). Su = P/(ρ0·cp) [K·m³/s], volumeMode absolute.
+    → 총 발열량(계산서 kW)을 정확히 주입, 에너지 폐합 검증의 기준값."""
+    hm = _heat_mode(cfg)
+    su = hm["power_w"] / RHO_CP
+    return (_hdr("dictionary", "fvOptions")
+            + "heatSource\n{\n"
+            "    type            scalarSemiImplicitSource;\n"
+            "    volumeMode      absolute;\n"
+            "    selectionMode   cellZone;\n"
+            "    cellZone        heatZone;\n"
+            f"    injectionRateSuSp {{ T ({su:.6g} 0); }}\n"
+            "}\n")
+
+
+def gen_allrun(need_toposet):
+    """Allrun 생성. 발열 kW 모드면 blockMesh 뒤에 topoSet 단계 추가."""
+    toposet = ('echo "=== topoSet ==="\ntopoSet > log.topoSet 2>&1 || '
+               '{ echo "topoSet FAILED"; tail -20 log.topoSet; exit 1; }\n') if need_toposet else ""
+    return ("#!/bin/sh\n"
+            "# RunFunctions 비의존(apt OpenFOAM 패키지엔 없음): 직접 호출 + 로그 리다이렉트.\n"
+            'cd "${0%/*}" || exit\n'
+            r"APP=$(sed -n 's/^application  *\([A-Za-z][A-Za-z]*\);.*/\1/p' system/controlDict)" + "\n"
+            ': "${APP:=buoyantBoussinesqSimpleFoam}"\n'
+            'echo "=== blockMesh ==="\n'
+            'blockMesh > log.blockMesh 2>&1 || { echo "blockMesh FAILED"; tail -20 log.blockMesh; exit 1; }\n'
+            + toposet
+            + 'echo "=== checkMesh ==="\n'
+            "checkMesh > log.checkMesh 2>&1; grep -E 'Mesh OK|\\*\\*\\*' log.checkMesh | head -3\n"
+            'echo "=== solver ($APP) ==="\n'
+            '"$APP" 2>&1 | tee "log.$APP"\n'
+            'echo "=== done: $APP ==="\n')
 
 
 def _patch_names(roles):
@@ -191,22 +257,6 @@ def gen_0(cfg, roles):
     return files
 
 
-ALLRUN = """#!/bin/sh
-# RunFunctions 비의존(apt OpenFOAM 패키지엔 없음): 직접 호출 + 로그 리다이렉트.
-# solver명은 controlDict의 application 에서 읽어 향후 템플릿에도 일반 적용.
-cd "${0%/*}" || exit
-APP=$(sed -n 's/^application  *\\([A-Za-z][A-Za-z]*\\);.*/\\1/p' system/controlDict)
-: "${APP:=buoyantBoussinesqSimpleFoam}"
-echo "=== blockMesh ==="
-blockMesh > log.blockMesh 2>&1 || { echo "blockMesh FAILED"; tail -20 log.blockMesh; exit 1; }
-echo "=== checkMesh ==="
-checkMesh > log.checkMesh 2>&1; grep -E 'Mesh OK|\\*\\*\\*' log.checkMesh | head -3
-echo "=== solver ($APP) ==="
-"$APP" 2>&1 | tee "log.$APP"
-echo "=== done: $APP ==="
-"""
-
-
 def build_case(cfg, out_dir):
     roles = _roles(cfg)
     if not os.path.isdir(TEMPLATE_DIR):
@@ -235,11 +285,16 @@ def build_case(cfg, out_dir):
     _w(os.path.join(out_dir, "constant", "g"), gen_g(cfg))
     for name, txt in gen_0(cfg, roles).items():
         _w(os.path.join(out_dir, "0", name), txt)
-    _w(os.path.join(out_dir, "Allrun"), ALLRUN)
+    # 발열 kW 모드: 바닥층 cellZone + 체적 발열원
+    hm = _heat_mode(cfg)
+    if hm["mode"] == "volume":
+        _w(os.path.join(out_dir, "system", "topoSetDict"), gen_toposet(cfg))
+        _w(os.path.join(out_dir, "constant", "fvOptions"), gen_fvoptions(cfg))
+    _w(os.path.join(out_dir, "Allrun"), gen_allrun(need_toposet=(hm["mode"] == "volume")))
     os.chmod(os.path.join(out_dir, "Allrun"), 0o755)
     # 생성 요약(리포트에서 가정값 표기용)
     _w(os.path.join(out_dir, "cfd_case_meta.json"),
-       json.dumps({"config": cfg, "mesh": meshinfo, "roles": roles},
+       json.dumps({"config": cfg, "mesh": meshinfo, "roles": roles, "heat": hm},
                   ensure_ascii=False, indent=2))
     return meshinfo, roles
 
@@ -276,7 +331,7 @@ def _opening_wall(cx, cy, ext, tol):
 
 def cfg_from_geometry(geom, zone=None, bbox=None, height=None, cell=0.3,
                       supply="x0", exhaust="xL", supply_u=0.05, supply_T=293.0,
-                      floor_T=313.0, init_T=300.0, endTime=400, name=None):
+                      floor_T=313.0, power_kw=None, init_T=300.0, endTime=400, name=None):
     """geometry.json(dict) + 선택(zone/bbox) → build_case 호환 cfg + 진단정보.
     반환: (cfg, info)  info={extent_mm, source, openings_by_wall, warnings}"""
     el = geom.get("elements", {})
@@ -335,8 +390,10 @@ def cfg_from_geometry(geom, zone=None, bbox=None, height=None, cell=0.3,
         "inlet": {"wall": supply, "U": [supply_u, 0, 0], "T": supply_T,
                   "_desc": f"급기(가정) — {supply} 벽"},
         "outlet": {"wall": exhaust, "_desc": f"배기(가정) — {exhaust} 벽"},
-        "heat": {"wall": "floor", "floor_T": floor_T,
-                 "_desc": "발열 바닥(가정) = 장비 총발열 단순화"},
+        # 발열: power_kw 주면 체적 발열원(계산서 kW 직결·에너지폐합 검증), 아니면 바닥 고정온도
+        "heat": ({"power_kw": power_kw, "_desc": f"장비 총발열(가정) {power_kw} kW = 바닥층 체적발열원"}
+                 if power_kw is not None
+                 else {"wall": "floor", "floor_T": floor_T, "_desc": "발열 바닥(가정) = 장비 총발열 단순화"}),
         "init": {"T": init_T},
         "endTime": endTime,
     }
@@ -363,7 +420,8 @@ def main():
     ap.add_argument("--supply", default="x0", help="급기 벽 (x0|xL|y0|yW)")
     ap.add_argument("--exhaust", default="xL", help="배기 벽 (x0|xL|y0|yW)")
     ap.add_argument("--supply-u", type=float, default=0.05, help="급기 유속(m/s)")
-    ap.add_argument("--floor-t", type=float, default=313.0, help="발열 바닥 온도(K)")
+    ap.add_argument("--floor-t", type=float, default=313.0, help="발열 바닥 온도(K, 구식 surface 모드)")
+    ap.add_argument("--power-kw", type=float, help="장비 총발열(kW) — 체적 발열원(계산서 직결, 에너지폐합 검증). floor-t 대신 권장")
     ap.add_argument("--endtime", type=int, default=400, help="반복 수(정상상태)")
     ap.add_argument("--name", help="케이스 이름")
     args = ap.parse_args()
@@ -379,8 +437,10 @@ def main():
         cfg, info = cfg_from_geometry(
             geom, zone=args.zone, bbox=bbox, height=args.height, cell=args.cell,
             supply=args.supply, exhaust=args.exhaust, supply_u=args.supply_u,
-            floor_T=args.floor_t, endTime=args.endtime, name=args.name)
+            floor_T=args.floor_t, power_kw=args.power_kw, endTime=args.endtime, name=args.name)
         print(f"[도면추출] {info['source']}  방 {cfg['room']['L']}×{cfg['room']['W']}×{cfg['room']['H']} m")
+        if args.power_kw is not None:
+            print(f"  발열: {args.power_kw} kW 체적발열원(에너지폐합 검증 가능)")
         if info["openings_by_wall"]:
             print(f"  경계 개구부(급/배기 후보): {info['openings_by_wall']}  → --supply/--exhaust 로 지정")
         if info["equipment"]:

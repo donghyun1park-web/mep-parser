@@ -110,10 +110,18 @@ python cfd_report.py case_room1
 | `--cell` | `0.3` | 격자 셀 크기(m) — 작을수록 정밀·느림 |
 | `--supply` | `x0` | 급기 벽 (`x0`\|`xL`\|`y0`\|`yW`) |
 | `--exhaust` | `xL` | 배기 벽 (`x0`\|`xL`\|`y0`\|`yW`) |
-| `--supply-u` | `0.05` | 급기 유속(m/s) |
-| `--floor-t` | `313.0` | 발열 바닥 온도(K) = 40°C |
-| `--endtime` | `400` | 반복 수(정상상태 SIMPLE iteration) |
+| `--supply-u` | `0.05` | 급기 유속(m/s). ※약유동은 수렴 나쁨 — §8 참고, 실디퓨저는 보통 0.3~3 |
+| `--power-kw` | — | **장비 총발열(kW) — 체적 발열원(권장).** 계산서 총발열 직결 + 에너지 폐합 검증 가능 |
+| `--floor-t` | `313.0` | (구식) 발열 바닥 고정온도(K). `--power-kw` 없을 때만 사용 |
+| `--endtime` | `400` | 최대 반복 수. 잔차 수렴하면 조기 종료 |
 | `--name` | 도면파일명 기반 | 케이스 이름(리포트 제목에 사용) |
+
+**발열 입력 두 방식:**
+- **`--power-kw` (권장)**: 계산서의 장비 총발열 kW를 그대로 넣습니다. 바닥층에 체적 발열원으로
+  주입되고 벽은 단열 처리되어, **주입열 = 배기열**이라는 에너지 폐합을 리포트가 검증합니다(§8).
+  계산서와 직접 맞물리는 방식.
+- **`--floor-t` (구식)**: 바닥을 고정온도로 두는 단순화. 실제 발열량이 입력이 아니라 결과라
+  계산서와 대조가 안 됩니다. 하위호환용으로만 남겨둡니다.
 
 **벽 이름 규약** (박스 방의 6면 — 모든 옵션에서 공통):
 ```
@@ -175,22 +183,72 @@ python cfd_report.py case_pilot/log.buoyantBoussinesqSimpleFoam  # 로그만 넣
 
 ---
 
-## 8. 알려진 한계 (v1)
+## 8. 신뢰성 검증 — "이 결과를 믿을 수 있는가?"
 
-- **방 = 경계 bbox 박스로 근사**합니다. 비직사각 방(L자형 등)은 실제 벽 폴리곤이 아니라 바운딩
-  박스로 계산되어 여유공간이 생길 수 있습니다. 폴리곤 압출은 후속(Phase 4 대상).
-- **장비는 장애물이 아니라 바닥 발열로 단순화**합니다. 개별 랙 위치의 국소 핫스팟은 못 잡습니다
-  (snappyHexMesh 장애물화는 후속).
-- **급기/배기는 도면에 없는 정보**라 `--supply`/`--exhaust`로 사람이 지정해야 합니다. 경계 개구부
-  위치는 자동으로 안내하지만, 급기인지 배기인지는 판단하지 않습니다.
-- **함수객체(functionObjects) 미사용**: 이 WSL apt OpenFOAM(v1912) 빌드는 `functions{}` 블록이
-  SHA1 IOstream 버그로 전부 실패합니다. 대신 `cfd_report.py`가 최종 time의 ascii 필드를 직접 읽어
-  단면·통계를 계산합니다 — 사용자 입장에서는 차이가 없지만, controlDict에 함수객체를 직접 추가하면
-  솔버가 즉시 죽으니 추가하지 마세요.
+CFD는 잔차가 떨어졌다고 다 믿으면 안 됩니다. 이 파이프라인은 신뢰를 **두 가지 계산 가능한
+지표**로 확인합니다.
+
+### 8-1. 에너지 폐합율 (발열 kW 케이스)
+`--power-kw` 로 발열을 넣으면, 정상상태 + 단열벽에서는 **주입한 열량이 전부 배기로 나가야**
+합니다(에너지 보존). 리포트가 배기 유량가중 엔탈피(ρ·cp·Σφ·ΔT)를 주입열과 비교해 **폐합율%**
+를 계산합니다.
+- **90~110%면 신뢰** — 물리적으로 수렴했다는 뜻. 배지가 `수렴(에너지폐합 100%)`.
+- **크게 벗어나면 미수렴** — 잔차가 떨어져도 에너지가 안 닫힌 것. 배지가 `미수렴`.
+
+> ⚠️ **중요**: 부력지배 약유동(예: 급기유속 0.05 m/s 같은 최소모델)은 **잔차는 떨어지는데 에너지가
+> 40%밖에 안 닫히는** 함정이 있습니다(실측 확인됨). 이때는 반복을 늘리거나, 급기유속을 현실값
+> (0.3~3 m/s)으로 올리세요. 폐합율이 이 함정을 자동으로 잡아냅니다 — 그래서 발열 케이스의
+> 진짜 수렴 게이트입니다.
+
+```bash
+python cfd_export.py --from-geometry g.json --room-bbox "x0,y0,x1,y1" \
+  --power-kw 10 --supply-u 0.3 -o case && python cfd_run.py case && python cfd_report.py case
+# → 리포트 배지: "수렴(에너지폐합 100%)", 배기 온도상승 = 계산서 P/(ρcp·풍량) 과 일치
+```
+
+### 8-2. 격자 독립성 (`cfd_gridstudy.py`)
+결과가 격자 조밀도가 아니라 물리에서 온 것임을 보이려면, 같은 방을 셀 크기 여러 개로 돌려
+지표가 수렴하는지 확인합니다(CFD 보고서 신뢰성의 1번 관문, PBD 심사 요구사항과 같은 논리).
+```bash
+python cfd_gridstudy.py --from-geometry g.json --room-bbox "x0,y0,x1,y1" \
+  --power-kw 10 --cells 0.3,0.2,0.15 -o study
+```
+출력 예:
+```
+ cell(m)      cells     T_avg     T_max       dT     폐합%
+   0.300      4,160     20.17     21.33     0.32       100
+   0.200     14,040     20.16     21.38     0.31       100
+   0.150     34,320     20.16     21.42     0.31       100
+GCI(T_max_C): 수렴차수 p=0.43, 외삽값=21.688, 최세밀격자 GCI=1.59% (신뢰(≤5%))
+```
+- **격자간 변화 <2%** → 격자 독립(충분). 이 방은 셀 0.2 m면 이미 격자 독립.
+- **GCI%** = 최세밀 격자의 남은 격자 오차 추정(ASME V&V 표준). ≤5%면 신뢰할 만한 수치.
+
+### 8-3. 추가로 권장(수동)
+- **계산서 대조**: 배기 온도상승이 계산서 ΔT=Q/(ρcp·풍량)와 맞는지(폐합율이 100%면 자동 성립).
+- **벤치마크**: IEA Annex 20(박스 방+급배기 실측 프로파일 공개) 치수를 config로 넣어 오차 확인.
+- **실측 대조**: TAB 풍량·온도 실측치와 CFD 예측을 비교(가장 강한 신뢰 근거).
 
 ---
 
-## 9. 문제 해결
+## 9. 알려진 한계 (v1)
+
+- **방 = 경계 bbox 박스로 근사**합니다. 비직사각 방(L자형 등)은 실제 벽 폴리곤이 아니라 바운딩
+  박스로 계산되어 여유공간이 생길 수 있습니다. 폴리곤 압출은 후속(Phase 4 대상).
+- **장비는 장애물이 아니라 바닥층 체적 발열로 단순화**합니다. 총발열량(kW)은 정확히 반영되지만
+  (에너지 폐합 검증됨), 개별 랙 위치의 국소 핫스팟은 못 잡습니다(snappyHexMesh 장애물화는 후속).
+- **급기/배기는 도면에 없는 정보**라 `--supply`/`--exhaust`로 사람이 지정해야 합니다. 경계 개구부
+  위치는 자동으로 안내하지만, 급기인지 배기인지는 판단하지 않습니다.
+- **급기 = 벽면 전체(최소모델)**: 실디퓨저의 작은 취출면적이 아니라 벽 한 면 전체를 급기로 봅니다.
+  풍량·유속이 실제와 다르고, 약유동은 수렴이 나쁩니다(§8-1). 실디퓨저 패치는 후속.
+- **함수객체(functionObjects) 미사용**: 이 WSL apt OpenFOAM(v1912) 빌드는 `functions{}` 블록이
+  SHA1 IOstream 버그로 전부 실패합니다. 대신 `cfd_report.py`가 최종 time의 ascii 필드를 직접 읽어
+  단면·통계·에너지폐합을 계산합니다 — 사용자 입장에서는 차이가 없지만, controlDict에 함수객체를
+  직접 추가하면 솔버가 즉시 죽으니 추가하지 마세요.
+
+---
+
+## 10. 문제 해결
 
 | 증상 | 원인/조치 |
 |---|---|
@@ -199,17 +257,22 @@ python cfd_report.py case_pilot/log.buoyantBoussinesqSimpleFoam  # 로그만 넣
 | `치수 추출 실패` | 도면에 wall/zone 좌표가 비어있음(파싱 자체가 안 됐을 가능성) — `dxf_parser.py --scan`으로 먼저 인벤토리 확인. |
 | 리포트에 단면 그림이 안 나옴 | 최종 time 디렉토리가 회수되지 않음 — `cfd_run.py` 실행이 중간에 실패했을 가능성. `case_xxx/log.checkMesh`, `log.buoyantBoussinesqSimpleFoam` 확인. |
 | 잔차가 안 떨어지고 발산 배지가 뜸 | `--endtime`을 늘리거나(정상상태라 보통 400~600이면 충분), `--supply-u`가 과도하게 크지 않은지 확인. |
-| `FOAM FATAL IO ERROR ... "sha1"` | controlDict에 함수객체를 직접 추가한 경우 발생. §8 참고 — 함수객체 쓰지 말고 `cfd_report.py`에 맡기세요. |
+| **배지가 `미수렴(에너지폐합 40%)`** | 부력지배 약유동. `--supply-u`를 0.3~3 m/s로 올리거나 `--endtime`을 크게. 잔차만 보지 말 것(§8-1). |
+| `FOAM FATAL IO ERROR ... "sha1"` | controlDict에 함수객체를 직접 추가한 경우 발생. §9 참고 — 함수객체 쓰지 말고 `cfd_report.py`에 맡기세요. |
 
 ---
 
-## 10. 재현 한 줄 요약
+## 11. 재현 한 줄 요약
 
 ```bash
 # A) config 직접
 python cfd_export.py <config.json> -o <case> && python cfd_run.py <case> && python cfd_report.py <case>
 
-# B) 도면에서
-python cfd_export.py --from-geometry <geometry.json> --room-bbox "x0,y0,x1,y1" --supply x0 --exhaust xL \
-  -o <case> && python cfd_run.py <case> && python cfd_report.py <case>
+# B) 도면에서(발열 kW + 에너지폐합 검증)
+python cfd_export.py --from-geometry <geometry.json> --room-bbox "x0,y0,x1,y1" \
+  --power-kw 10 --supply-u 0.3 -o <case> && python cfd_run.py <case> && python cfd_report.py <case>
+
+# C) 격자 독립성 검증
+python cfd_gridstudy.py --from-geometry <geometry.json> --room-bbox "x0,y0,x1,y1" \
+  --power-kw 10 --cells 0.3,0.2,0.15 -o study
 ```

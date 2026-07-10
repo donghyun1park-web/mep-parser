@@ -241,6 +241,60 @@ def find_latest_time(case_dir):
     return max(times, key=lambda t: t[0])[1]
 
 
+def read_patch_field(path, patch):
+    """time-dir 필드파일의 boundaryField[patch] 값 판독 → [float,...] 또는 상수.
+    inletOutlet/calculated 등도 'value' 리스트를 씀. 없으면 None."""
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8", errors="replace") as f:
+        txt = f.read()
+    # boundaryField 안의 해당 patch 블록만 잘라내기(중괄호 균형)
+    m = re.search(r"\b" + re.escape(patch) + r"\s*\{", txt)
+    if not m:
+        return None
+    i = m.end(); depth = 1
+    while i < len(txt) and depth:
+        if txt[i] == "{":
+            depth += 1
+        elif txt[i] == "}":
+            depth -= 1
+        i += 1
+    seg = txt[m.end():i - 1]
+    mv = re.search(r"value\s+nonuniform\s+List<scalar>\s*\n?\s*(\d+)\s*\n?\s*\(", seg)
+    if mv:
+        s = mv.end(); e = seg.index("\n)", s)
+        return [float(x) for x in seg[s:e].split()]
+    mu = re.search(r"value\s+uniform\s+([-\d.eE]+)", seg)
+    if mu:
+        return ("uniform", float(mu.group(1)))
+    return None
+
+
+def energy_closure(case_dir, meta):
+    """발열 kW(체적발열원) 케이스의 에너지 폐합 검증.
+    정상상태 + 단열벽이면 주입열 P = 유량가중 배기 엔탈피유출 ρcp·Σ(phi·(T-Tref)).
+    잔차가 아니라 이 폐합율(≈100%)이 발열 케이스의 진짜 수렴/신뢰 지표.
+    반환: {closure_pct, outlet_dT, power_w, vdot} 또는 None."""
+    heat = meta.get("heat", {})
+    if heat.get("mode") != "volume":
+        return None
+    tdir = find_latest_time(case_dir)
+    if not tdir:
+        return None
+    phi = read_patch_field(os.path.join(tdir, "phi"), "outlet")
+    T = read_patch_field(os.path.join(tdir, "T"), "outlet")
+    if not isinstance(phi, list) or not isinstance(T, list) or len(phi) != len(T):
+        return None
+    Tref = float(meta["config"].get("inlet", {}).get("T", 293))
+    vdot = sum(phi)                                   # 순 배기유량(m³/s)
+    enth = sum(p * (t - Tref) for p, t in zip(phi, T))  # Σ phi·ΔT (K·m³/s)
+    power_w = float(heat.get("power_w", 0))
+    su = power_w / 1206.0                             # 주입 Su (ρ0·cp=1206)
+    closure = (enth / su * 100.0) if su else None
+    return {"closure_pct": closure, "outlet_dT": (enth / vdot if vdot else None),
+            "power_w": power_w, "vdot": vdot}
+
+
 def field_metrics(case_dir, meta):
     """최종 time 디렉토리 → T/U 통계 + 유량·환기 지표(가정값 명시)."""
     import numpy as np
@@ -280,6 +334,12 @@ def field_metrics(case_dir, meta):
         out["supply_cmh"] = Q * 3600.0
         out["ach"] = (Q * 3600.0) / (L * W * H)
         out["supply_full_wall"] = (wall in ("x0", "xL", "y0", "yW", "floor", "ceiling"))
+    # 발열 kW 케이스: 에너지 폐합 검증(신뢰 지표)
+    ec = energy_closure(case_dir, meta)
+    if ec:
+        out["heat_kw"] = ec["power_w"] / 1000.0
+        out["closure_pct"] = ec["closure_pct"]
+        out["outlet_dT"] = ec["outlet_dT"]
     return out
 
 
@@ -383,15 +443,22 @@ def build_html_report(case_dir, meta, parsed, resid_png, sect_png, metrics, out_
     room = cfg.get("room", {})
     diag = diagnose(parsed)
     crashed = parsed.get("crashed")
-    # 수렴 판정 배지
+    m = metrics or {}
+    # 수렴 판정 배지. 발열 kW 케이스는 '에너지 폐합율'이 잔차보다 신뢰성 높은 게이트
+    # (부력지배 약유동은 잔차가 떨어져도 에너지가 안 닫힘 → 미수렴을 잔차가 오판).
+    cont_ok = parsed["continuity_global"] and abs(parsed["continuity_global"][-1][1]) < 1e-3
+    clo = m.get("closure_pct")
     if crashed:
         badge, bcol = "발산/크래시", "#c0392b"
-    elif parsed["continuity_global"] and abs(parsed["continuity_global"][-1][1]) < 1e-3:
+    elif clo is not None:
+        if 90 <= clo <= 110:
+            badge, bcol = f"수렴(에너지폐합 {clo:.0f}%)", "#1e8449"
+        else:
+            badge, bcol = f"미수렴(에너지폐합 {clo:.0f}%)", "#b9770e"
+    elif cont_ok:
         badge, bcol = "수렴(양호)", "#1e8449"
     else:
         badge, bcol = "부분수렴/확인필요", "#b9770e"
-
-    m = metrics or {}
     # 해석조건(입력 가정) 행
     assum = []
     fg = meta.get("from_geometry")
@@ -412,7 +479,9 @@ def build_html_report(case_dir, meta, parsed, resid_png, sect_png, metrics, out_
         assum.append(("급기(가정)", f"{_fmt(m.get('supply_U'),' m/s',3)} × {_fmt(m.get('supply_area'),' m²',1)} = {_fmt(m.get('supply_cmh'),' CMH',0)} · {_fmt(m.get('ach'),' ACH',1)}{fw}"))
     assum.append(("급기온도(가정)", _fmt(m.get("T_supply_C"), " °C", 1)))
     heat = cfg.get("heat", {})
-    if heat:
+    if m.get("heat_kw") is not None:
+        assum.append(("발열(입력)", f"{_fmt(m.get('heat_kw'),' kW',1)} — 바닥층 체적 발열원(계산서 총발열 직결). 실발열량 반영 시 값 지정."))
+    elif heat.get("floor_T") is not None:
         assum.append(("발열(가정)", f"바닥 {heat.get('floor_T','?')}K 고정온도 = 장비 총발열 단순화 (실발열량 아님)"))
 
     # 결과 지표 행
@@ -422,6 +491,11 @@ def build_html_report(case_dir, meta, parsed, resid_png, sect_png, metrics, out_
     res.append(("최저 온도", _fmt(m.get("T_min_C"), " °C", 1)))
     res.append(("급기 대비 상승 ΔT", _fmt(m.get("dT_rise"), " K", 1)))
     res.append(("최대 유속", _fmt(m.get("U_max"), " m/s", 3)))
+    if m.get("closure_pct") is not None:
+        cv = m["closure_pct"]
+        mark = "✓ 신뢰" if 90 <= cv <= 110 else "✗ 미수렴 — 반복↑ 또는 급기유속 현실화 필요"
+        res.append(("에너지 폐합율 (주입열=배기열)", f"{cv:.0f}% &nbsp;<b>{mark}</b>"))
+        res.append(("배기 온도상승(유량가중)", _fmt(m.get("outlet_dT"), " K", 2)))
     res.append(("반복(iteration)", f"{parsed['n_iters']}"))
     if parsed["continuity_global"]:
         res.append(("최종 연속방정식 오차(global)", f"{parsed['continuity_global'][-1][1]:.2e}"))
