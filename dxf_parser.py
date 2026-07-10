@@ -65,6 +65,23 @@ DEFAULT_BLOCK_RULES = [
 ]
 # [Phase 2.7] MEP 카테고리 (벽 평행선 검출 제외, z·치수 주석 부착 대상)
 MEP_CATEGORIES = ("pipe", "duct", "tray", "equipment")
+
+# ── [창호 Phase 1] 창호일람/콜아웃 텍스트 추출 설정 ─────────────────────────
+# 실무 도면은 창호를 평면에 개별 주석하지 않고 '창호부호' 레이어의
+# 부호 TEXT(ADW/AW/AD…) + 치수 TEXT(7.7X2.4)로 일람표/범례를 따로 그린다.
+# 평면 창은 벽의 끊김(gap)으로 나타나며, 콜아웃과는 '폭(width) 일치'로 연결한다.
+WINDOW_CALLOUT_LAYERS = (r"창호부호", r"창호", r"WIN.?(MARK|NO|SYM)", r"WD.?MARK")
+# 부호 → (subtype, 기본 sill mm). ADW=문+창(전체높이), AD=문, AW=창.
+WINDOW_MARK_TYPES = {
+    "ADW": ("door", 0.0), "AD": ("door", 0.0), "DW": ("door", 0.0),
+    "AW": ("window", 900.0), "WW": ("window", 900.0), "WD": ("window", 900.0),
+}
+# 부호 토큰(알파벳만) / 치수(미터 단위 a X b) 정규식
+_WIN_MARK_RE = re.compile(r"^(ADW|ADD|AD|AW|DW|WW|WD)$", re.I)
+_WIN_DIM_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*[Xx×]\s*(\d+(?:\.\d+)?)\s*$")
+# 부호↔치수 페어링 최대 거리(mm) 및 폭 매칭 허용오차(mm)
+WINDOW_CALLOUT_PAIR_MAX_MM = 900.0
+WINDOW_WIDTH_MATCH_TOL_MM = 200.0
 # [라운드트립] element_id.element_eid 의 geom_prefix — 카테고리별 EID 접두
 ELEMENT_EID_PREFIX = {
     "wall": "w", "column": "c", "slab": "s", "zone": "z", "opening": "o",
@@ -96,6 +113,7 @@ COLLINEAR_GAP_TOL_MM = 500.0   # 끝-끝 간격 이 이하면 한 벽으로 연�
                                 # 실무 도면: T/십자 교차점 틈 = 벽두께(100~400mm)
                                 # 문 개구부 ≥800mm 이므로 500mm 는 안전
 CORNER_SNAP_TOL_MM = 50.0      # 끝점 이 거리 이내면 centroid로 스냅(mm)
+WALL_JUNCTION_HEAL_TOL_MM = 200.0  # [4.2] snap 이후 남는 dangling 끝점→인접 벽 연장/트림 최대 갭(mm)
 
 
 # ── [MEP 물량산출] 외부 CSV 매핑 테이블 로드 ──────────────────
@@ -960,6 +978,119 @@ def snap_wall_corners(wall_records, snap_tol=None):
     return out
 
 
+# ── [Phase 4.2] 벽 junction 치유 ─────────────────────────────
+# snap_wall_corners(≤50mm 끝점-끝점 centroid) 이후 남는 dangling 끝점을 인접 벽에
+# 연장/트림해 접합(T·L·X)한다. 실측(지하3층 A-CON): snap 후에도 549개 끝점이 2~150mm 갭으로
+# 안 닿음 → 코너가 안 만나는 시각 결함 + 방 미폐합의 원인.
+# 분류·처리: (B)상대 끝점 근처=두 직선 교점, (C)상대 중간=foot로 T접합.
+#   (A)평행근접·(D)자유단은 건드리지 않음 — A는 평행선에 투영하면 벽을 비틀어 빌드 시 invalid
+#   shape 을 유발(실측), D는 오접합 위험. 둘 다 제외해 안전.
+# 안전장치: 2<gap<tol AND foot가 상대 선분 범위 내. 모든 target 을 '원본' 기하에서 한 번에 계산 후
+# 적용 → 처리 순서 무관(결정론) · 멱등(이미 접합이면 무동작).
+def _line_intersection(p1, p2, p3, p4):
+    """무한직선 (p1-p2) ∩ (p3-p4). 거의 평행이면 None."""
+    x1, y1 = p1; x2, y2 = p2; x3, y3 = p3; x4, y4 = p4
+    den = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    if abs(den) < 1e-9:
+        return None
+    t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / den
+    return (x1 + t * (x2 - x1), y1 + t * (y2 - y1))
+
+
+def heal_wall_junctions(wall_records, tol=None):
+    """dangling 끝점을 인접 벽에 연장/트림해 접합. deepcopy 원본 불변, overrides/_sigs 보존.
+    result["wall_merge"]["healed_junctions"] 용 카운트를 위해 (out, n_healed) 튜플 반환."""
+    if tol is None:
+        tol = WALL_JUNCTION_HEAL_TOL_MM
+    if not wall_records:
+        return wall_records, 0
+
+    # 각 벽의 끝점·세그먼트·두께
+    segs = []  # (c1, c2, thickness)
+    for rec in wall_records:
+        cl = rec.get("centerline") or rec.get("points")
+        if not cl or len(cl) < 2:
+            segs.append(None)
+            continue
+        th = float(rec.get("width_detected")
+                   or rec.get("overrides", {}).get("width", 0) or 200.0)
+        segs.append((tuple(cl[0]), tuple(cl[-1]), th))
+
+    # 끝점 목록: (x, y, rec_idx, ep_idx)
+    eps = []
+    for i, s in enumerate(segs):
+        if s is None:
+            continue
+        eps.append((s[0][0], s[0][1], i, 0))
+        eps.append((s[1][0], s[1][1], i, 1))
+
+    # ── 원본 기하에서 각 끝점의 target 을 한 번에 계산(순서 무관) ──
+    targets = {}  # (rec_idx, ep_idx) -> (nx, ny)
+    order = sorted(range(len(eps)), key=lambda k: (eps[k][0], eps[k][1]))
+    for k in order:
+        ex, ey, i, ei = eps[k]
+        si = segs[i]
+        if si is None:
+            continue
+        wd = _get_normalized_direction(si[0], si[1])
+        best = None  # (gap, j, t, F)
+        for j, sj in enumerate(segs):
+            if j == i or sj is None:
+                continue
+            c, d = sj[0], sj[1]
+            dx, dy = d[0] - c[0], d[1] - c[1]
+            L2 = dx * dx + dy * dy
+            if L2 == 0:
+                continue
+            t = ((ex - c[0]) * dx + (ey - c[1]) * dy) / L2
+            tc = max(0.0, min(1.0, t))
+            fx, fy = c[0] + tc * dx, c[1] + tc * dy
+            gap = math.hypot(ex - fx, ey - fy)
+            if best is None or gap < best[0]:
+                best = (gap, j, t, (fx, fy))
+        if best is None:
+            continue
+        gap, j, t, F = best
+        if not (2.0 < gap < tol):
+            continue
+        c, d = segs[j][0], segs[j][1]
+        od = _get_normalized_direction(c, d)
+        par = abs(wd[0] * od[0] + wd[1] * od[1])
+        end_near = min(math.hypot(ex - c[0], ey - c[1]),
+                       math.hypot(ex - d[0], ey - d[1])) < tol
+        if par > 0.985:                      # (A) 평행 근접 → 비틀림 유발(벽 invalid) → 건드리지 않음
+            continue
+        elif end_near:                       # (B) 코너 L/X → 두 직선 교점
+            inter = _line_intersection(si[0], si[1], c, d)
+            # 교점이 너무 멀면(거의 평행/불안정) foot 폴백
+            if inter is None or math.hypot(inter[0] - ex, inter[1] - ey) > tol:
+                tgt = F
+            else:
+                tgt = inter
+        elif 0.05 < t < 0.95:                # (C) T접합 → foot
+            tgt = F
+        else:                                # (D) 자유단/오접합 위험 → 건드리지 않음
+            continue
+        # 가드: 이동 후 벽이 두께 미만으로 짧아지면 스킵
+        other = si[1] if ei == 0 else si[0]
+        if math.hypot(tgt[0] - other[0], tgt[1] - other[1]) < si[2]:
+            continue
+        targets[(i, ei)] = (round(tgt[0], 3), round(tgt[1], 3))
+
+    if not targets:
+        return wall_records, 0
+
+    out = copy.deepcopy(wall_records)
+    for (i, ei), pos in targets.items():
+        rec = out[i]
+        for field in ("centerline", "points"):
+            lst = rec.get(field)
+            if not lst or len(lst) < 2:
+                continue
+            lst[0 if ei == 0 else -1] = list(pos)
+    return out, len(targets)
+
+
 # ── [Phase 4a] opening → 벽 연결 ────────────────────────────
 # geometry.json 파싱 시 각 opening에 wall_indices 태깅.
 # builder(freecad_builder.py)가 Part.makeCut boolean void 적용할 때 사용.
@@ -1031,6 +1162,203 @@ def link_openings_to_walls(elements, params):
         if nearest[1] is not None:
             op["host_dir"] = [round(nearest[1][0], 5), round(nearest[1][1], 5)]
             op["host_width"] = round(nearest[2], 1)
+
+
+# ── [창호 Phase 1] 창호 콜아웃/일람 추출 ─────────────────────────────────
+def _text_value(e):
+    """TEXT/MTEXT 엔티티의 문자열(없으면 '')."""
+    try:
+        if e.dxftype() == "MTEXT":
+            return (e.text or "").strip()
+        return (e.dxf.text or "").strip()
+    except Exception:
+        return ""
+
+
+def _text_pos(e, scale):
+    """TEXT/MTEXT 삽입점 (x, y) — 벽 좌표계와 같은 scale 적용."""
+    try:
+        ins = e.dxf.get("insert", None) or getattr(e.dxf, "insert", None)
+        if ins is not None:
+            return (float(ins[0]) * scale, float(ins[1]) * scale)
+    except Exception:
+        pass
+    return (0.0, 0.0)
+
+
+def _mark_subtype_sill(mark):
+    """부호 → (subtype, sill mm). 미등록 부호는 (None, None)."""
+    return WINDOW_MARK_TYPES.get(mark.upper(), (None, None))
+
+
+def extract_window_schedule(msp, scale, layer_patterns=WINDOW_CALLOUT_LAYERS):
+    """창호부호 레이어의 부호 TEXT + 치수 TEXT를 페어링해 창호 콜아웃 목록 생성.
+
+    반환: (callouts, schedule)
+      callouts: [{mark, subtype, width, height, sill, pos:[x,y]}, ...] 각 콜아웃
+      schedule: 동일 (mark,width,height) 집계 [{mark, subtype, width, height, sill, count}]
+    치수는 미터 단위(7.7X2.4)로 보고 ×1000 → mm. 부호 미상이면 종횡비로 추정.
+    """
+    layer_re = re.compile("|".join(f"(?:{p})" for p in layer_patterns), re.I)
+    marks, dims = [], []
+    for e in msp:
+        if e.dxftype() not in ("TEXT", "MTEXT"):
+            continue
+        try:
+            layer = e.dxf.layer
+        except Exception:
+            continue
+        if not layer_re.search(layer or ""):
+            continue
+        s = _text_value(e)
+        if not s:
+            continue
+        pos = _text_pos(e, scale)
+        if _WIN_MARK_RE.match(s):
+            marks.append((s.upper(), pos))
+            continue
+        m = _WIN_DIM_RE.match(s)
+        if m:
+            w_mm = float(m.group(1)) * 1000.0
+            h_mm = float(m.group(2)) * 1000.0
+            dims.append((w_mm, h_mm, pos))
+
+    callouts = []
+    for (w_mm, h_mm, (dx, dy)) in dims:
+        # 가장 가까운 부호(거리 한계 내). 없으면 종횡비로 문/창 추정.
+        best_mark, best_d = None, WINDOW_CALLOUT_PAIR_MAX_MM
+        for (mk, (mx, my)) in marks:
+            d = math.hypot(mx - dx, my - dy)
+            if d < best_d:
+                best_d, best_mark = d, mk
+        if best_mark:
+            subtype, sill = _mark_subtype_sill(best_mark)
+        else:
+            subtype, sill = None, None
+        if subtype is None:  # 부호 미상/미페어링 → 종횡비 추정(세로>가로 = 문)
+            if h_mm >= w_mm * 1.4:
+                subtype, sill = "door", 0.0
+            else:
+                subtype, sill = "window", 900.0
+        callouts.append({
+            "mark": best_mark or "?",
+            "subtype": subtype,
+            "width": round(w_mm, 1),
+            "height": round(h_mm, 1),
+            "sill": float(sill),
+            "pos": [round(dx, 1), round(dy, 1)],
+        })
+
+    # 집계: (mark, width, height) 동일 항목 count
+    agg = {}
+    for c in callouts:
+        k = (c["mark"], c["width"], c["height"])
+        if k not in agg:
+            agg[k] = {"mark": c["mark"], "subtype": c["subtype"],
+                      "width": c["width"], "height": c["height"],
+                      "sill": c["sill"], "count": 0}
+        agg[k]["count"] += 1
+    schedule = sorted(agg.values(), key=lambda r: (-r["width"], -r["height"]))
+    return callouts, schedule
+
+
+def detect_wall_openings(elements, schedule, params):
+    """평면 벽의 끊김(gap)을 검출하고 창호일람 폭과 매칭해 opening 생성.
+
+    원리(진단 결과): 실무 도면은 창을 벽의 끊김으로 그리고, 치수/종류는
+    별도 창호일람표에만 둔다. 같은 직선 위 인접 벽 세그먼트 사이의 gap 폭을
+    schedule width(7.7m 등)와 ±tol 로 매칭해 높이·sill·종류를 부여한다.
+    매칭 실패한 gap 은 무시(구조 틈/코너일 수 있음 → 거짓양성 억제).
+    반환: 생성된 opening 개수."""
+    walls = elements.get("wall", [])
+    openings = elements.setdefault("opening", [])
+    if not walls or not schedule:
+        return 0
+
+    # 기존 opening(문 스윙 호 등) 중심 — 중복 생성 방지
+    existing = []
+    for op in openings:
+        c = op.get("center")
+        if c:
+            existing.append((float(c[0]), float(c[1])))
+
+    # 같은 직선 버킷(merge_collinear_walls 와 동일 키 — 단 두께/pairing 무시)
+    items = []
+    for rec in walls:
+        cl = rec.get("centerline") or rec.get("points")
+        if not cl or len(cl) < 2:
+            continue
+        items.append({"c1": tuple(cl[0]), "c2": tuple(cl[-1]), "rec": rec})
+    buckets = {}
+    for it in items:
+        d = _get_normalized_direction(it["c1"], it["c2"])
+        ang = math.degrees(math.atan2(d[1], d[0]))
+        off = -d[1] * it["c1"][0] + d[0] * it["c1"][1]
+        key = (round(ang / COLLINEAR_ANGLE_TOL_DEG),
+               round(off / COLLINEAR_DIST_TOL_MM))
+        buckets.setdefault(key, []).append(it)
+
+    n_new = 0
+    for key in sorted(buckets):
+        bucket = buckets[key]
+        if len(bucket) < 2:
+            continue
+        dref = _get_normalized_direction(bucket[0]["c1"], bucket[0]["c2"])
+        base = bucket[0]["c1"]  # 직선 위 기준점 → 1D 사영 ↔ XY 환산용
+
+        def proj(p):
+            return (p[0] - base[0]) * dref[0] + (p[1] - base[1]) * dref[1]
+
+        segs = []
+        for it in bucket:
+            t1, t2 = proj(it["c1"]), proj(it["c2"])
+            segs.append((min(t1, t2), max(t1, t2), it))
+        segs.sort(key=lambda s: s[0])
+
+        for a, b in zip(segs, segs[1:]):
+            gap = b[0] - a[1]  # 다음 시작 - 이전 끝 (양수=틈)
+            if gap <= COLLINEAR_GAP_TOL_MM:  # 이미 병합 대상이거나 겹침
+                continue
+            # 폭 매칭: schedule 중 |width-gap| 최소 & tol 이내
+            match, best_d = None, WINDOW_WIDTH_MATCH_TOL_MM
+            for s in schedule:
+                d = abs(s["width"] - gap)
+                if d < best_d:
+                    best_d, match = d, s
+            if match is None:
+                continue
+            t_mid = (a[1] + b[0]) / 2.0
+            mx = base[0] + t_mid * dref[0]
+            my = base[1] + t_mid * dref[1]
+            # 기존 opening 과 근접 중복 스킵
+            if any(math.hypot(mx - ex, my - ey) < 500.0 for ex, ey in existing):
+                continue
+            gs = base[0] + a[1] * dref[0], base[1] + a[1] * dref[1]  # gap 시작 XY
+            ge = base[0] + b[0] * dref[0], base[1] + b[0] * dref[1]  # gap 끝 XY
+            ww = float(a[2]["rec"].get("width_detected")
+                       or params.get("wall", {}).get("width", 200.0))
+            op = {
+                "kind": "polyline", "closed": False,
+                "points": [[round(gs[0], 1), round(gs[1], 1)],
+                           [round(ge[0], 1), round(ge[1], 1)]],
+                "center": [round(mx, 1), round(my, 1)],
+                "width": round(gap, 1),
+                "radius": round(gap / 2.0, 1),
+                "height": float(match["height"]),
+                "sill": float(match["sill"]),
+                "subtype": match["subtype"],
+                "mark": match["mark"],
+                "sched_width": float(match["width"]),
+                "host_dir": [round(dref[0], 5), round(dref[1], 5)],
+                "host_width": round(ww, 1),
+                "source": "wall_gap_match",
+                "confidence": round(max(0.4, 1.0 - best_d / WINDOW_WIDTH_MATCH_TOL_MM), 2),
+                "needs_review": best_d > WINDOW_WIDTH_MATCH_TOL_MM * 0.5,
+            }
+            openings.append(op)
+            existing.append((mx, my))
+            n_new += 1
+    return n_new
 
 
 # ── [Phase 3] 레이어명 비의존 기하 분류기 + 미매핑 fuzzy 제안 ──
@@ -1142,10 +1470,13 @@ def assign_zones(elements, zones):
 
 
 def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAMS,
-          use_ai=False, use_vision=False, api_key=None, ai_threshold=0.8):
+          use_ai=False, use_vision=False, api_key=None, ai_threshold=0.8,
+          ext_schedule=None):
     """DXF → geometry.json dict.
     use_ai: 텍스트 LLM 분류 + 고신뢰 자동적용. use_vision: Vision 폴백.
-    ai_threshold: best_classification confidence 이 값 초과면 자동 카테고리 적용."""
+    ai_threshold: best_classification confidence 이 값 초과면 자동 카테고리 적용.
+    ext_schedule: 외부 창호일람(Excel/별도 DXF에서 로드한 schedule 레코드 목록).
+        주어지면 DXF 내부 추출본과 병합(외부 우선) 후 벽 끊김 매칭에 사용."""
     doc = ezdxf.readfile(dxf_path)
     msp = doc.modelspace()
     scale = 1000.0 if doc.header.get("$INSUNITS", 0) == 6 else 1.0
@@ -1328,6 +1659,44 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         1 for a, b in zip(_walls_pre_snap, result["elements"]["wall"])
         if a.get("centerline") != b.get("centerline"))
     result["wall_merge"]["snapped_corners"] = _snapped
+    # [Phase 4.2] junction 치유: snap 후 남는 dangling 끝점 → 인접 벽 연장/트림(T·L·X)
+    result["elements"]["wall"], _healed = heal_wall_junctions(result["elements"]["wall"])
+    result["wall_merge"]["healed_junctions"] = _healed
+    if _healed:
+        print(f"  [junction 치유] dangling 끝점 {_healed}개를 인접 벽에 접합")
+    # ── [창호 Phase 1] 창호부호 콜아웃/일람 추출 ───────────────────────────
+    try:
+        _win_callouts, _win_schedule = extract_window_schedule(msp, scale)
+    except Exception as _we:
+        _win_callouts, _win_schedule = [], []
+        result["warnings"].append(f"창호 콜아웃 추출 스킵: {_we}")
+    # 외부 일람(Excel/별도 DXF) 병합 — 사용자 수정본이 우선.
+    if ext_schedule:
+        try:
+            from schedule_io import merge_schedules
+            _win_schedule = merge_schedules(_win_schedule, ext_schedule)
+        except Exception:
+            # schedule_io 부재 시 단순 합집합 폴백
+            _seen = {(s["mark"], s["width"], s["height"]) for s in _win_schedule}
+            _win_schedule = _win_schedule + [
+                s for s in ext_schedule
+                if (s["mark"], s["width"], s["height"]) not in _seen]
+        print(f"  [창호일람] 외부 일람 {len(ext_schedule)}행 병합 → 총 {len(_win_schedule)}행")
+    result["window_schedule"] = _win_schedule
+    if _win_schedule:
+        print("  [창호일람] " + ", ".join(
+            f"{r['mark']} {r['width']:.0f}x{r['height']:.0f}×{r['count']}"
+            for r in _win_schedule))
+
+    # ── [창호 Phase 2] 평면 벽 끊김 → opening + 콜아웃 폭 매칭 ──────────────
+    try:
+        _n_new_op = detect_wall_openings(result["elements"], _win_schedule, params)
+    except Exception as _oe:
+        _n_new_op = 0
+        result["warnings"].append(f"벽 끊김 창호 검출 스킵: {_oe}")
+    if _n_new_op:
+        print(f"  [창호배치] 벽 끊김에서 창/문 {_n_new_op}개 생성(폭 매칭)")
+
     # [Phase 4a] opening → 교차 벽 연결 (builder boolean void 전처리)
     link_openings_to_walls(result["elements"], params)
     paired = sum(1 for w in result["elements"]["wall"] if w.get("pairing") == "paired")
@@ -1749,6 +2118,12 @@ def main():
                     help="신뢰도 높은(0.8이상) 제안을 layer_map.csv에 자동 추가")
     ap.add_argument("--edits", default=None,
                     help="EID 기반 수정 사이드카(edits.json) 적용 — preview.py 다운로드 파일")
+    ap.add_argument("--schedule", default=None,
+                    help="외부 창호일람 Excel(.xlsx) — 평면도와 함께 먹여 창/문 자동 배치")
+    ap.add_argument("--schedule-dxf", default=None,
+                    help="별도 창호일람표 DXF에서 일람 추출해 평면 파싱에 병합")
+    ap.add_argument("--schedule-out", default=None,
+                    help="추출/병합된 창호일람을 Excel 양식(.xlsx)으로 저장")
     args = ap.parse_args()
 
     if args.checklist:
@@ -1764,10 +2139,30 @@ def main():
 
     rules = load_layer_map(args.map) if args.map else DEFAULT_LAYER_RULES
     block_rules = load_layer_map(args.blockmap) if args.blockmap else DEFAULT_BLOCK_RULES
+
+    # 외부 창호일람 로드(Excel 우선, 별도 DXF 보조) → 평면 파싱에 병합
+    _ext_sched = None
+    if args.schedule:
+        from schedule_io import load_schedule_xlsx
+        _ext_sched = load_schedule_xlsx(args.schedule)
+        print(f"  [창호일람] Excel '{os.path.basename(args.schedule)}' {len(_ext_sched)}행 로드")
+    if args.schedule_dxf:
+        import ezdxf as _ez
+        _sdoc = _ez.readfile(args.schedule_dxf)
+        _, _sdxf = extract_window_schedule(_sdoc.modelspace(), 1.0)
+        _ext_sched = (_ext_sched or []) + _sdxf
+        print(f"  [창호일람] DXF '{os.path.basename(args.schedule_dxf)}' {len(_sdxf)}행 추출")
+
     # use_ai/use_vision: parse() 내부에서 분류·자동적용(요소 합류 후 wall 후처리 보장)
     data = parse(args.dxf, rules, block_rules,
                  use_ai=args.llm, use_vision=args.vision,
-                 ai_threshold=args.ai_threshold)
+                 ai_threshold=args.ai_threshold, ext_schedule=_ext_sched)
+
+    # 추출/병합된 창호일람을 Excel 양식으로 저장(검토·수정용)
+    if args.schedule_out:
+        from schedule_io import export_schedule_xlsx
+        export_schedule_xlsx(data.get("window_schedule", []), args.schedule_out)
+        print(f"  [창호일람] Excel 양식 저장 → {args.schedule_out}")
 
     # [라운드트립] EID 기반 수정 사이드카 적용 (preview.py 가 만든 edits.json).
     # 재파싱으로 새로 산정된 elements 에, 저장된 사용자 수정을 EID 로 재적용한다.
@@ -1778,6 +2173,11 @@ def main():
             from element_id import apply_edits
             _rep = apply_edits(data["elements"], _edits)
             data["edits_report"] = _rep
+            # 반자동 배치로 추가된 opening 은 host 벽 링크(wall_indices/host_dir)를
+            # 현재 파싱 기준으로 재계산해야 빌더 void cut 이 정확하다.
+            if _rep.get("added"):
+                link_openings_to_walls(data["elements"], data.get("params", DEFAULT_PARAMS))
+                print(f"  [edits] 신규 추가 {len(_rep['added'])}건(반자동 배치) → host 벽 재링크")
             print(f"  [edits] 적용 {len(_rep['applied'])}건, "
                   f"고아(요소 사라짐) {len(_rep['orphaned'])}건")
             for _oid in _rep["orphaned"]:

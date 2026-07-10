@@ -100,6 +100,7 @@ def build_html(data):
         "bbox": bbox,
         "source": data.get("source", ""),
         "wall_pairing": data.get("wall_pairing", {}),
+        "window_schedule": data.get("window_schedule", []),
     }
     data_json = json.dumps(payload, ensure_ascii=False)
     # JS 안전: </script> 분리
@@ -187,6 +188,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
       <button id="bfit">맞춤(Fit)</button>
       <button id="bconf">신뢰도 색</button>
       <button id="bwire">와이어</button>
+      <button id="bplace">창호 배치: OFF</button>
     </div>
     <div id="legend"></div>
     <div id="err">three.js 로드 실패. (CDN 모드면 인터넷 필요 · 오프라인 모드면 vendor/ 동봉 확인)</div>
@@ -206,6 +208,12 @@ _TEMPLATE = r"""<!DOCTYPE html>
       <div class="row"><label>높이/두께 (mm)</label><input id="e_h" type="number"/></div>
       <div class="row"><label><input type="checkbox" id="e_del" style="width:auto"/> 삭제</label></div>
       <button id="apply">수정 적용</button>
+    </div>
+    <h3>창호 배치 (반자동)</h3>
+    <div id="schedwrap">
+      <div class="row"><label>창호일람 선택</label>
+        <select id="sched"></select></div>
+      <div class="muted" id="placehint">‘창호 배치’ 켠 뒤 벽을 클릭하면 그 위치에 배치됩니다.</div>
     </div>
     <h3>수정 목록 (<span id="nedits">0</span>)</h3>
     <div id="editlist" class="muted">없음</div>
@@ -394,6 +402,11 @@ renderer.domElement.addEventListener('click', ev=>{
   mouse.x=((ev.clientX-r.left)/r.width)*2-1; mouse.y=-((ev.clientY-r.top)/r.height)*2+1;
   ray.setFromCamera(mouse,cam);
   const hit=ray.intersectObjects(meshes)[0];
+  if(placeMode){
+    if(hit && hit.object.userData.cat==='wall'){ placeWindow(hit.object, hit.point); }
+    else { document.getElementById('placehint').textContent='⚠ 벽을 클릭하세요(창호는 벽 위에만 배치).'; }
+    return;
+  }
   select(hit?hit.object:null);
 });
 function select(m){
@@ -427,10 +440,25 @@ function refreshEdits(){
   const n=Object.keys(edits).length; document.getElementById('nedits').textContent=n;
   const el=document.getElementById('editlist');
   el.innerHTML = n? Object.entries(edits).map(([k,v])=>{
+    if(v.added){ const r=v.record||{};
+      return `<div class="kv"><span>➕ ${r.mark||'창호'} ${Math.round(r.width||0)}×${Math.round(r.height||0)}</span>`
+           + `<span><a href="#" class="rm" data-eid="${k}" style="color:#ff8080">✕ 제거</a></span></div>`; }
     const tag=v.deleted?'🗑삭제':(v.category?('→'+v.category):'')+(v.overrides?(' '+JSON.stringify(v.overrides)):'');
     return `<div class="kv"><span>${k}</span><span>${tag}</span></div>`;
   }).join('') : '없음';
 }
+function removeAdded(eid){
+  delete edits[eid];
+  // 씬 메시 제거
+  for(let i=meshes.length-1;i>=0;i--){ if(meshes[i].userData.rec.eid===eid){
+    const m=meshes[i]; scene.remove(m); m.geometry.dispose(); m.material.dispose(); meshes.splice(i,1); } }
+  // 데이터 모델에서 제거
+  if(DATA.elements.opening) DATA.elements.opening=DATA.elements.opening.filter(o=>o.eid!==eid);
+  refreshEdits(); applyEditVisuals();
+}
+document.getElementById('editlist').addEventListener('click', ev=>{
+  const a=ev.target.closest('a.rm'); if(a){ ev.preventDefault(); removeAdded(a.dataset.eid); }
+});
 function applyEditVisuals(){
   for(const m of meshes){
     const eid=m.userData.rec.eid; const e=eid&&edits[eid];
@@ -443,6 +471,60 @@ document.getElementById('dl').addEventListener('click', ()=>{
   const blob=new Blob([JSON.stringify(edits,null,2)],{type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='edits.json'; a.click();
 });
+
+// ── 창호 반자동 배치 ────────────────────────────────────────
+const SCHED = DATA.window_schedule || [];
+const schedSel = document.getElementById('sched');
+if(SCHED.length){
+  SCHED.forEach((s,i)=>{ const o=document.createElement('option'); o.value=i;
+    o.textContent=`${s.mark} ${Math.round(s.width)}×${Math.round(s.height)} (${s.subtype||'?'})`;
+    schedSel.appendChild(o); });
+} else {
+  const o=document.createElement('option'); o.textContent='(창호일람 없음 — 창호부호 레이어 미검출)'; o.disabled=true; schedSel.appendChild(o);
+}
+function sceneToDxf(v){ return [v.x/S + CX, v.y/S + CY]; }
+function hashId(str){ let h=2166136261>>>0; for(let i=0;i<str.length;i++){ h^=str.charCodeAt(i); h=Math.imul(h,16777619);} return (h>>>0).toString(36); }
+
+let placeMode=false;
+const bplace=document.getElementById('bplace');
+bplace.onclick=()=>{
+  if(!SCHED.length){ document.getElementById('placehint').textContent='⚠ 창호일람이 없어 배치할 수 없습니다.'; return; }
+  placeMode=!placeMode;
+  bplace.textContent='창호 배치: '+(placeMode?'ON':'OFF');
+  bplace.classList.toggle('active', placeMode);
+  renderer.domElement.style.cursor = placeMode?'crosshair':'default';
+  document.getElementById('placehint').textContent = placeMode
+    ? '벽을 클릭하면 선택한 창호를 그 위치에 배치합니다.'
+    : '‘창호 배치’ 켠 뒤 벽을 클릭하면 그 위치에 배치됩니다.';
+};
+
+function placeWindow(wallMesh, hitVec){
+  const s = SCHED[parseInt(schedSel.value)||0]; if(!s) return;
+  const rec = wallMesh.userData.rec;
+  const cl = rec.centerline || rec.points; if(!cl||cl.length<2) return;
+  const a=cl[0], b=cl[cl.length-1];
+  const hp = sceneToDxf(hitVec);
+  const dx=b[0]-a[0], dy=b[1]-a[1], L2=dx*dx+dy*dy;
+  let t = L2? ((hp[0]-a[0])*dx+(hp[1]-a[1])*dy)/L2 : 0;
+  t = Math.max(0, Math.min(1, t));
+  const cx=a[0]+t*dx, cy=a[1]+t*dy;
+  const len=Math.hypot(dx,dy)||1, ux=dx/len, uy=dy/len;
+  const ww = (rec.width_detected ?? rec.overrides?.width ?? (P.wall?.width) ?? 200);
+  const half=s.width/2;
+  const orec = {kind:'polyline', closed:false,
+    points:[[cx-ux*half,cy-uy*half],[cx+ux*half,cy+uy*half]],
+    center:[cx,cy], width:s.width, radius:s.width/2,
+    height:s.height, sill:s.sill, subtype:s.subtype, mark:s.mark,
+    host_dir:[ux,uy], host_width:ww, source:'manual_preview',
+    z_base:(rec.z_base||0)};
+  const eid='om:'+hashId(Math.round(cx)+'_'+Math.round(cy)+'_'+Math.round(s.width)+'_'+(s.subtype||''));
+  orec.eid=eid;
+  edits[eid]={added:true, category:'opening', record: JSON.parse(JSON.stringify(orec))};
+  (DATA.elements.opening = DATA.elements.opening || []).push(orec);
+  buildOpening(orec);
+  document.getElementById('placehint').textContent=`✓ ${s.mark} 배치됨 @(${Math.round(cx)},${Math.round(cy)}). 계속 클릭 가능.`;
+  refreshEdits(); applyEditVisuals();
+}
 
 // ── 툴바 ───────────────────────────────────────────────────
 const b3d=document.getElementById('b3d'), btop=document.getElementById('btop');

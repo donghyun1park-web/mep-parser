@@ -512,7 +512,20 @@ def process_cli_command(ui_instance, cmd_text):
                 wall_data = extractor.extract_from_raw_lines(raw_lines, props)
                 _elapsed = _time.time() - _t0
                 
+                import math
+                def calc_len(line):
+                    if len(line) == 2:
+                        return math.dist(line[0], line[1])
+                    else:
+                        from shapely.geometry import LineString
+                        return LineString(line).length
+                
+                total_raw_len = sum(calc_len(pts) for pts in raw_lines)
+                total_wall_len = sum(w['centerline'].length for w in wall_data)
+                coverage = (total_wall_len * 2 / total_raw_len * 100) if total_raw_len > 0 else 0
+                
                 log(f"✅ 엔진 분석 완료! {len(wall_data)}개의 스마트 벽체 생성 시작... (분석 {_elapsed:.1f}초)")
+                log(f"📊 [커버리지 지표] 벽체 생성률: {coverage:.1f}% (생성선 {total_wall_len*2/1000:.1f}m / 원본선 {total_raw_len/1000:.1f}m)")
                 
                 # Debug log 경로 출력
                 _debug_log = os.path.join(HERE, "debug_extractors.log")
@@ -527,10 +540,47 @@ def process_cli_command(ui_instance, cmd_text):
                         skipped += 1
                         continue
                     
-                    # 중심선이 벽 두께보다 짧으면 FreeCAD가 형상을 만들 수 없음
+                    # 중심선이 벽 두께와 거의 같거나 짧으면 FreeCAD가 형상을 만들 수 없음 (max() error)
                     cl_len = w['centerline'].length
-                    if cl_len < w['thickness']:
-                        skipped += 1
+                    if cl_len <= w['thickness'] + 10.0:
+                        # ★통벽 방지 가드: 정상 기둥은 검색반경 상 ≤~700mm. 비정상적으로 큰
+                        # 정사각 영역(>1.5m)을 ColBase 기둥으로 만들면 화면 전체가 회색 솔리드로
+                        # 꽉 차는 '통벽'이 됨 → 건너뜀(정상 기둥·벽은 영향 없음).
+                        if max(cl_len, w['thickness']) > 1500.0:
+                            skipped += 1
+                            continue
+                        try:
+                            # 기하학적으로 기둥(Pillar)에 해당하므로, 4개 모서리점을 계산하여 기둥(Structure)으로 빌드
+                            import math
+                            p1, p2 = coords[0], coords[-1]
+                            dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+                            h_len = math.hypot(dx, dy)
+                            if h_len > 0.001:
+                                ux, uy = dx / h_len, dy / h_len
+                            else:
+                                ux, uy = 1.0, 0.0
+                            nx, ny = -uy, ux
+                            half_t = w['thickness'] / 2.0
+                            
+                            c1 = App.Vector(p1[0] - half_t * nx, p1[1] - half_t * ny, 0)
+                            c2 = App.Vector(p1[0] + half_t * nx, p1[1] + half_t * ny, 0)
+                            c3 = App.Vector(p2[0] + half_t * nx, p2[1] + half_t * ny, 0)
+                            c4 = App.Vector(p2[0] - half_t * nx, p2[1] - half_t * ny, 0)
+                            
+                            wire = Draft.make_wire([c1, c2, c3, c4, c1], closed=True, face=True)
+                            wire_label = f"ColBase_{w['label']}_{idx}"
+                            wire.Label = wire_label
+                            
+                            col = Arch.makeStructure(wire, height=w['height'])
+                            col.Label = f"Col_{w['label']}_{idx}"
+                            col.IfcType = "Column"
+                            
+                            if hasattr(wire, "ViewObject") and wire.ViewObject:
+                                wire.ViewObject.Visibility = False
+                                
+                            count += 1
+                        except Exception:
+                            skipped += 1
                         continue
     
                     try:
@@ -554,10 +604,65 @@ def process_cli_command(ui_instance, cmd_text):
                 for obj in target_objs:
                     if hasattr(obj, "ViewObject") and obj.ViewObject:
                         obj.ViewObject.Visibility = False
-                        
+
+                # 미페어링 세그먼트에서 기둥(브래킷/박스) 검출 → Arch.makeStructure 로 빌드.
+                # 벽으로 안 묶인 짧은 선들이 박스를 이루면 기둥이다(정사각 기둥은 이미 ColBase
+                # 폴백이 잡으므로 여기선 그 외 보강). 벽과 입력이 분리돼 중복되지 않는다.
+                unpaired = list(getattr(extractor, "last_unpaired_segments", []) or [])
+                col_count = 0
+                if unpaired:
+                    try:
+                        col_polys = extractor.detect_columns_from_segments(unpaired) \
+                            if hasattr(extractor, "detect_columns_from_segments") \
+                            else extractors.detect_columns_from_segments(unpaired)
+                        for c_idx, foot in enumerate(col_polys):
+                            try:
+                                vecs = [App.Vector(x, y, 0) for (x, y) in foot]
+                                vecs.append(vecs[0])
+                                wire = Draft.make_wire(vecs, closed=True, face=True)
+                                wire.Label = f"ColBase2_{layer_name}_{c_idx}"
+                                col = Arch.makeStructure(wire, height=height)
+                                col.Label = f"Col_{layer_name}_C{c_idx}"
+                                col.IfcType = "Column"
+                                if hasattr(wire, "ViewObject") and wire.ViewObject:
+                                    wire.ViewObject.Visibility = False
+                                col_count += 1
+                            except Exception:
+                                pass
+                        if col_count:
+                            log(f"🏛 미페어링 선에서 기둥 {col_count}개 검출·생성했습니다.")
+                    except Exception as e:
+                        log(f"  [경고] 기둥 검출 실패(무시): {e}")
+
+                # 짝을 못 찾아 벽으로 생성되지 못한 선분을 빨간 선으로 표시(알림).
+                # 주의: 과거엔 선분마다 Draft.make_wire + ViewObject 색상 지정을 반복했는데,
+                # 수백 개를 GUI 갱신 없이 연속 호출하면 FreeCAD가 "Access violation"으로
+                # 죽는 경우가 실제로 발생했다(지하3층 평면도, 미페어링 338개 재현).
+                # Part.makeLine 으로 기하만 모아 Part::Feature 1개에 담아 GUI 호출을 0번으로 줄임.
+                unpaired = list(getattr(extractor, "last_unpaired_segments", []) or [])
+                if unpaired:
+                    try:
+                        edges = []
+                        for p1, p2 in unpaired:
+                            v1 = App.Vector(p1[0], p1[1], 0)
+                            v2 = App.Vector(p2[0], p2[1], 0)
+                            if (v2 - v1).Length > 1e-6:
+                                edges.append(Part.makeLine(v1, v2))
+                        if edges:
+                            marker = doc.addObject("Part::Feature", f"Unpaired_{layer_name}")
+                            marker.Shape = Part.makeCompound(edges)
+                            marker.Label = f"⚠ 미페어링_{layer_name}"
+                            if hasattr(marker, "ViewObject") and marker.ViewObject:
+                                marker.ViewObject.LineColor = (1.0, 0.0, 0.0)
+                                marker.ViewObject.LineWidth = 3
+                            log(f"⚠️ 짝을 찾지 못해 벽으로 생성되지 않은 선분 {len(unpaired)}개를 "
+                                f"'{marker.Label}' (빨간선 1개 오브젝트)로 표시했습니다. (200mm 이상만)")
+                    except Exception as e:
+                        log(f"  [경고] 미페어링 표시 생성 실패(무시): {e}")
+
                 safe_recompute(doc)
                 Gui.updateGui()
-                log(f"✅ 성공! {count}개의 스마트 벽체 생성 완료. (짧은 조각 {skipped}개 제외)")
+                log(f"✅ 성공! 벽체 {count}개 + 기둥 {col_count}개 생성 완료. (짧은 조각 {skipped}개 제외)")
             except Exception as e:
                 log(f"❌ 중심선 추출 엔진 실행 중 오류 발생: {e}")
                 import traceback

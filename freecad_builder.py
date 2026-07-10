@@ -306,54 +306,117 @@ def _opening_axes(op):
     return (ux, uy), (-uy, ux)  # (along-wall, normal)
 
 
+def _opening_solids(op, params):
+    """opening 스펙 → (cutter_shape, leaf_shape|None, subtype). 좌표·배향 계산을 한 곳에 모아
+    build_openings(다건)와 cut_window_into_wall(라이브 단건)이 공유. doc 미접근(순수 Part)."""
+    d = params.get("wall", {})
+    wall_h = float(d.get("height", 2800.0))
+    margin = 100.0
+    c = op.get("center") or [0, 0]
+    cx, cy = float(c[0]), float(c[1])
+    subtype = op.get("subtype")
+    width = float(op.get("width") or (float(op.get("radius", 450.0)) * 2))
+    depth = float(op.get("host_width") or d.get("width", 200.0)) + margin
+    z_base = float(op.get("z_base", 0.0))
+    if subtype == "window":
+        sill = float(op.get("sill", 900.0)) + z_base
+        oh = float(op.get("height", 1200.0))
+    elif subtype == "door":
+        sill = z_base
+        oh = float(op.get("height", 2100.0))
+    else:
+        sill = z_base - margin
+        oh = wall_h + margin * 2
+    (ux, uy), (nx, ny) = _opening_axes(op)
+    hw, hd_ = width / 2.0, depth / 2.0
+    corners = [
+        App.Vector(cx - ux * hw - nx * hd_, cy - uy * hw - ny * hd_, sill),
+        App.Vector(cx + ux * hw - nx * hd_, cy + uy * hw - ny * hd_, sill),
+        App.Vector(cx + ux * hw + nx * hd_, cy + uy * hw + ny * hd_, sill),
+        App.Vector(cx - ux * hw + nx * hd_, cy - uy * hw + ny * hd_, sill),
+    ]
+    cutter = Part.Face(Part.makePolygon(corners + [corners[0]])).extrude(App.Vector(0, 0, oh))
+
+    leaf = None
+    if subtype in ("door", "window"):
+        lh = 40.0 / 2.0  # 판 두께/2
+        lc = [
+            App.Vector(cx - ux * hw - nx * lh, cy - uy * hw - ny * lh, sill),
+            App.Vector(cx + ux * hw - nx * lh, cy + uy * hw - ny * lh, sill),
+            App.Vector(cx + ux * hw + nx * lh, cy + uy * hw + ny * lh, sill),
+            App.Vector(cx - ux * hw + nx * lh, cy - uy * hw + ny * lh, sill),
+        ]
+        leaf = Part.Face(Part.makePolygon(lc + [lc[0]])).extrude(App.Vector(0, 0, oh))
+    return cutter, leaf, subtype
+
+
+def _add_leaf_feature(doc, leaf_shape, subtype, tag):
+    """창틀/문짝 Part::Feature 추가 + IfcType 태깅. 라벨 반환."""
+    feat = doc.addObject("Part::Feature",
+                         f"{'Door' if subtype == 'door' else 'Window'}_{tag}")
+    feat.Shape = leaf_shape
+    try:
+        arch_obj = Arch.makeEquipment(feat) if hasattr(Arch, "makeEquipment") else feat
+    except Exception:
+        arch_obj = feat
+    target = arch_obj if arch_obj is not None else feat
+    try:
+        target.Label = f"{'Door' if subtype == 'door' else 'Window'}_{tag}"
+        if hasattr(target, "IfcType"):
+            target.IfcType = "Door" if subtype == "door" else "Window"
+    except Exception:
+        pass
+    return target.Label
+
+
+def cut_window_into_wall(doc, wall_obj, op, params, tag="live", add_leaf=True):
+    """라이브 단건 삽입: 한 벽 객체에 opening void + (옵션)창틀/문짝 패널.
+    freecad_live_addon.cmd_add_window_to_wall 이 호출. _opening_solids 로 build_openings 와 기하 공유.
+    ★ 라이브 영속성: Arch Wall 의 .Shape 직접 덮어쓰기는 다음 recompute 에 사라지므로,
+      파라메트릭 Part::Cut(Base=벽, Tool=cutter) 로 만들어 recompute 후에도 유지되게 한다.
+    returns {"void": bool, "leaf": label|None, "cut_obj": label|None}."""
+    cutter_shape, leaf, subtype = _opening_solids(op, params)
+    out = {"void": False, "leaf": None, "cut_obj": None}
+    try:
+        cutter_feat = doc.addObject("Part::Feature", f"WinCutter_{tag}")
+        cutter_feat.Shape = cutter_shape
+        if hasattr(cutter_feat, "ViewObject") and cutter_feat.ViewObject:
+            cutter_feat.ViewObject.Visibility = False
+        cut = doc.addObject("Part::Cut", f"WallCut_{tag}")
+        cut.Base = wall_obj
+        cut.Tool = cutter_feat
+        out["void"] = True
+        out["cut_obj"] = cut.Label
+    except Exception as e:
+        print(f"[warn] cut_window_into_wall void(Part::Cut) 실패: {e}")
+    if add_leaf and leaf is not None:
+        try:
+            out["leaf"] = _add_leaf_feature(doc, leaf, subtype, tag)
+        except Exception as e:
+            print(f"[warn] cut_window_into_wall leaf 실패: {e}")
+    return out
+
+
 def build_openings(doc, openings, wall_idx_map, params):
     """[Phase D] 문/창 3D. 사각형 void 로 벽 cut + 문짝/창틀 솔리드(IfcDoor/Window).
     - subtype='door'  : 바닥~height 개구, 얇은 문짝 판.
     - subtype='window': sill~sill+height 개구, 창틀+유리 판.
     - subtype 없음     : 사각 void 만(기존 동작 보강). radius 없을 때 원통 폴백.
-    recompute 이후·saveAs 이전 호출(비파라메트릭 cut). returns (n_void, n_leaf)."""
+    recompute 이후·saveAs 이전 호출(비파라메트릭 cut). returns (n_void, n_leaf).
+    좌표·솔리드 계산은 _opening_solids 로 cut_window_into_wall(라이브 단건)과 공유."""
     if not openings:
         return (0, 0)
-    d = params.get("wall", {})
-    wall_h = float(d.get("height", 2800.0))
-    margin = 100.0
     n_void = 0
     n_leaf = 0
     log = ""
     for oi, op in enumerate(openings):
-        c = op.get("center") or [0, 0]
-        cx, cy = float(c[0]), float(c[1])
-        subtype = op.get("subtype")
-        width = float(op.get("width") or (float(op.get("radius", 450.0)) * 2))
-        depth = float(op.get("host_width") or d.get("width", 200.0)) + margin
-        z_base = float(op.get("z_base", 0.0))
-        if subtype == "window":
-            sill = float(op.get("sill", 900.0)) + z_base
-            oh = float(op.get("height", 1200.0))
-        elif subtype == "door":
-            sill = z_base
-            oh = float(op.get("height", 2100.0))
-        else:
-            sill = z_base - margin
-            oh = wall_h + margin * 2
-        (ux, uy), (nx, ny) = _opening_axes(op)
-
-        # 사각형 cutter: along-wall=width, normal=depth, z=sill..sill+oh
         try:
-            hw, hd_ = width / 2.0, depth / 2.0
-            corners = [
-                App.Vector(cx - ux * hw - nx * hd_, cy - uy * hw - ny * hd_, sill),
-                App.Vector(cx + ux * hw - nx * hd_, cy + uy * hw - ny * hd_, sill),
-                App.Vector(cx + ux * hw + nx * hd_, cy + uy * hw + ny * hd_, sill),
-                App.Vector(cx - ux * hw + nx * hd_, cy - uy * hw + ny * hd_, sill),
-            ]
-            wire = Part.makePolygon(corners + [corners[0]])
-            cutter = Part.Face(wire).extrude(App.Vector(0, 0, oh))
+            cutter, leaf, subtype = _opening_solids(op, params)
         except Exception as e:
             print(f"[warn] opening_{oi} cutter 실패: {e}")
             continue
 
-        # 벽 cut
+        # 벽 cut (개구부가 교차하는 모든 벽)
         for wi in op.get("wall_indices", []):
             wobj = wall_idx_map.get(wi)
             if wobj is None:
@@ -368,37 +431,16 @@ def build_openings(doc, openings, wall_idx_map, params):
             except Exception as e:
                 log += f"[warn] opening void 실패 Wall_{wi}: {e}\n"
 
-        # 문짝/창틀 솔리드 (얇은 판) — IfcType 태깅
-        if subtype in ("door", "window"):
+        # 문짝/창틀 솔리드 (개구부당 1회) — IfcType 태깅
+        if leaf is not None:
             try:
-                leaf_t = 40.0  # 판 두께
-                lh = leaf_t / 2.0
-                lc = [
-                    App.Vector(cx - ux * hw - nx * lh, cy - uy * hw - ny * lh, sill),
-                    App.Vector(cx + ux * hw - nx * lh, cy + uy * hw - ny * lh, sill),
-                    App.Vector(cx + ux * hw + nx * lh, cy + uy * hw + ny * lh, sill),
-                    App.Vector(cx - ux * hw + nx * lh, cy - uy * hw + ny * lh, sill),
-                ]
-                lw = Part.makePolygon(lc + [lc[0]])
-                leaf = Part.Face(lw).extrude(App.Vector(0, 0, oh))
-                feat = doc.addObject("Part::Feature",
-                                     f"{'Door' if subtype=='door' else 'Window'}_{oi}")
-                feat.Shape = leaf
-                try:
-                    arch_obj = Arch.makeEquipment(feat) if hasattr(Arch, "makeEquipment") else feat
-                except Exception:
-                    arch_obj = feat
-                target = arch_obj if arch_obj is not None else feat
-                try:
-                    target.Label = f"{'Door' if subtype=='door' else 'Window'}_{oi}"
-                    if hasattr(target, "IfcType"):
-                        target.IfcType = "Door" if subtype == "door" else "Window"
-                except Exception:
-                    pass
+                _add_leaf_feature(doc, leaf, subtype, oi)
                 n_leaf += 1
             except Exception as e:
                 log += f"[warn] {subtype}_{oi} leaf 실패: {e}\n"
-    return (n_void, n_leaf, log)
+    if log:
+        print(log, end="")
+    return (n_void, n_leaf)
 
 
 def build_columns(doc, columns, params):

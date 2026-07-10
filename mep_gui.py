@@ -284,6 +284,7 @@ class App:
         self.v_block = tk.StringVar(value=user_csv("block_map.csv"))
         self.v_llm = tk.BooleanVar(value=bool(os.environ.get("ANTHROPIC_API_KEY")))
         self.v_vision = tk.BooleanVar(value=False)  # Vision 폴백(실험적, 기본 OFF)
+        self.v_schedule = tk.StringVar()  # 외부 창호일람 Excel 경로(선택)
 
         self._build_file_row()
         self._build_buttons()
@@ -320,6 +321,10 @@ class App:
         self.btn_build.pack(side="left", padx=4)
         if find_freecadcmd() is None:
             self.btn_build.state(["disabled"])
+        ttk.Button(f, text="창호일람 Excel↓",
+                   command=self._do_schedule_export).pack(side="left", padx=4)
+        ttk.Button(f, text="창호일람 불러오기↑",
+                   command=self._do_schedule_pick).pack(side="left", padx=4)
         ttk.Button(f, text="DWG->DXF checklist",
                    command=self._show_checklist).pack(side="right", padx=4)
         ttk.Checkbutton(f, text="Vision fallback",
@@ -435,10 +440,22 @@ class App:
         self._log("Parsing...")
         self._set_buttons("disabled")
 
+        # 외부 창호일람 Excel(선택) 로드 → 평면도와 함께 먹여 창/문 배치
+        ext_sched = None
+        sched_path = self.v_schedule.get().strip()
+        if sched_path and os.path.exists(sched_path):
+            try:
+                from schedule_io import load_schedule_xlsx
+                ext_sched = load_schedule_xlsx(sched_path)
+                self._log(f"  [창호일람] Excel {len(ext_sched)}행 로드: {os.path.basename(sched_path)}")
+            except Exception as e:
+                self._log(f"  [창호일람] Excel 로드 실패(무시): {e}")
+
         def run():
             try:
                 data = P.parse(dxf, rules, brules,
-                               use_ai=use_ai, use_vision=use_vision)
+                               use_ai=use_ai, use_vision=use_vision,
+                               ext_schedule=ext_sched)
                 self.root.after(0, lambda: self._parse_done(data, dxf))
             except Exception as e:
                 msg = str(e)
@@ -446,6 +463,43 @@ class App:
                     self._log(f"[Error] Parse failed: {m}"),
                     self._set_buttons("!disabled")))
         threading.Thread(target=run, daemon=True).start()
+
+    def _do_schedule_pick(self):
+        """외부 창호일람 Excel 선택 → 다음 파싱에 사용."""
+        p = filedialog.askopenfilename(
+            title="창호일람 Excel 선택",
+            filetypes=[("Excel", "*.xlsx"), ("All", "*.*")])
+        if p:
+            self.v_schedule.set(p)
+            self._log(f"창호일람 Excel 지정: {p} (다음 'Parse'부터 적용)")
+
+    def _do_schedule_export(self):
+        """현재 파싱된 창호일람(window_schedule)을 Excel 양식으로 저장.
+        파싱 전이면 빈 양식 생성."""
+        try:
+            from schedule_io import export_schedule_xlsx
+        except Exception as e:
+            messagebox.showwarning("Excel", f"openpyxl 필요: {e}")
+            return
+        sched = (self.data or {}).get("window_schedule", []) if self.data else []
+        base = self.geom_path or self.v_dxf.get().strip() or os.path.join(HERE, "창호일람")
+        default = os.path.splitext(base)[0] + "_창호일람.xlsx"
+        p = filedialog.asksaveasfilename(
+            title="창호일람 Excel 저장", defaultextension=".xlsx",
+            initialfile=os.path.basename(default),
+            filetypes=[("Excel", "*.xlsx")])
+        if not p:
+            return
+        try:
+            export_schedule_xlsx(sched, p)
+            self._log(f"창호일람 Excel 저장({len(sched)}행) -> {p}"
+                      + ("  (빈 양식 — 먼저 Parse 하면 추출본이 채워집니다)" if not sched else ""))
+            try:
+                os.startfile(os.path.dirname(p) or ".")
+            except Exception:
+                pass
+        except Exception as e:
+            messagebox.showerror("Excel", f"저장 실패: {e}")
 
     def _set_buttons(self, state):
         """스캔·파싱 진행 중 버튼 비활성화(GUI 반응 보장)."""

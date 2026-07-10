@@ -56,15 +56,29 @@ def apply_edits(elements, edits):
     """fresh 파싱 결과(elements)에 저장된 edits를 EID로 재적용.
     elements: {category: [rec, ...]}, 각 rec에 rec['eid'] 존재 가정.
     edits: {eid: {"overrides":{...}, "category":..., "deleted":bool, "review_resolved":bool}}
-    반환: report(적용/고아/현재EID목록)."""
+       또는 신규 추가: {eid: {"added": true, "category": <cat>, "record": {...}}}
+         (preview.py 반자동 창호 배치 — DXF에 없는 사용자 생성 요소).
+    반환: report(적용/고아/추가/현재EID목록)."""
     present = {}
     for cat, items in elements.items():
         for rec in items:
             present[rec["eid"]] = (cat, rec)
 
-    applied, orphans = [], []
+    applied, orphans, added = [], [], []
     move_ops = []
     for eid, edit in edits.items():
+        # 신규 추가 요소: DXF 재파싱과 무관하게 elements 에 주입(멱등 — 이미 있으면 스킵).
+        if edit.get("added"):
+            if eid in present:
+                applied.append(eid)
+                continue
+            cat = edit.get("category", "opening")
+            rec = dict(edit.get("record", {}))
+            rec["eid"] = eid
+            elements.setdefault(cat, []).append(rec)
+            present[eid] = (cat, rec)
+            added.append(eid)
+            continue
         if eid not in present:
             orphans.append(eid)
             continue
@@ -92,6 +106,7 @@ def apply_edits(elements, edits):
     return {
         "applied": sorted(applied),
         "orphaned": sorted(orphans),
+        "added": sorted(added),
         "current_eids": sorted(present),
     }
 

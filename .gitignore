@@ -34,3 +34,22 @@ ai_res.json
 _live_screenshot_tmp.png
 flake8*.txt
 test.json
+
+# 스크래치/디버그/데이터 (공개 저장소 제외)
+*.log
+*.xlsx
+search_results.txt
+commands_yesterday.py
+old_macro.py
+test_curve.py
+test_freecad.py
+test_hatch.py
+test_merge.py
+test_merge_debug.py
+test_pair.py
+
+# CFD 생성 산출물 (케이스 디렉토리는 재현 가능)
+case_*/
+cfd_report_*.html
+_residuals.png
+_sections.png

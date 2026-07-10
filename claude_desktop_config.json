@@ -5,6 +5,12 @@
       "args": [
         "c:/AI program/3D Modeling/mep-parser/mep_mcp_server.py"
       ]
+    },
+    "freecad-live": {
+      "command": "python",
+      "args": [
+        "c:/AI program/3D Modeling/mep-parser/mcp_freecad_live.py"
+      ]
     }
   }
 }

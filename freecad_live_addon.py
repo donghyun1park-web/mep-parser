@@ -211,6 +211,167 @@ def cmd_build_geometry(payload):
         traceback.print_exc()
         return {"error": str(e)}
 
+def _wall_baseline(wall_obj):
+    """Arch Wall 객체 → (centerline [[x,y],[x,y]], width, height). 못 읽으면 (None,..)."""
+    cl = None
+    base = getattr(wall_obj, "Base", None)
+    if base is not None and getattr(base, "Shape", None):
+        vs = base.Shape.Vertexes
+        if len(vs) >= 2:
+            cl = [[round(vs[0].Point.x, 1), round(vs[0].Point.y, 1)],
+                  [round(vs[-1].Point.x, 1), round(vs[-1].Point.y, 1)]]
+    def _q(v, dflt):
+        try:
+            return float(v)
+        except Exception:
+            return dflt
+    return cl, _q(getattr(wall_obj, "Width", 200.0), 200.0), _q(getattr(wall_obj, "Height", 2800.0), 2800.0)
+
+
+_BUILT_PREFIXES = ("Wall_", "Col_", "Center_", "BaseSolid_", "WallAxis_", "ColBase", "WinCutter_", "WallCut_")
+
+
+def _is_wall_obj(o):
+    tid = getattr(o, "TypeId", "") or ""
+    ifc = getattr(o, "IfcType", "") or ""
+    lbl = getattr(o, "Label", "") or ""
+    return ("Wall" in tid) or (ifc == "Wall") or lbl.startswith("Wall") or "WallCut" in lbl
+
+
+def cmd_get_selection(payload):
+    """현재 FreeCAD 선택을 구조화 반환 — '이 벽'/'여기 선들'을 AI가 파악하는 핵심.
+    각 객체: {label,name,typeId,ifcType,role,picked_point, (wall이면)centerline/width/height,
+              (dxf_lines면)segment_count}. role: wall|dxf_lines|other."""
+    selex = Gui.Selection.getSelectionEx()
+    if not selex:
+        return {"status": "ok", "count": 0, "objects": [],
+                "hint": "선택이 없습니다. FreeCAD에서 대상(DXF 선 또는 벽)을 클릭 선택하세요."}
+    try:
+        from mep_macro.freecad_utils import extract_segments_from_objects
+    except Exception:
+        extract_segments_from_objects = None
+    out = []
+    for s in selex:
+        o = s.Object
+        picked = None
+        try:
+            if s.PickedPoints:
+                p = s.PickedPoints[0]
+                picked = [round(p.x, 1), round(p.y, 1), round(p.z, 1)]
+        except Exception:
+            pass
+        entry = {"label": o.Label, "name": o.Name, "typeId": getattr(o, "TypeId", ""),
+                 "ifcType": getattr(o, "IfcType", "") or "", "picked_point": picked}
+        if _is_wall_obj(o):
+            cl, w, h = _wall_baseline(o)
+            entry.update({"role": "wall", "centerline": cl, "width": w, "height": h})
+        else:
+            segs = extract_segments_from_objects([o]) if extract_segments_from_objects else []
+            if segs:
+                entry["role"] = "dxf_lines"
+                entry["segment_count"] = len(segs)
+            else:
+                entry["role"] = "other"
+        out.append(entry)
+    return {"status": "ok", "count": len(out), "objects": out}
+
+
+def cmd_make_wall_from_selection(payload):
+    """선택한 DXF 선 → 벽 페어링 → Arch 벽(+기둥). build_walls_from_segments 공유 헬퍼 사용."""
+    doc = ensure_active_document()
+    sel = Gui.Selection.getSelection()
+    if not sel:
+        return {"error": "선택된 객체가 없습니다. FreeCAD에서 DXF 선을 클릭 선택하세요."}
+    from mep_macro.freecad_utils import extract_segments_from_objects, build_walls_from_segments
+    src = [o for o in sel if not any((o.Name or "").startswith(p) for p in _BUILT_PREFIXES)]
+    segs = extract_segments_from_objects(src)
+    if not segs:
+        return {"error": "선택에서 선분을 찾지 못했습니다(이미 빌드된 객체만 선택됨?)."}
+    props = {"label": payload.get("label", "Sel"),
+             "height": float(payload.get("height", 3000)),
+             "default_thickness": float(payload.get("width", 200))}
+    res = build_walls_from_segments(doc, segs, props,
+                                    build_columns=bool(payload.get("columns", True)))
+    for o in src:
+        if hasattr(o, "ViewObject") and o.ViewObject:
+            o.ViewObject.Visibility = False
+    doc.recompute()
+    Gui.updateGui()
+    return {"status": "ok", "walls": res["walls"], "columns": res["columns"],
+            "skipped": res["skipped"],
+            "message": f"벽 {res['walls']}개 + 기둥 {res['columns']}개 생성(선분 {len(segs)}개에서)."}
+
+
+def cmd_add_window_to_wall(payload):
+    """선택한(또는 wall_label) 벽에 창문/문 단건 삽입. 클릭 지점(picked_point) 투영 위치 또는
+    position(0~1 비율 또는 mm) 또는 중앙. freecad_builder.cut_window_into_wall(Part::Cut, 영속) 사용."""
+    import math
+    import freecad_builder
+    doc = ensure_active_document()
+
+    wall_obj = None
+    picked = None
+    wl = payload.get("wall_label")
+    if wl:
+        for o in doc.Objects:
+            if o.Label == wl:
+                wall_obj = o
+                break
+    if wall_obj is None:
+        for s in Gui.Selection.getSelectionEx():
+            if _is_wall_obj(s.Object):
+                wall_obj = s.Object
+                try:
+                    if s.PickedPoints:
+                        picked = s.PickedPoints[0]
+                except Exception:
+                    pass
+                break
+    if wall_obj is None:
+        return {"error": "대상 벽을 찾지 못했습니다. 벽을 클릭 선택하거나 wall_label 을 지정하세요."}
+
+    cl, ww, wh = _wall_baseline(wall_obj)
+    if cl is None:
+        return {"error": "벽 중심선을 읽지 못했습니다(파라메트릭 Arch Wall 이 아님?)."}
+    a, b = cl[0], cl[1]
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    L = math.hypot(dx, dy) or 1.0
+    ux, uy = dx / L, dy / L
+
+    # 창 중심 위치 t (벽 시작점 기준 거리)
+    if picked is not None:
+        t = (picked.x - a[0]) * ux + (picked.y - a[1]) * uy
+    elif payload.get("position") is not None:
+        pos = float(payload["position"])
+        t = pos * L if 0.0 <= pos <= 1.0 else pos
+    else:
+        t = L / 2.0
+    t = max(0.0, min(L, t))
+    cx, cy = a[0] + t * ux, a[1] + t * uy
+
+    subtype = payload.get("subtype", "window")
+    op = {"center": [cx, cy],
+          "width": float(payload.get("width", 1200)),
+          "height": float(payload.get("height", 1500)),
+          "sill": float(payload.get("sill", 0.0 if subtype == "door" else 900.0)),
+          "subtype": subtype, "host_dir": [ux, uy], "host_width": ww}
+    params = {"wall": {"width": ww, "height": wh}}
+
+    doc.recompute()  # Arch Wall Shape 실현 보장
+    import uuid as _uuid
+    tag = _uuid.uuid4().hex[:6]
+    out = freecad_builder.cut_window_into_wall(doc, wall_obj, op, params, tag=tag)
+    doc.recompute()
+    Gui.updateGui()
+    if not out.get("void"):
+        return {"error": "창문 void 생성 실패(위치/크기를 확인하세요)."}
+    return {"status": "ok", "wall": wall_obj.Label, "subtype": subtype,
+            "center": [round(cx, 1), round(cy, 1)],
+            "size": [op["width"], op["height"]], "sill": op["sill"],
+            "leaf": out.get("leaf"), "cut_obj": out.get("cut_obj"),
+            "message": f"{wall_obj.Label} 에 {subtype} {op['width']:.0f}x{op['height']:.0f} 삽입 @({cx:.0f},{cy:.0f})."}
+
+
 def cmd_get_screenshot(payload):
     doc = App.ActiveDocument
     if not doc:
@@ -268,6 +429,16 @@ class LiveRPCHandler(BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps(res).encode('utf-8'))
             except Exception as e:
                 self.send_error(500, str(e))
+
+        elif self.path == '/get_selection':
+            try:
+                res = run_in_main_thread("cmd_get_selection", {})
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps(res, ensure_ascii=False).encode('utf-8'))
+            except Exception as e:
+                self.send_error(500, str(e))
         else:
             self.send_error(404, "Not Found")
 
@@ -293,6 +464,12 @@ class LiveRPCHandler(BaseHTTPRequestHandler):
                 res = run_in_main_thread("cmd_get_screenshot", payload)
             elif self.path == '/exec_python':
                 res = run_in_main_thread("cmd_exec_python", payload, timeout=300)
+            elif self.path == '/get_selection':
+                res = run_in_main_thread("cmd_get_selection", payload)
+            elif self.path == '/make_wall_from_selection':
+                res = run_in_main_thread("cmd_make_wall_from_selection", payload, timeout=180)
+            elif self.path == '/add_window_to_wall':
+                res = run_in_main_thread("cmd_add_window_to_wall", payload, timeout=120)
             else:
                 self.send_error(404, "Not Found")
                 return

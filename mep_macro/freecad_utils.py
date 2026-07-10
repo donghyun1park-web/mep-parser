@@ -3,6 +3,22 @@ import FreeCADGui as Gui
 import Arch
 import Part
 
+
+def _layer_label_matches(label, layer_name):
+    """원본 DXF 레이어 선분을 수집할 때 쓰는 '정확 일치' 매처.
+    'A-CEN'/'A-CEN-SUB', 'A-INS'/'A-INSUL' 처럼 베이스 이름 + 접미사로
+    보조선(중심선 보조·단열재선 등) 레이어를 짓는 관행이 실무 도면에 매우 흔해서,
+    과거의 부분문자열(포함관계) 매칭은 그 보조선까지 끌어와 벽 페어링이
+    엉뚱한 선과 짝지어지고 도면 전체에서 벽이 한쪽으로 어긋나는 버그를 냈다.
+    다층 합본에서 FreeCAD가 'He_underground B1|A-CON' 처럼 '|' 로 층 prefix를
+    붙이는 경우만 마지막 토큰 정확 일치로 허용한다."""
+    if label == layer_name:
+        return True
+    if "|" in label and label.rsplit("|", 1)[-1] == layer_name:
+        return True
+    return False
+
+
 def find_objects(name_str):
     """
     Finds and returns objects matching the name/label.
@@ -36,15 +52,15 @@ def get_lines_from_fc_layer(doc, layer_name, only_visible=True):
                     target_objs.append(child)
             break
             
-    # 2. 2순위: 단일 객체의 이름이 정확히 일치하거나, layer_name을 포함하는 2D 객체들
+    # 2. 2순위: 단일 객체의 이름이 정확히 일치하는 2D 객체들.
+    # (과거 "layer_name in obj.Label" 포함관계 매칭은 _layer_label_matches 참고 주석대로 제거)
     if not target_objs:
         for obj in doc.Objects:
             # 이미 생성된 3D 객체는 무조건 스킵
             if any(obj.Name.startswith(prefix) for prefix in ["Wall_", "Col_", "Center_", "BaseSolid_"]):
                 continue
-                
-            # 이름이 정확히 일치하거나, 느슨한 포함 관계 허용
-            if layer_name == obj.Label or layer_name.replace("-", "_") == obj.Name or layer_name in obj.Label:
+
+            if (_layer_label_matches(obj.Label, layer_name) or layer_name.replace("-", "_") == obj.Name):
                 if getattr(obj, "Shape", None) and obj.Shape.Edges:
                     target_objs.append(obj)
                     
@@ -88,17 +104,148 @@ def get_lines_from_fc_layer(doc, layer_name, only_visible=True):
                 b = (round(pts[-1].x, 1), round(pts[-1].y, 1))
                 if a != b:
                     segs.append((a, b))
+
             else:
-                curve_pts = tuple((round(p.x, 1), round(p.y, 1)) for p in pts)
-                # Remove consecutive duplicates
-                clean_pts = []
-                for p in curve_pts:
-                    if not clean_pts or clean_pts[-1] != p:
-                        clean_pts.append(p)
-                if len(clean_pts) > 1:
-                    segs.append(tuple(clean_pts))
+                for i in range(len(pts) - 1):
+                    a = (round(pts[i].x, 1), round(pts[i].y, 1))
+                    b = (round(pts[i+1].x, 1), round(pts[i+1].y, 1))
+                    if a != b:
+                        segs.append((a, b))
                     
     return segs, target_objs
+
+
+def extract_segments_from_objects(objs, only_visible=False, min_len=50.0):
+    """주어진 FreeCAD 객체들 → 2D 선분 목록 [((x1,y1),(x2,y2)), ...].
+    get_lines_from_fc_layer 의 edge→endpoint 로직과 동일(레이어 매칭 대신 객체 직접 입력).
+    라이브 선택(cmd_get_selection)에서 클릭한 객체의 선분을 뽑을 때 사용."""
+    segs = []
+    for obj in objs:
+        if only_visible and hasattr(obj, "ViewObject") and obj.ViewObject and not obj.ViewObject.Visibility:
+            continue
+        sh = getattr(obj, "Shape", None)
+        if not sh:
+            continue
+        for ed in sh.Edges:
+            if ed.Length < min_len:
+                continue
+            is_line = bool(getattr(ed, "Curve", None)) and "Line" in getattr(ed.Curve, "TypeId", "")
+            if is_line:
+                vs = ed.Vertexes
+                if len(vs) < 2:
+                    continue
+                pts = [vs[0].Point, vs[-1].Point]
+            else:
+                try:
+                    num_pts = max(2, int(ed.Length / 100.0) + 1)
+                    pts = ed.discretize(Number=num_pts)
+                except Exception:
+                    vs = ed.Vertexes
+                    if len(vs) < 2:
+                        continue
+                    pts = [vs[0].Point, vs[-1].Point]
+            if is_line:
+                a = (round(pts[0].x, 1), round(pts[0].y, 1))
+                b = (round(pts[-1].x, 1), round(pts[-1].y, 1))
+                if a != b:
+                    segs.append((a, b))
+            else:
+                for i in range(len(pts) - 1):
+                    a = (round(pts[i].x, 1), round(pts[i].y, 1))
+                    b = (round(pts[i + 1].x, 1), round(pts[i + 1].y, 1))
+                    if a != b:
+                        segs.append((a, b))
+    return segs
+
+
+def build_walls_from_segments(doc, raw_lines, props, build_columns=True):
+    """raw 2D 선분 → 벽 페어링(extractors) → Arch 벽 + 짧은조각/미페어링 기둥 폴백.
+    commands.py '빌드'와 live cmd_make_wall_from_selection 의 단일 공유 구현(향후 commands.py 도 이걸로 수렴).
+    returns {walls, columns, skipped, wall_objs, unpaired_segments}."""
+    import math
+    import Draft
+    import extractors
+    import importlib
+    importlib.reload(extractors)
+
+    extractor = extractors.WallExtractor(None)
+    extractor.wall_mappings = {}
+    wall_data = extractor.extract_from_raw_lines(raw_lines, props)
+    height = float(props.get("height", 3000))
+    label = props.get("label", "Live")
+
+    count = skipped = 0
+    wall_objs = []
+    for idx, w in enumerate(wall_data):
+        coords = list(w["centerline"].coords)
+        if len(coords) < 2:
+            skipped += 1
+            continue
+        cl_len = w["centerline"].length
+        # 중심선이 두께와 거의 같거나 짧으면 기둥(Structure)으로 폴백(commands.py 동일 로직)
+        if cl_len <= w["thickness"] + 10.0:
+            # ★통벽 방지: 비정상적으로 큰 정사각 영역(>1.5m)은 기둥 아님 → 스킵
+            if max(cl_len, w["thickness"]) > 1500.0:
+                skipped += 1
+                continue
+            try:
+                p1, p2 = coords[0], coords[-1]
+                dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+                hl = math.hypot(dx, dy)
+                ux, uy = (dx / hl, dy / hl) if hl > 0.001 else (1.0, 0.0)
+                nx, ny = -uy, ux
+                ht = w["thickness"] / 2.0
+                c1 = App.Vector(p1[0] - ht * nx, p1[1] - ht * ny, 0)
+                c2 = App.Vector(p1[0] + ht * nx, p1[1] + ht * ny, 0)
+                c3 = App.Vector(p2[0] + ht * nx, p2[1] + ht * ny, 0)
+                c4 = App.Vector(p2[0] - ht * nx, p2[1] - ht * ny, 0)
+                wire = Draft.make_wire([c1, c2, c3, c4, c1], closed=True, face=True)
+                wire.Label = f"ColBase_{label}_{idx}"
+                col = Arch.makeStructure(wire, height=w["height"])
+                col.Label = f"Col_{label}_{idx}"
+                col.IfcType = "Column"
+                if hasattr(wire, "ViewObject") and wire.ViewObject:
+                    wire.ViewObject.Visibility = False
+                count += 1
+            except Exception:
+                skipped += 1
+            continue
+        try:
+            points = [App.Vector(x, y, 0) for x, y in coords]
+            wire = Draft.make_wire(points, closed=False, face=False)
+            wire.Label = f"Center_{label}_{idx}"
+            wall = Arch.makeWall(wire, length=0, width=w["thickness"],
+                                 height=w["height"], align="Center")
+            wall.Label = f"Wall_{label}_{idx}"
+            wall_objs.append(wall)
+            count += 1
+        except Exception:
+            skipped += 1
+
+    unpaired = list(getattr(extractor, "last_unpaired_segments", []) or [])
+    col_count = 0
+    if build_columns and unpaired:
+        try:
+            for c_idx, foot in enumerate(extractors.detect_columns_from_segments(unpaired)):
+                try:
+                    vecs = [App.Vector(x, y, 0) for (x, y) in foot]
+                    vecs.append(vecs[0])
+                    wire = Draft.make_wire(vecs, closed=True, face=True)
+                    wire.Label = f"ColBase2_{label}_{c_idx}"
+                    col = Arch.makeStructure(wire, height=height)
+                    col.Label = f"Col_{label}_C{c_idx}"
+                    col.IfcType = "Column"
+                    if hasattr(wire, "ViewObject") and wire.ViewObject:
+                        wire.ViewObject.Visibility = False
+                    col_count += 1
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    return {"walls": count, "columns": col_count, "skipped": skipped,
+            "wall_objs": wall_objs, "unpaired_segments": unpaired}
+
 
 def hide_base_solids(doc):
     """
@@ -177,15 +324,19 @@ def build_polygonized_layer(doc, layer_name, obj_type, height, thick_cap=None, l
         log("❌ shapely 가 없습니다. FreeCAD python 에 'pip install shapely' 필요.")
         return
 
-    # 1) 레이어 객체 수집
+    # 1) 레이어 객체 수집 (정확 일치 — get_lines_from_fc_layer 와 동일 사유로
+    #    포함관계 매칭 금지: _layer_label_matches 주석 참고)
+    def _matches(obj):
+        return _layer_label_matches(obj.Label, layer_name) or layer_name.replace("-", "_") == obj.Name
+
     lines = []
     for obj in doc.Objects:
-        if (layer_name in obj.Label or layer_name in obj.Name) and hasattr(obj, "Group"):
+        if _matches(obj) and hasattr(obj, "Group"):
             lines = list(obj.Group)
             break
     if not lines:
         for obj in doc.Objects:
-            if (layer_name in obj.Label or layer_name in obj.Name):
+            if _matches(obj):
                 if getattr(obj, "Shape", None) and obj.Shape.Edges:
                     lines.append(obj)
     if not lines:
