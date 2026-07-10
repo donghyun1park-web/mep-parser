@@ -1,0 +1,54 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| =========                 |                                                 |
+| \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\    /   O peration     | Version:  v1912                                 |
+|   \\  /    A nd           | Website:  www.openfoam.com                      |
+|    \\/     M anipulation  |                                                 |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      controlDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+application     buoyantBoussinesqSimpleFoam;
+
+startFrom       latestTime;
+
+startTime       0;
+
+stopAt          endTime;
+
+endTime         400;
+
+deltaT          1;
+
+writeControl    timeStep;
+
+writeInterval   100;
+
+purgeWrite      0;
+
+writeFormat     ascii;
+
+writePrecision  6;
+
+writeCompression off;
+
+timeFormat      general;
+
+timePrecision   6;
+
+runTimeModifiable true;
+
+// 주: 이 OpenFOAM v1912 apt 빌드는 함수객체(인라인·postProcess 공통)가 SHA1 IOstream
+// 버그로 깨져 있어 사용하지 않는다. 리포트 지표는 cfd_report.py 가 solver 로그(잔차)와
+// 최종 time 디렉토리의 ascii 필드(T/U)를 균일 구조격자 기준으로 직접 계산한다.
+// (writeFormat=ascii, 격자=blockMeshDict 박스라서 셀 인덱스→좌표 해석적 복원 가능)
+
+
+// ************************************************************************* //
