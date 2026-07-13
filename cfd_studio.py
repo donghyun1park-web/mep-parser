@@ -80,8 +80,8 @@ RUN_LOCK = threading.Lock()
 OPENFOAM_OK = None   # main()에서 1회 체크(1초 status 폴링마다 wsl 프로세스를 띄우지 않음)
 
 
-def enqueue_run(name):
-    """케이스 실행 예약. 문제 있으면 오류 문자열, 정상이면 None."""
+def _enqueue(name, kind):
+    """실행/격자검증 작업 예약. 문제 있으면 오류 문자열, 정상이면 None."""
     if not OPENFOAM_OK:
         return ("WSL OpenFOAM 이 없습니다 — WSL 에서 `sudo apt-get install openfoam` "
                 "설치 후 스튜디오를 재시작하세요.")
@@ -90,9 +90,9 @@ def enqueue_run(name):
     with RUN_LOCK:
         if RUN["active"] and RUN["active"]["name"] == name:
             return "이미 실행 중"
-        if name in RUN["queue"]:
+        if any(q["name"] == name for q in RUN["queue"]):
             return "이미 대기열에 있음"
-        RUN["queue"].append(name)
+        RUN["queue"].append({"name": name, "kind": kind})
         RUN["history"].pop(name, None)
         if not RUN["worker"]:
             RUN["worker"] = True
@@ -100,14 +100,23 @@ def enqueue_run(name):
     return None
 
 
+def enqueue_run(name):
+    return _enqueue(name, "run")
+
+
+def enqueue_grid(name):
+    return _enqueue(name, "grid")
+
+
 def _run_worker():
-    """대기열을 하나씩 처리(동시 1개). 완료 시 리포트 자동 생성."""
+    """대기열을 하나씩 처리(동시 1개). run=실행+리포트, grid=격자검증 3케이스."""
     while True:
         with RUN_LOCK:
             if not RUN["queue"]:
                 RUN["worker"] = False
                 return
-            name = RUN["queue"].pop(0)
+            job = RUN["queue"].pop(0)
+            name, kind = job["name"], job["kind"]
             case_dir = safe_case_dir(name)
             end_t = None
             try:
@@ -118,34 +127,95 @@ def _run_worker():
             RUN["active"] = {"name": name, "step": "준비", "time": 0.0,
                              "endTime": end_t, "lines": []}
         act = RUN["active"]
-
-        def cb(line):
-            if line.startswith("Time = "):
-                act["step"] = "solver"
-                try:
-                    act["time"] = float(line.split("=", 1)[1])
-                except ValueError:
-                    pass
-            elif line.startswith("=== blockMesh"):
-                act["step"] = "blockMesh"
-            elif line.startswith("=== checkMesh"):
-                act["step"] = "checkMesh"
-            elif line.startswith("=== solver"):
-                act["step"] = "solver"
-            act["lines"].append(line)
-            del act["lines"][:-15]
-
-        r = run_case(case_dir, progress_cb=cb)
-        err = r.get("error")
-        if r["ok"]:
-            act["step"] = "리포트 생성"
-            try:
-                cfd_report.generate_report(case_dir)
-            except Exception as e:
-                err = f"리포트 생성 실패: {e}"
+        try:
+            if kind == "grid":
+                err = _do_gridstudy(name, case_dir, act)
+                ok = err is None
+            else:
+                ok, err = _do_run(name, case_dir, act)
+        except Exception as e:
+            ok, err = False, f"{type(e).__name__}: {e}"
         with RUN_LOCK:
-            RUN["history"][name] = {"ok": r["ok"] and not err, "error": err}
+            RUN["history"][name] = {"ok": ok, "error": err}
             RUN["active"] = None
+        FIELD_CACHE.pop(name, None)   # 결과 갱신 → 뷰어 캐시 무효화
+
+
+def _do_run(name, case_dir, act):
+    def cb(line):
+        if line.startswith("Time = "):
+            act["step"] = "solver"
+            try:
+                act["time"] = float(line.split("=", 1)[1])
+            except ValueError:
+                pass
+        elif line.startswith("=== blockMesh"):
+            act["step"] = "blockMesh"
+        elif line.startswith("=== checkMesh"):
+            act["step"] = "checkMesh"
+        elif line.startswith("=== solver"):
+            act["step"] = "solver"
+        act["lines"].append(line)
+        del act["lines"][:-15]
+
+    r = run_case(case_dir, progress_cb=cb)
+    err = r.get("error")
+    if r["ok"]:
+        act["step"] = "리포트 생성"
+        try:
+            cfd_report.generate_report(case_dir)
+        except Exception as e:
+            err = f"리포트 생성 실패: {e}"
+    return (r["ok"] and not err), err
+
+
+def _do_gridstudy(name, case_dir, act):
+    """격자 독립성 검증: 케이스 셀 c 기준 [1.5c, c, c/1.5] 3케이스를 <case>/_grid/ 에
+    실행(cfd_gridstudy.run_one 재사용) → GCI 를 케이스 meta['gci'] 에 병합.
+    반환: 오류 문자열 또는 None."""
+    import cfd_gridstudy
+    meta_path = os.path.join(case_dir, "cfd_case_meta.json")
+    with open(meta_path, encoding="utf-8") as f:
+        meta = json.load(f)
+    cfg = meta.get("config", {})
+    c = float(cfg.get("mesh", {}).get("cell", 0.3))
+    cells = [round(c * 1.5, 3), c, round(c / 1.5, 3)]   # 성긴 → 세밀
+    gdir = os.path.join(case_dir, "_grid")
+    os.makedirs(gdir, exist_ok=True)
+    results = []
+    for i, cell in enumerate(cells):
+        act["step"] = f"격자검증 {i + 1}/3 · 셀 {cell} m"
+        act["time"] = 0.0
+        act["lines"].append(f"[격자 {i + 1}/3] 셀 {cell} m 실행...")
+        results.append(cfd_gridstudy.run_one(cfg, cell, os.path.join(gdir, f"c{i}"),
+                                             cfg.get("endTime")))
+    key = "T_max_C"
+    vals = [r["metrics"].get(key) for r in results]
+    gci = {"key": key, "cells": cells,
+           "values": [round(v, 3) if isinstance(v, float) else v for v in vals],
+           "ncells": [r["cells"] for r in results]}
+    err = None
+    if all(v is not None for v in vals):
+        res = cfd_gridstudy.solve_order(vals[2], vals[1], vals[0],
+                                        cells[1] / cells[2], cells[0] / cells[1])
+        if res and res[0] == "비단조":
+            gci["verdict"] = "비단조 — 격자 미독립(더 세밀 필요)"
+        elif res:
+            p, fext, g21 = res
+            gci.update(p=round(p, 2), extrapolated=round(fext, 3), gci_pct=round(g21, 2),
+                       verdict=("신뢰(≤5%)" if g21 <= 5 else "격자오차 큼(>5%)"))
+        else:
+            gci["verdict"] = "격자간 변화 0 — 완전 독립"
+            gci["gci_pct"] = 0.0
+    else:
+        gci["verdict"] = "지표 누락(하위 실행 실패)"
+        err = "격자검증: 일부 격자 실행 실패(케이스 _grid/ 로그 확인)"
+    meta["gci"] = gci
+    with open(meta_path, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+    act["lines"].append(f"격자검증 완료: {gci.get('verdict')}"
+                        + (f" GCI={gci.get('gci_pct')}%" if gci.get("gci_pct") is not None else ""))
+    return err
 
 
 def run_status():
@@ -155,8 +225,107 @@ def run_status():
             a = RUN["active"]
             act = {"name": a["name"], "step": a["step"], "time": a["time"],
                    "endTime": a["endTime"], "lines": list(a["lines"])}
+        queue = [q["name"] + (" (격자검증)" if q["kind"] == "grid" else "")
+                 for q in RUN["queue"]]
         return {"openfoam": bool(OPENFOAM_OK), "active": act,
-                "queue": list(RUN["queue"]), "history": dict(RUN["history"])}
+                "queue": queue, "history": dict(RUN["history"])}
+
+
+# ── 결과 필드 캐시 + 단면 슬라이스 (2D/3D 뷰어 공용 API) ─────────────────────
+# 함수객체가 깨진 환경이므로(SHA1 버그) 최종 time 의 ascii 필드를 직접 파싱해
+# (nz,ny,nx) 구조격자로 캐시하고, 요청된 절단면만 JSON 으로 반환한다(수 KB).
+
+FIELD_CACHE = {}
+FIELD_LOCK = threading.Lock()
+
+
+def _load_fields(name):
+    """케이스 결과 필드 → 구조격자 배열 캐시(mtime 무효화)."""
+    d = safe_case_dir(name)
+    if not d:
+        return None
+    tdir = cfd_report.find_latest_time(d)
+    if not tdir or not os.path.exists(os.path.join(tdir, "T")):
+        return None
+    meta = cfd_report._load_meta(d)
+    if not meta:
+        return None
+    mt = os.path.getmtime(os.path.join(tdir, "T"))
+    with FIELD_LOCK:
+        c = FIELD_CACHE.get(name)
+        if c and c["mtime"] == mt:
+            return c
+    import numpy as np
+    n = meta["mesh"]["cells"]
+    T = cfd_report._as_array(cfd_report.read_field(os.path.join(tdir, "T")), n)
+    if T is None:
+        return None
+    Tg, xc, yc, zc = cfd_report._cell_grid(T - 273.15, meta)
+    entry = {"meta": meta, "mtime": mt, "T": Tg,
+             "xc": xc, "yc": yc, "zc": zc,
+             "Tmin": float(Tg.min()), "Tmax": float(Tg.max())}
+    U = cfd_report._as_array(cfd_report.read_field(os.path.join(tdir, "U")), n)
+    if U is not None and getattr(U, "ndim", 1) == 2:
+        nx, ny, nz = meta["mesh"]["nx"], meta["mesh"]["ny"], meta["mesh"]["nz"]
+        Ug = U[:nx * ny * nz].reshape(nz, ny, nx, 3)
+        entry["Ux"], entry["Uy"], entry["Uz"] = Ug[..., 0], Ug[..., 1], Ug[..., 2]
+        Umag = np.linalg.norm(Ug, axis=3)
+        entry["Umag"] = Umag
+        entry["Umax"] = float(Umag.max())
+    with FIELD_LOCK:
+        FIELD_CACHE[name] = entry
+    return entry
+
+
+def field_info(name):
+    e = _load_fields(name)
+    if not e:
+        return {"error": "결과 필드 없음 — 아직 실행 전이거나 회수 실패"}
+    m = e["meta"]["mesh"]
+    room = e["meta"]["config"].get("room", {})
+    roles = e["meta"].get("roles", {})
+    return {"nx": m["nx"], "ny": m["ny"], "nz": m["nz"], "room": room,
+            "Tmin": round(e["Tmin"], 2), "Tmax": round(e["Tmax"], 2),
+            "Umax": round(e.get("Umax", 0.0), 3), "hasU": "Umag" in e,
+            "inlet": next((k for k, v in roles.items() if v == "inlet"), None),
+            "outlet": next((k for k, v in roles.items() if v == "outlet"), None)}
+
+
+def field_slice(name, field, axis, idx, want_vec):
+    """절단면 1장: {hx,hy,w,h,pos,data[[..]],(vx,vy)}. data 는 화면행=hy축."""
+    e = _load_fields(name)
+    if not e:
+        return {"error": "결과 필드 없음"}
+    key = "Umag" if field == "U" else "T"
+    if key not in e:
+        return {"error": f"{field} 필드 없음"}
+    g = e[key]
+    nz, ny, nx = g.shape
+    room = e["meta"]["config"].get("room", {})
+    L, W, H = room.get("L", 1), room.get("W", 1), room.get("H", 1)
+    axis = axis if axis in ("x", "y", "z") else "z"
+    lim = {"z": nz, "y": ny, "x": nx}[axis]
+    idx = max(0, min(int(idx), lim - 1))
+    has_u = "Ux" in e
+    if axis == "z":
+        data = g[idx]                       # (ny, nx) — 행=y, 열=x
+        pos, hx, hy, w, h = e["zc"][idx], "x", "y", L, W
+        vec = (e["Ux"][idx], e["Uy"][idx]) if has_u else None
+    elif axis == "y":
+        data = g[:, idx, :]                 # (nz, nx) — 행=z, 열=x
+        pos, hx, hy, w, h = e["yc"][idx], "x", "z", L, H
+        vec = (e["Ux"][:, idx, :], e["Uz"][:, idx, :]) if has_u else None
+    else:
+        data = g[:, :, idx]                 # (nz, ny) — 행=z, 열=y
+        pos, hx, hy, w, h = e["xc"][idx], "y", "z", W, H
+        vec = (e["Uy"][:, :, idx], e["Uz"][:, :, idx]) if has_u else None
+    out = {"axis": axis, "idx": idx, "pos": round(float(pos), 3),
+           "hx": hx, "hy": hy, "w": w, "h": h,
+           "data": [[round(float(v), 3) for v in row] for row in data]}
+    if want_vec and vec is not None:
+        out["vx"] = [[round(float(v), 4) for v in row] for row in vec[0]]
+        out["vy"] = [[round(float(v), 4) for v in row] for row in vec[1]]
+    return out
 
 
 # ── 마법사 백엔드: 도면 미리보기 · 케이스 생성 · 삭제 ────────────────────────
@@ -322,7 +491,8 @@ class StudioHandler(BaseHTTPRequestHandler):
                 pass
 
     def _route_get(self):
-        path = unquote(urlparse(self.path).path)
+        u = urlparse(self.path)
+        path = unquote(u.path)
         if path == "/":
             return self._send(200, PAGE_DASH)
         if path == "/new":
@@ -331,6 +501,19 @@ class StudioHandler(BaseHTTPRequestHandler):
             return self._json(scan_cases())
         if path == "/api/status":
             return self._json(run_status())
+        m = re.match(r"^/api/fieldinfo/([^/]+)$", path)
+        if m:
+            return self._json(field_info(m.group(1)))
+        m = re.match(r"^/api/slice/([^/]+)$", path)
+        if m:
+            from urllib.parse import parse_qs
+            q = parse_qs(u.query)
+            return self._json(field_slice(
+                m.group(1),
+                q.get("field", ["T"])[0],
+                q.get("axis", ["z"])[0],
+                q.get("idx", ["0"])[0],
+                q.get("vec", ["0"])[0] == "1"))
         m = re.match(r"^/case/([^/]+)/report$", path)
         if m:
             return self._serve_report(m.group(1))
@@ -362,6 +545,10 @@ class StudioHandler(BaseHTTPRequestHandler):
             m = re.match(r"^/api/run/([^/]+)$", path)
             if m:
                 err = enqueue_run(m.group(1))
+                return self._json({"error": err} if err else {"ok": True})
+            m = re.match(r"^/api/grid/([^/]+)$", path)
+            if m:
+                err = enqueue_grid(m.group(1))
                 return self._json({"error": err} if err else {"ok": True})
             m = re.match(r"^/api/delete/([^/]+)$", path)
             if m:
@@ -437,6 +624,21 @@ PAGE_DASH = """<!doctype html><html lang="ko"><head><meta charset="utf-8">
  .strip .fill{background:var(--accent);height:100%;transition:width .5s}
  .strip pre{background:#1e2a33;color:#d5e8f5;border-radius:6px;padding:8px 10px;font-size:11.5px;max-height:220px;overflow:auto;white-space:pre-wrap}
  .strip summary{cursor:pointer;color:var(--accent);font-size:12.5px}
+ .ov{position:fixed;inset:0;background:rgba(20,30,40,.5);display:none;align-items:center;justify-content:center;z-index:60}
+ .ovbox{background:#fff;border-radius:12px;padding:16px 20px;max-width:94vw;max-height:92vh;overflow:auto;box-shadow:0 6px 30px rgba(0,0,0,.25)}
+ .ovhdr{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap}
+ .ovhdr b{color:var(--accent);font-size:15px}
+ .ovhdr select,.ovhdr input[type=range]{font-size:13px}
+ .ovhdr .x{margin-left:auto;background:none;border:none;font-size:18px;cursor:pointer;color:#666}
+ #vwcv{border:1px solid var(--line);border-radius:6px;cursor:crosshair}
+ #vwread{font-size:13px;color:#333;margin-top:8px;min-height:18px}
+ .cmpbar{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--accent);color:#fff;
+  border-radius:24px;padding:10px 22px;box-shadow:0 4px 16px rgba(0,0,0,.3);display:none;z-index:55;font-size:14px}
+ .cmpbar button{background:#fff;color:var(--accent);border:none;border-radius:14px;padding:5px 14px;margin-left:12px;cursor:pointer;font-weight:600}
+ #cmptbl{border-collapse:collapse;font-size:13.5px;min-width:480px}
+ #cmptbl th,#cmptbl td{padding:8px 14px;border-bottom:1px solid var(--line);text-align:right}
+ #cmptbl th:first-child,#cmptbl td:first-child{text-align:left;background:#fafafa;font-weight:600}
+ .best{color:#1e8449;font-weight:700}
 </style></head><body><div class="wrap">
  <div class="hdr">
   <h1>MEP CFD Studio</h1>
@@ -450,9 +652,37 @@ PAGE_DASH = """<!doctype html><html lang="ko"><head><meta charset="utf-8">
  <div class="foot">도면→OpenFOAM CFD 파이프라인 · 지표: 평균/최고 온도, 급기 대비 ΔT,
   에너지 폐합율(주입열=배기열, 90~110% 정상), GCI(격자 오차, ≤5% 신뢰)</div>
 </div>
+
+<div id="vwov" class="ov" onclick="if(event.target===this)vwClose()">
+ <div class="ovbox">
+  <div class="ovhdr">
+   <b id="vwtitle"></b>
+   <select id="vwfield" onchange="vwFetch()"><option value="T">온도</option><option value="U">유속</option></select>
+   <select id="vwaxis" onchange="vwAxis()"><option value="z">수평면(Z)</option><option value="y">수직면(Y)</option><option value="x">수직면(X)</option></select>
+   <input type="range" id="vwidx" style="width:180px" oninput="vwFetch()">
+   <span id="vwpos" style="font-size:13px;color:#444;min-width:88px"></span>
+   <label style="font-size:13px"><input type="checkbox" id="vwvec" onchange="vwFetch()"> 기류 화살표</label>
+   <button class="x" onclick="vwClose()">✕</button>
+  </div>
+  <div style="display:flex;gap:12px;align-items:flex-start">
+   <canvas id="vwcv" width="640" height="430" onmousemove="vwHover(event)" onmouseleave="vwread.textContent=''"></canvas>
+   <canvas id="vwcb" width="52" height="430"></canvas>
+  </div>
+  <div id="vwread"></div>
+ </div>
+</div>
+
+<div id="cmpov" class="ov" onclick="if(event.target===this)cmpov.style.display='none'">
+ <div class="ovbox"><div class="ovhdr"><b>케이스 비교</b><button class="x" onclick="cmpov.style.display='none'">✕</button></div>
+  <div id="cmpbody"></div></div>
+</div>
+<div id="cmpbar" class="cmpbar"><span id="cmpn"></span><button onclick="openCompare()">선택 비교 →</button></div>
+
 <script>
 let CASES=[], KEY='mtime', ASC=false;
+const SEL=new Set();
 const COLS=[
+ {k:'_sel',t:''},
  {k:'name',t:'케이스명'},
  {k:'room',t:'방 L×W×H (m)'},
  {k:'cells',t:'셀',num:1},
@@ -501,6 +731,7 @@ function render(){
  });
  let h='<div class="tblwrap"><table><thead><tr>';
  for(const c of COLS){
+  if(c.k==='_sel'){h+='<th></th>';continue;}
   const arrow=(KEY===c.k)?`<span class="arr">${ASC?'▲':'▼'}</span>`:'';
   h+=`<th class="${c.num?'num':''}" onclick="sortBy('${c.k}')">${c.t}${arrow}</th>`;
  }
@@ -509,12 +740,17 @@ function render(){
   const warn=(r.closure_pct!=null&&(r.closure_pct<90||r.closure_pct>110));
   h+=`<tr class="${warn?'rowwarn':''}">`;
   for(const c of COLS){
+   if(c.k==='_sel'){
+    h+=`<td><input type="checkbox" ${SEL.has(r.dir)?'checked':''} onchange="selCh('${encodeURIComponent(r.dir)}',this.checked)"></td>`;continue;
+   }
    if(c.k==='badge'){h+=`<td><span class="badge" style="background:${r.badge_color||'#7f8c8d'}">${r.badge||''}</span></td>`;continue;}
    if(c.k==='_act'){
     const d=encodeURIComponent(r.dir);
     let a=[];
     if(r.report)a.push(`<a class="rep" target="_blank" href="/case/${d}/report">리포트</a>`);
+    if(r.status!=='created')a.push(`<a class="rep" href="#" onclick="openViewer('${d}');return false">결과</a>`);
     a.push(`<a class="rep" href="#" onclick="runCase('${d}');return false">${r.status==='created'?'실행':'재실행'}</a>`);
+    if(r.status!=='created')a.push(`<a class="rep" href="#" title="격자 독립성 검증(3격자 배치 실행 → GCI)" onclick="gridCase('${d}');return false">격자</a>`);
     a.push(`<a class="rep del" href="#" onclick="delCase('${d}',this);return false">삭제</a>`);
     h+=`<td>${a.join(' · ')}</td>`;continue;
    }
@@ -524,6 +760,155 @@ function render(){
  }
  h+='</tbody></table></div>';
  main.innerHTML=h;
+ cmpBar();
+}
+function selCh(d,on){
+ const name=decodeURIComponent(d);
+ if(on)SEL.add(name); else SEL.delete(name);
+ cmpBar();
+}
+function cmpBar(){
+ const bar=document.getElementById('cmpbar');
+ const n=[...SEL].filter(s=>CASES.some(c=>c.dir===s)).length;
+ bar.style.display=n>=2?'':'none';
+ document.getElementById('cmpn').textContent=n+'개 선택됨';
+}
+const CMPROWS=[
+ ['room','방 (m)',v=>v],['cells','셀',v=>v?v.toLocaleString():'—'],
+ ['heat_label','발열',v=>v],['supply_u','급기 m/s',v=>v],
+ ['T_avg_C','평균T ℃',v=>v!=null?v.toFixed(1):'—'],
+ ['T_max_C','최고T ℃',v=>v!=null?v.toFixed(1):'—','min'],
+ ['dT_rise','ΔT K',v=>v!=null?v.toFixed(1):'—'],
+ ['outlet_dT','배기 ΔT K',v=>v!=null?v.toFixed(2):'—'],
+ ['closure_pct','폐합 %',v=>v!=null?v.toFixed(0)+'%':'—'],
+ ['gci_pct','GCI %',v=>v!=null?v.toFixed(1)+'%':'—'],
+ ['badge','상태',v=>v||'—'],
+];
+function openCompare(){
+ const sel=CASES.filter(c=>SEL.has(c.dir)).slice(0,4);
+ if(sel.length<2){alert('2개 이상 선택하세요');return}
+ let h='<table id="cmptbl"><tr><th></th>'+sel.map(c=>`<th>${c.dir}</th>`).join('')+'</tr>';
+ for(const [k,label,f,best] of CMPROWS){
+  let bi=-1;
+  if(best==='min'){
+   let bv=Infinity;
+   sel.forEach((c,i)=>{if(c[k]!=null&&c[k]<bv){bv=c[k];bi=i;}});
+  }
+  h+=`<tr><th>${label}</th>`+sel.map((c,i)=>`<td class="${i===bi?'best':''}">${f(c[k])}${i===bi?' ★':''}</td>`).join('')+'</tr>';
+ }
+ h+='<tr><th>리포트</th>'+sel.map(c=>`<td>${c.report?`<a class="rep" target="_blank" href="/case/${encodeURIComponent(c.dir)}/report">열기</a>`:'—'}</td>`).join('')+'</tr></table>';
+ document.getElementById('cmpbody').innerHTML=h;
+ document.getElementById('cmpov').style.display='flex';
+}
+// ── 결과 뷰어 (2D 단면: 슬라이더·호버·기류 화살표) ──
+let VW=null, SL=null;
+const CSTOPS=[[0,[48,18,59]],[0.25,[40,187,236]],[0.5,[164,252,60]],[0.75,[251,126,33]],[1,[122,4,3]]];
+function cmap(t){
+ t=Math.max(0,Math.min(1,t));
+ for(let i=1;i<CSTOPS.length;i++){
+  if(t<=CSTOPS[i][0]){
+   const [t0,c0]=CSTOPS[i-1],[t1,c1]=CSTOPS[i],f=(t-t0)/(t1-t0);
+   return `rgb(${c0.map((v,k)=>Math.round(v+(c1[k]-v)*f)).join(',')})`;
+  }
+ }
+ return 'rgb(122,4,3)';
+}
+async function openViewer(d){
+ const name=decodeURIComponent(d);
+ const r=await fetch('/api/fieldinfo/'+d);const j=await r.json();
+ if(j.error){alert(j.error);return}
+ VW={case:d,name,info:j,axis:'z'};
+ document.getElementById('vwtitle').textContent=name+' — 결과 뷰어';
+ document.getElementById('vwfield').value='T';
+ document.getElementById('vwaxis').value='z';
+ document.getElementById('vwvec').checked=false;
+ vwAxis();
+ document.getElementById('vwov').style.display='flex';
+}
+function vwClose(){document.getElementById('vwov').style.display='none';VW=null;}
+function vwAxis(){
+ if(!VW)return;
+ VW.axis=document.getElementById('vwaxis').value;
+ const n={z:VW.info.nz,y:VW.info.ny,x:VW.info.nx}[VW.axis];
+ const s=document.getElementById('vwidx');
+ s.min=0;s.max=n-1;s.value=Math.round(n/2);
+ vwFetch();
+}
+async function vwFetch(){
+ if(!VW)return;
+ const f=document.getElementById('vwfield').value;
+ const vec=document.getElementById('vwvec').checked?1:0;
+ const idx=document.getElementById('vwidx').value;
+ const r=await fetch(`/api/slice/${VW.case}?field=${f}&axis=${VW.axis}&idx=${idx}&vec=${vec}`);
+ SL=await r.json();
+ if(SL.error){document.getElementById('vwread').textContent='⚠ '+SL.error;return}
+ const axisName={z:'높이 z',y:'y',x:'x'}[VW.axis];
+ document.getElementById('vwpos').textContent=`${axisName} = ${SL.pos} m`;
+ vwDraw();
+}
+function vwRange(){
+ const f=document.getElementById('vwfield').value;
+ return f==='T'?[VW.info.Tmin,VW.info.Tmax]:[0,VW.info.Umax];
+}
+function vwDraw(){
+ const cv=document.getElementById('vwcv'),ctx=cv.getContext('2d');
+ const d=SL.data,ny=d.length,nx=d[0].length;
+ const scale=Math.min(660/SL.w,430/SL.h);
+ cv.width=Math.max(220,Math.round(SL.w*scale));
+ cv.height=Math.max(160,Math.round(SL.h*scale));
+ const cw=cv.width/nx,chh=cv.height/ny;
+ const [mn,mx]=vwRange(),rg=(mx-mn)||1;
+ for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){
+  ctx.fillStyle=cmap((d[j][i]-mn)/rg);
+  ctx.fillRect(i*cw,cv.height-(j+1)*chh,cw+0.7,chh+0.7);
+ }
+ if(SL.vx&&document.getElementById('vwvec').checked){
+  ctx.strokeStyle='rgba(255,255,255,.85)';ctx.fillStyle='rgba(255,255,255,.85)';ctx.lineWidth=1.1;
+  const st=Math.max(1,Math.round(nx/20)),um=VW.info.Umax||1,len=Math.min(cw,chh)*2.1;
+  for(let j=0;j<ny;j+=st)for(let i=0;i<nx;i+=st){
+   const vx=SL.vx[j][i]/um*len,vy=SL.vy[j][i]/um*len;
+   if(Math.abs(vx)<0.5&&Math.abs(vy)<0.5)continue;
+   const x0=(i+0.5)*cw,y0=cv.height-(j+0.5)*chh;
+   const x1=x0+vx,y1=y0-vy;
+   ctx.beginPath();ctx.moveTo(x0,y0);ctx.lineTo(x1,y1);ctx.stroke();
+   const a=Math.atan2(y1-y0,x1-x0);
+   ctx.beginPath();ctx.moveTo(x1,y1);
+   ctx.lineTo(x1-4*Math.cos(a-0.45),y1-4*Math.sin(a-0.45));
+   ctx.lineTo(x1-4*Math.cos(a+0.45),y1-4*Math.sin(a+0.45));
+   ctx.fill();
+  }
+ }
+ // 컬러바
+ const cb=document.getElementById('vwcb'),c2=cb.getContext('2d');
+ cb.height=cv.height;
+ c2.clearRect(0,0,cb.width,cb.height);
+ for(let y=0;y<cb.height;y++){
+  c2.fillStyle=cmap(1-y/cb.height);
+  c2.fillRect(0,y,20,1);
+ }
+ c2.fillStyle='#333';c2.font='11px sans-serif';
+ const unit=document.getElementById('vwfield').value==='T'?'℃':'m/s';
+ c2.fillText(mx.toFixed(1),23,10);
+ c2.fillText(((mn+mx)/2).toFixed(1),23,cb.height/2+4);
+ c2.fillText(mn.toFixed(1),23,cb.height-2);
+ c2.fillText(unit,23,cb.height/2+18);
+}
+function vwHover(ev){
+ if(!SL||!SL.data)return;
+ const cv=document.getElementById('vwcv'),rect=cv.getBoundingClientRect();
+ const d=SL.data,ny=d.length,nx=d[0].length;
+ const i=Math.min(nx-1,Math.max(0,Math.floor((ev.clientX-rect.left)/rect.width*nx)));
+ const j=Math.min(ny-1,Math.max(0,ny-1-Math.floor((ev.clientY-rect.top)/rect.height*ny)));
+ const px=((i+0.5)*SL.w/nx).toFixed(2),py=((j+0.5)*SL.h/ny).toFixed(2);
+ const unit=document.getElementById('vwfield').value==='T'?'℃':'m/s';
+ document.getElementById('vwread').textContent=`${SL.hx}=${px} m, ${SL.hy}=${py} m  →  ${d[j][i]} ${unit}`;
+}
+async function gridCase(d){
+ const name=decodeURIComponent(d);
+ if(!confirm(name+' 격자 독립성 검증을 실행할까요? (셀 크기 3종을 배치 실행 — 수 분 소요, GCI 배지가 표에 추가됩니다)'))return;
+ const r=await fetch('/api/grid/'+d,{method:'POST'});
+ const j=await r.json();
+ if(j.error)alert(j.error);
 }
 async function runCase(d){
  const r=await fetch('/api/run/'+d,{method:'POST'});
