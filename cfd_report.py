@@ -423,6 +423,85 @@ def find_log(path):
     return None
 
 
+def convergence_badge(parsed, metrics):
+    """수렴 판정 → (배지문구, 색). 리포트·대시보드(cfd_studio)가 같은 판정 공유.
+    발열 kW 케이스는 '에너지 폐합율'이 잔차보다 신뢰성 높은 게이트(부력지배 약유동은
+    잔차가 떨어져도 에너지가 안 닫힘 → 미수렴을 잔차가 오판, 실측 확인)."""
+    m = metrics or {}
+    cont_ok = parsed["continuity_global"] and abs(parsed["continuity_global"][-1][1]) < 1e-3
+    clo = m.get("closure_pct")
+    if parsed.get("crashed"):
+        return ("발산/크래시", "#c0392b")
+    if clo is not None:
+        if 90 <= clo <= 110:
+            return (f"수렴(에너지폐합 {clo:.0f}%)", "#1e8449")
+        return (f"미수렴(에너지폐합 {clo:.0f}%)", "#b9770e")
+    if cont_ok:
+        return ("수렴(양호)", "#1e8449")
+    return ("부분수렴/확인필요", "#b9770e")
+
+
+def case_summary(case_dir):
+    """케이스 폴더 → 대시보드 행 dict. 실행 전(meta만)·실행 후·리포트 유무 모두 처리.
+    meta 없으면 None(케이스 아님)."""
+    import glob as _glob
+    import math
+    meta = _load_meta(case_dir)
+    if not meta:
+        return None
+    cfg = meta.get("config", {})
+    room = cfg.get("room", {})
+    heat = meta.get("heat", {})
+    Uvec = cfg.get("inlet", {}).get("U", [0, 0, 0])
+    supply_u = math.sqrt(sum(float(v) ** 2 for v in Uvec)) if Uvec else 0.0
+    if heat.get("mode") == "volume":
+        heat_label = f"{heat.get('power_w', 0) / 1000.0:g} kW"
+    elif heat.get("mode") == "surface":
+        heat_label = f"바닥 {heat.get('floor_T', '?')}K"
+    else:
+        heat_label = "—"
+    out = {
+        "dir": os.path.basename(os.path.abspath(case_dir)),
+        "name": cfg.get("name") or os.path.basename(case_dir),
+        "room": f"{room.get('L','?')}×{room.get('W','?')}×{room.get('H','?')}",
+        "cells": meta.get("mesh", {}).get("cells"),
+        "heat_label": heat_label,
+        "heat_kw": (heat.get("power_w", 0) / 1000.0) if heat.get("mode") == "volume" else None,
+        "supply_u": round(supply_u, 3),
+        "endTime": cfg.get("endTime"),
+        "mtime": os.path.getmtime(os.path.join(case_dir, "cfd_case_meta.json")),
+        "status": "created",
+        "badge": "미실행", "badge_color": "#7f8c8d",
+        "T_avg_C": None, "T_max_C": None, "dT_rise": None,
+        "closure_pct": None, "outlet_dT": None, "n_iters": None,
+        "gci": meta.get("gci"),
+        "report": None,
+        "from_geometry": bool(meta.get("from_geometry")),
+    }
+    logp = find_log(case_dir)
+    if logp:
+        out["status"] = "ran"
+        with open(logp, encoding="utf-8", errors="replace") as f:
+            parsed = parse_log(f.read())
+        metrics = None
+        try:
+            metrics = field_metrics(case_dir, meta)
+        except Exception:
+            pass
+        out["badge"], out["badge_color"] = convergence_badge(parsed, metrics)
+        out["n_iters"] = parsed["n_iters"]
+        if metrics:
+            for k in ("T_avg_C", "T_max_C", "dT_rise", "closure_pct", "outlet_dT",
+                      "supply_cmh", "ach", "U_max"):
+                out[k] = metrics.get(k)
+    reps = _glob.glob(os.path.join(case_dir, "cfd_report_*.html"))
+    if reps:
+        out["report"] = os.path.basename(max(reps, key=os.path.getmtime))
+        if out["status"] == "ran":
+            out["status"] = "reported"
+    return out
+
+
 def _b64(png_path):
     import base64
     with open(png_path, "rb") as f:
@@ -442,23 +521,8 @@ def build_html_report(case_dir, meta, parsed, resid_png, sect_png, metrics, out_
     name = cfg.get("name", os.path.basename(case_dir))
     room = cfg.get("room", {})
     diag = diagnose(parsed)
-    crashed = parsed.get("crashed")
     m = metrics or {}
-    # 수렴 판정 배지. 발열 kW 케이스는 '에너지 폐합율'이 잔차보다 신뢰성 높은 게이트
-    # (부력지배 약유동은 잔차가 떨어져도 에너지가 안 닫힘 → 미수렴을 잔차가 오판).
-    cont_ok = parsed["continuity_global"] and abs(parsed["continuity_global"][-1][1]) < 1e-3
-    clo = m.get("closure_pct")
-    if crashed:
-        badge, bcol = "발산/크래시", "#c0392b"
-    elif clo is not None:
-        if 90 <= clo <= 110:
-            badge, bcol = f"수렴(에너지폐합 {clo:.0f}%)", "#1e8449"
-        else:
-            badge, bcol = f"미수렴(에너지폐합 {clo:.0f}%)", "#b9770e"
-    elif cont_ok:
-        badge, bcol = "수렴(양호)", "#1e8449"
-    else:
-        badge, bcol = "부분수렴/확인필요", "#b9770e"
+    badge, bcol = convergence_badge(parsed, metrics)
     # 해석조건(입력 가정) 행
     assum = []
     fg = meta.get("from_geometry")
@@ -566,6 +630,46 @@ def _load_meta(case_dir):
     return None
 
 
+def generate_report(case_dir, out_html=None, quiet=True):
+    """케이스 디렉토리 → HTML 리포트 생성(그래프·지표·단면 포함).
+    CLI(main)와 스튜디오(cfd_studio)가 공용. 반환: (out_html, metrics) 또는 로그 없으면 예외."""
+    logpath = find_log(case_dir)
+    if not logpath or not os.path.exists(logpath):
+        raise FileNotFoundError(f"솔버 로그 없음: {case_dir}")
+    with open(logpath, encoding="utf-8", errors="replace") as f:
+        parsed = parse_log(f.read())
+    meta = _load_meta(case_dir)
+    if not meta:
+        raise FileNotFoundError(f"cfd_case_meta.json 없음: {case_dir}")
+
+    def note(msg):
+        if not quiet:
+            print(msg, file=sys.stderr)
+
+    resid_png = os.path.join(case_dir, "_residuals.png")
+    try:
+        plot_residuals(parsed, resid_png)
+    except Exception as e:
+        note(f"수렴 그래프 스킵: {e}")
+        resid_png = None
+    metrics = None
+    try:
+        metrics = field_metrics(case_dir, meta)
+    except Exception as e:
+        note(f"지표 계산 스킵: {e}")
+    sect_png = os.path.join(case_dir, "_sections.png")
+    try:
+        if not plot_sections(case_dir, meta, sect_png):
+            sect_png = None
+    except Exception as e:
+        note(f"단면 스킵: {e}")
+        sect_png = None
+    out_html = out_html or os.path.join(
+        case_dir, f"cfd_report_{meta.get('config', {}).get('name', 'case')}.html")
+    build_html_report(case_dir, meta, parsed, resid_png, sect_png, metrics, out_html)
+    return out_html, metrics
+
+
 def main():
     ap = argparse.ArgumentParser(description="OpenFOAM 결과 → 수렴 그래프·지표·단면 HTML 리포트")
     ap.add_argument("input", help="솔버 로그 파일 또는 case 디렉토리")
@@ -585,34 +689,19 @@ def main():
 
     # 케이스 디렉토리 + meta 있으면 전체 HTML 리포트
     case_dir = args.input if os.path.isdir(args.input) else os.path.dirname(logpath)
-    meta = _load_meta(case_dir)
-    resid_png = os.path.join(case_dir, "_residuals.png")
-    try:
-        plot_residuals(parsed, resid_png)
-    except Exception as e:
-        print(f"수렴 그래프 스킵: {e}", file=sys.stderr)
-        resid_png = None
-
-    if meta:
-        metrics = None
-        sect_png = os.path.join(case_dir, "_sections.png")
-        try:
-            metrics = field_metrics(case_dir, meta)
-        except Exception as e:
-            print(f"지표 계산 스킵: {e}", file=sys.stderr)
-        try:
-            if not plot_sections(case_dir, meta, sect_png):
-                sect_png = None
-        except Exception as e:
-            print(f"단면 스킵: {e}", file=sys.stderr)
-            sect_png = None
-        out_html = args.out or os.path.join(case_dir, f"cfd_report_{meta.get('config',{}).get('name','case')}.html")
-        build_html_report(case_dir, meta, parsed, resid_png, sect_png, metrics, out_html)
+    if _load_meta(case_dir):
+        out_html, metrics = generate_report(case_dir, out_html=args.out, quiet=False)
         if metrics:
             print(f"  평균 {_fmt(metrics.get('T_avg_C'),'°C')} · 최고 {_fmt(metrics.get('T_max_C'),'°C')} · "
                   f"ΔT {_fmt(metrics.get('dT_rise'),'K')} · 최대유속 {_fmt(metrics.get('U_max'),'m/s',3)}")
         print(f"HTML 리포트 -> {out_html}")
     else:
+        resid_png = os.path.join(case_dir, "_residuals.png")
+        try:
+            plot_residuals(parsed, resid_png)
+        except Exception as e:
+            print(f"수렴 그래프 스킵: {e}", file=sys.stderr)
+            resid_png = None
         out = args.out or (os.path.splitext(logpath)[0] + "_residuals.png")
         if resid_png and resid_png != out and os.path.exists(resid_png):
             import shutil

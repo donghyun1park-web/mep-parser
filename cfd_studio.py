@@ -1,0 +1,785 @@
+"""
+cfd_studio.py — MEP CFD Studio: 대시보드 통합 단일 프로그램
+
+CLI 4개(cfd_export/run/report/gridstudy) 체인을 브라우저 하나로 통합:
+  더블클릭(run_cfd.bat) → 브라우저 → 대시보드(전 케이스 집계) → 새 해석 마법사 →
+  실행 모니터 → 리포트/결과 뷰어.
+
+설계 원칙(계획서):
+- stdlib http.server 만(의존성 0), 127.0.0.1 바인딩, 자립 HTML(외부 CDN 없음).
+- 파일이 진실: 프로젝트 루트(기본 cfd_projects/) 직속 폴더 중 cfd_case_meta.json 있는
+  것이 케이스. 서버가 죽어도 재스캔으로 복구.
+- 엔진 재사용: cfd_export.build_case/cfg_from_geometry · cfd_run.run_case ·
+  cfd_report.case_summary/build (판정·지표는 CLI와 동일 코드 = 불일치 없음).
+
+사용:
+  python cfd_studio.py                 # cfd_projects/ 루트, 브라우저 자동
+  python cfd_studio.py --root <경로> --port 8090 --no-browser
+"""
+import argparse
+import glob
+import json
+import os
+import re
+import shutil
+import socket
+import sys
+import threading
+import webbrowser
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, unquote
+
+import cfd_export
+import cfd_report
+from cfd_run import run_case, check_openfoam
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.join(HERE, "cfd_projects")   # main()에서 확정
+
+_SAFE_NAME = re.compile(r"^[\w가-힣.\- ]+$")
+
+
+# ── 케이스 스캔 ───────────────────────────────────────────────────────────────
+
+def safe_case_dir(name):
+    """케이스 폴더명 검증 + ROOT 밖 접근 차단. 유효하면 절대경로, 아니면 None."""
+    if not name or not _SAFE_NAME.match(name) or ".." in name:
+        return None
+    full = os.path.realpath(os.path.join(ROOT, name))
+    if not full.startswith(os.path.realpath(ROOT) + os.sep):
+        return None
+    return full if os.path.isdir(full) else None
+
+
+def scan_cases():
+    """루트 직속 케이스 폴더 → case_summary 목록(최신순)."""
+    cases = []
+    if os.path.isdir(ROOT):
+        for d in sorted(os.listdir(ROOT)):
+            full = os.path.join(ROOT, d)
+            if not os.path.isdir(full):
+                continue
+            if not os.path.exists(os.path.join(full, "cfd_case_meta.json")):
+                continue
+            try:
+                s = cfd_report.case_summary(full)
+            except Exception as e:
+                s = {"dir": d, "name": d, "badge": f"요약 실패: {e}", "badge_color": "#c0392b",
+                     "status": "error", "mtime": 0}
+            if s:
+                s["gci_pct"] = (s.get("gci") or {}).get("gci_pct")
+                cases.append(s)
+    cases.sort(key=lambda c: c.get("mtime") or 0, reverse=True)
+    return {"root": ROOT, "cases": cases}
+
+
+# ── 실행 큐 (동시 1개 — WSL 경합·결정론 보장) ────────────────────────────────
+
+RUN = {"active": None, "queue": [], "history": {}, "worker": False}
+RUN_LOCK = threading.Lock()
+OPENFOAM_OK = None   # main()에서 1회 체크(1초 status 폴링마다 wsl 프로세스를 띄우지 않음)
+
+
+def enqueue_run(name):
+    """케이스 실행 예약. 문제 있으면 오류 문자열, 정상이면 None."""
+    if not OPENFOAM_OK:
+        return ("WSL OpenFOAM 이 없습니다 — WSL 에서 `sudo apt-get install openfoam` "
+                "설치 후 스튜디오를 재시작하세요.")
+    if not safe_case_dir(name):
+        return "케이스 없음"
+    with RUN_LOCK:
+        if RUN["active"] and RUN["active"]["name"] == name:
+            return "이미 실행 중"
+        if name in RUN["queue"]:
+            return "이미 대기열에 있음"
+        RUN["queue"].append(name)
+        RUN["history"].pop(name, None)
+        if not RUN["worker"]:
+            RUN["worker"] = True
+            threading.Thread(target=_run_worker, daemon=True).start()
+    return None
+
+
+def _run_worker():
+    """대기열을 하나씩 처리(동시 1개). 완료 시 리포트 자동 생성."""
+    while True:
+        with RUN_LOCK:
+            if not RUN["queue"]:
+                RUN["worker"] = False
+                return
+            name = RUN["queue"].pop(0)
+            case_dir = safe_case_dir(name)
+            end_t = None
+            try:
+                with open(os.path.join(case_dir, "cfd_case_meta.json"), encoding="utf-8") as f:
+                    end_t = json.load(f).get("config", {}).get("endTime")
+            except Exception:
+                pass
+            RUN["active"] = {"name": name, "step": "준비", "time": 0.0,
+                             "endTime": end_t, "lines": []}
+        act = RUN["active"]
+
+        def cb(line):
+            if line.startswith("Time = "):
+                act["step"] = "solver"
+                try:
+                    act["time"] = float(line.split("=", 1)[1])
+                except ValueError:
+                    pass
+            elif line.startswith("=== blockMesh"):
+                act["step"] = "blockMesh"
+            elif line.startswith("=== checkMesh"):
+                act["step"] = "checkMesh"
+            elif line.startswith("=== solver"):
+                act["step"] = "solver"
+            act["lines"].append(line)
+            del act["lines"][:-15]
+
+        r = run_case(case_dir, progress_cb=cb)
+        err = r.get("error")
+        if r["ok"]:
+            act["step"] = "리포트 생성"
+            try:
+                cfd_report.generate_report(case_dir)
+            except Exception as e:
+                err = f"리포트 생성 실패: {e}"
+        with RUN_LOCK:
+            RUN["history"][name] = {"ok": r["ok"] and not err, "error": err}
+            RUN["active"] = None
+
+
+def run_status():
+    with RUN_LOCK:
+        act = None
+        if RUN["active"]:
+            a = RUN["active"]
+            act = {"name": a["name"], "step": a["step"], "time": a["time"],
+                   "endTime": a["endTime"], "lines": list(a["lines"])}
+        return {"openfoam": bool(OPENFOAM_OK), "active": act,
+                "queue": list(RUN["queue"]), "history": dict(RUN["history"])}
+
+
+# ── 마법사 백엔드: 도면 미리보기 · 케이스 생성 · 삭제 ────────────────────────
+
+def inspect_geometry(path, zone=None, bbox=None):
+    """geometry.json 미리보기: zone 목록·전체범위·(zone/bbox 선택 시) 개구부 벽 힌트."""
+    path = os.path.abspath(os.path.expanduser(path or ""))
+    if not os.path.isfile(path):
+        return {"error": f"파일 없음: {path}"}
+    try:
+        with open(path, encoding="utf-8") as f:
+            geom = json.load(f)
+    except Exception as e:
+        return {"error": f"geometry.json 파싱 실패: {e}"}
+    el = geom.get("elements", {})
+    zones = []
+    for i, z in enumerate(el.get("zone", [])):
+        ext = cfd_export._xy_extent([z])
+        if ext:
+            zones.append({"i": i, "L": round((ext[2] - ext[0]) / 1000, 2),
+                          "W": round((ext[3] - ext[1]) / 1000, 2)})
+    out = {"zones": zones,
+           "openings": len(el.get("opening", [])),
+           "equipment": len(el.get("equipment", [])),
+           "walls": len(el.get("wall", [])),
+           "height_m": round(geom.get("params", {}).get("wall", {}).get("height", 2800.0) / 1000.0, 2)}
+    ext_all = cfd_export._xy_extent(el.get("wall", []))
+    if ext_all:
+        out["wall_extent_mm"] = [round(v, 1) for v in ext_all]
+    if zone is not None or bbox is not None:
+        try:
+            cfg, info = cfd_export.cfg_from_geometry(geom, zone=zone, bbox=bbox,
+                                                     height=out["height_m"])
+            out["room"] = cfg["room"]
+            out["openings_by_wall"] = info["openings_by_wall"]
+            out["warnings"] = info["warnings"]
+        except SystemExit as e:
+            out["error"] = str(e)
+    return out
+
+
+_INFLOW = {"x0": (1, 0, 0), "xL": (-1, 0, 0), "y0": (0, 1, 0), "yW": (0, -1, 0)}
+
+
+def create_case(p):
+    """마법사 폼(JSON) → 케이스 생성. 반환 {ok, dir} 또는 {error}."""
+    name = (p.get("name") or "").strip()
+    if not name or not _SAFE_NAME.match(name):
+        return {"error": "케이스명은 한글/영문/숫자/공백/._- 만 가능"}
+    out_dir = os.path.join(ROOT, name)
+    if os.path.exists(out_dir):
+        return {"error": f"이미 존재하는 케이스: {name} (다른 이름 또는 기존 삭제 후)"}
+    try:
+        supply = p.get("supply", "x0")
+        exhaust = p.get("exhaust", "xL")
+        if supply == exhaust:
+            return {"error": "급기 벽과 배기 벽이 같습니다"}
+        supply_u = float(p.get("supply_u", 0.3))
+        supply_T = float(p.get("supply_T_C", 20.0)) + 273.15
+        power_kw = p.get("power_kw")
+        power_kw = float(power_kw) if power_kw not in (None, "") else None
+        cell = float(p.get("cell", 0.3))
+        endtime = int(p.get("endtime", 400))
+        info = None
+        if p.get("mode") == "geometry":
+            with open(os.path.expanduser(p.get("geometry") or ""), encoding="utf-8") as f:
+                geom = json.load(f)
+            zone = p.get("zone")
+            zone = int(zone) if zone not in (None, "") else None
+            bbox = p.get("bbox") or None
+            if isinstance(bbox, str) and bbox.strip():
+                bbox = [float(x) for x in bbox.split(",")]
+            elif not bbox:
+                bbox = None
+            height = p.get("height")
+            height = float(height) if height not in (None, "") else None
+            cfg, info = cfd_export.cfg_from_geometry(
+                geom, zone=zone, bbox=bbox, height=height, cell=cell,
+                supply=supply, exhaust=exhaust, supply_u=supply_u, supply_T=supply_T,
+                power_kw=power_kw, endTime=endtime, name=name)
+        else:
+            L, W, H = float(p["L"]), float(p["W"]), float(p["H"])
+            d = _INFLOW.get(supply, (1, 0, 0))
+            cfg = {
+                "name": name,
+                "_note": "스튜디오 직접 입력 · 급배기·발열=가정값(리포트 명시)",
+                "room": {"L": L, "W": W, "H": H},
+                "mesh": {"cell": cell},
+                "g": [0, 0, -9.81],
+                "inlet": {"wall": supply,
+                          "U": [supply_u * d[0], supply_u * d[1], supply_u * d[2]],
+                          "T": supply_T, "_desc": f"급기(가정) — {supply} 벽"},
+                "outlet": {"wall": exhaust, "_desc": f"배기(가정) — {exhaust} 벽"},
+                "heat": ({"power_kw": power_kw,
+                          "_desc": f"장비 총발열(가정) {power_kw} kW = 바닥층 체적발열원"}
+                         if power_kw is not None else
+                         {"wall": "floor", "floor_T": 313.0,
+                          "_desc": "발열 바닥(가정) = 장비 총발열 단순화"}),
+                "init": {"T": 300},
+                "endTime": endtime,
+            }
+        cfd_export.build_case(cfg, out_dir)
+        if info:
+            meta_path = os.path.join(out_dir, "cfd_case_meta.json")
+            with open(meta_path, encoding="utf-8") as f:
+                meta = json.load(f)
+            meta["from_geometry"] = {k: v for k, v in info.items() if k != "src_polygon"}
+            with open(meta_path, "w", encoding="utf-8", newline="\n") as f:
+                json.dump(meta, f, ensure_ascii=False, indent=2)
+        return {"ok": True, "dir": name}
+    except SystemExit as e:
+        return {"error": str(e)}
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
+def delete_case(name):
+    d = safe_case_dir(name)
+    if not d:
+        return {"error": "케이스 없음"}
+    with RUN_LOCK:
+        if RUN["active"] and RUN["active"]["name"] == name:
+            return {"error": "실행 중인 케이스 — 완료 후 삭제하세요"}
+        if name in RUN["queue"]:
+            RUN["queue"].remove(name)
+    shutil.rmtree(d)
+    return {"ok": True}
+
+
+# ── HTTP 핸들러 ───────────────────────────────────────────────────────────────
+
+_CTYPES = {".html": "text/html; charset=utf-8", ".png": "image/png",
+           ".json": "application/json; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+           ".csv": "text/csv; charset=utf-8"}
+
+
+class StudioHandler(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):   # 콘솔 도배 방지
+        pass
+
+    def _send(self, code, body, ctype="text/html; charset=utf-8"):
+        data = body.encode("utf-8") if isinstance(body, str) else body
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _json(self, obj, code=200):
+        self._send(code, json.dumps(obj, ensure_ascii=False),
+                   "application/json; charset=utf-8")
+
+    def do_GET(self):
+        try:
+            self._route_get()
+        except (ConnectionAbortedError, BrokenPipeError):
+            pass
+        except Exception as e:
+            try:
+                self._json({"error": str(e)}, 500)
+            except Exception:
+                pass
+
+    def _route_get(self):
+        path = unquote(urlparse(self.path).path)
+        if path == "/":
+            return self._send(200, PAGE_DASH)
+        if path == "/new":
+            return self._send(200, PAGE_NEW)
+        if path == "/api/cases":
+            return self._json(scan_cases())
+        if path == "/api/status":
+            return self._json(run_status())
+        m = re.match(r"^/case/([^/]+)/report$", path)
+        if m:
+            return self._serve_report(m.group(1))
+        m = re.match(r"^/case/([^/]+)/file/([^/]+)$", path)
+        if m:
+            return self._serve_file(m.group(1), m.group(2))
+        self._send(404, "not found")
+
+    def do_POST(self):
+        try:
+            ln = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(ln).decode("utf-8") if ln else "{}"
+            p = json.loads(body or "{}")
+            path = unquote(urlparse(self.path).path)
+            if path == "/api/inspect":
+                zone = p.get("zone")
+                zone = int(zone) if zone not in (None, "") else None
+                bbox = p.get("bbox") or None
+                if isinstance(bbox, str) and bbox.strip():
+                    bbox = [float(x) for x in bbox.split(",")]
+                elif not bbox:
+                    bbox = None
+                return self._json(inspect_geometry(p.get("geometry", ""), zone=zone, bbox=bbox))
+            if path == "/api/create":
+                r = create_case(p)
+                if r.get("ok") and p.get("run_now"):
+                    r["run_error"] = enqueue_run(r["dir"])
+                return self._json(r)
+            m = re.match(r"^/api/run/([^/]+)$", path)
+            if m:
+                err = enqueue_run(m.group(1))
+                return self._json({"error": err} if err else {"ok": True})
+            m = re.match(r"^/api/delete/([^/]+)$", path)
+            if m:
+                return self._json(delete_case(m.group(1)))
+            self._send(404, "not found")
+        except (ConnectionAbortedError, BrokenPipeError):
+            pass
+        except Exception as e:
+            try:
+                self._json({"error": str(e)}, 500)
+            except Exception:
+                pass
+
+    def _serve_report(self, case_name):
+        d = safe_case_dir(case_name)
+        if not d:
+            return self._send(404, "케이스 없음")
+        reps = glob.glob(os.path.join(d, "cfd_report_*.html"))
+        if not reps:
+            return self._send(404, "<meta charset='utf-8'>리포트가 아직 없습니다 — 먼저 실행하세요.")
+        with open(max(reps, key=os.path.getmtime), encoding="utf-8") as f:
+            self._send(200, f.read())
+
+    def _serve_file(self, case_name, fname):
+        d = safe_case_dir(case_name)
+        if not d or not _SAFE_NAME.match(fname):
+            return self._send(404, "not found")
+        full = os.path.realpath(os.path.join(d, fname))
+        if not full.startswith(d + os.sep) or not os.path.isfile(full):
+            return self._send(404, "not found")
+        ext = os.path.splitext(fname)[1].lower()
+        with open(full, "rb") as f:
+            self._send(200, f.read(), _CTYPES.get(ext, "text/plain; charset=utf-8"))
+
+
+# ── 대시보드 페이지 (자립 HTML/JS, 리포트와 같은 시각 언어) ──────────────────
+
+PAGE_DASH = """<!doctype html><html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MEP CFD Studio</title>
+<style>
+ :root{--accent:#2c5f8a;--line:#e2e2e2;--muted:#666}
+ *{box-sizing:border-box}
+ body{font-family:'Malgun Gothic','Segoe UI',sans-serif;margin:0;background:#f0f2f5;color:#1a1a1a}
+ .wrap{max-width:1280px;margin:18px auto;padding:0 16px}
+ .hdr{display:flex;align-items:center;gap:14px;background:#fff;padding:14px 20px;border-radius:10px;box-shadow:0 1px 6px rgba(0,0,0,.07)}
+ .hdr h1{font-size:19px;margin:0;color:var(--accent);white-space:nowrap}
+ .hdr .root{color:var(--muted);font-size:12px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+ .btn{background:var(--accent);color:#fff;border:none;border-radius:8px;padding:9px 16px;font-size:14px;cursor:pointer;text-decoration:none;display:inline-block;white-space:nowrap}
+ .btn.sec{background:#fff;color:var(--accent);border:1px solid var(--accent)}
+ .cards{display:flex;gap:12px;margin:14px 0;flex-wrap:wrap}
+ .card{flex:1;min-width:140px;background:#fff;border-radius:10px;padding:13px 18px;box-shadow:0 1px 6px rgba(0,0,0,.07)}
+ .card .n{font-size:26px;font-weight:700}
+ .card .l{color:var(--muted);font-size:12.5px}
+ .tblwrap{background:#fff;border-radius:10px;box-shadow:0 1px 6px rgba(0,0,0,.07);overflow-x:auto}
+ table{width:100%;border-collapse:collapse;font-size:13.5px;min-width:1080px}
+ th,td{padding:9px 10px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+ th{background:#fafafa;cursor:pointer;user-select:none;font-weight:600}
+ th:hover{color:var(--accent)}
+ th .arr{font-size:10px;color:var(--accent)}
+ td.num,th.num{text-align:right}
+ .badge{display:inline-block;color:#fff;border-radius:12px;padding:2px 10px;font-size:12px;font-weight:600}
+ tr.rowwarn td{background:#fdecea}
+ .empty{background:#fff;border-radius:10px;padding:56px 20px;text-align:center;color:var(--muted);box-shadow:0 1px 6px rgba(0,0,0,.07)}
+ .empty .steps{font-size:15px;margin:14px 0 22px}
+ a.rep{color:var(--accent);font-weight:600;text-decoration:none}
+ a.rep:hover{text-decoration:underline}
+ a.del{color:#c0392b}
+ .foot{color:var(--muted);font-size:11.5px;margin:14px 2px}
+ .strip{background:#eaf2f8;border:1px solid #aed6f1;border-radius:10px;padding:10px 16px;margin:0 0 12px;font-size:13.5px}
+ .strip.err{background:#fdecea;border-color:#f5b7b1;color:#922b21}
+ .strip .bar{background:#d6eaf8;border-radius:6px;height:9px;margin:7px 0;overflow:hidden}
+ .strip .fill{background:var(--accent);height:100%;transition:width .5s}
+ .strip pre{background:#1e2a33;color:#d5e8f5;border-radius:6px;padding:8px 10px;font-size:11.5px;max-height:220px;overflow:auto;white-space:pre-wrap}
+ .strip summary{cursor:pointer;color:var(--accent);font-size:12.5px}
+</style></head><body><div class="wrap">
+ <div class="hdr">
+  <h1>MEP CFD Studio</h1>
+  <div class="root" id="root">…</div>
+  <button class="btn sec" onclick="load()">새로고침</button>
+  <a class="btn" href="/new">＋ 새 해석</a>
+ </div>
+ <div class="cards" id="cards"></div>
+ <div id="strip"></div>
+ <div id="main"></div>
+ <div class="foot">도면→OpenFOAM CFD 파이프라인 · 지표: 평균/최고 온도, 급기 대비 ΔT,
+  에너지 폐합율(주입열=배기열, 90~110% 정상), GCI(격자 오차, ≤5% 신뢰)</div>
+</div>
+<script>
+let CASES=[], KEY='mtime', ASC=false;
+const COLS=[
+ {k:'name',t:'케이스명'},
+ {k:'room',t:'방 L×W×H (m)'},
+ {k:'cells',t:'셀',num:1},
+ {k:'heat_label',t:'발열'},
+ {k:'supply_u',t:'급기 m/s',num:1,dec:2},
+ {k:'T_avg_C',t:'평균T ℃',num:1,dec:1},
+ {k:'T_max_C',t:'최고T ℃',num:1,dec:1},
+ {k:'dT_rise',t:'ΔT K',num:1,dec:1},
+ {k:'closure_pct',t:'폐합 %',num:1,dec:0},
+ {k:'gci_pct',t:'GCI %',num:1,dec:1},
+ {k:'badge',t:'상태'},
+ {k:'mtime',t:'날짜',num:1},
+ {k:'_act',t:'동작'}
+];
+function fmt(c,v){
+ if(v===null||v===undefined||v==='')return '—';
+ if(c.k==='mtime'){const d=new Date(v*1000);return (d.getMonth()+1)+'/'+d.getDate()+' '+String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');}
+ if(c.k==='cells')return v.toLocaleString();
+ if(c.dec!==undefined&&typeof v==='number')return v.toFixed(c.dec);
+ return v;
+}
+function cards(){
+ const n=CASES.length;
+ const ok=CASES.filter(c=>(c.badge||'').startsWith('수렴')).length;
+ const warn=CASES.filter(c=>/^미수렴|^발산/.test(c.badge||'')).length;
+ const idle=CASES.filter(c=>c.status==='created').length;
+ document.getElementById('cards').innerHTML=
+  card(n,'케이스','#2c5f8a')+card(ok,'수렴 🟢','#1e8449')+card(warn,'경고 🔴','#c0392b')+card(idle,'미실행 ⚪','#7f8c8d');
+}
+function card(n,l,col){return `<div class="card"><div class="n" style="color:${col}">${n}</div><div class="l">${l}</div></div>`}
+function sortBy(k){ if(KEY===k)ASC=!ASC; else {KEY=k;ASC=(k==='name'||k==='room');} render(); }
+function render(){
+ cards();
+ const main=document.getElementById('main');
+ if(!CASES.length){
+  main.innerHTML=`<div class="empty"><h3>아직 케이스가 없습니다</h3>
+   <div class="steps">① ＋ 새 해석 (방·발열·급기 입력) → ② 실행 → ③ 리포트·결과 확인</div>
+   <a class="btn" href="/new">＋ 새 해석 시작</a></div>`;
+  return;
+ }
+ const arr=[...CASES].sort((a,b)=>{
+  let x=a[KEY],y=b[KEY];
+  if(x==null&&y==null)return 0; if(x==null)return 1; if(y==null)return -1;
+  if(typeof x==='string')x=x.toLowerCase(),y=(y+'').toLowerCase();
+  return (x<y?-1:x>y?1:0)*(ASC?1:-1);
+ });
+ let h='<div class="tblwrap"><table><thead><tr>';
+ for(const c of COLS){
+  const arrow=(KEY===c.k)?`<span class="arr">${ASC?'▲':'▼'}</span>`:'';
+  h+=`<th class="${c.num?'num':''}" onclick="sortBy('${c.k}')">${c.t}${arrow}</th>`;
+ }
+ h+='</tr></thead><tbody>';
+ for(const r of arr){
+  const warn=(r.closure_pct!=null&&(r.closure_pct<90||r.closure_pct>110));
+  h+=`<tr class="${warn?'rowwarn':''}">`;
+  for(const c of COLS){
+   if(c.k==='badge'){h+=`<td><span class="badge" style="background:${r.badge_color||'#7f8c8d'}">${r.badge||''}</span></td>`;continue;}
+   if(c.k==='_act'){
+    const d=encodeURIComponent(r.dir);
+    let a=[];
+    if(r.report)a.push(`<a class="rep" target="_blank" href="/case/${d}/report">리포트</a>`);
+    a.push(`<a class="rep" href="#" onclick="runCase('${d}');return false">${r.status==='created'?'실행':'재실행'}</a>`);
+    a.push(`<a class="rep del" href="#" onclick="delCase('${d}',this);return false">삭제</a>`);
+    h+=`<td>${a.join(' · ')}</td>`;continue;
+   }
+   h+=`<td class="${c.num?'num':''}">${fmt(c,r[c.k])}</td>`;
+  }
+  h+='</tr>';
+ }
+ h+='</tbody></table></div>';
+ main.innerHTML=h;
+}
+async function runCase(d){
+ const r=await fetch('/api/run/'+d,{method:'POST'});
+ const j=await r.json();
+ if(j.error)alert(j.error);
+ pollNow=true;
+}
+async function delCase(d){
+ const name=decodeURIComponent(d);
+ if(!confirm(name+' 케이스 폴더를 삭제할까요? (되돌릴 수 없음)'))return;
+ const r=await fetch('/api/delete/'+d,{method:'POST'});
+ const j=await r.json();
+ if(j.error)alert(j.error); else load();
+}
+let WAS_ACTIVE=false, pollNow=false;
+async function pollStatus(){
+ try{
+  const r=await fetch('/api/status');const s=await r.json();
+  const el=document.getElementById('strip');
+  let h='';
+  if(s.active){
+   WAS_ACTIVE=true;
+   const a=s.active;
+   const pct=(a.endTime&&a.time)?Math.min(100,Math.round(a.time/a.endTime*100)):0;
+   h+=`<div class="strip">▶ 실행중: <b>${a.name}</b> · ${a.step}`+
+      (a.time?` · Time ${a.time}/${a.endTime||'?'} (${pct}%)`:'')+
+      (s.queue.length?` · 대기 ${s.queue.length}건`:'')+
+      `<div class="bar"><div class="fill" style="width:${pct}%"></div></div>`+
+      `<details><summary>진행 로그</summary><pre>${(a.lines||[]).join('\\n')}</pre></details></div>`;
+  } else {
+   if(s.queue.length)h+=`<div class="strip">⏳ 대기열 ${s.queue.length}건…</div>`;
+   if(WAS_ACTIVE){WAS_ACTIVE=false;load();}
+   for(const [k,v] of Object.entries(s.history||{})){
+    if(v&&v.error)h+=`<div class="strip err">⚠ ${k}: ${v.error}</div>`;
+   }
+  }
+  if(!s.openfoam)h+=`<div class="strip err">⚠ WSL OpenFOAM 미설치 — 케이스 생성은 가능하나 실행 불가.
+   WSL에서 <code>sudo apt-get install openfoam</code> 후 스튜디오 재시작.</div>`;
+  el.innerHTML=h;
+ }catch(e){}
+ setTimeout(pollStatus,1000);
+}
+async function load(){
+ const r=await fetch('/api/cases');const j=await r.json();
+ CASES=j.cases||[];
+ document.getElementById('root').textContent='프로젝트: '+j.root;
+ render();
+}
+load();
+pollStatus();
+</script></body></html>"""
+
+
+# ── 새 해석 마법사 페이지 ────────────────────────────────────────────────────
+
+PAGE_NEW = """<!doctype html><html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>새 해석 — MEP CFD Studio</title>
+<style>
+ :root{--accent:#2c5f8a;--line:#e2e2e2;--muted:#666}
+ *{box-sizing:border-box}
+ body{font-family:'Malgun Gothic','Segoe UI',sans-serif;margin:0;background:#f0f2f5;color:#1a1a1a}
+ .wrap{max-width:860px;margin:18px auto;padding:0 16px}
+ .hdr{display:flex;align-items:center;gap:14px;background:#fff;padding:14px 20px;border-radius:10px;box-shadow:0 1px 6px rgba(0,0,0,.07)}
+ .hdr h1{font-size:19px;margin:0;color:var(--accent)}
+ .btn{background:var(--accent);color:#fff;border:none;border-radius:8px;padding:9px 16px;font-size:14px;cursor:pointer;text-decoration:none;display:inline-block}
+ .btn.sec{background:#fff;color:var(--accent);border:1px solid var(--accent)}
+ .panel{background:#fff;border-radius:10px;box-shadow:0 1px 6px rgba(0,0,0,.07);padding:16px 22px;margin:14px 0}
+ h2{font-size:15px;color:var(--accent);border-bottom:2px solid var(--accent);padding-bottom:6px;margin:2px 0 14px}
+ label{margin-right:18px}
+ input[type=number],input[type=text]{border:1px solid #ccc;border-radius:6px;padding:6px 8px;font-size:14px;width:90px}
+ input.wide{width:430px} input.mid{width:220px}
+ select{border:1px solid #ccc;border-radius:6px;padding:6px;font-size:14px}
+ .row{margin:9px 0;line-height:2.1}
+ .hint{background:#eaf2f8;border-radius:8px;padding:8px 12px;font-size:12.5px;color:#1a5276;margin:8px 0}
+ .warn{color:#b9770e;font-size:12.5px;font-weight:600}
+ .prevbox{background:#fbf9f3;border:1px solid #e0d9c2;border-radius:8px;padding:12px 16px;font-size:13.5px;line-height:1.9;margin-bottom:12px}
+ .err{color:#c0392b;font-weight:600;margin-top:10px}
+ .req{color:#c0392b}
+</style></head><body><div class="wrap">
+ <div class="hdr"><h1>＋ 새 해석</h1><div style="flex:1"></div><a class="btn sec" href="/">← 대시보드</a></div>
+
+ <div class="panel"><h2>STEP 1 · 방 정보</h2>
+  <div class="row">
+   <label><input type="radio" name="mode" value="manual" checked onchange="modeCh()"> 치수 직접 입력</label>
+   <label><input type="radio" name="mode" value="geometry" onchange="modeCh()"> 도면(geometry.json)에서 자동 추출</label>
+  </div>
+  <div id="sec_manual">
+   <div class="row">L <input id="L" type="number" step="0.1" value="11.0" oninput="preview()"> ×
+    W <input id="W" type="number" step="0.1" value="9.0" oninput="preview()"> ×
+    H <input id="H" type="number" step="0.1" value="5.4" oninput="preview()"> m</div>
+  </div>
+  <div id="sec_geom" style="display:none">
+   <div class="row">경로 <input id="gpath" type="text" class="wide" placeholder="C:\\...\\geometry.json">
+    <button class="btn sec" onclick="inspect()">불러오기</button></div>
+   <div id="ginfo" class="hint" style="display:none"></div>
+   <div class="row">zone <select id="zone" onchange="selCh()"><option value="">(bbox 직접)</option></select>
+    &nbsp;bbox(mm) <input id="bbox" type="text" class="mid" placeholder="x0,y0,x1,y1" onchange="selCh()">
+    &nbsp;층고 <input id="height" type="number" step="0.1" value="3.0" oninput="preview()"> m</div>
+   <div id="ohint" class="hint" style="display:none"></div>
+  </div>
+ </div>
+
+ <div class="panel"><h2>STEP 2 · 해석 조건</h2>
+  <div class="row">발열(계산서 총발열) <input id="kw" type="number" step="0.5" placeholder="예: 10" oninput="preview()"> kW
+   <span class="req">★권장</span> <span style="color:var(--muted);font-size:12px">— 비우면 구식 바닥 40°C 고정온도 모드</span></div>
+  <div class="row">급기 벽 <select id="supply" onchange="preview()"></select>
+   &nbsp;배기 벽 <select id="exhaust" onchange="preview()"></select>
+   <span style="color:var(--muted);font-size:12px">(x0=서, xL=동, y0=남, yW=북 벽 — 도면 좌표 기준)</span></div>
+  <div class="row">급기 유속 <input id="su" type="number" step="0.05" value="0.3" oninput="preview()"> m/s
+   <span id="suwarn" class="warn"></span></div>
+  <div class="row">급기 온도 <input id="st" type="number" step="1" value="20"> °C
+   &nbsp;· 격자 셀 <input id="cell" type="number" step="0.05" value="0.3"> m
+   &nbsp;· 최대 반복 <input id="iters" type="number" step="50" value="400"></div>
+ </div>
+
+ <div class="panel"><h2>STEP 3 · 확인</h2>
+  <div id="preview" class="prevbox">방 정보를 입력하세요.</div>
+  <div class="row">케이스명 <input id="name" type="text" class="mid" placeholder="전기실_B1_10kW"></div>
+  <button class="btn" onclick="create(false)">생성</button>
+  <button class="btn" onclick="create(true)">생성＋즉시 실행</button>
+  <span id="msg" class="err"></span>
+ </div>
+</div>
+<script>
+let GDIMS=null, OHINT={};
+const WALLS=['x0','xL','y0','yW'];
+function v(id){return document.getElementById(id).value}
+function el(id){return document.getElementById(id)}
+function mode(){return document.querySelector('input[name=mode]:checked').value}
+function modeCh(){
+ el('sec_manual').style.display=mode()==='manual'?'':'none';
+ el('sec_geom').style.display=mode()==='geometry'?'':'none';
+ preview();
+}
+function wallOpts(){
+ for(const id of ['supply','exhaust']){
+  const cur=v(id)|| (id==='supply'?'x0':'xL');
+  el(id).innerHTML=WALLS.map(w=>{
+   const star=OHINT[w]?` ★개구부${OHINT[w]}`:'';
+   return `<option value="${w}" ${w===cur?'selected':''}>${w}${star}</option>`;
+  }).join('');
+ }
+}
+async function inspect(){
+ const r=await fetch('/api/inspect',{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({geometry:v('gpath')})});
+ const j=await r.json();
+ if(j.error){el('ginfo').style.display='';el('ginfo').textContent='⚠ '+j.error;return}
+ el('ginfo').style.display='';
+ el('ginfo').innerHTML=`벽 ${j.walls} · 개구부 ${j.openings} · 장비 ${j.equipment} · zone ${j.zones.length}개`+
+  (j.wall_extent_mm?` · 도면범위 x ${j.wall_extent_mm[0]}~${j.wall_extent_mm[2]}, y ${j.wall_extent_mm[1]}~${j.wall_extent_mm[3]} mm`:'');
+ el('zone').innerHTML='<option value="">(bbox 직접)</option>'+
+  j.zones.map(z=>`<option value="${z.i}">zone[${z.i}] ${z.L}×${z.W} m</option>`).join('');
+ if(j.height_m)el('height').value=j.height_m;
+ if(j.zones.length){el('zone').value=j.zones[0].i;selCh();}
+}
+async function selCh(){
+ const body={geometry:v('gpath')};
+ if(v('zone')!=='')body.zone=v('zone'); else if(v('bbox').trim())body.bbox=v('bbox');
+ else {GDIMS=null;preview();return}
+ const r=await fetch('/api/inspect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+ const j=await r.json();
+ if(j.error){el('ohint').style.display='';el('ohint').textContent='⚠ '+j.error;GDIMS=null;preview();return}
+ GDIMS=j.room||null; OHINT=j.openings_by_wall||{};
+ let t='';
+ if(Object.keys(OHINT).length)t+='💡 경계 개구부(급/배기 후보): '+Object.entries(OHINT).map(([w,n])=>`${w}벽 ${n}개`).join(' · ');
+ if(j.warnings&&j.warnings.length)t+=(t?'<br>':'')+j.warnings.map(w=>'⚠ '+w).join('<br>');
+ el('ohint').style.display=t?'':'none'; el('ohint').innerHTML=t;
+ wallOpts(); preview();
+}
+function dims(){
+ if(mode()==='manual')return {L:+v('L'),W:+v('W'),H:+v('H')};
+ if(!GDIMS)return null;
+ return {L:GDIMS.L,W:GDIMS.W,H:+v('height')||GDIMS.H};
+}
+function preview(){
+ const u=+v('su');
+ el('suwarn').textContent=(u&&u<0.1)?'⚠ 약유동: 에너지폐합이 안 닫혀 미수렴 위험 — 0.3 이상 권장':'';
+ const d=dims(), pv=el('preview');
+ if(!d||!d.L||!d.W||!d.H){pv.innerHTML='방 정보를 입력하세요 (도면 모드는 불러오기 → zone/bbox 선택).';return}
+ const sup=v('supply')||'x0';
+ const A=(sup==='x0'||sup==='xL')?d.W*d.H:d.L*d.H;
+ const Q=u*A, cmh=Q*3600, vol=d.L*d.W*d.H, ach=cmh/vol;
+ const kw=parseFloat(v('kw'));
+ let t=`방 ${d.L}×${d.W}×${d.H} m — 체적 ${vol.toFixed(0)} m³<br>`+
+  `풍량 = ${u} m/s × ${A.toFixed(1)} m² = <b>${cmh.toLocaleString(undefined,{maximumFractionDigits:0})} CMH</b> · ACH ${ach.toFixed(1)}`;
+ if(kw&&Q>0)t+=`<br>예상 배기 ΔT = Q/(ρc·V̇) = ${kw}kW/(1206×${Q.toFixed(2)}) = <b>${(kw*1000/(1206*Q)).toFixed(2)} K</b>
+  <span style="color:#666;font-size:12px">— 실행 후 CFD 배기 ΔT·에너지폐합이 이 손계산과 맞아야 정상</span>`;
+ else t+=`<br><span class="warn">발열 kW 미입력 — 계산서 대조(에너지폐합 검증)가 불가한 구식 모드로 생성됩니다.</span>`;
+ pv.innerHTML=t;
+}
+async function create(runNow){
+ el('msg').textContent='';
+ const p={mode:mode(),name:v('name'),power_kw:v('kw'),supply:v('supply'),exhaust:v('exhaust'),
+  supply_u:v('su'),supply_T_C:v('st'),cell:v('cell'),endtime:v('iters'),run_now:runNow};
+ if(mode()==='manual'){p.L=v('L');p.W=v('W');p.H=v('H');}
+ else{p.geometry=v('gpath');p.zone=v('zone');p.bbox=v('bbox');p.height=v('height');}
+ if(!p.name){el('msg').textContent='케이스명을 입력하세요';return}
+ const r=await fetch('/api/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});
+ const j=await r.json();
+ if(j.error){el('msg').textContent=j.error;return}
+ if(j.run_error)alert('생성됨. 실행 실패: '+j.run_error);
+ location.href='/';
+}
+wallOpts(); el('exhaust').value='xL'; preview();
+</script></body></html>"""
+
+
+# ── 기동 ─────────────────────────────────────────────────────────────────────
+
+def find_port(prefer):
+    """지정 포트가 사용 중이면 +1 씩 20개까지 시도, 0이면 OS 임의."""
+    if prefer == 0:
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        p = s.getsockname()[1]
+        s.close()
+        return p
+    for p in range(prefer, prefer + 20):
+        try:
+            s = socket.socket()
+            s.bind(("127.0.0.1", p))
+            s.close()
+            return p
+        except OSError:
+            continue
+    raise SystemExit(f"빈 포트를 못 찾음({prefer}~{prefer+19})")
+
+
+def main():
+    global ROOT, OPENFOAM_OK
+    ap = argparse.ArgumentParser(description="MEP CFD Studio — 대시보드 통합 프로그램")
+    ap.add_argument("--root", default=os.path.join(HERE, "cfd_projects"),
+                    help="프로젝트 루트(케이스 폴더 모음, 기본 cfd_projects/)")
+    ap.add_argument("--port", type=int, default=8090)
+    ap.add_argument("--no-browser", action="store_true")
+    args = ap.parse_args()
+
+    ROOT = os.path.abspath(args.root)
+    os.makedirs(ROOT, exist_ok=True)
+    OPENFOAM_OK = check_openfoam()
+    port = find_port(args.port)
+    url = f"http://127.0.0.1:{port}"
+    httpd = ThreadingHTTPServer(("127.0.0.1", port), StudioHandler)
+    print(f"MEP CFD Studio: {url}")
+    print(f"  프로젝트 루트: {ROOT}")
+    print(f"  OpenFOAM(WSL): {'OK' if OPENFOAM_OK else '없음 — 실행 기능 비활성(생성·조회만)'}")
+    print("  종료: Ctrl+C")
+    if not args.no_browser:
+        threading.Timer(0.4, lambda: webbrowser.open(url)).start()
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\n종료.")
+
+
+if __name__ == "__main__":
+    main()
