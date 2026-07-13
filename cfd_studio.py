@@ -520,6 +520,13 @@ class StudioHandler(BaseHTTPRequestHandler):
         m = re.match(r"^/case/([^/]+)/file/([^/]+)$", path)
         if m:
             return self._serve_file(m.group(1), m.group(2))
+        m = re.match(r"^/vendor/([\w.\-]+)$", path)
+        if m:
+            full = os.path.join(HERE, "vendor", m.group(1))
+            if os.path.isfile(full):
+                with open(full, "rb") as f:
+                    return self._send(200, f.read(), "text/javascript; charset=utf-8")
+            return self._send(404, "not found")
         self._send(404, "not found")
 
     def do_POST(self):
@@ -657,16 +664,29 @@ PAGE_DASH = """<!doctype html><html lang="ko"><head><meta charset="utf-8">
  <div class="ovbox">
   <div class="ovhdr">
    <b id="vwtitle"></b>
-   <select id="vwfield" onchange="vwFetch()"><option value="T">온도</option><option value="U">유속</option></select>
+   <select id="vwmode" onchange="vwMode()"><option value="2d">2D 단면</option><option value="3d">3D 컷플레인</option></select>
+   <select id="vwfield" onchange="fieldCh()"><option value="T">온도</option><option value="U">유속</option></select>
    <select id="vwaxis" onchange="vwAxis()"><option value="z">수평면(Z)</option><option value="y">수직면(Y)</option><option value="x">수직면(X)</option></select>
-   <input type="range" id="vwidx" style="width:180px" oninput="vwFetch()">
+   <input type="range" id="vwidx" style="width:170px" oninput="vwFetch()">
    <span id="vwpos" style="font-size:13px;color:#444;min-width:88px"></span>
-   <label style="font-size:13px"><input type="checkbox" id="vwvec" onchange="vwFetch()"> 기류 화살표</label>
+   <label style="font-size:13px" id="vwveclb"><input type="checkbox" id="vwvec" onchange="vwFetch()"> 기류 화살표</label>
    <button class="x" onclick="vwClose()">✕</button>
   </div>
-  <div style="display:flex;gap:12px;align-items:flex-start">
+  <div id="vw2d" style="display:flex;gap:12px;align-items:flex-start">
    <canvas id="vwcv" width="640" height="430" onmousemove="vwHover(event)" onmouseleave="vwread.textContent=''"></canvas>
    <canvas id="vwcb" width="52" height="430"></canvas>
+  </div>
+  <div id="vw3d" style="display:none">
+   <div style="display:flex;gap:12px;align-items:flex-start">
+    <canvas id="cv3d" width="640" height="430" style="border:1px solid var(--line);border-radius:6px"></canvas>
+    <canvas id="vwcb3" width="52" height="430"></canvas>
+   </div>
+   <div style="font-size:13px;margin-top:8px">
+    절단면 X <input type="range" id="s3x" style="width:140px" oninput="upd3&&upd3('x',this.value)">
+    Y <input type="range" id="s3y" style="width:140px" oninput="upd3&&upd3('y',this.value)">
+    Z(높이) <input type="range" id="s3z" style="width:140px" oninput="upd3&&upd3('z',this.value)">
+    <span style="color:#888">· 드래그=회전 · 휠=줌 · 파랑면=급기 · 빨강면=배기</span>
+   </div>
   </div>
   <div id="vwread"></div>
  </div>
@@ -800,8 +820,8 @@ function openCompare(){
  document.getElementById('cmpbody').innerHTML=h;
  document.getElementById('cmpov').style.display='flex';
 }
-// ── 결과 뷰어 (2D 단면: 슬라이더·호버·기류 화살표) ──
-let VW=null, SL=null;
+// ── 결과 뷰어 (2D 단면: 슬라이더·호버·기류 화살표 / 3D 컷플레인은 모듈에서) ──
+var VW=null, SL=null;   // var = window 프로퍼티(3D 모듈 스크립트가 접근)
 const CSTOPS=[[0,[48,18,59]],[0.25,[40,187,236]],[0.5,[164,252,60]],[0.75,[251,126,33]],[1,[122,4,3]]];
 function cmap(t){
  t=Math.max(0,Math.min(1,t));
@@ -822,10 +842,29 @@ async function openViewer(d){
  document.getElementById('vwfield').value='T';
  document.getElementById('vwaxis').value='z';
  document.getElementById('vwvec').checked=false;
+ document.getElementById('vwmode').value='2d';
+ vwMode();
  vwAxis();
  document.getElementById('vwov').style.display='flex';
 }
 function vwClose(){document.getElementById('vwov').style.display='none';VW=null;}
+function vwMode(){
+ const m=document.getElementById('vwmode').value;
+ document.getElementById('vw2d').style.display=m==='2d'?'flex':'none';
+ document.getElementById('vw3d').style.display=m==='3d'?'':'none';
+ for(const id of ['vwaxis','vwidx','vwpos','vwveclb'])
+  document.getElementById(id).style.display=m==='3d'?'none':'';
+ if(m==='3d'&&VW){
+  for(const [id,n] of [['s3x',VW.info.nx],['s3y',VW.info.ny],['s3z',VW.info.nz]]){
+   const s=document.getElementById(id);s.min=0;s.max=n-1;s.value=Math.round(n/2);
+  }
+  if(window.init3D)init3D(); else document.getElementById('vwread').textContent='3D 모듈 로딩 중… 잠시 후 다시';
+ }
+}
+function fieldCh(){
+ vwFetch();
+ if(document.getElementById('vwmode').value==='3d'&&window.init3D)init3D();
+}
 function vwAxis(){
  if(!VW)return;
  VW.axis=document.getElementById('vwaxis').value;
@@ -959,6 +998,122 @@ async function load(){
 }
 load();
 pollStatus();
+</script>
+<script type="importmap">{"imports":{"three":"/vendor/three.module.js"}}</script>
+<script type="module">
+// ── 3D 컷플레인 뷰어 (three.js — preview.py 와 같은 벤더 파일, 오프라인) ──
+// 좌표 매핑: CFD(x,y,z; z=높이) → three(X,Z,Y; Y=up). 텍스처는 2D 뷰어와 같은
+// /api/slice + cmap 을 그대로 사용 → 값·색이 2D 와 정의상 일치.
+import * as THREE from 'three';
+import { OrbitControls } from '/vendor/OrbitControls.js';
+let R=null;
+function mat(c,op){return new THREE.MeshBasicMaterial({color:c,transparent:true,opacity:op,side:THREE.DoubleSide});}
+function sliceCanvas(sl){
+ const d=sl.data,ny=d.length,nx=d[0].length;
+ const c=document.createElement('canvas');c.width=Math.max(64,nx*6);c.height=Math.max(64,ny*6);
+ const ctx=c.getContext('2d');
+ const [mn,mx]=vwRange(),rg=(mx-mn)||1;
+ const cw=c.width/nx,ch=c.height/ny;
+ for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){
+  ctx.fillStyle=cmap((d[j][i]-mn)/rg);
+  ctx.fillRect(i*cw,c.height-(j+1)*ch,cw+0.7,ch+0.7);
+ }
+ return c;
+}
+async function setPlane(axis,idx){
+ try{
+  const f=document.getElementById('vwfield').value;
+  const r=await fetch(`/api/slice/${VW.case}?field=${f}&axis=${axis}&idx=${idx}`);
+  const sl=await r.json(); if(sl.error){document.getElementById('vwread').textContent='⚠ '+sl.error;return;}
+  const {L,W,H}=VW.info.room;
+  let mesh=R.planes[axis];
+  if(!mesh){
+   let g;
+   if(axis==='z'){g=new THREE.PlaneGeometry(L,W);}      // 수평면
+   else if(axis==='y'){g=new THREE.PlaneGeometry(L,H);} // x–z 면
+   else{g=new THREE.PlaneGeometry(W,H);}                // y–z 면
+   mesh=new THREE.Mesh(g,new THREE.MeshBasicMaterial({side:THREE.DoubleSide}));
+   if(axis==='z')mesh.rotation.x=Math.PI/2;    // 국소+y → 세계+Z(CFD y)
+   if(axis==='x')mesh.rotation.y=-Math.PI/2;   // 국소+x → 세계+Z(CFD y)
+   R.planes[axis]=mesh;R.scene.add(mesh);
+  }
+  if(mesh.material.map)mesh.material.map.dispose();
+  mesh.material.map=new THREE.CanvasTexture(sliceCanvas(sl));
+  mesh.material.needsUpdate=true;
+  if(axis==='z')mesh.position.set(L/2,sl.pos,W/2);
+  else if(axis==='y')mesh.position.set(L/2,H/2,sl.pos);
+  else mesh.position.set(sl.pos,H/2,W/2);
+  R.pos[axis]=sl.pos;
+  R.renderer.render(R.scene,R.camera);   // RAF 와 무관하게 즉시 1프레임(확실성)
+ }catch(e){
+  document.getElementById('vwread').textContent='⚠ 3D: '+e.message;
+ }
+}
+window.upd3=function(axis,idx){setPlane(axis,idx);};
+window._dbg3=function(){return R?{raf:!!R.raf,children:R.scene.children.length,
+ planes:Object.keys(R.planes),pos:R.pos,zY:R.planes.z?R.planes.z.position.y:null}:null;};
+window._rot3=function(rad){ // 검증용: OrbitControls 와 동일한 궤도 회전 경로
+ if(!R)return null;
+ const t=R.controls.target,p=R.camera.position;
+ const dx=p.x-t.x,dz=p.z-t.z,r0=Math.hypot(dx,dz),a=Math.atan2(dz,dx)+rad;
+ p.set(t.x+r0*Math.cos(a),p.y,t.z+r0*Math.sin(a));
+ R.camera.lookAt(t);R.renderer.render(R.scene,R.camera);
+ return p.toArray().map(v=>+v.toFixed(2));
+};
+window.init3D=async function(){
+ if(!VW)return;
+ const cv=document.getElementById('cv3d');
+ if(!R){
+  const renderer=new THREE.WebGLRenderer({canvas:cv,antialias:true,preserveDrawingBuffer:true});
+  renderer.setSize(640,430,false);
+  R={renderer,scene:new THREE.Scene(),camera:new THREE.PerspectiveCamera(45,640/430,0.01,2000),
+     controls:null,planes:{},pos:{},raf:null};
+  R.scene.background=new THREE.Color(0xf4f6f8);
+  R.controls=new OrbitControls(R.camera,cv);
+ }
+ R.scene.clear(); R.planes={};
+ const {L,W,H}=VW.info.room;
+ const edges=new THREE.LineSegments(
+  new THREE.EdgesGeometry(new THREE.BoxGeometry(L,H,W)),
+  new THREE.LineBasicMaterial({color:0x2c5f8a}));
+ edges.position.set(L/2,H/2,W/2);
+ R.scene.add(edges);
+ const face=(wall,color)=>{
+  let p;
+  if(wall==='x0'||wall==='xL'){p=new THREE.Mesh(new THREE.PlaneGeometry(W,H),mat(color,0.16));
+   p.rotation.y=-Math.PI/2;p.position.set(wall==='x0'?0:L,H/2,W/2);}
+  else if(wall==='y0'||wall==='yW'){p=new THREE.Mesh(new THREE.PlaneGeometry(L,H),mat(color,0.16));
+   p.position.set(L/2,H/2,wall==='y0'?0:W);}
+  else return;
+  R.scene.add(p);
+ };
+ if(VW.info.inlet)face(VW.info.inlet,0x2980b9);
+ if(VW.info.outlet)face(VW.info.outlet,0xc0392b);
+ R.camera.position.set(L*1.45,H*1.7,W*1.55);
+ R.controls.target.set(L/2,H/2,W/2);R.controls.update();
+ for(const [ax,id] of [['x','s3x'],['y','s3y'],['z','s3z']])
+  await setPlane(ax,document.getElementById(id).value);
+ // 컬러바(2D와 동일 색범위)
+ const cb=document.getElementById('vwcb3'),c2=cb.getContext('2d');
+ const [mn,mx]=vwRange();
+ c2.clearRect(0,0,cb.width,cb.height);
+ for(let y=0;y<cb.height;y++){c2.fillStyle=cmap(1-y/cb.height);c2.fillRect(0,y,20,1);}
+ c2.fillStyle='#333';c2.font='11px sans-serif';
+ const unit=document.getElementById('vwfield').value==='T'?'℃':'m/s';
+ c2.fillText(mx.toFixed(1),23,10);c2.fillText(mn.toFixed(1),23,cb.height-2);
+ c2.fillText(unit,23,cb.height/2+4);
+ R.renderer.render(R.scene,R.camera);
+ if(!R.raf)anim();
+};
+function anim(){
+ if(!R)return;
+ const vis=document.getElementById('vw3d').style.display!=='none'
+        && document.getElementById('vwov').style.display!=='none';
+ if(!vis){R.raf=null;return;}
+ R.raf=requestAnimationFrame(anim);
+ R.controls.update();
+ R.renderer.render(R.scene,R.camera);
+}
 </script></body></html>"""
 
 
