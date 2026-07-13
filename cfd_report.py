@@ -302,7 +302,7 @@ def energy_closure(case_dir, meta):
         full = os.path.join(case_dir, name)
         if os.path.isdir(full) and re.fullmatch(r"\d+(\.\d+)?", name) and float(name) > 0:
             tdirs.append((float(name), full))
-    tdirs = [d for _, d in sorted(tdirs)]
+    tdirs = [d for _, d in sorted(tdirs)][-3:]   # 최근 3개만(과거 과도기 스냅샷 배제)
     power_w = float(heat.get("power_w", 0))
     su = power_w / 1206.0                             # 주입 Su (ρ0·cp=1206)
     samples = []                                      # (closure, vdot, outlet_dT)
