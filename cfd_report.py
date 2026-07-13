@@ -262,7 +262,10 @@ def read_patch_field(path, patch):
     seg = txt[m.end():i - 1]
     mv = re.search(r"value\s+nonuniform\s+List<scalar>\s*\n?\s*(\d+)\s*\n?\s*\(", seg)
     if mv:
-        s = mv.end(); e = seg.index("\n)", s)
+        s = mv.end()
+        e = seg.find("\n)", s)
+        if e == -1:                       # 소형 패치는 한 줄 인라인 `N(a b c)` 포맷
+            e = seg.index(")", s)
         return [float(x) for x in seg[s:e].split()]
     mu = re.search(r"value\s+uniform\s+([-\d.eE]+)", seg)
     if mu:
@@ -274,25 +277,64 @@ def energy_closure(case_dir, meta):
     """발열 kW(체적발열원) 케이스의 에너지 폐합 검증.
     정상상태 + 단열벽이면 주입열 P = 유량가중 배기 엔탈피유출 ρcp·Σ(phi·(T-Tref)).
     잔차가 아니라 이 폐합율(≈100%)이 발열 케이스의 진짜 수렴/신뢰 지표.
-    반환: {closure_pct, outlet_dT, power_w, vdot} 또는 None."""
+    v2: meta['patches'](급배기구 모드)면 배기 패치 전부 합산 + 질량수지 추가.
+    반환: {closure_pct, outlet_dT, power_w, vdot[, mass_err_pct]} 또는 None."""
     heat = meta.get("heat", {})
     if heat.get("mode") != "volume":
         return None
     tdir = find_latest_time(case_dir)
     if not tdir:
         return None
-    phi = read_patch_field(os.path.join(tdir, "phi"), "outlet")
-    T = read_patch_field(os.path.join(tdir, "T"), "outlet")
-    if not isinstance(phi, list) or not isinstance(T, list) or len(phi) != len(T):
-        return None
     Tref = float(meta["config"].get("inlet", {}).get("T", 293))
-    vdot = sum(phi)                                   # 순 배기유량(m³/s)
-    enth = sum(p * (t - Tref) for p, t in zip(phi, T))  # Σ phi·ΔT (K·m³/s)
+    exh_names = ["outlet"]
+    patches = meta.get("patches")
+    if patches:
+        exh_names = [p["name"] for p in patches if p["role"] == "exhaust"]
+        sups = [p for p in patches if p["role"] == "supply"]
+        if sups:
+            Tref = float(sups[0].get("T") or Tref)   # 기준 = 급기온도
+
+    # 회수된 모든 time 스냅샷(최근 3개)에 대해 폐합 계산 → 평균.
+    # 이유(실측): 4way 등 제트 충돌 유동은 진동 정상상태(limit cycle) — 단일 스냅샷
+    # 폐합이 87~104% 로 요동해 수렴을 오판. 반복 평균이 올바른 판정.
+    tdirs = []
+    for name in os.listdir(case_dir):
+        full = os.path.join(case_dir, name)
+        if os.path.isdir(full) and re.fullmatch(r"\d+(\.\d+)?", name) and float(name) > 0:
+            tdirs.append((float(name), full))
+    tdirs = [d for _, d in sorted(tdirs)]
     power_w = float(heat.get("power_w", 0))
     su = power_w / 1206.0                             # 주입 Su (ρ0·cp=1206)
-    closure = (enth / su * 100.0) if su else None
-    return {"closure_pct": closure, "outlet_dT": (enth / vdot if vdot else None),
-            "power_w": power_w, "vdot": vdot}
+    samples = []                                      # (closure, vdot, outlet_dT)
+    for td in tdirs:
+        vdot = enth = 0.0
+        got = False
+        for nm in exh_names:
+            phi = read_patch_field(os.path.join(td, "phi"), nm)
+            T = read_patch_field(os.path.join(td, "T"), nm)
+            if not isinstance(phi, list) or not isinstance(T, list) or len(phi) != len(T):
+                continue
+            got = True
+            vdot += sum(phi)                                     # 순 배기유량(m³/s)
+            enth += sum(p * (t - Tref) for p, t in zip(phi, T))  # Σ phi·ΔT (K·m³/s)
+        if got and su:
+            samples.append((enth / su * 100.0, vdot, (enth / vdot if vdot else None)))
+    if not samples:
+        return None
+    clos = [s[0] for s in samples]
+    closure = sum(clos) / len(clos)
+    osc = (max(clos) - min(clos)) / 2 if len(clos) > 1 else 0.0
+    vdot = samples[-1][1]
+    dts = [s[2] for s in samples if s[2] is not None]
+    out = {"closure_pct": closure, "closure_osc": round(osc, 1),
+           "closure_n": len(samples),
+           "outlet_dT": (sum(dts) / len(dts) if dts else None),
+           "power_w": power_w, "vdot": vdot}
+    if patches:
+        qin = sum((p.get("cmh") or 0) for p in patches if p["role"] == "supply") / 3600.0
+        if qin > 0:
+            out["mass_err_pct"] = (vdot - qin) / qin * 100.0   # 배기순유량 vs 급기설계유량
+    return out
 
 
 def field_metrics(case_dir, meta):
@@ -334,12 +376,25 @@ def field_metrics(case_dir, meta):
         out["supply_cmh"] = Q * 3600.0
         out["ach"] = (Q * 3600.0) / (L * W * H)
         out["supply_full_wall"] = (wall in ("x0", "xL", "y0", "yW", "floor", "ceiling"))
+    # v2 급배기구 모드: 설계 풍량은 패치 정의에서 정확히(스냅 실면적 반영)
+    patches = meta.get("patches")
+    if patches:
+        sup_cmh = sum((p.get("cmh") or 0) for p in patches if p["role"] == "supply")
+        if sup_cmh:
+            out["supply_cmh"] = sup_cmh
+            out["ach"] = sup_cmh / (L * W * H)
+            out["supply_full_wall"] = False
+        out["n_supply"] = len({p["name"].split("_q")[0] for p in patches
+                               if p["role"] == "supply"})
+        out["n_exhaust"] = sum(1 for p in patches if p["role"] == "exhaust")
     # 발열 kW 케이스: 에너지 폐합 검증(신뢰 지표)
     ec = energy_closure(case_dir, meta)
     if ec:
         out["heat_kw"] = ec["power_w"] / 1000.0
         out["closure_pct"] = ec["closure_pct"]
+        out["closure_osc"] = ec.get("closure_osc")
         out["outlet_dT"] = ec["outlet_dT"]
+        out["mass_err_pct"] = ec.get("mass_err_pct")
     return out
 
 
@@ -433,9 +488,11 @@ def convergence_badge(parsed, metrics):
     if parsed.get("crashed"):
         return ("발산/크래시", "#c0392b")
     if clo is not None:
+        osc = m.get("closure_osc") or 0
+        tag = f"{clo:.0f}%" + (f"±{osc:.0f}" if osc >= 5 else "")
         if 90 <= clo <= 110:
-            return (f"수렴(에너지폐합 {clo:.0f}%)", "#1e8449")
-        return (f"미수렴(에너지폐합 {clo:.0f}%)", "#b9770e")
+            return (f"수렴(에너지폐합 {tag})", "#1e8449")
+        return (f"미수렴(에너지폐합 {tag})", "#b9770e")
     if cont_ok:
         return ("수렴(양호)", "#1e8449")
     return ("부분수렴/확인필요", "#b9770e")
@@ -492,7 +549,7 @@ def case_summary(case_dir):
         out["n_iters"] = parsed["n_iters"]
         if metrics:
             for k in ("T_avg_C", "T_max_C", "dT_rise", "closure_pct", "outlet_dT",
-                      "supply_cmh", "ach", "U_max"):
+                      "supply_cmh", "ach", "U_max", "mass_err_pct", "n_supply", "n_exhaust"):
                 out[k] = metrics.get(k)
     reps = _glob.glob(os.path.join(case_dir, "cfd_report_*.html"))
     if reps:
@@ -538,8 +595,24 @@ def build_html_report(case_dir, meta, parsed, resid_png, sect_png, metrics, out_
     assum.append(("체적", _fmt(m.get("room_volume"), " m³", 1)))
     assum.append(("격자", f"{meta['mesh']['nx']}×{meta['mesh']['ny']}×{meta['mesh']['nz']} = {meta['mesh']['cells']:,} cells (셀 {cfg.get('mesh',{}).get('cell','?')} m)"))
     assum.append(("솔버", "buoyantBoussinesqSimpleFoam (정상상태·부력·비압축 Boussinesq)"))
-    if m.get("supply_cmh"):
-        fw = " ※최소모델: 벽면 전체를 급기로 단순화 → 풍량·ACH 비현실적, Phase 3에서 실디퓨저 면적 반영" if m.get("supply_full_wall") else ""
+    patches = meta.get("patches")
+    if patches:
+        # v2 급배기구 목록 (스냅된 실면적·실풍량)
+        seen = {}
+        for p in patches:
+            base = p["name"].split("_q")[0]
+            e = seen.setdefault(base, {"role": p["role"], "type": p.get("type"),
+                                       "wall": p["wall"], "area": 0.0, "cmh": 0.0})
+            e["area"] += p.get("area") or 0
+            e["cmh"] += p.get("cmh") or 0
+        rows_txt = " · ".join(
+            (f"{k}[{v['type']},{v['wall']}] {v['area']:.2f}㎡ {v['cmh']:.0f}CMH" if v["role"] == "supply"
+             else f"{k}[배기,{v['wall']}] {v['area']:.2f}㎡")
+            for k, v in seen.items())
+        assum.append(("급배기구", rows_txt))
+        assum.append(("총 급기(설계)", f"{_fmt(m.get('supply_cmh'),' CMH',0)} · {_fmt(m.get('ach'),' ACH',1)}"))
+    elif m.get("supply_cmh"):
+        fw = " ※최소모델: 벽면 전체를 급기로 단순화 → 풍량·ACH 비현실적, 급배기구(openings) 모드 권장" if m.get("supply_full_wall") else ""
         assum.append(("급기(가정)", f"{_fmt(m.get('supply_U'),' m/s',3)} × {_fmt(m.get('supply_area'),' m²',1)} = {_fmt(m.get('supply_cmh'),' CMH',0)} · {_fmt(m.get('ach'),' ACH',1)}{fw}"))
     assum.append(("급기온도(가정)", _fmt(m.get("T_supply_C"), " °C", 1)))
     heat = cfg.get("heat", {})
@@ -557,9 +630,15 @@ def build_html_report(case_dir, meta, parsed, resid_png, sect_png, metrics, out_
     res.append(("최대 유속", _fmt(m.get("U_max"), " m/s", 3)))
     if m.get("closure_pct") is not None:
         cv = m["closure_pct"]
+        osc = m.get("closure_osc") or 0
         mark = "✓ 신뢰" if 90 <= cv <= 110 else "✗ 미수렴 — 반복↑ 또는 급기유속 현실화 필요"
-        res.append(("에너지 폐합율 (주입열=배기열)", f"{cv:.0f}% &nbsp;<b>{mark}</b>"))
+        oscnote = f" ±{osc:.0f} (진동 유동 — 최근 스냅샷 평균)" if osc >= 5 else ""
+        res.append(("에너지 폐합율 (주입열=배기열)", f"{cv:.0f}%{oscnote} &nbsp;<b>{mark}</b>"))
         res.append(("배기 온도상승(유량가중)", _fmt(m.get("outlet_dT"), " K", 2)))
+    if m.get("mass_err_pct") is not None:
+        mv = m["mass_err_pct"]
+        res.append(("질량수지 (배기−급기)/급기", f"{mv:+.1f}%"
+                    + (" &nbsp;<b>✓</b>" if abs(mv) < 2 else " &nbsp;<b>✗ 확인 필요</b>")))
     res.append(("반복(iteration)", f"{parsed['n_iters']}"))
     if parsed["continuity_global"]:
         res.append(("최종 연속방정식 오차(global)", f"{parsed['continuity_global'][-1][1]:.2e}"))

@@ -83,12 +83,14 @@ def run_case(case_dir, name=None, keep_mesh=False, progress_cb=None):
     proc.wait()
 
     cb(f"[3/3] 결과 회수 -> {case}")
-    # 로그·postProcessing·마지막 time 디렉토리만
+    # 로그·postProcessing + time 스냅샷 3개(최근 7개 중 처음/중간/끝 = ~600 iter 스팬).
+    # 진동 정상상태(4way 제트 등, 주기 수백 iter)의 반복평균 폐합 계산용 — 연속 3개는
+    # 주기를 못 덮어 여전히 오판함(실측).
     recover = (f"cd {run_dir} && "
                f"cp log.* '{wsl_case}/' 2>/dev/null; "
                f"[ -d postProcessing ] && cp -r postProcessing '{wsl_case}/' 2>/dev/null; "
-               f"LAST=$(ls -d [0-9]* 2>/dev/null | sort -n | tail -1); "
-               f"[ -n \"$LAST\" ] && [ \"$LAST\" != \"0\" ] && cp -r \"$LAST\" '{wsl_case}/' 2>/dev/null; "
+               f"for T in $(ls -d [0-9]* 2>/dev/null | sort -n | grep -v '^0$' | tail -7 "
+               f"| awk 'NR%3==1'); do cp -r \"$T\" '{wsl_case}/' 2>/dev/null; done; "
                + (f"cp -r constant/polyMesh '{wsl_case}/constant/' 2>/dev/null; " if keep_mesh else "")
                + "echo done")
     _wsl(recover)

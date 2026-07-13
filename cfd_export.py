@@ -111,6 +111,219 @@ def gen_g(cfg):
             + f"value ({g[0]} {g[1]} {g[2]});\n")
 
 
+# ── v2: 사각 급배기구(openings) — topoSet faceSet + createPatch ──────────────
+# 실측 크기·위치의 디퓨저/취출구/배기구 N개를 균일 blockMesh 격자 위에 패치로 분리.
+# (WSL v1912 수동 검증 완료: boxToFace faceSet 4면 → createPatch sup0, Mesh OK)
+
+# wall → (법선축, 평면좌표 키, (cx축, cy축)) — cx,cy 는 그 벽 평면의 2D 좌표(m)
+_WALL_PLANES = {
+    "x0": ("x", 0.0, ("y", "z")), "xL": ("x", "L", ("y", "z")),
+    "y0": ("y", 0.0, ("x", "z")), "yW": ("y", "W", ("x", "z")),
+    "floor": ("z", 0.0, ("x", "y")), "ceiling": ("z", "H", ("x", "y")),
+}
+_WALL_NORMAL_IN = {  # 실내로 향하는 법선(급기 취출 방향)
+    "x0": (1, 0, 0), "xL": (-1, 0, 0), "y0": (0, 1, 0), "yW": (0, -1, 0),
+    "floor": (0, 0, 1), "ceiling": (0, 0, -1),
+}
+
+
+def _snap_1d(lo, hi, h, nmax):
+    """[lo,hi] 구간을 셀 경계(간격 h)에 스냅. 최소 1셀 보장. 반환 (lo', hi')."""
+    i0 = int(round(lo / h))
+    i1 = int(round(hi / h))
+    i0 = max(0, min(i0, nmax - 1))
+    i1 = max(i0 + 1, min(i1, nmax))
+    return i0 * h, i1 * h
+
+
+def resolve_openings(cfg, meshinfo):
+    """cfg['openings'] → 패치 정의 목록(스냅·풍량보존·취출벡터 계산).
+    반환: [{name, role, type, wall, rect_req, rect_snap, area, U, T, cmh, cmh_req}, ...]
+    4way 는 4분면 패치 4개로 전개(각각 바깥쪽 수평+하향 벡터)."""
+    room = cfg["room"]
+    L, W, H = room["L"], room["W"], room["H"]
+    dims = {"x": L, "y": W, "z": H}
+    ncell = {"x": meshinfo["nx"], "y": meshinfo["ny"], "z": meshinfo["nz"]}
+    Tsup_default = float(cfg.get("inlet", {}).get("T", 293.0))
+    patches = []
+    n_sup = n_exh = 0
+    for op in cfg.get("openings", []):
+        wall = op.get("wall")
+        if wall not in _WALL_PLANES:
+            raise SystemExit(f"openings: wall '{wall}' 는 {list(_WALL_PLANES)} 중 하나")
+        nax, _, (uax, vax) = _WALL_PLANES[wall]
+        hu = dims[uax] / ncell[uax]
+        hv = dims[vax] / ncell[vax]
+        cx, cy = float(op["cx"]), float(op["cy"])
+        w, h = float(op["w"]), float(op["h"])
+        u0, u1 = _snap_1d(cx - w / 2, cx + w / 2, hu, ncell[uax])
+        v0, v1 = _snap_1d(cy - h / 2, cy + h / 2, hv, ncell[vax])
+        if not (0 <= u0 < u1 <= dims[uax] and 0 <= v0 < v1 <= dims[vax]):
+            raise SystemExit(f"openings: '{wall}' ({cx},{cy}) {w}x{h} 가 벽 범위 밖")
+        area = (u1 - u0) * (v1 - v0)
+        role = op.get("role", "supply")
+        typ = op.get("type", "grille")
+        n = _WALL_NORMAL_IN[wall]
+        base = {"role": role, "type": typ, "wall": wall,
+                "rect_req": [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2],
+                "rect_snap": [round(u0, 4), round(v0, 4), round(u1, 4), round(v1, 4)],
+                "uax": uax, "vax": vax}
+        if role == "exhaust":
+            patches.append({**base, "name": f"exh{n_exh}", "area": round(area, 4),
+                            "U": None, "T": None, "cmh": None, "cmh_req": None})
+            n_exh += 1
+            continue
+        cmh = op.get("cmh")
+        if cmh is None:
+            raise SystemExit(f"openings: supply '{wall}' 에 cmh 필수(계산서 풍량)")
+        Q = float(cmh) / 3600.0
+        Tsup = float(op.get("T", Tsup_default))
+        k_in = float(op.get("k", 0.01))          # 급기 난류(벤치마크 재현용 오버라이드)
+        eps_in = float(op.get("epsilon", 0.01))
+        if typ == "4way":
+            # 4분면 분할(스냅된 중앙선 기준) — 각 분면 바깥쪽 대각 수평 + 질량용 하향
+            um = _snap_1d(cx, cx, hu, ncell[uax])[0]
+            vm = _snap_1d(cy, cy, hv, ncell[vax])[0]
+            um = min(max(um, u0 + hu), u1 - hu) if (u1 - u0) > 2 * hu else (u0 + u1) / 2
+            vm = min(max(vm, v0 + hv), v1 - hv) if (v1 - v0) > 2 * hv else (v0 + v1) / 2
+            quads = [(u0, v0, um, vm, -1, -1), (um, v0, u1, vm, +1, -1),
+                     (u0, vm, um, v1, -1, +1), (um, vm, u1, v1, +1, +1)]
+            u_n = Q / area                                  # 법선(질량) 성분
+            u_h = float(op.get("throat_v", max(1.0, 4.0 * u_n)))  # 수평 취출 성분
+            for qi, (a0, b0, a1, b1, su, sv) in enumerate(quads):
+                qarea = (a1 - a0) * (b1 - b0)
+                if qarea <= 0:
+                    continue
+                vec = {"x": 0.0, "y": 0.0, "z": 0.0}
+                vec[uax] = su * u_h
+                vec[vax] = sv * u_h
+                # 법선 성분(실내 방향)
+                for ax, comp in zip(("x", "y", "z"), n):
+                    if comp:
+                        vec[ax] = comp * u_n
+                patches.append({**base, "name": f"sup{n_sup}_q{qi}",
+                                "rect_snap": [round(a0, 4), round(b0, 4), round(a1, 4), round(b1, 4)],
+                                "area": round(qarea, 4),
+                                "U": [round(vec["x"], 4), round(vec["y"], 4), round(vec["z"], 4)],
+                                "T": Tsup, "cmh": round(u_n * qarea * 3600, 1),
+                                "cmh_req": float(cmh) / 4, "k": k_in, "epsilon": eps_in})
+        else:
+            # grille(법선 취출) / down(천장 하향 = ceiling 의 법선과 동일)
+            u_mag = Q / area                                # 스냅 실면적으로 역산 → CMH 정확
+            vec = [round(n[0] * u_mag, 4), round(n[1] * u_mag, 4), round(n[2] * u_mag, 4)]
+            patches.append({**base, "name": f"sup{n_sup}", "area": round(area, 4),
+                            "U": vec, "T": Tsup,
+                            "cmh": round(u_mag * area * 3600, 1), "cmh_req": float(cmh),
+                            "k": k_in, "epsilon": eps_in})
+        n_sup += 1
+    if patches and not any(p["role"] == "exhaust" for p in patches):
+        raise SystemExit("openings: exhaust(배기) 가 최소 1개 필요(압력출구)")
+    return patches
+
+
+def _face_box(p, room):
+    """패치의 boxToFace 박스(법선 방향 ±1mm 얇은 박스) 좌표."""
+    L, W, H = room["L"], room["W"], room["H"]
+    nax, plane, (uax, vax) = _WALL_PLANES[p["wall"]]
+    pc = {"L": L, "W": W, "H": H}[plane] if isinstance(plane, str) else plane
+    a0, b0, a1, b1 = p["rect_snap"]
+    lo = {"x": None, "y": None, "z": None}
+    hi = {"x": None, "y": None, "z": None}
+    lo[nax], hi[nax] = pc - 0.001, pc + 0.001
+    lo[uax], hi[uax] = a0, a1
+    lo[vax], hi[vax] = b0, b1
+    return (lo["x"], lo["y"], lo["z"], hi["x"], hi["y"], hi["z"])
+
+
+def gen_toposet_all(cfg, patches):
+    """topoSetDict 통합: openings faceSet 들 + (발열 volume 모드면) heatZone cellZone."""
+    room = cfg["room"]
+    s = _hdr("dictionary", "topoSetDict") + "actions\n(\n"
+    for p in patches:
+        b = _face_box(p, room)
+        s += (f"    {{ name {p['name']}f; type faceSet; action new; source boxToFace;\n"
+              f"      box ({b[0]:.4f} {b[1]:.4f} {b[2]:.4f}) ({b[3]:.4f} {b[4]:.4f} {b[5]:.4f}); }}\n")
+    if _heat_mode(cfg)["mode"] == "volume":
+        L, W, H = room["L"], room["W"], room["H"]
+        zh = round(_heat_mode(cfg)["zone_frac"] * H, 4)
+        s += (f"    {{ name heatZone; type cellSet;     action new; source boxToCell; box (0 0 0) ({L} {W} {zh}); }}\n"
+              "    { name heatZone; type cellZoneSet; action new; source setToCellZone; set heatZone; }\n")
+    s += ");\n"
+    return s
+
+
+def gen_createpatch(patches):
+    """createPatchDict — faceSet 마다 패치 생성(원본 벽 패치에서 면 분리)."""
+    s = _hdr("dictionary", "createPatchDict") + "pointSync false;\npatches\n(\n"
+    for p in patches:
+        s += (f"    {{ name {p['name']}; patchInfo {{ type patch; }} "
+              f"constructFrom set; set {p['name']}f; }}\n")
+    s += ");\n"
+    return s
+
+
+def gen_0_openings(cfg, patches):
+    """openings 모드 0/ 필드: 벽 전부 단열(sideWalls) + 급기/배기 패치별 BC."""
+    Tinit = cfg.get("init", {}).get("T", 300)
+    sups = [p for p in patches if p["role"] == "supply"]
+    exhs = [p for p in patches if p["role"] == "exhaust"]
+
+    def bc(wall_e, sup_e, exh_e):
+        out = f"    sideWalls {wall_e}\n"
+        for p in sups:
+            out += f"    {p['name']} {sup_e(p)}\n"
+        for p in exhs:
+            out += f"    {p['name']} {exh_e}\n"
+        return out
+
+    files = {}
+    files["U"] = (_hdr("volVectorField", "U") + "dimensions [0 1 -1 0 0 0 0];\n"
+                  "internalField uniform (0 0 0);\nboundaryField\n{\n"
+                  + bc("{ type noSlip; }",
+                       lambda p: f"{{ type fixedValue; value uniform ({p['U'][0]} {p['U'][1]} {p['U'][2]}); }}",
+                       "{ type pressureInletOutletVelocity; value uniform (0 0 0); }")
+                  + "}\n")
+    files["T"] = (_hdr("volScalarField", "T") + "dimensions [0 0 0 1 0 0 0];\n"
+                  f"internalField uniform {Tinit};\nboundaryField\n{{\n"
+                  + bc("{ type zeroGradient; }",
+                       lambda p: f"{{ type fixedValue; value uniform {p['T']}; }}",
+                       f"{{ type inletOutlet; inletValue uniform {Tinit}; value uniform {Tinit}; }}")
+                  + "}\n")
+    files["p_rgh"] = (_hdr("volScalarField", "p_rgh") + "dimensions [0 2 -2 0 0 0 0];\n"
+                      "internalField uniform 0;\nboundaryField\n{\n"
+                      + bc("{ type fixedFluxPressure; rho rhok; value uniform 0; }",
+                           lambda p: "{ type fixedFluxPressure; rho rhok; value uniform 0; }",
+                           "{ type fixedValue; value uniform 0; }")
+                      + "}\n")
+    files["p"] = (_hdr("volScalarField", "p") + "dimensions [0 2 -2 0 0 0 0];\n"
+                  'internalField uniform 0;\nboundaryField { ".*" { type calculated; value uniform 0; } }\n')
+    files["k"] = (_hdr("volScalarField", "k") + "dimensions [0 2 -2 0 0 0 0];\n"
+                  "internalField uniform 0.01;\nboundaryField\n{\n"
+                  + bc("{ type kqRWallFunction; value uniform 0.01; }",
+                       lambda p: f"{{ type fixedValue; value uniform {p.get('k', 0.01):.6g}; }}",
+                       "{ type inletOutlet; inletValue uniform 0.01; value uniform 0.01; }")
+                  + "}\n")
+    files["epsilon"] = (_hdr("volScalarField", "epsilon") + "dimensions [0 2 -3 0 0 0 0];\n"
+                        "internalField uniform 0.01;\nboundaryField\n{\n"
+                        + bc("{ type epsilonWallFunction; value uniform 0.01; }",
+                             lambda p: f"{{ type fixedValue; value uniform {p.get('epsilon', 0.01):.6g}; }}",
+                             "{ type inletOutlet; inletValue uniform 0.01; value uniform 0.01; }")
+                        + "}\n")
+    files["nut"] = (_hdr("volScalarField", "nut") + "dimensions [0 2 -1 0 0 0 0];\n"
+                    "internalField uniform 0;\nboundaryField\n{\n"
+                    + bc("{ type nutkWallFunction; value uniform 0; }",
+                         lambda p: "{ type calculated; value uniform 0; }",
+                         "{ type calculated; value uniform 0; }")
+                    + "}\n")
+    files["alphat"] = (_hdr("volScalarField", "alphat") + "dimensions [0 2 -1 0 0 0 0];\n"
+                       "internalField uniform 0;\nboundaryField\n{\n"
+                       + bc("{ type alphatJayatillekeWallFunction; Prt 0.85; value uniform 0; }",
+                            lambda p: "{ type calculated; value uniform 0; }",
+                            "{ type calculated; value uniform 0; }")
+                       + "}\n")
+    return files
+
+
 def gen_toposet(cfg):
     """바닥층 cellZone(heatZone) — 체적 발열원을 넣을 영역. 방 바닥~zone_frac·H 높이."""
     L, W, H = cfg["room"]["L"], cfg["room"]["W"], cfg["room"]["H"]
@@ -136,10 +349,12 @@ def gen_fvoptions(cfg):
             "}\n")
 
 
-def gen_allrun(need_toposet):
-    """Allrun 생성. 발열 kW 모드면 blockMesh 뒤에 topoSet 단계 추가."""
+def gen_allrun(need_toposet, need_createpatch=False):
+    """Allrun 생성. 발열 kW/openings 면 topoSet, openings 면 createPatch 단계 추가."""
     toposet = ('echo "=== topoSet ==="\ntopoSet > log.topoSet 2>&1 || '
                '{ echo "topoSet FAILED"; tail -20 log.topoSet; exit 1; }\n') if need_toposet else ""
+    createpatch = ('echo "=== createPatch ==="\ncreatePatch -overwrite > log.createPatch 2>&1 || '
+                   '{ echo "createPatch FAILED"; tail -20 log.createPatch; exit 1; }\n') if need_createpatch else ""
     return ("#!/bin/sh\n"
             "# RunFunctions 비의존(apt OpenFOAM 패키지엔 없음): 직접 호출 + 로그 리다이렉트.\n"
             'cd "${0%/*}" || exit\n'
@@ -147,7 +362,7 @@ def gen_allrun(need_toposet):
             ': "${APP:=buoyantBoussinesqSimpleFoam}"\n'
             'echo "=== blockMesh ==="\n'
             'blockMesh > log.blockMesh 2>&1 || { echo "blockMesh FAILED"; tail -20 log.blockMesh; exit 1; }\n'
-            + toposet
+            + toposet + createpatch
             + 'echo "=== checkMesh ==="\n'
             "checkMesh > log.checkMesh 2>&1; grep -E 'Mesh OK|\\*\\*\\*' log.checkMesh | head -3\n"
             'echo "=== solver ($APP) ==="\n'
@@ -280,22 +495,43 @@ def build_case(cfg, out_dir):
         with open(cd_path, "w", encoding="utf-8") as f:
             f.write(cd)
     # 파라메트릭 생성
+    has_openings = bool(cfg.get("openings"))
+    if has_openings:
+        # v2 급배기구 모드: 6면 전부 벽(sideWalls) → 패치는 topoSet+createPatch 로 분리
+        if _heat_mode(cfg)["mode"] == "surface":
+            raise SystemExit("openings 모드는 발열을 power_kw(체적)로 지정하세요(floor_T 불가)")
+        roles = {name: "wall" for name in _FACES}
     bm, meshinfo = gen_blockmesh(cfg, roles)
     _w(os.path.join(out_dir, "system", "blockMeshDict"), bm)
     _w(os.path.join(out_dir, "constant", "g"), gen_g(cfg))
-    for name, txt in gen_0(cfg, roles).items():
-        _w(os.path.join(out_dir, "0", name), txt)
-    # 발열 kW 모드: 바닥층 cellZone + 체적 발열원
     hm = _heat_mode(cfg)
-    if hm["mode"] == "volume":
-        _w(os.path.join(out_dir, "system", "topoSetDict"), gen_toposet(cfg))
-        _w(os.path.join(out_dir, "constant", "fvOptions"), gen_fvoptions(cfg))
-    _w(os.path.join(out_dir, "Allrun"), gen_allrun(need_toposet=(hm["mode"] == "volume")))
+    patches = []
+    if has_openings:
+        patches = resolve_openings(cfg, meshinfo)
+        for name, txt in gen_0_openings(cfg, patches).items():
+            _w(os.path.join(out_dir, "0", name), txt)
+        _w(os.path.join(out_dir, "system", "topoSetDict"), gen_toposet_all(cfg, patches))
+        _w(os.path.join(out_dir, "system", "createPatchDict"), gen_createpatch(patches))
+        if hm["mode"] == "volume":
+            _w(os.path.join(out_dir, "constant", "fvOptions"), gen_fvoptions(cfg))
+    else:
+        for name, txt in gen_0(cfg, roles).items():
+            _w(os.path.join(out_dir, "0", name), txt)
+        # 발열 kW 모드: 바닥층 cellZone + 체적 발열원
+        if hm["mode"] == "volume":
+            _w(os.path.join(out_dir, "system", "topoSetDict"), gen_toposet(cfg))
+            _w(os.path.join(out_dir, "constant", "fvOptions"), gen_fvoptions(cfg))
+    _w(os.path.join(out_dir, "Allrun"),
+       gen_allrun(need_toposet=(hm["mode"] == "volume" or has_openings),
+                  need_createpatch=has_openings))
     os.chmod(os.path.join(out_dir, "Allrun"), 0o755)
     # 생성 요약(리포트에서 가정값 표기용)
+    meta = {"config": cfg, "mesh": meshinfo, "roles": roles, "heat": hm}
+    if patches:
+        meta["patches"] = [{k: v for k, v in p.items() if k not in ("uax", "vax")}
+                           for p in patches]
     _w(os.path.join(out_dir, "cfd_case_meta.json"),
-       json.dumps({"config": cfg, "mesh": meshinfo, "roles": roles, "heat": hm},
-                  ensure_ascii=False, indent=2))
+       json.dumps(meta, ensure_ascii=False, indent=2))
     return meshinfo, roles
 
 
@@ -319,6 +555,41 @@ def _xy_extent(records):
     if not xs:
         return None
     return (min(xs), min(ys), max(xs), max(ys))
+
+
+def diffusers_from_geometry(geom, zone=None, bbox=None):
+    """도면 equipment 블록(footprint) → 천장 디퓨저/급배기구 후보 목록(방 좌표계 m).
+    반환 [{cx, cy, w, h, name}]. 역할·CMH 는 도면에 없으므로 사용자가 지정(정직).
+    D4: MEP 도면의 디퓨저 심볼은 블록(INSERT)→equipment 로 추출되어 있음."""
+    el = geom.get("elements", {})
+    if zone is not None:
+        zones = el.get("zone", [])
+        if zone >= len(zones):
+            raise SystemExit(f"zone {zone} 없음")
+        ext = _xy_extent([zones[zone]])
+    elif bbox is not None:
+        ext = tuple(bbox)
+    else:
+        ext = _xy_extent(el.get("wall", []))
+    if not ext:
+        ext = _xy_extent(el.get("equipment", []))   # MEP 전용 도면(벽 없음) 폴백
+    if not ext:
+        return []
+    x0, y0, x1, y1 = ext
+    out = []
+    for eq in el.get("equipment", []):
+        e = _xy_extent([eq])
+        if not e:
+            continue
+        cx, cy = (e[0] + e[2]) / 2, (e[1] + e[3]) / 2
+        if not (x0 <= cx <= x1 and y0 <= cy <= y1):
+            continue
+        out.append({"cx": round((cx - x0) / 1000.0, 3),
+                    "cy": round((cy - y0) / 1000.0, 3),
+                    "w": max(0.1, round((e[2] - e[0]) / 1000.0, 3)),
+                    "h": max(0.1, round((e[3] - e[1]) / 1000.0, 3)),
+                    "name": eq.get("layer") or "equipment"})
+    return out
 
 
 def _opening_wall(cx, cy, ext, tol):

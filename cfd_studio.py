@@ -362,6 +362,7 @@ def inspect_geometry(path, zone=None, bbox=None):
             out["room"] = cfg["room"]
             out["openings_by_wall"] = info["openings_by_wall"]
             out["warnings"] = info["warnings"]
+            out["diffusers"] = cfd_export.diffusers_from_geometry(geom, zone=zone, bbox=bbox)
         except SystemExit as e:
             out["error"] = str(e)
     return out
@@ -381,7 +382,8 @@ def create_case(p):
     try:
         supply = p.get("supply", "x0")
         exhaust = p.get("exhaust", "xL")
-        if supply == exhaust:
+        vent_openings = p.get("openings") or None   # v2: 급배기구 목록(디퓨저/그릴)
+        if not vent_openings and supply == exhaust:
             return {"error": "급기 벽과 배기 벽이 같습니다"}
         supply_u = float(p.get("supply_u", 0.3))
         supply_T = float(p.get("supply_T_C", 20.0)) + 273.15
@@ -427,6 +429,22 @@ def create_case(p):
                 "init": {"T": 300},
                 "endTime": endtime,
             }
+        if vent_openings:
+            # 급배기구 모드: 벽 전체 inlet/outlet 제거, openings 로 대체
+            cfg["openings"] = []
+            for o in vent_openings:
+                row = {"role": o.get("role", "supply"), "type": o.get("type", "grille"),
+                       "wall": o.get("wall", "ceiling"),
+                       "cx": float(o["cx"]), "cy": float(o["cy"]),
+                       "w": float(o["w"]), "h": float(o["h"])}
+                if row["role"] == "supply":
+                    row["cmh"] = float(o["cmh"])
+                    row["T"] = float(o.get("T_C", p.get("supply_T_C", 20.0))) + 273.15
+                cfg["openings"].append(row)
+            cfg["inlet"] = {"T": supply_T}    # Tref(폐합 기준)만 유지
+            cfg.pop("outlet", None)
+            if cfg.get("heat", {}).get("floor_T") is not None:
+                cfg["heat"] = ({"power_kw": power_kw} if power_kw is not None else {})
         cfd_export.build_case(cfg, out_dir)
         if info:
             meta_path = os.path.join(out_dir, "cfd_case_meta.json")
@@ -801,6 +819,8 @@ const CMPROWS=[
  ['dT_rise','ΔT K',v=>v!=null?v.toFixed(1):'—'],
  ['outlet_dT','배기 ΔT K',v=>v!=null?v.toFixed(2):'—'],
  ['closure_pct','폐합 %',v=>v!=null?v.toFixed(0)+'%':'—'],
+ ['mass_err_pct','질량수지 %',v=>v!=null?(v>0?'+':'')+v.toFixed(1)+'%':'—'],
+ ['n_supply','급기구 수',v=>v!=null?v:'—'],
  ['gci_pct','GCI %',v=>v!=null?v.toFixed(1)+'%':'—'],
  ['badge','상태',v=>v||'—'],
 ];
@@ -1143,6 +1163,10 @@ PAGE_NEW = """<!doctype html><html lang="ko"><head><meta charset="utf-8">
  .prevbox{background:#fbf9f3;border:1px solid #e0d9c2;border-radius:8px;padding:12px 16px;font-size:13.5px;line-height:1.9;margin-bottom:12px}
  .err{color:#c0392b;font-weight:600;margin-top:10px}
  .req{color:#c0392b}
+ .optbl{border-collapse:collapse;font-size:13px;margin:6px 0}
+ .optbl th,.optbl td{border:1px solid var(--line);padding:4px 7px;text-align:center}
+ .optbl input{width:56px;padding:4px 5px}
+ .optbl select{font-size:12.5px;padding:4px}
 </style></head><body><div class="wrap">
  <div class="hdr"><h1>＋ 새 해석</h1><div style="flex:1"></div><a class="btn sec" href="/">← 대시보드</a></div>
 
@@ -1170,11 +1194,29 @@ PAGE_NEW = """<!doctype html><html lang="ko"><head><meta charset="utf-8">
  <div class="panel"><h2>STEP 2 · 해석 조건</h2>
   <div class="row">발열(계산서 총발열) <input id="kw" type="number" step="0.5" placeholder="예: 10" oninput="preview()"> kW
    <span class="req">★권장</span> <span style="color:var(--muted);font-size:12px">— 비우면 구식 바닥 40°C 고정온도 모드</span></div>
-  <div class="row">급기 벽 <select id="supply" onchange="preview()"></select>
-   &nbsp;배기 벽 <select id="exhaust" onchange="preview()"></select>
-   <span style="color:var(--muted);font-size:12px">(x0=서, xL=동, y0=남, yW=북 벽 — 도면 좌표 기준)</span></div>
-  <div class="row">급기 유속 <input id="su" type="number" step="0.05" value="0.3" oninput="preview()"> m/s
-   <span id="suwarn" class="warn"></span></div>
+  <div class="row">급배기 방식:
+   <label><input type="radio" name="vmode" value="wall" checked onchange="vmodeCh()"> 벽 전체(간이 스크리닝)</label>
+   <label><input type="radio" name="vmode" value="open" onchange="vmodeCh()"> 급배기구 지정(디퓨저/그릴) <span class="req">★배열 검토용</span></label>
+  </div>
+  <div id="sec_vwall">
+   <div class="row">급기 벽 <select id="supply" onchange="preview()"></select>
+    &nbsp;배기 벽 <select id="exhaust" onchange="preview()"></select>
+    <span style="color:var(--muted);font-size:12px">(x0=서, xL=동, y0=남, yW=북 벽 — 도면 좌표 기준)</span></div>
+   <div class="row">급기 유속 <input id="su" type="number" step="0.05" value="0.3" oninput="preview()"> m/s
+    <span id="suwarn" class="warn"></span></div>
+  </div>
+  <div id="sec_vopen" style="display:none">
+   <table class="optbl" id="optbl"><thead><tr>
+    <th>역할</th><th>타입</th><th>벽</th><th>cx(m)</th><th>cy(m)</th><th>w(m)</th><th>h(m)</th><th>CMH</th><th></th>
+   </tr></thead><tbody></tbody></table>
+   <div class="row">
+    <button class="btn sec" onclick="opAdd('supply')">＋ 급기구</button>
+    <button class="btn sec" onclick="opAdd('exhaust')">＋ 배기구</button>
+    <button class="btn sec" id="btnDiff" style="display:none" onclick="opFromDrawing()">📐 도면 디퓨저 불러오기 <span id="ndiff"></span></button>
+    <span class="hint" style="display:inline-block;padding:4px 10px">좌표축: ceiling/floor=(x,y) · x0/xL=(y,z) · y0/yW=(x,z) · 4way=천장 4방향 취출</span>
+   </div>
+   <div id="opwarn" class="warn"></div>
+  </div>
   <div class="row">급기 온도 <input id="st" type="number" step="1" value="20"> °C
    &nbsp;· 격자 셀 <input id="cell" type="number" step="0.05" value="0.3"> m
    &nbsp;· 최대 반복 <input id="iters" type="number" step="50" value="400"></div>
@@ -1189,7 +1231,7 @@ PAGE_NEW = """<!doctype html><html lang="ko"><head><meta charset="utf-8">
  </div>
 </div>
 <script>
-let GDIMS=null, OHINT={};
+let GDIMS=null, OHINT={}, GDIFF=[];
 const WALLS=['x0','xL','y0','yW'];
 function v(id){return document.getElementById(id).value}
 function el(id){return document.getElementById(id)}
@@ -1228,32 +1270,104 @@ async function selCh(){
  const r=await fetch('/api/inspect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
  const j=await r.json();
  if(j.error){el('ohint').style.display='';el('ohint').textContent='⚠ '+j.error;GDIMS=null;preview();return}
- GDIMS=j.room||null; OHINT=j.openings_by_wall||{};
+ GDIMS=j.room||null; OHINT=j.openings_by_wall||{}; GDIFF=j.diffusers||[];
  let t='';
  if(Object.keys(OHINT).length)t+='💡 경계 개구부(급/배기 후보): '+Object.entries(OHINT).map(([w,n])=>`${w}벽 ${n}개`).join(' · ');
+ if(GDIFF.length)t+=(t?'<br>':'')+`📐 도면 장비블록(디퓨저 후보) ${GDIFF.length}개 감지 — 급배기구 지정 모드에서 [도면 디퓨저 불러오기]`;
  if(j.warnings&&j.warnings.length)t+=(t?'<br>':'')+j.warnings.map(w=>'⚠ '+w).join('<br>');
  el('ohint').style.display=t?'':'none'; el('ohint').innerHTML=t;
+ el('btnDiff').style.display=GDIFF.length?'':'none';
+ el('ndiff').textContent=GDIFF.length?`(${GDIFF.length})`:'';
  wallOpts(); preview();
+}
+function opFromDrawing(){
+ if(!GDIFF.length){alert('불러올 도면 장비블록이 없습니다 — STEP 1에서 도면·zone/bbox 먼저');return}
+ for(const d of GDIFF){
+  OPROWS.push({role:'supply',type:'4way',wall:'ceiling',cx:d.cx,cy:d.cy,
+   w:Math.min(1.2,d.w),h:Math.min(1.2,d.h),cmh:''});
+ }
+ if(!OPROWS.some(r=>r.role==='exhaust'))opAdd('exhaust');
+ opRender();
+ alert(GDIFF.length+'개 디퓨저 위치를 불러왔습니다. 각 급기구의 CMH(계산서 풍량)를 입력하세요.');
 }
 function dims(){
  if(mode()==='manual')return {L:+v('L'),W:+v('W'),H:+v('H')};
  if(!GDIMS)return null;
  return {L:GDIMS.L,W:GDIMS.W,H:+v('height')||GDIMS.H};
 }
+// ── 급배기구 편집기 (v2 openings) ──
+let OPROWS=[];
+function vmode(){return document.querySelector('input[name=vmode]:checked').value}
+function vmodeCh(){
+ el('sec_vwall').style.display=vmode()==='wall'?'':'none';
+ el('sec_vopen').style.display=vmode()==='open'?'':'none';
+ if(vmode()==='open'){
+  if(!OPROWS.length){opAdd('supply');opAdd('exhaust');}
+  if(+v('cell')>0.16){el('cell').value=0.15;}
+ }
+ preview();
+}
+function opAdd(role){
+ OPROWS.push(role==='supply'
+  ?{role:'supply',type:'4way',wall:'ceiling',cx:'',cy:'',w:0.6,h:0.6,cmh:400}
+  :{role:'exhaust',type:'grille',wall:'xL',cx:'',cy:'',w:0.5,h:0.5,cmh:''});
+ opRender();
+}
+function opDel(i){OPROWS.splice(i,1);opRender();}
+function opSet(i,k,val){OPROWS[i][k]=val; if(k==='role')opRender(); else preview();}
+function opRender(){
+ const tb=document.querySelector('#optbl tbody');
+ tb.innerHTML=OPROWS.map((r,i)=>{
+  const sel=(k,opts)=>`<select onchange="opSet(${i},'${k}',this.value)">`+opts.map(o=>`<option ${o===r[k]?'selected':''}>${o}</option>`).join('')+`</select>`;
+  const num=(k,w)=>`<input type="number" step="0.1" style="width:${w||56}px" value="${r[k]}" oninput="opSet(${i},'${k}',this.value)">`;
+  return `<tr><td>${sel('role',['supply','exhaust'])}</td>`+
+   `<td>${r.role==='supply'?sel('type',['4way','down','grille']):'—'}</td>`+
+   `<td>${sel('wall',['ceiling','x0','xL','y0','yW','floor'])}</td>`+
+   `<td>${num('cx')}</td><td>${num('cy')}</td><td>${num('w')}</td><td>${num('h')}</td>`+
+   `<td>${r.role==='supply'?num('cmh',66):'—'}</td>`+
+   `<td><a class="rep" style="color:#c0392b" href="#" onclick="opDel(${i});return false">✕</a></td></tr>`;
+ }).join('');
+ preview();
+}
+function opValid(){
+ const sups=OPROWS.filter(r=>r.role==='supply'), exhs=OPROWS.filter(r=>r.role==='exhaust');
+ if(!sups.length)return '급기구가 없습니다';
+ if(!exhs.length)return '배기구가 최소 1개 필요합니다(압력출구)';
+ for(const r of OPROWS){
+  if(r.cx===''||r.cy===''||!(+r.w>0)||!(+r.h>0))return '급배기구 좌표(cx,cy)·크기(w,h)를 채우세요';
+  if(r.role==='supply'&&!(+r.cmh>0))return '급기구 CMH(계산서 풍량)를 입력하세요';
+ }
+ return '';
+}
 function preview(){
- const u=+v('su');
- el('suwarn').textContent=(u&&u<0.1)?'⚠ 약유동: 에너지폐합이 안 닫혀 미수렴 위험 — 0.3 이상 권장':'';
  const d=dims(), pv=el('preview');
- if(!d||!d.L||!d.W||!d.H){pv.innerHTML='방 정보를 입력하세요 (도면 모드는 불러오기 → zone/bbox 선택).';return}
- const sup=v('supply')||'x0';
- const A=(sup==='x0'||sup==='xL')?d.W*d.H:d.L*d.H;
- const Q=u*A, cmh=Q*3600, vol=d.L*d.W*d.H, ach=cmh/vol;
  const kw=parseFloat(v('kw'));
- let t=`방 ${d.L}×${d.W}×${d.H} m — 체적 ${vol.toFixed(0)} m³<br>`+
-  `풍량 = ${u} m/s × ${A.toFixed(1)} m² = <b>${cmh.toLocaleString(undefined,{maximumFractionDigits:0})} CMH</b> · ACH ${ach.toFixed(1)}`;
- if(kw&&Q>0)t+=`<br>예상 배기 ΔT = Q/(ρc·V̇) = ${kw}kW/(1206×${Q.toFixed(2)}) = <b>${(kw*1000/(1206*Q)).toFixed(2)} K</b>
+ if(!d||!d.L||!d.W||!d.H){pv.innerHTML='방 정보를 입력하세요 (도면 모드는 불러오기 → zone/bbox 선택).';return}
+ const vol=d.L*d.W*d.H;
+ let Q=0, head='';
+ if(vmode()==='open'){
+  el('suwarn').textContent='';
+  const warn=opValid();
+  el('opwarn').textContent=warn?('⚠ '+warn):'';
+  const cmh=OPROWS.filter(r=>r.role==='supply').reduce((s,r)=>s+(+r.cmh||0),0);
+  Q=cmh/3600;
+  const ns=OPROWS.filter(r=>r.role==='supply').length, ne=OPROWS.filter(r=>r.role==='exhaust').length;
+  head=`급기구 ${ns}개 Σ<b>${cmh.toLocaleString()} CMH</b> · 배기구 ${ne}개 · ACH ${(cmh/vol).toFixed(1)}`;
+  const nx=Math.round(d.L/ +v('cell')),ny=Math.round(d.W/ +v('cell')),nz=Math.round(d.H/ +v('cell'));
+  head+=`<br>격자 ${nx}×${ny}×${nz} = ${(nx*ny*nz).toLocaleString()} 셀 <span style="color:#666;font-size:12px">(급배기구 케이스는 반복 2000~4000 권장 — 현실 풍량은 열 수렴이 느림)</span>`;
+ } else {
+  const u=+v('su');
+  el('suwarn').textContent=(u&&u<0.1)?'⚠ 약유동: 에너지폐합이 안 닫혀 미수렴 위험 — 0.3 이상 권장':'';
+  const sup=v('supply')||'x0';
+  const A=(sup==='x0'||sup==='xL')?d.W*d.H:d.L*d.H;
+  Q=u*A;
+  const cmh=Q*3600;
+  head=`풍량 = ${u} m/s × ${A.toFixed(1)} m² = <b>${cmh.toLocaleString(undefined,{maximumFractionDigits:0})} CMH</b> · ACH ${(cmh/vol).toFixed(1)}`;
+ }
+ let t=`방 ${d.L}×${d.W}×${d.H} m — 체적 ${vol.toFixed(0)} m³<br>`+head;
+ if(kw&&Q>0)t+=`<br>예상 배기 ΔT = Q/(ρc·V̇) = ${kw}kW/(1206×${Q.toFixed(3)}) = <b>${(kw*1000/(1206*Q)).toFixed(2)} K</b>
   <span style="color:#666;font-size:12px">— 실행 후 CFD 배기 ΔT·에너지폐합이 이 손계산과 맞아야 정상</span>`;
- else t+=`<br><span class="warn">발열 kW 미입력 — 계산서 대조(에너지폐합 검증)가 불가한 구식 모드로 생성됩니다.</span>`;
+ else if(!kw)t+=`<br><span class="warn">발열 kW 미입력 — 계산서 대조(에너지폐합 검증)가 불가합니다.</span>`;
  pv.innerHTML=t;
 }
 async function create(runNow){
@@ -1262,6 +1376,11 @@ async function create(runNow){
   supply_u:v('su'),supply_T_C:v('st'),cell:v('cell'),endtime:v('iters'),run_now:runNow};
  if(mode()==='manual'){p.L=v('L');p.W=v('W');p.H=v('H');}
  else{p.geometry=v('gpath');p.zone=v('zone');p.bbox=v('bbox');p.height=v('height');}
+ if(vmode()==='open'){
+  const warn=opValid();
+  if(warn){el('msg').textContent=warn;return}
+  p.openings=OPROWS;
+ }
  if(!p.name){el('msg').textContent='케이스명을 입력하세요';return}
  const r=await fetch('/api/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});
  const j=await r.json();
