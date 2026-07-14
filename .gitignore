@@ -26,3 +26,10 @@ ai_res.json
 _live_screenshot_tmp.png
 flake8*.txt
 test.json
+
+# CFD 생성 산출물 (케이스 디렉토리는 재현 가능)
+case_*/
+cfd_projects/
+cfd_report_*.html
+_residuals.png
+_sections.png

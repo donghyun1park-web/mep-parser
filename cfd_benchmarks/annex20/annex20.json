@@ -1,0 +1,17 @@
+{
+  "name": "annex20_2d1",
+  "_note": "IEA Annex 20 등온 벤치마크(2D1): L/H=3, h/H=0.056, Re=5000. U0=Re*nu/h=0.4464 m/s. 급기 난류 k0=1.5(0.04u0)^2, eps0=k0^1.5/(h/10) (Nielsen et al. 2010 식(1)). 실측은 W/H=1 모형.",
+  "room": {"L": 9.0, "W": 3.0, "H": 3.0},
+  "mesh": {"cell": 0.08333},
+  "g": [0, 0, -9.81],
+  "inlet": {"T": 293},
+  "init": {"T": 293},
+  "endTime": 2500,
+  "openings": [
+    {"role": "supply", "type": "grille", "wall": "x0",
+     "cx": 1.5, "cy": 2.916, "w": 3.0, "h": 0.168,
+     "cmh": 810.1, "T": 293, "k": 0.000478, "epsilon": 0.000623},
+    {"role": "exhaust", "wall": "xL",
+     "cx": 1.5, "cy": 0.24, "w": 3.0, "h": 0.48}
+  ]
+}
