@@ -337,8 +337,25 @@ def energy_closure(case_dir, meta):
     return out
 
 
+def solid_mask(meta):
+    """V3a 실형상: meta config(room_polygon/obstacles) → (nz,ny,nx) 고체 bool 마스크.
+    저장하지 않고 결정론 재계산(파일이 진실). 실형상 아니면 None."""
+    cfg = meta.get("config", {})
+    if not (cfg.get("room_polygon") or cfg.get("obstacles")):
+        return None
+    import numpy as np
+    import cfd_export
+    labels = cfd_export.solid_labels(cfg, meta["mesh"])
+    nx, ny, nz = meta["mesh"]["nx"], meta["mesh"]["ny"], meta["mesh"]["nz"]
+    m = np.zeros(nx * ny * nz, dtype=bool)
+    if labels["solid"]:
+        m[np.asarray(labels["solid"], dtype=int)] = True
+    return m.reshape(nz, ny, nx)
+
+
 def field_metrics(case_dir, meta):
-    """최종 time 디렉토리 → T/U 통계 + 유량·환기 지표(가정값 명시)."""
+    """최종 time 디렉토리 → T/U 통계 + 유량·환기 지표(가정값 명시).
+    V3a: 고체 셀(방 밖·장애물)은 통계에서 제외(유체만)."""
     import numpy as np
     tdir = find_latest_time(case_dir)
     if not tdir:
@@ -350,17 +367,24 @@ def field_metrics(case_dir, meta):
     L, W, H = room["L"], room["W"], room["H"]
     inlet = meta["config"].get("inlet", {})
     Tsup_K = float(inlet.get("T", 293))
+    smask = solid_mask(meta)
+    fluid = None if smask is None else ~smask.reshape(-1)
+    nfluid = int(fluid.sum()) if fluid is not None else n
+    cell_vol = (L / meta["mesh"]["nx"]) * (W / meta["mesh"]["ny"]) * (H / meta["mesh"]["nz"])
     out = {
         "time_dir": os.path.basename(tdir),
         "T_supply_C": Tsup_K - 273.15,
-        "room_volume": L * W * H,
+        "room_volume": round(nfluid * cell_vol, 1) if fluid is not None else L * W * H,
+        "solid_n": (n - nfluid) if fluid is not None else 0,
     }
     if T is not None:
-        Tc = T - 273.15
+        Tc = (T - 273.15) if fluid is None else (T - 273.15)[fluid[:len(T)]]
         out.update(T_avg_C=float(Tc.mean()), T_max_C=float(Tc.max()),
                    T_min_C=float(Tc.min()), dT_rise=float(Tc.mean() - (Tsup_K - 273.15)))
     if U is not None and U.ndim == 2:
         mag = np.linalg.norm(U, axis=1)
+        if fluid is not None:
+            mag = mag[fluid[:len(mag)]]
         out.update(U_max=float(mag.max()), U_avg=float(mag.mean()))
     # 급기 풍량: fixedValue inlet BC(정확) × 벽 면적. 최소모델은 '벽 전체' → 비현실적일 수 있어 명시.
     roles = meta.get("roles", {})
@@ -369,12 +393,13 @@ def field_metrics(case_dir, meta):
             "floor": L * W, "ceiling": L * W}.get(wall)
     Uvec = inlet.get("U", [0, 0, 0])
     Umag = float(np.linalg.norm(Uvec)) if Uvec else 0.0
+    vol_eff = out["room_volume"]
     if area and Umag > 0:
         Q = Umag * area              # m3/s
         out["supply_area"] = area
         out["supply_U"] = Umag
         out["supply_cmh"] = Q * 3600.0
-        out["ach"] = (Q * 3600.0) / (L * W * H)
+        out["ach"] = (Q * 3600.0) / vol_eff
         out["supply_full_wall"] = (wall in ("x0", "xL", "y0", "yW", "floor", "ceiling"))
     # v2 급배기구 모드: 설계 풍량은 패치 정의에서 정확히(스냅 실면적 반영)
     patches = meta.get("patches")
@@ -382,7 +407,7 @@ def field_metrics(case_dir, meta):
         sup_cmh = sum((p.get("cmh") or 0) for p in patches if p["role"] == "supply")
         if sup_cmh:
             out["supply_cmh"] = sup_cmh
-            out["ach"] = sup_cmh / (L * W * H)
+            out["ach"] = sup_cmh / vol_eff
             out["supply_full_wall"] = False
         out["n_supply"] = len({p["name"].split("_q")[0] for p in patches
                                if p["role"] == "supply"})
@@ -432,10 +457,16 @@ def plot_sections(case_dir, meta, out_png, z_target=1.5):
     kz = int(np.clip(round(z_target / H * nz - 0.5), 0, nz - 1))
     jy = ny // 2
 
+    # V3a 실형상: 고체(방 밖·장애물) 회색 마스킹 — 색범위·통계는 유체만
+    smask = solid_mask(meta)
+    if smask is not None:
+        Tg = np.ma.masked_array(Tg, mask=smask)
     vmin, vmax = float(Tg.min()), float(Tg.max())
     if vmax - vmin < 0.5:
         vmax = vmin + 0.5
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5.2))
+    for ax in (ax1, ax2):
+        ax.set_facecolor("#b8bcc0")   # 마스크 영역 = 회색 바탕
 
     # (1) 수평면 z=z_target : 평면 온도분포
     c1 = ax1.contourf(xc, yc, Tg[kz], levels=24, cmap="turbo", vmin=vmin, vmax=vmax)
@@ -617,7 +648,12 @@ def build_html_report(case_dir, meta, parsed, resid_png, sect_png, metrics, out_
     assum.append(("급기온도(가정)", _fmt(m.get("T_supply_C"), " °C", 1)))
     heat = cfg.get("heat", {})
     if m.get("heat_kw") is not None:
-        assum.append(("발열(입력)", f"{_fmt(m.get('heat_kw'),' kW',1)} — 바닥층 체적 발열원(계산서 총발열 직결). 실발열량 반영 시 값 지정."))
+        if meta.get("heat", {}).get("via") == "obstacles":
+            eqz = meta.get("equip_zones") or []
+            assum.append(("발열(입력)", f"{_fmt(m.get('heat_kw'),' kW',1)} — 장비 {len(eqz)}대 위치별 체적 발열"
+                          f"({', '.join(str(e['kw'])+'kW' for e in eqz)}) → 국소 핫스팟 계산"))
+        else:
+            assum.append(("발열(입력)", f"{_fmt(m.get('heat_kw'),' kW',1)} — 바닥층 체적 발열원(계산서 총발열 직결). 실발열량 반영 시 값 지정."))
     elif heat.get("floor_T") is not None:
         assum.append(("발열(가정)", f"바닥 {heat.get('floor_T','?')}K 고정온도 = 장비 총발열 단순화 (실발열량 아님)"))
 

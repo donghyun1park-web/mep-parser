@@ -261,9 +261,15 @@ def _load_fields(name):
     if T is None:
         return None
     Tg, xc, yc, zc = cfd_report._cell_grid(T - 273.15, meta)
-    entry = {"meta": meta, "mtime": mt, "T": Tg,
+    smask = cfd_report.solid_mask(meta)          # V3a 실형상: (nz,ny,nx) bool 또는 None
+    if smask is not None:
+        Tm = np.ma.masked_array(Tg, mask=smask)
+        tmin, tmax = float(Tm.min()), float(Tm.max())
+    else:
+        tmin, tmax = float(Tg.min()), float(Tg.max())
+    entry = {"meta": meta, "mtime": mt, "T": Tg, "smask": smask,
              "xc": xc, "yc": yc, "zc": zc,
-             "Tmin": float(Tg.min()), "Tmax": float(Tg.max())}
+             "Tmin": tmin, "Tmax": tmax}
     U = cfd_report._as_array(cfd_report.read_field(os.path.join(tdir, "U")), n)
     if U is not None and getattr(U, "ndim", 1) == 2:
         nx, ny, nz = meta["mesh"]["nx"], meta["mesh"]["ny"], meta["mesh"]["nz"]
@@ -282,13 +288,36 @@ def field_info(name):
     if not e:
         return {"error": "결과 필드 없음 — 아직 실행 전이거나 회수 실패"}
     m = e["meta"]["mesh"]
-    room = e["meta"]["config"].get("room", {})
+    cfg = e["meta"]["config"]
+    room = cfg.get("room", {})
     roles = e["meta"].get("roles", {})
-    return {"nx": m["nx"], "ny": m["ny"], "nz": m["nz"], "room": room,
-            "Tmin": round(e["Tmin"], 2), "Tmax": round(e["Tmax"], 2),
-            "Umax": round(e.get("Umax", 0.0), 3), "hasU": "Umag" in e,
-            "inlet": next((k for k, v in roles.items() if v == "inlet"), None),
-            "outlet": next((k for k, v in roles.items() if v == "outlet"), None)}
+    out = {"nx": m["nx"], "ny": m["ny"], "nz": m["nz"], "room": room,
+           "Tmin": round(e["Tmin"], 2), "Tmax": round(e["Tmax"], 2),
+           "Umax": round(e.get("Umax", 0.0), 3), "hasU": "Umag" in e,
+           "inlet": next((k for k, v in roles.items() if v == "inlet"), None),
+           "outlet": next((k for k, v in roles.items() if v == "outlet"), None)}
+    # V3a 실형상 윤곽(뷰어 오버레이용): 방 폴리곤 + 장애물 footprint/높이
+    outlines = {}
+    if cfg.get("room_polygon"):
+        outlines["room"] = cfg["room_polygon"]
+    obs = []
+    for o in (cfg.get("obstacles") or []):
+        if o.get("footprint"):
+            poly = o["footprint"]
+            xs = [p[0] for p in poly]; ys = [p[1] for p in poly]
+            bb = [min(xs), min(ys), max(xs), max(ys)]
+        else:
+            bb = o["bbox"]
+            poly = [[bb[0], bb[1]], [bb[2], bb[1]], [bb[2], bb[3]], [bb[0], bb[3]]]
+        H = room.get("H", 3.0)
+        obs.append({"kind": o.get("kind", "equipment"), "poly": poly, "bbox": bb,
+                    "h": float(o.get("h", H if o.get("kind") == "column" else 2.0)),
+                    "kw": o.get("kw")})
+    if obs:
+        outlines["obstacles"] = obs
+    if outlines:
+        out["outlines"] = outlines
+    return out
 
 
 def field_slice(name, field, axis, idx, want_vec):
@@ -307,21 +336,31 @@ def field_slice(name, field, axis, idx, want_vec):
     lim = {"z": nz, "y": ny, "x": nx}[axis]
     idx = max(0, min(int(idx), lim - 1))
     has_u = "Ux" in e
+    sm = e.get("smask")
+    mslice = None
     if axis == "z":
         data = g[idx]                       # (ny, nx) — 행=y, 열=x
         pos, hx, hy, w, h = e["zc"][idx], "x", "y", L, W
         vec = (e["Ux"][idx], e["Uy"][idx]) if has_u else None
+        if sm is not None:
+            mslice = sm[idx]
     elif axis == "y":
         data = g[:, idx, :]                 # (nz, nx) — 행=z, 열=x
         pos, hx, hy, w, h = e["yc"][idx], "x", "z", L, H
         vec = (e["Ux"][:, idx, :], e["Uz"][:, idx, :]) if has_u else None
+        if sm is not None:
+            mslice = sm[:, idx, :]
     else:
         data = g[:, :, idx]                 # (nz, ny) — 행=z, 열=y
         pos, hx, hy, w, h = e["xc"][idx], "y", "z", W, H
         vec = (e["Uy"][:, :, idx], e["Uz"][:, :, idx]) if has_u else None
+        if sm is not None:
+            mslice = sm[:, :, idx]
     out = {"axis": axis, "idx": idx, "pos": round(float(pos), 3),
            "hx": hx, "hy": hy, "w": w, "h": h,
            "data": [[round(float(v), 3) for v in row] for row in data]}
+    if mslice is not None:
+        out["mask"] = [[1 if v else 0 for v in row] for row in mslice]
     if want_vec and vec is not None:
         out["vx"] = [[round(float(v), 4) for v in row] for row in vec[0]]
         out["vy"] = [[round(float(v), 4) for v in row] for row in vec[1]]
@@ -363,6 +402,9 @@ def inspect_geometry(path, zone=None, bbox=None):
             out["openings_by_wall"] = info["openings_by_wall"]
             out["warnings"] = info["warnings"]
             out["diffusers"] = cfd_export.diffusers_from_geometry(geom, zone=zone, bbox=bbox)
+            shape = cfd_export.obstacles_from_geometry(geom, zone=zone, bbox=bbox)
+            out["room_polygon"] = shape["room_polygon"]
+            out["obstacles"] = shape["obstacles"]
         except SystemExit as e:
             out["error"] = str(e)
     return out
@@ -445,6 +487,26 @@ def create_case(p):
             cfg.pop("outlet", None)
             if cfg.get("heat", {}).get("floor_T") is not None:
                 cfg["heat"] = ({"power_kw": power_kw} if power_kw is not None else {})
+            # V3a 실형상: 방 폴리곤 + 장애물(기둥·장비, 장비별 kw)
+            if p.get("room_polygon"):
+                cfg["room_polygon"] = [[float(q[0]), float(q[1])] for q in p["room_polygon"]]
+            obs_rows = p.get("obstacles") or []
+            if obs_rows:
+                cfg["obstacles"] = []
+                for o in obs_rows:
+                    row = {"kind": o.get("kind", "equipment"),
+                           "bbox": [float(o["x0"]), float(o["y0"]),
+                                    float(o["x1"]), float(o["y1"])]}
+                    if o.get("h") not in (None, ""):
+                        row["h"] = float(o["h"])
+                    if o.get("kw") not in (None, ""):
+                        row["kw"] = float(o["kw"])
+                    cfg["obstacles"].append(row)
+                obs_kw = sum(r.get("kw") or 0 for r in cfg["obstacles"])
+                if obs_kw > 0:
+                    if power_kw is not None:
+                        return {"error": "발열은 장애물별 kw 또는 총발열 kW 중 하나만 입력하세요"}
+                    cfg["heat"] = {}
         cfd_export.build_case(cfg, out_dir)
         if info:
             meta_path = os.path.join(out_dir, "cfd_case_meta.json")
@@ -918,8 +980,20 @@ function vwDraw(){
  const cw=cv.width/nx,chh=cv.height/ny;
  const [mn,mx]=vwRange(),rg=(mx-mn)||1;
  for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){
-  ctx.fillStyle=cmap((d[j][i]-mn)/rg);
+  ctx.fillStyle=(SL.mask&&SL.mask[j][i])?'#b8bcc0':cmap((d[j][i]-mn)/rg);
   ctx.fillRect(i*cw,cv.height-(j+1)*chh,cw+0.7,chh+0.7);
+ }
+ // 실형상 윤곽(수평면에서만: 방 폴리곤 + 장애물 footprint)
+ if(SL.axis==='z'&&VW.info.outlines){
+  const sx=cv.width/SL.w, sy=cv.height/SL.h;
+  const drawPoly=(poly,col,wd)=>{
+   ctx.strokeStyle=col;ctx.lineWidth=wd;ctx.beginPath();
+   poly.forEach((p,n)=>{const X=p[0]*sx,Y=cv.height-p[1]*sy;n?ctx.lineTo(X,Y):ctx.moveTo(X,Y);});
+   ctx.closePath();ctx.stroke();
+  };
+  if(VW.info.outlines.room)drawPoly(VW.info.outlines.room,'#1a2733',2);
+  for(const o of (VW.info.outlines.obstacles||[]))
+   drawPoly(o.poly,o.kind==='column'?'#5d4037':'#8e44ad',1.6);
  }
  if(SL.vx&&document.getElementById('vwvec').checked){
   ctx.strokeStyle='rgba(255,255,255,.85)';ctx.fillStyle='rgba(255,255,255,.85)';ctx.lineWidth=1.1;
@@ -960,7 +1034,8 @@ function vwHover(ev){
  const j=Math.min(ny-1,Math.max(0,ny-1-Math.floor((ev.clientY-rect.top)/rect.height*ny)));
  const px=((i+0.5)*SL.w/nx).toFixed(2),py=((j+0.5)*SL.h/ny).toFixed(2);
  const unit=document.getElementById('vwfield').value==='T'?'℃':'m/s';
- document.getElementById('vwread').textContent=`${SL.hx}=${px} m, ${SL.hy}=${py} m  →  ${d[j][i]} ${unit}`;
+ const val=(SL.mask&&SL.mask[j][i])?'고체(벽/장애물)':`${d[j][i]} ${unit}`;
+ document.getElementById('vwread').textContent=`${SL.hx}=${px} m, ${SL.hy}=${py} m  →  ${val}`;
 }
 async function gridCase(d){
  const name=decodeURIComponent(d);
@@ -1035,7 +1110,7 @@ function sliceCanvas(sl){
  const [mn,mx]=vwRange(),rg=(mx-mn)||1;
  const cw=c.width/nx,ch=c.height/ny;
  for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){
-  ctx.fillStyle=cmap((d[j][i]-mn)/rg);
+  ctx.fillStyle=(sl.mask&&sl.mask[j][i])?'#b8bcc0':cmap((d[j][i]-mn)/rg);
   ctx.fillRect(i*cw,c.height-(j+1)*ch,cw+0.7,ch+0.7);
  }
  return c;
@@ -1109,6 +1184,24 @@ window.init3D=async function(){
  };
  if(VW.info.inlet)face(VW.info.inlet,0x2980b9);
  if(VW.info.outlet)face(VW.info.outlet,0xc0392b);
+ // V3a 실형상: 장애물 wireframe 박스 + 방 폴리곤 라인(바닥·천장)
+ const ol=VW.info.outlines||{};
+ for(const o of (ol.obstacles||[])){
+  const bb=o.bbox, bw=bb[2]-bb[0], bd=bb[3]-bb[1];
+  const eg=new THREE.LineSegments(
+   new THREE.EdgesGeometry(new THREE.BoxGeometry(bw,o.h,bd)),
+   new THREE.LineBasicMaterial({color:o.kind==='column'?0x5d4037:0x8e44ad}));
+  eg.position.set((bb[0]+bb[2])/2, o.h/2, (bb[1]+bb[3])/2);
+  R.scene.add(eg);
+ }
+ if(ol.room){
+  for(const yy of [0,H]){
+   const pts=ol.room.map(p=>new THREE.Vector3(p[0],yy,p[1]));
+   pts.push(pts[0].clone());
+   R.scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),
+    new THREE.LineBasicMaterial({color:0x1a2733})));
+  }
+ }
  R.camera.position.set(L*1.45,H*1.7,W*1.55);
  R.controls.target.set(L/2,H/2,W/2);R.controls.update();
  for(const [ax,id] of [['x','s3x'],['y','s3y'],['z','s3z']])
@@ -1215,6 +1308,18 @@ PAGE_NEW = """<!doctype html><html lang="ko"><head><meta charset="utf-8">
     <button class="btn sec" id="btnDiff" style="display:none" onclick="opFromDrawing()">📐 도면 디퓨저 불러오기 <span id="ndiff"></span></button>
     <span class="hint" style="display:inline-block;padding:4px 10px">좌표축: ceiling/floor=(x,y) · x0/xL=(y,z) · y0/yW=(x,z) · 4way=천장 4방향 취출</span>
    </div>
+   <div class="row" style="margin-top:12px;font-weight:600;font-size:13.5px">실형상(V3) — 방 폴리곤·장애물
+    <label id="polylb" style="display:none;font-weight:400;margin-left:10px">
+     <input type="checkbox" id="usepoly" checked onchange="preview()"> 방 실형상(zone 폴리곤) 사용</label>
+   </div>
+   <table class="optbl" id="obtbl"><thead><tr>
+    <th>종류</th><th>x0(m)</th><th>y0</th><th>x1</th><th>y1</th><th>h(m)</th><th>발열 kW</th><th></th>
+   </tr></thead><tbody></tbody></table>
+   <div class="row">
+    <button class="btn sec" onclick="obAdd()">＋ 장애물</button>
+    <button class="btn sec" id="btnObs" style="display:none" onclick="obFromDrawing()">📐 도면 기둥·장비 불러오기 <span id="nobs"></span></button>
+    <span class="hint" style="display:inline-block;padding:4px 10px">장애물=고체 셀(기류 차단), 장비에 kW 주면 그 위치에서 발열(국소 핫스팟)</span>
+   </div>
    <div id="opwarn" class="warn"></div>
   </div>
   <div class="row">급기 온도 <input id="st" type="number" step="1" value="20"> °C
@@ -1231,7 +1336,7 @@ PAGE_NEW = """<!doctype html><html lang="ko"><head><meta charset="utf-8">
  </div>
 </div>
 <script>
-let GDIMS=null, OHINT={}, GDIFF=[];
+let GDIMS=null, OHINT={}, GDIFF=[], GPOLY=null, GOBS=[];
 const WALLS=['x0','xL','y0','yW'];
 function v(id){return document.getElementById(id).value}
 function el(id){return document.getElementById(id)}
@@ -1271,14 +1376,45 @@ async function selCh(){
  const j=await r.json();
  if(j.error){el('ohint').style.display='';el('ohint').textContent='⚠ '+j.error;GDIMS=null;preview();return}
  GDIMS=j.room||null; OHINT=j.openings_by_wall||{}; GDIFF=j.diffusers||[];
+ GPOLY=j.room_polygon||null; GOBS=j.obstacles||[];
  let t='';
  if(Object.keys(OHINT).length)t+='💡 경계 개구부(급/배기 후보): '+Object.entries(OHINT).map(([w,n])=>`${w}벽 ${n}개`).join(' · ');
  if(GDIFF.length)t+=(t?'<br>':'')+`📐 도면 장비블록(디퓨저 후보) ${GDIFF.length}개 감지 — 급배기구 지정 모드에서 [도면 디퓨저 불러오기]`;
+ if(GPOLY)t+=(t?'<br>':'')+`⬠ zone 실형상 폴리곤 ${GPOLY.length}점 — 급배기구 모드에서 "방 실형상 사용" 가능`;
+ if(GOBS.length)t+=(t?'<br>':'')+`▣ 기둥·장비 ${GOBS.length}개 — [도면 기둥·장비 불러오기]로 장애물 배치`;
  if(j.warnings&&j.warnings.length)t+=(t?'<br>':'')+j.warnings.map(w=>'⚠ '+w).join('<br>');
  el('ohint').style.display=t?'':'none'; el('ohint').innerHTML=t;
  el('btnDiff').style.display=GDIFF.length?'':'none';
  el('ndiff').textContent=GDIFF.length?`(${GDIFF.length})`:'';
+ el('btnObs').style.display=GOBS.length?'':'none';
+ el('nobs').textContent=GOBS.length?`(${GOBS.length})`:'';
+ el('polylb').style.display=GPOLY?'':'none';
  wallOpts(); preview();
+}
+// ── 장애물 편집기 (V3a 실형상) ──
+let OBROWS=[];
+function obAdd(){OBROWS.push({kind:'equipment',x0:'',y0:'',x1:'',y1:'',h:2.0,kw:''});obRender();}
+function obDel(i){OBROWS.splice(i,1);obRender();}
+function obSet(i,k,val){OBROWS[i][k]=val;preview();}
+function obRender(){
+ const tb=document.querySelector('#obtbl tbody');
+ tb.innerHTML=OBROWS.map((r,i)=>{
+  const num=(k,w)=>`<input type="number" step="0.1" style="width:${w||56}px" value="${r[k]}" oninput="obSet(${i},'${k}',this.value)">`;
+  const sel=`<select onchange="obSet(${i},'kind',this.value)"><option ${r.kind==='column'?'selected':''}>column</option><option ${r.kind==='equipment'?'selected':''}>equipment</option></select>`;
+  return `<tr><td>${sel}</td><td>${num('x0')}</td><td>${num('y0')}</td><td>${num('x1')}</td><td>${num('y1')}</td>`+
+   `<td>${num('h',48)}</td><td>${r.kind==='equipment'?num('kw',56):'—'}</td>`+
+   `<td><a class="rep" style="color:#c0392b" href="#" onclick="obDel(${i});return false">✕</a></td></tr>`;
+ }).join('');
+ preview();
+}
+function obFromDrawing(){
+ if(!GOBS.length){alert('도면에서 감지된 기둥·장비가 없습니다 — STEP 1에서 도면·zone/bbox 먼저');return}
+ for(const o of GOBS){
+  OBROWS.push({kind:o.kind,x0:o.bbox[0],y0:o.bbox[1],x1:o.bbox[2],y1:o.bbox[3],
+   h:o.h||(o.kind==='column'?'':2.0),kw:''});
+ }
+ obRender();
+ alert(GOBS.length+'개 장애물을 불러왔습니다. 발열 장비에는 kW(계산서)를 입력하세요.');
 }
 function opFromDrawing(){
  if(!GDIFF.length){alert('불러올 도면 장비블록이 없습니다 — STEP 1에서 도면·zone/bbox 먼저');return}
@@ -1347,14 +1483,20 @@ function preview(){
  let Q=0, head='';
  if(vmode()==='open'){
   el('suwarn').textContent='';
-  const warn=opValid();
+  let warn=opValid();
+  const obkw=OBROWS.reduce((s,r)=>s+(+r.kw||0),0);
+  if(obkw>0&&kw)warn=warn||'발열은 장애물 kW 또는 총발열 kW 중 하나만';
   el('opwarn').textContent=warn?('⚠ '+warn):'';
   const cmh=OPROWS.filter(r=>r.role==='supply').reduce((s,r)=>s+(+r.cmh||0),0);
   Q=cmh/3600;
   const ns=OPROWS.filter(r=>r.role==='supply').length, ne=OPROWS.filter(r=>r.role==='exhaust').length;
   head=`급기구 ${ns}개 Σ<b>${cmh.toLocaleString()} CMH</b> · 배기구 ${ne}개 · ACH ${(cmh/vol).toFixed(1)}`;
+  if(OBROWS.length||GPOLY&&el('usepoly').checked){
+   head+=`<br>실형상: ${GPOLY&&el('usepoly').checked?'방 폴리곤 ✓':''} 장애물 ${OBROWS.length}개`
+     +(obkw>0?` (발열 Σ${obkw} kW — 장비 위치별)`:'');
+  }
   const nx=Math.round(d.L/ +v('cell')),ny=Math.round(d.W/ +v('cell')),nz=Math.round(d.H/ +v('cell'));
-  head+=`<br>격자 ${nx}×${ny}×${nz} = ${(nx*ny*nz).toLocaleString()} 셀 <span style="color:#666;font-size:12px">(급배기구 케이스는 반복 2000~4000 권장 — 현실 풍량은 열 수렴이 느림)</span>`;
+  head+=`<br>격자 ${nx}×${ny}×${nz} = ${(nx*ny*nz).toLocaleString()} 셀 <span style="color:#666;font-size:12px">(급배기구 케이스는 반복 4000~8000 권장 — 현실 풍량은 열 수렴이 느림)</span>`;
  } else {
   const u=+v('su');
   el('suwarn').textContent=(u&&u<0.1)?'⚠ 약유동: 에너지폐합이 안 닫혀 미수렴 위험 — 0.3 이상 권장':'';
@@ -1365,9 +1507,10 @@ function preview(){
   head=`풍량 = ${u} m/s × ${A.toFixed(1)} m² = <b>${cmh.toLocaleString(undefined,{maximumFractionDigits:0})} CMH</b> · ACH ${(cmh/vol).toFixed(1)}`;
  }
  let t=`방 ${d.L}×${d.W}×${d.H} m — 체적 ${vol.toFixed(0)} m³<br>`+head;
- if(kw&&Q>0)t+=`<br>예상 배기 ΔT = Q/(ρc·V̇) = ${kw}kW/(1206×${Q.toFixed(3)}) = <b>${(kw*1000/(1206*Q)).toFixed(2)} K</b>
+ const kweff=kw||(vmode()==='open'?OBROWS.reduce((s,r)=>s+(+r.kw||0),0):0);
+ if(kweff&&Q>0)t+=`<br>예상 배기 ΔT = Q/(ρc·V̇) = ${kweff}kW/(1206×${Q.toFixed(3)}) = <b>${(kweff*1000/(1206*Q)).toFixed(2)} K</b>
   <span style="color:#666;font-size:12px">— 실행 후 CFD 배기 ΔT·에너지폐합이 이 손계산과 맞아야 정상</span>`;
- else if(!kw)t+=`<br><span class="warn">발열 kW 미입력 — 계산서 대조(에너지폐합 검증)가 불가합니다.</span>`;
+ else if(!kweff)t+=`<br><span class="warn">발열 미입력(총 kW 또는 장비 kw) — 계산서 대조(에너지폐합 검증)가 불가합니다.</span>`;
  pv.innerHTML=t;
 }
 async function create(runNow){
@@ -1380,6 +1523,9 @@ async function create(runNow){
   const warn=opValid();
   if(warn){el('msg').textContent=warn;return}
   p.openings=OPROWS;
+  const obs=OBROWS.filter(r=>r.x0!==''&&r.y0!==''&&r.x1!==''&&r.y1!=='');
+  if(obs.length)p.obstacles=obs;
+  if(GPOLY&&el('usepoly').checked&&mode()==='geometry')p.room_polygon=GPOLY;
  }
  if(!p.name){el('msg').textContent='케이스명을 입력하세요';return}
  const r=await fetch('/api/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});

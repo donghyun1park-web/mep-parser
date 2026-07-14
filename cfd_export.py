@@ -236,20 +236,184 @@ def _face_box(p, room):
 
 
 def gen_toposet_all(cfg, patches):
-    """topoSetDict 통합: openings faceSet 들 + (발열 volume 모드면) heatZone cellZone."""
+    """topoSetDict(1차): openings faceSet 만.
+    ★cellZone 은 여기 넣지 않는다 — createPatch 가 메시를 재작성하며 기존 cellZone 을
+    절단하는 것을 실측 확인(250→100셀). zone 은 gen_toposet_zones(2차, createPatch 후)."""
     room = cfg["room"]
     s = _hdr("dictionary", "topoSetDict") + "actions\n(\n"
     for p in patches:
         b = _face_box(p, room)
         s += (f"    {{ name {p['name']}f; type faceSet; action new; source boxToFace;\n"
               f"      box ({b[0]:.4f} {b[1]:.4f} {b[2]:.4f}) ({b[3]:.4f} {b[4]:.4f} {b[5]:.4f}); }}\n")
+    s += ");\n"
+    return s
+
+
+# ── V3a: 실형상(방 폴리곤 + 장애물) — 고체 셀 라벨 분류 ─────────────────────
+# 검증(G-V0): 셀 라벨 = i + nx·j + nx·ny·k (blockMesh 단일 hex, 파이썬 분류가
+# boxToCell 과 250/250 일치). 고체화 = explicitPorositySource(중첩 DarcyForchheimerCoeffs,
+# d=1e9, implicit 저항) → 장애물 내부 |U| ~1e-4. vectorFixedValueConstraint 는 압력보정
+# 재구성 누설(~0.12 m/s)로 부적합 판정.
+
+SOLID_DARCY = 1.0e9
+
+
+def solid_labels(cfg, meshinfo):
+    """cfg 의 room_polygon/obstacles → 셀 라벨 분류.
+    반환 {"solid": [...], "equip": [(장애물 인덱스, kw, [라벨...]), ...]} (전부 정렬, 결정론).
+    solid = 방 밖 ∪ 모든 장애물. equip = kw 지정 장애물별 라벨(발열 zone)."""
+    from shapely.geometry import Point, Polygon, box as sbox
+    room = cfg["room"]
+    L, W, H = room["L"], room["W"], room["H"]
+    nx, ny, nz = meshinfo["nx"], meshinfo["ny"], meshinfo["nz"]
+    hu, hv, hz = L / nx, W / ny, H / nz
+
+    poly = None
+    if cfg.get("room_polygon"):
+        poly = Polygon(cfg["room_polygon"])
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+    obs = []
+    for oi, o in enumerate(cfg.get("obstacles", []) or []):
+        if o.get("footprint"):
+            g = Polygon(o["footprint"])
+        elif o.get("bbox"):
+            b = o["bbox"]
+            g = sbox(b[0], b[1], b[2], b[3])
+        else:
+            raise SystemExit(f"obstacles[{oi}]: footprint 또는 bbox 필요")
+        if not g.is_valid:
+            g = g.buffer(0)
+        h = float(o.get("h", H if o.get("kind") == "column" else 2.0))
+        obs.append((oi, g, min(h, H), float(o.get("kw") or 0.0)))
+
+    # 2D 선분류(z 무관) 캐시 → 3D 전개
+    inside_room = [[True] * nx for _ in range(ny)]
+    if poly is not None:
+        for j in range(ny):
+            y = (j + 0.5) * hv
+            for i in range(nx):
+                inside_room[j][i] = poly.contains(Point((i + 0.5) * hu, y))
+    obs2d = []   # (oi, kw, kmax, [(i,j)...])
+    for oi, g, h, kw in obs:
+        cells = []
+        for j in range(ny):
+            y = (j + 0.5) * hv
+            for i in range(nx):
+                if g.contains(Point((i + 0.5) * hu, y)):
+                    cells.append((i, j))
+        kmax = max(1, min(nz, int(round(h / hz))))
+        obs2d.append((oi, kw, kmax, cells))
+
+    solid = set()
+    equip = []
+    plane = nx * ny
+    if poly is not None:
+        out2d = [(i, j) for j in range(ny) for i in range(nx) if not inside_room[j][i]]
+        for k in range(nz):
+            base = plane * k
+            for (i, j) in out2d:
+                solid.add(base + i + nx * j)
+    for oi, kw, kmax, cells in obs2d:
+        labels = []
+        for k in range(kmax):
+            base = plane * k
+            for (i, j) in cells:
+                labels.append(base + i + nx * j)
+        solid.update(labels)
+        if kw > 0:
+            equip.append((oi, kw, sorted(labels)))
+    return {"solid": sorted(solid), "equip": equip}
+
+
+def gen_toposet_zones(cfg, labels):
+    """topoSetDict.zones(2차, createPatch 후 실행): heatZone(기존 바닥층) 또는
+    solidZone + 장비별 eqZone_i. labelToCell(파이썬 결정론 라벨)."""
+    s = _hdr("dictionary", "topoSetDict.zones").replace("topoSetDict.zones", "topoSetDict") \
+        + "actions\n(\n"
+    if labels and labels["solid"]:
+        vals = " ".join(map(str, labels["solid"]))
+        s += (f"    {{ name solidCells; type cellSet;     action new; source labelToCell; value ({vals}); }}\n"
+              "    { name solidZone;  type cellZoneSet; action new; source setToCellZone; set solidCells; }\n")
+        for oi, kw, labs in labels["equip"]:
+            vals = " ".join(map(str, labs))
+            s += (f"    {{ name eqCells{oi}; type cellSet;     action new; source labelToCell; value ({vals}); }}\n"
+                  f"    {{ name eqZone{oi};  type cellZoneSet; action new; source setToCellZone; set eqCells{oi}; }}\n")
     if _heat_mode(cfg)["mode"] == "volume":
+        room = cfg["room"]
         L, W, H = room["L"], room["W"], room["H"]
         zh = round(_heat_mode(cfg)["zone_frac"] * H, 4)
         s += (f"    {{ name heatZone; type cellSet;     action new; source boxToCell; box (0 0 0) ({L} {W} {zh}); }}\n"
               "    { name heatZone; type cellZoneSet; action new; source setToCellZone; set heatZone; }\n")
     s += ");\n"
     return s
+
+
+def gen_fvoptions_v3(cfg, labels):
+    """fvOptions: 고체 다공 + 장비별 발열(또는 기존 바닥층 발열)."""
+    s = _hdr("dictionary", "fvOptions")
+    if labels and labels["solid"]:
+        s += ("solidBlock\n{\n"
+              "    type            explicitPorositySource;\n"
+              "    active          yes;\n"
+              "    explicitPorositySourceCoeffs\n    {\n"
+              "        selectionMode   cellZone;\n"
+              "        cellZone        solidZone;\n"
+              "        type            DarcyForchheimer;\n"
+              "        DarcyForchheimerCoeffs\n        {\n"
+              f"            d   ({SOLID_DARCY:g} {SOLID_DARCY:g} {SOLID_DARCY:g});\n"
+              "            f   (0 0 0);\n"
+              "            coordinateSystem\n            {\n"
+              "                origin (0 0 0);\n"
+              "                rotation { type axesRotation; e1 (1 0 0); e2 (0 1 0); }\n"
+              "            }\n        }\n    }\n}\n")
+        for oi, kw, _labs in labels["equip"]:
+            su = kw * 1000.0 / RHO_CP
+            s += (f"heat_eq{oi}\n{{\n"
+                  "    type            scalarSemiImplicitSource;\n"
+                  "    volumeMode      absolute;\n"
+                  "    selectionMode   cellZone;\n"
+                  f"    cellZone        eqZone{oi};\n"
+                  f"    injectionRateSuSp {{ T ({su:.6g} 0); }}\n"
+                  "}\n")
+    if _heat_mode(cfg)["mode"] == "volume":
+        su = _heat_mode(cfg)["power_w"] / RHO_CP
+        s += ("heatSource\n{\n"
+              "    type            scalarSemiImplicitSource;\n"
+              "    volumeMode      absolute;\n"
+              "    selectionMode   cellZone;\n"
+              "    cellZone        heatZone;\n"
+              f"    injectionRateSuSp {{ T ({su:.6g} 0); }}\n"
+              "}\n")
+    return s
+
+
+def validate_openings_fluid(cfg, patches, labels, meshinfo):
+    """급배기 패치 중앙의 안쪽 첫 셀이 고체면 SystemExit(개구부 막힘 방지).
+    (방 폴리곤이 그 벽에서 물러나 있거나 장애물이 개구부를 덮는 경우 조기 검출)"""
+    if not labels or not labels["solid"]:
+        return
+    solid = set(labels["solid"])
+    room = cfg["room"]
+    L, W, H = room["L"], room["W"], room["H"]
+    nx, ny, nz = meshinfo["nx"], meshinfo["ny"], meshinfo["nz"]
+    hu = {"x": L / nx, "y": W / ny, "z": H / nz}
+    ncell = {"x": nx, "y": ny, "z": nz}
+    edge_idx = {"x0": ("x", 0), "xL": ("x", nx - 1), "y0": ("y", 0), "yW": ("y", ny - 1),
+                "floor": ("z", 0), "ceiling": ("z", nz - 1)}
+    for p in patches:
+        a0, b0, a1, b1 = p["rect_snap"]
+        cu, cv = (a0 + a1) / 2, (b0 + b1) / 2
+        nax, nidx = edge_idx[p["wall"]]
+        idx = {"x": 0, "y": 0, "z": 0}
+        idx[nax] = nidx
+        idx[p["uax"]] = min(ncell[p["uax"]] - 1, max(0, int(cu / hu[p["uax"]])))
+        idx[p["vax"]] = min(ncell[p["vax"]] - 1, max(0, int(cv / hu[p["vax"]])))
+        label = idx["x"] + nx * idx["y"] + nx * ny * idx["z"]
+        if label in solid:
+            raise SystemExit(
+                f"급배기구 '{p['name']}'({p['wall']}) 안쪽 셀이 고체(방 밖/장애물)입니다 — "
+                "방 폴리곤이 그 벽에 닿는지, 장애물이 개구부를 막지 않는지 확인하세요.")
 
 
 def gen_createpatch(patches):
@@ -349,12 +513,16 @@ def gen_fvoptions(cfg):
             "}\n")
 
 
-def gen_allrun(need_toposet, need_createpatch=False):
-    """Allrun 생성. 발열 kW/openings 면 topoSet, openings 면 createPatch 단계 추가."""
+def gen_allrun(need_toposet, need_createpatch=False, need_zones=False):
+    """Allrun 생성. openings 면 topoSet(faceSet)→createPatch, zone 은 그 뒤 별도
+    topoSet(-dict topoSetDict.zones) — createPatch 가 cellZone 을 절단하므로(실측)."""
     toposet = ('echo "=== topoSet ==="\ntopoSet > log.topoSet 2>&1 || '
                '{ echo "topoSet FAILED"; tail -20 log.topoSet; exit 1; }\n') if need_toposet else ""
     createpatch = ('echo "=== createPatch ==="\ncreatePatch -overwrite > log.createPatch 2>&1 || '
                    '{ echo "createPatch FAILED"; tail -20 log.createPatch; exit 1; }\n') if need_createpatch else ""
+    zones = ('echo "=== topoSet(zones) ==="\ntopoSet -dict system/topoSetDict.zones '
+             '> log.topoSetZones 2>&1 || '
+             '{ echo "topoSet zones FAILED"; tail -20 log.topoSetZones; exit 1; }\n') if need_zones else ""
     return ("#!/bin/sh\n"
             "# RunFunctions 비의존(apt OpenFOAM 패키지엔 없음): 직접 호출 + 로그 리다이렉트.\n"
             'cd "${0%/*}" || exit\n'
@@ -362,7 +530,7 @@ def gen_allrun(need_toposet, need_createpatch=False):
             ': "${APP:=buoyantBoussinesqSimpleFoam}"\n'
             'echo "=== blockMesh ==="\n'
             'blockMesh > log.blockMesh 2>&1 || { echo "blockMesh FAILED"; tail -20 log.blockMesh; exit 1; }\n'
-            + toposet + createpatch
+            + toposet + createpatch + zones
             + 'echo "=== checkMesh ==="\n'
             "checkMesh > log.checkMesh 2>&1; grep -E 'Mesh OK|\\*\\*\\*' log.checkMesh | head -3\n"
             'echo "=== solver ($APP) ==="\n'
@@ -494,6 +662,17 @@ def build_case(cfg, out_dir):
         cd = re.sub(r"endTime\s+[\d.]+", f"endTime         {cfg['endTime']}", cd)
         with open(cd_path, "w", encoding="utf-8") as f:
             f.write(cd)
+    # openings/실형상 케이스: residualControl 제거 — 잔차 자가종료가 에너지 폐합 전에
+    # 멈추는 것을 실측(G-V1: 770 iter 자가종료, 폐합 50%). 수렴 판정은 폐합 배지가 담당.
+    if cfg.get("openings"):
+        import re
+        fs_path = os.path.join(out_dir, "system", "fvSolution")
+        with open(fs_path, encoding="utf-8") as f:
+            fs = f.read()
+        fs2 = re.sub(r"residualControl\s*\{[^{}]*\}\s*", "", fs)
+        if fs2 != fs:
+            with open(fs_path, "w", encoding="utf-8") as f:
+                f.write(fs2)
     # 파라메트릭 생성
     has_openings = bool(cfg.get("openings"))
     if has_openings:
@@ -506,30 +685,56 @@ def build_case(cfg, out_dir):
     _w(os.path.join(out_dir, "constant", "g"), gen_g(cfg))
     hm = _heat_mode(cfg)
     patches = []
+    labels = None
+    # V3a 실형상: room_polygon(방 실폴리곤) / obstacles(기둥·장비 고체+개별발열)
+    v3 = bool(cfg.get("room_polygon") or cfg.get("obstacles"))
+    eq_kw = sum(float(o.get("kw") or 0) for o in (cfg.get("obstacles") or []))
+    if v3:
+        if not has_openings:
+            raise SystemExit("실형상(room_polygon/obstacles)은 급배기구(openings) 모드에서 사용하세요"
+                             " — 벽 전체 급기와 방 폴리곤은 양립 불가")
+        if eq_kw > 0 and hm["mode"] != "none":
+            raise SystemExit("발열은 obstacles[].kw 또는 heat.power_kw 중 하나만 지정")
+        labels = solid_labels(cfg, meshinfo)
     if has_openings:
         patches = resolve_openings(cfg, meshinfo)
+        if labels:
+            validate_openings_fluid(cfg, patches, labels, meshinfo)
         for name, txt in gen_0_openings(cfg, patches).items():
             _w(os.path.join(out_dir, "0", name), txt)
         _w(os.path.join(out_dir, "system", "topoSetDict"), gen_toposet_all(cfg, patches))
         _w(os.path.join(out_dir, "system", "createPatchDict"), gen_createpatch(patches))
-        if hm["mode"] == "volume":
-            _w(os.path.join(out_dir, "constant", "fvOptions"), gen_fvoptions(cfg))
+        need_zones = (hm["mode"] == "volume") or bool(labels and labels["solid"])
+        if need_zones:
+            # ★zone 은 createPatch 후 별도 topoSet 로 생성(절단 함정 실측 — G-V0)
+            _w(os.path.join(out_dir, "system", "topoSetDict.zones"),
+               gen_toposet_zones(cfg, labels))
+            _w(os.path.join(out_dir, "constant", "fvOptions"),
+               gen_fvoptions_v3(cfg, labels))
+        _w(os.path.join(out_dir, "Allrun"),
+           gen_allrun(need_toposet=True, need_createpatch=True, need_zones=need_zones))
     else:
         for name, txt in gen_0(cfg, roles).items():
             _w(os.path.join(out_dir, "0", name), txt)
-        # 발열 kW 모드: 바닥층 cellZone + 체적 발열원
+        # 발열 kW 모드: 바닥층 cellZone + 체적 발열원 (v1 경로 — 파일 구성 불변)
         if hm["mode"] == "volume":
             _w(os.path.join(out_dir, "system", "topoSetDict"), gen_toposet(cfg))
             _w(os.path.join(out_dir, "constant", "fvOptions"), gen_fvoptions(cfg))
-    _w(os.path.join(out_dir, "Allrun"),
-       gen_allrun(need_toposet=(hm["mode"] == "volume" or has_openings),
-                  need_createpatch=has_openings))
+        _w(os.path.join(out_dir, "Allrun"),
+           gen_allrun(need_toposet=(hm["mode"] == "volume"), need_createpatch=False))
     os.chmod(os.path.join(out_dir, "Allrun"), 0o755)
     # 생성 요약(리포트에서 가정값 표기용)
-    meta = {"config": cfg, "mesh": meshinfo, "roles": roles, "heat": hm}
+    heat_meta = dict(hm)
+    if eq_kw > 0:
+        heat_meta = {"mode": "volume", "power_w": eq_kw * 1000.0, "via": "obstacles"}
+    meta = {"config": cfg, "mesh": meshinfo, "roles": roles, "heat": heat_meta}
     if patches:
         meta["patches"] = [{k: v for k, v in p.items() if k not in ("uax", "vax")}
                            for p in patches]
+    if labels:
+        meta["solid_n"] = len(labels["solid"])
+        meta["equip_zones"] = [{"i": oi, "kw": kw, "cells": len(labs)}
+                               for oi, kw, labs in labels["equip"]]
     _w(os.path.join(out_dir, "cfd_case_meta.json"),
        json.dumps(meta, ensure_ascii=False, indent=2))
     return meshinfo, roles
@@ -590,6 +795,61 @@ def diffusers_from_geometry(geom, zone=None, bbox=None):
                     "h": max(0.1, round((e[3] - e[1]) / 1000.0, 3)),
                     "name": eq.get("layer") or "equipment"})
     return out
+
+
+def obstacles_from_geometry(geom, zone=None, bbox=None):
+    """도면 columns/equipment → V3a 장애물 후보(방 로컬 m).
+    반환 {"room_polygon": [[x,y]..]|None, "obstacles": [{kind,bbox,h?,name}...]}.
+    kw 는 도면에 없음 — 사용자가 지정(정직)."""
+    el = geom.get("elements", {})
+    src_poly = None
+    if zone is not None:
+        zones = el.get("zone", [])
+        if zone >= len(zones):
+            raise SystemExit(f"zone {zone} 없음")
+        src_poly = zones[zone].get("points")
+        ext = _xy_extent([zones[zone]])
+    elif bbox is not None:
+        ext = tuple(bbox)
+    else:
+        ext = _xy_extent(el.get("wall", []))
+    if not ext:
+        return {"room_polygon": None, "obstacles": []}
+    x0, y0, x1, y1 = ext
+
+    def to_local(px, py):
+        return [round((px - x0) / 1000.0, 3), round((py - y0) / 1000.0, 3)]
+
+    room_poly = None
+    if src_poly and len(src_poly) >= 3:
+        room_poly = [to_local(p[0], p[1]) for p in src_poly]
+
+    obstacles = []
+    for col in el.get("column", []):
+        if col.get("kind") == "circle" and col.get("center"):
+            c, r = col["center"], float(col.get("radius") or 200.0)
+            e = (c[0] - r, c[1] - r, c[0] + r, c[1] + r)
+        else:
+            e = _xy_extent([col])
+        if not e:
+            continue
+        cx, cy = (e[0] + e[2]) / 2, (e[1] + e[3]) / 2
+        if not (x0 <= cx <= x1 and y0 <= cy <= y1):
+            continue
+        lo, hi = to_local(e[0], e[1]), to_local(e[2], e[3])
+        obstacles.append({"kind": "column", "bbox": [lo[0], lo[1], hi[0], hi[1]],
+                          "name": col.get("layer") or "column"})
+    for eq in el.get("equipment", []):
+        e = _xy_extent([eq])
+        if not e:
+            continue
+        cx, cy = (e[0] + e[2]) / 2, (e[1] + e[3]) / 2
+        if not (x0 <= cx <= x1 and y0 <= cy <= y1):
+            continue
+        lo, hi = to_local(e[0], e[1]), to_local(e[2], e[3])
+        obstacles.append({"kind": "equipment", "bbox": [lo[0], lo[1], hi[0], hi[1]],
+                          "h": 2.0, "name": eq.get("layer") or "equipment"})
+    return {"room_polygon": room_poly, "obstacles": obstacles}
 
 
 def _opening_wall(cx, cy, ext, tol):
