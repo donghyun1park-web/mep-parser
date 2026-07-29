@@ -81,6 +81,12 @@ def parse_dxf(dxf_path: str, json_out_path: str = "", use_ai: bool = False,
     """
     if not os.path.exists(dxf_path):
         return f"Error: DXF file not found at {dxf_path}"
+    if dxf_path.lower().endswith(".dwg"):
+        try:
+            from dwg_converter import ensure_dxf as _ensure_dxf
+            dxf_path = _ensure_dxf(dxf_path, log=lambda *_: None)
+        except RuntimeError as _de:
+            return f"Error: {_de}"
     if not json_out_path:
         json_out_path = os.path.splitext(dxf_path)[0] + ".geometry.json"
 

@@ -2232,6 +2232,14 @@ def main():
     if not args.dxf:
         ap.error("DXF 파일을 지정하세요 (또는 --checklist 사용)")
 
+    # DWG 자동 변환 (ODA File Converter 필요 — dwg_converter 안내 포함)
+    if args.dxf.lower().endswith(".dwg"):
+        from dwg_converter import ensure_dxf as _ensure_dxf
+        try:
+            args.dxf = _ensure_dxf(args.dxf)
+        except RuntimeError as _de:
+            ap.error(str(_de))
+
     if args.scan:
         scan(args.dxf)
         return

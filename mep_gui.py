@@ -367,9 +367,26 @@ class App:
         self.txt.see("end")
 
     def _pick_dxf(self):
-        p = filedialog.askopenfilename(filetypes=[("DXF", "*.dxf"), ("All", "*.*")])
+        p = filedialog.askopenfilename(
+            filetypes=[("도면 (DXF/DWG)", "*.dxf *.dwg"),
+                       ("DXF", "*.dxf"), ("DWG", "*.dwg"), ("All", "*.*")])
         if p:
             self.v_dxf.set(p)
+
+    def _ensure_dxf(self):
+        """선택 파일 검증 + DWG 면 ODA 로 자동 변환(dwg_converter). 실패 시 None."""
+        path = self.v_dxf.get().strip()
+        if not path or not os.path.exists(path):
+            messagebox.showwarning("Check", "도면(DXF/DWG)을 먼저 선택하세요.")
+            return None
+        if path.lower().endswith(".dwg"):
+            try:
+                from dwg_converter import ensure_dxf
+                path = ensure_dxf(path, log=self._log)
+            except RuntimeError as e:
+                messagebox.showerror("DWG 변환", str(e))
+                return None
+        return path
 
     def _pick_csv(self, var):
         p = filedialog.askopenfilename(filetypes=[("CSV", "*.csv"), ("All", "*.*")])
@@ -407,9 +424,8 @@ class App:
         txt.configure(state="disabled")
 
     def _do_scan(self):
-        dxf = self.v_dxf.get().strip()
-        if not dxf or not os.path.exists(dxf):
-            messagebox.showwarning("Check", "Please select a DXF drawing first.")
+        dxf = self._ensure_dxf()
+        if not dxf:
             return
         self._log("Scanning...")
         self._set_buttons("disabled")
@@ -428,9 +444,8 @@ class App:
         threading.Thread(target=run, daemon=True).start()
 
     def _do_parse(self):
-        dxf = self.v_dxf.get().strip()
-        if not dxf or not os.path.exists(dxf):
-            messagebox.showwarning("Check", "Please select a DXF drawing first.")
+        dxf = self._ensure_dxf()
+        if not dxf:
             return
         rules, brules = self._rules()
         use_ai = bool(self.v_llm.get())
