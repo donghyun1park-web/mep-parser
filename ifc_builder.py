@@ -58,7 +58,8 @@ def _placement_matrix(p1, p2, z=0.0):
     return M
 
 
-def _setup(model, storey_name):
+def _setup_project(model):
+    """프로젝트 골격(단위/컨텍스트/Site/Building)만 생성 — 층은 _add_storey 로."""
     proj = ifcopenshell.api.root.create_entity(model, ifc_class="IfcProject", name="MEP")
     # 길이단위 = METRE 명시 (prefix 없음). 기본값은 MILLIMETRE 라 단위규약 불일치 발생.
     lu = ifcopenshell.api.unit.add_si_unit(model, unit_type="LENGTHUNIT")
@@ -69,27 +70,31 @@ def _setup(model, storey_name):
         target_view="MODEL_VIEW", parent=ctx)
     site = ifcopenshell.api.root.create_entity(model, ifc_class="IfcSite", name="Site")
     bld = ifcopenshell.api.root.create_entity(model, ifc_class="IfcBuilding", name="Building")
-    sto = ifcopenshell.api.root.create_entity(
-        model, ifc_class="IfcBuildingStorey", name=storey_name)
     ifcopenshell.api.aggregate.assign_object(model, relating_object=proj, products=[site])
     ifcopenshell.api.aggregate.assign_object(model, relating_object=site, products=[bld])
+    return body, bld
+
+
+def _add_storey(model, bld, name, z_mm=0.0):
+    sto = ifcopenshell.api.root.create_entity(
+        model, ifc_class="IfcBuildingStorey", name=name)
+    try:
+        sto.Elevation = z_mm / MM   # Revit/ArchiCAD 층 레벨 표시용
+    except Exception:
+        pass
     ifcopenshell.api.aggregate.assign_object(model, relating_object=bld, products=[sto])
-    return body, sto
+    return sto
 
 
-def build(geom_path, ifc_path, storey="Level", z_base=0.0):
-    with open(geom_path, encoding="utf-8") as f:
-        data = json.load(f)
+def _build_elements(model, body, sb, sto, data, z_offset=0.0):
+    """한 층의 geometry dict → IFC 요소 생성. z_offset(mm)=층 바닥 레벨.
+    요소별 z = z_offset + 레코드 z_base (레코드 값은 층 '내' 오프셋)."""
     params = data.get("params", {})
     el = data.get("elements", {})
     pw = float(params.get("wall", {}).get("width", 200.0))
     ph = float(params.get("wall", {}).get("height", 2800.0))
     pcol_h = float(params.get("column", {}).get("height", 3000.0))
     pslab_t = float(params.get("slab", {}).get("thickness", 200.0))
-
-    model = ifcopenshell.api.project.create_file()  # IFC4
-    body, sto = _setup(model, storey)
-    sb = ifcopenshell.util.shape_builder.ShapeBuilder(model)
     stats = {"wall": 0, "column": 0, "slab": 0, "skip": 0}
 
     def container(prod):
@@ -104,7 +109,7 @@ def build(geom_path, ifc_path, storey="Level", z_base=0.0):
             continue
         width = float(w.get("width_detected") or w.get("overrides", {}).get("width", pw))
         height = float(w.get("overrides", {}).get("height", ph))
-        zb = float(w.get("z_base", z_base))
+        zb = z_offset + float(w.get("z_base", 0.0))
         # 다중점 centerline → 세그먼트별 벽
         for k in range(len(cl) - 1):
             p1, p2 = cl[k], cl[k + 1]
@@ -125,7 +130,7 @@ def build(geom_path, ifc_path, storey="Level", z_base=0.0):
 
     # ── 기둥 ─────────────────────────────────────────────────────────
     for i, c in enumerate(el.get("column", [])):
-        zb = float(c.get("z_base", z_base))
+        zb = z_offset + float(c.get("z_base", 0.0))
         h = float(c.get("overrides", {}).get("height", pcol_h))
         coords = None
         if c.get("kind") == "circle":
@@ -150,16 +155,54 @@ def build(geom_path, ifc_path, storey="Level", z_base=0.0):
         pts = s.get("points", [])
         if len(pts) < 3:
             continue
-        zb = float(s.get("z_base", z_base))
+        zb = z_offset + float(s.get("z_base", 0.0))
         thk = float(s.get("overrides", {}).get("thickness", pslab_t))
         coords = [(p[0], p[1]) for p in pts]
         slab = _extrude_polygon(model, body, sb, coords, thk, zb - thk, "IfcSlab", f"Slab_{i}")
         if slab:
             container(slab)
             stats["slab"] += 1
+    return stats
 
+
+def build(geom_path, ifc_path, storey="Level", z_base=0.0):
+    """단일 층 geometry.json → IFC. (기존 API 호환)"""
+    with open(geom_path, encoding="utf-8") as f:
+        data = json.load(f)
+    model = ifcopenshell.api.project.create_file()  # IFC4
+    body, bld = _setup_project(model)
+    sto = _add_storey(model, bld, storey, z_base)
+    sb = ifcopenshell.util.shape_builder.ShapeBuilder(model)
+    stats = _build_elements(model, body, sb, sto, data, z_offset=z_base)
     model.write(ifc_path)
     return stats
+
+
+def build_multi(floors, ifc_path):
+    """다층 스태킹: floors=[{"geometry": path, "storey": 이름, "z": 바닥레벨mm}, ...]
+    → 층별 IfcBuildingStorey 를 가진 단일 IFC. 반환: 층별 stats 리스트.
+
+    z 를 생략하면 이전 층 z + 이전 층 벽 param 높이로 자동 누적."""
+    model = ifcopenshell.api.project.create_file()
+    body, bld = _setup_project(model)
+    sb = ifcopenshell.util.shape_builder.ShapeBuilder(model)
+    all_stats = []
+    z_auto = 0.0
+    for i, fl in enumerate(floors):
+        gp = fl["geometry"]
+        with open(gp, encoding="utf-8") as f:
+            data = json.load(f)
+        name = fl.get("storey") or f"Level_{i + 1}"
+        z = float(fl["z"]) if fl.get("z") is not None else z_auto
+        sto = _add_storey(model, bld, name, z)
+        stats = _build_elements(model, body, sb, sto, data, z_offset=z)
+        stats["storey"] = name
+        stats["z"] = z
+        all_stats.append(stats)
+        ph = float(data.get("params", {}).get("wall", {}).get("height", 2800.0))
+        z_auto = z + ph   # 다음 층 자동 레벨(명시 z 없을 때)
+    model.write(ifc_path)
+    return all_stats
 
 
 def _extrude_polygon(model, body, sb, coords_mm, depth_mm, z_mm, ifc_class, name):
@@ -190,11 +233,31 @@ def _extrude_polygon(model, body, sb, coords_mm, depth_mm, z_mm, ifc_class, name
 
 def main():
     ap = argparse.ArgumentParser(description="geometry.json → IFC (FreeCAD 불필요)")
-    ap.add_argument("geometry", help="geometry.json 경로")
+    ap.add_argument("geometry", nargs="?", default=None,
+                    help="geometry.json 경로 (--project 사용 시 생략)")
     ap.add_argument("out", nargs="?", default=None, help="출력 .ifc (기본 <geometry>.ifc)")
     ap.add_argument("--storey", default="Level", help="층 이름")
     ap.add_argument("--z", type=float, default=0.0, help="층 기준 Z(mm)")
+    ap.add_argument("--project", default=None,
+                    help="다층 스태킹: floors.json 경로 — "
+                         '[{"geometry": "b3.json", "storey": "B3", "z": 0}, ...] '
+                         "(z 생략 시 벽 높이로 자동 누적)")
     args = ap.parse_args()
+
+    if args.project:
+        with open(args.project, encoding="utf-8") as f:
+            floors = json.load(f)
+        out = args.out or args.geometry or \
+            (os.path.splitext(args.project)[0] + ".ifc")
+        all_stats = build_multi(floors, out)
+        print(f"[OK] 다층 IFC 빌드 -> {out}  ({len(all_stats)}개 층)")
+        for st in all_stats:
+            print(f"  [{st['storey']}] z={st['z']:.0f}mm  walls={st['wall']} "
+                  f"columns={st['column']} slabs={st['slab']} skipped={st['skip']}")
+        return
+
+    if not args.geometry:
+        ap.error("geometry.json 경로 또는 --project 를 지정하세요")
     out = args.out or (os.path.splitext(args.geometry)[0] + ".ifc")
     stats = build(args.geometry, out, storey=args.storey, z_base=args.z)
     print(f"[OK] IFC 빌드 -> {out}")
