@@ -312,6 +312,8 @@ class App:
         f.pack(fill="x", padx=8)
         ttk.Button(f, text="(1) Scan drawing", command=self._do_scan).pack(side="left", padx=4)
         ttk.Button(f, text="(2) Parse -> geometry.json", command=self._do_parse).pack(side="left", padx=4)
+        ttk.Button(f, text="(2b) 누락 진단",
+                   command=self._do_diag).pack(side="left", padx=4)
         ttk.Button(f, text="(3) 3D 미리보기(브라우저)",
                    command=self._do_preview).pack(side="left", padx=4)
         self.btn_ifc = ttk.Button(f, text="(4) IFC 빌드 (FreeCAD 불필요)",
@@ -621,6 +623,27 @@ class App:
             webbrowser.open("file://" + os.path.abspath(out))
         except Exception as e:
             messagebox.showerror("Preview 실패", str(e))
+
+    def _do_diag(self):
+        """벽 누락 진단 오버레이 PNG(diag_overlay.py 재사용) 생성 후 열기.
+        회색=원본 도면 / 파랑=paired / 주황=single_offset / 빨강=미커버(누락 의심)."""
+        if not self.geom_path or not os.path.exists(self.geom_path):
+            messagebox.showwarning("Check", "먼저 (2) Parse 를 실행하세요.")
+            return
+        try:
+            import diag_overlay as DG
+            out, qa = DG.build_overlay(self.geom_path)
+            cov = qa.get("face_coverage_pct", "?")
+            self._log(f"누락 진단 -> {out}")
+            self._log(f"  면선커버 {cov}% | 미커버 면선 {qa.get('uncovered_count', '?')}개 "
+                      f"(빨간 선 = 벽 생성 실패 구간 — 레이어 매핑/치수 검토)")
+            for u in (qa.get("uncovered") or [])[:5]:
+                self._log(f"    - {u['layer']}  {u['length_mm']:.0f}mm  @({u['p1'][0]:.0f},{u['p1'][1]:.0f})")
+            os.startfile(out)
+        except ImportError as e:
+            messagebox.showerror("진단 불가", f"matplotlib 필요: pip install matplotlib\n({e})")
+        except Exception as e:
+            messagebox.showerror("진단 실패", str(e))
 
     def _do_ifc_build(self):
         """IfcOpenShell 로 geometry.json → .ifc 빌드 (FreeCAD 불필요).

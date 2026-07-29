@@ -1469,6 +1469,94 @@ def assign_zones(elements, zones):
             rec["zone"] = next((i for i, poly in polys if poly.contains(pt)), None)
 
 
+# ── [자기검증 QA] 빌드 결과 스스로 검사 ─────────────────────────
+# "vision in the loop" 의 결정론 버전: 파싱 전 원본 벽 면선을 스냅샷해 두고,
+# 벽 후처리(페어링·병합·offset·스냅·치유)가 끝난 최종 벽 footprint 가 그 면선을
+# 얼마나 회수했는지 실측한다. 미커버 면선 = "누락 의심" 리스트로 노출 →
+# 사용자/AI(MCP diagnose_build)가 보고 layer_map/치수를 고치는 루프를 닫는다.
+QA_COVER_TOL_MM = 60.0     # footprint 경계 허용 오차(제도 오차 흡수)
+QA_SAMPLE_STEP_MM = 400.0  # 면선 위 샘플 간격
+QA_UNCOVERED_FRAC = 0.5    # 샘플 커버 비율이 이 미만이면 '미커버 면선'
+QA_TOP_N = 15              # 미커버 상위 보고 개수
+
+
+def build_qa(face_segs, wall_records, params, top_n=QA_TOP_N):
+    """원본 벽 면선(face_segs, _wall_segments 산출) 대비 최종 벽 회수율 QA.
+    반환 dict: face_coverage_pct / face_total_m / uncovered_count / uncovered_top.
+    shapely 없으면 None (graceful — 기존 동작 불변)."""
+    if not HAS_SHAPELY or not face_segs:
+        return None
+    try:
+        from shapely.geometry import LineString
+        from shapely.strtree import STRtree
+    except ImportError:
+        return None
+    pw = float(params.get("wall", {}).get("width", 200.0))
+
+    # 최종 벽 footprint: centerline(또는 closed 외곽) + 반두께
+    geoms, half_ws = [], []
+    for r in wall_records:
+        cl = r.get("centerline") or r.get("points") or []
+        if len(cl) < 2:
+            continue
+        pts = [(p[0], p[1]) for p in cl]
+        if r.get("closed") and len(pts) >= 3:
+            pts = pts + [pts[0]]      # closed: 외곽 링 자체가 면선과 일치
+            hw = QA_COVER_TOL_MM      # 링 경계 근접이면 커버로 침
+        else:
+            w = r.get("width_detected") or (r.get("overrides") or {}).get("width") or pw
+            hw = float(w) / 2.0
+        try:
+            g = LineString(pts)
+        except Exception:
+            continue
+        if g.length < 1.0:
+            continue
+        geoms.append(g)
+        half_ws.append(hw)
+    if not geoms:
+        return None
+    tree = STRtree(geoms)
+
+    def _covered(x, y):
+        from shapely.geometry import Point as _Pt
+        p = _Pt(x, y)
+        rmax = max(half_ws) + QA_COVER_TOL_MM
+        for idx in tree.query(p.buffer(rmax)):
+            if geoms[idx].distance(p) <= half_ws[idx] + QA_COVER_TOL_MM:
+                return True
+        return False
+
+    tot = cov = 0.0
+    uncovered = []
+    for s in face_segs:
+        L = s.get("len", 0.0)
+        if L <= 0:
+            continue
+        p1, p2 = s["p1"], s["p2"]
+        n = max(2, int(L / QA_SAMPLE_STEP_MM) + 1)
+        hit = sum(1 for k in range(n)
+                  if _covered(p1[0] + (p2[0] - p1[0]) * k / (n - 1),
+                              p1[1] + (p2[1] - p1[1]) * k / (n - 1)))
+        frac = hit / n
+        tot += L
+        cov += L * frac
+        if frac < QA_UNCOVERED_FRAC:
+            uncovered.append({"layer": s.get("layer", ""),
+                              "length_mm": round(L, 0),
+                              "p1": [round(p1[0], 0), round(p1[1], 0)],
+                              "p2": [round(p2[0], 0), round(p2[1], 0)]})
+    uncovered.sort(key=lambda u: -u["length_mm"])
+    return {
+        "face_coverage_pct": round(100.0 * cov / tot, 1) if tot else 100.0,
+        "face_total_m": round(tot / 1000.0, 1),
+        "uncovered_count": len(uncovered),
+        # 전체 미커버 선분(오버레이 diag_overlay.py 가 사용). 상위 top_n 요약은
+        # 호출측(MCP diagnose_build / 로그)에서 슬라이스.
+        "uncovered": uncovered[:500],
+    }
+
+
 def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAMS,
           use_ai=False, use_vision=False, api_key=None, ai_threshold=0.8,
           ext_schedule=None):
@@ -1638,6 +1726,8 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
     result["elements"]["column"] = new_cols
     # --------------------------------------
 
+    # [자기검증 QA] 후처리 전 원본 벽 면선 스냅샷 (최종 회수율 측정 기준)
+    _qa_face_segs = _wall_segments(result["elements"]["wall"])
     # [Phase 1] 평행선 쌍 → 벽 중심선+두께 (zone 귀속 전에 재구성)
     result["elements"]["wall"] = detect_wall_pairs(result["elements"]["wall"], params)
     # [Phase 4.0] 같은 직선 위 쪼개진 세그먼트 재병합(코너 틈은 제외)
@@ -1703,6 +1793,15 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
     single = sum(1 for w in result["elements"]["wall"] if w.get("pairing") == "single")
     offset = sum(1 for w in result["elements"]["wall"] if w.get("pairing") == "single_offset")
     result["wall_pairing"] = {"paired": paired, "single": single, "single_offset": offset}
+    # [자기검증 QA] 원본 면선 대비 최종 벽 회수율 + 누락 의심 리스트
+    _qa = build_qa(_qa_face_segs, result["elements"]["wall"], params)
+    if _qa:
+        _qa["needs_review"] = sum(1 for items in result["elements"].values()
+                                  for it in items if it.get("needs_review"))
+        result["qa"] = _qa
+        print(f"  [QA] 면선커버 {_qa['face_coverage_pct']:.0f}% "
+              f"({_qa['face_total_m']}m) | paired {paired} | "
+              f"미커버 면선 {_qa['uncovered_count']}개 | 검토필요 {_qa['needs_review']}")
     result["blocks"] = {"inserts": n_inserts, "unmapped": sum(unmapped_blocks.values())}
     result["mep"] = {c: len(result["elements"].get(c, [])) for c in MEP_CATEGORIES}
     # [Phase 4b] 층 감지: structural z_base 값 수집 → 100mm tol 양자화 → floors 목록

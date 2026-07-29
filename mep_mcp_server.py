@@ -276,6 +276,65 @@ def apply_layer_rule(layer_pattern: str, category: str,
 
 
 @mcp.tool()
+def diagnose_build(json_path: str = DEFAULT_JSON, top_n: int = 10,
+                   make_image: bool = False) -> str:
+    """
+    Step 2b (자기검증): 파싱/빌드 품질을 스스로 진단한다 — "vision in the loop".
+
+    geometry.json 의 qa(면선 커버리지, 미커버=누락 의심 선분)와 미매핑 레이어 제안을
+    함께 반환한다. AI 는 이 결과를 보고 apply_layer_rule / update_geometry_overrides
+    로 수정 → parse_dxf 재실행 → 다시 diagnose_build 로 확인하는 루프를 돈다.
+
+    Args:
+        json_path: geometry.json 경로 (parse_dxf 산출물, qa 포함).
+        top_n: 미커버 선분 상위 보고 개수.
+        make_image: True 면 진단 오버레이 PNG(diag_overlay)도 생성해 경로 반환.
+    """
+    if not os.path.exists(json_path):
+        return f"Error: JSON not found at {json_path}. Run parse_dxf first."
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        return f"Error reading JSON: {e}"
+    qa = data.get("qa")
+    if not qa:
+        return ("No qa data in this geometry.json (parsed by an older version). "
+                "Re-run parse_dxf to generate coverage QA.")
+
+    # 미커버 선분을 레이어별로 묶어 원인 진단을 돕는다
+    by_layer = {}
+    for u in qa.get("uncovered", []):
+        d = by_layer.setdefault(u.get("layer", "?"), {"count": 0, "total_mm": 0.0})
+        d["count"] += 1
+        d["total_mm"] += u.get("length_mm", 0.0)
+    out = {
+        "face_coverage_pct": qa.get("face_coverage_pct"),
+        "face_total_m": qa.get("face_total_m"),
+        "uncovered_count": qa.get("uncovered_count"),
+        "uncovered_by_layer": by_layer,
+        "uncovered_top": qa.get("uncovered", [])[:top_n],
+        "wall_pairing": data.get("wall_pairing", {}),
+        "needs_review": qa.get("needs_review"),
+        "unmapped_suggestions": [
+            {"layer": s.get("layer"), "count": s.get("count"),
+             "final_guess": s.get("final_guess")}
+            for s in data.get("suggestions", []) if not s.get("applied")],
+        "hint": ("uncovered_by_layer 에 특정 레이어가 몰려 있으면 그 레이어가 "
+                 "미매핑이거나 반대 면선이 다른 레이어일 가능성 → apply_layer_rule 검토. "
+                 "고르게 퍼져 있으면 개구부/특수 형상일 가능성이 높음."),
+    }
+    if make_image:
+        try:
+            import diag_overlay as _DG
+            png, _ = _DG.build_overlay(json_path)
+            out["overlay_png"] = png
+        except Exception as e:
+            out["overlay_png_error"] = str(e)
+    return json.dumps(out, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
 def build_freecad(out_name: str, json_path: str = DEFAULT_JSON) -> str:
     """
     Step 4: geometry.json 을 FreeCAD 3D 모델(.FCStd)과 IFC 로 빌드한다. 마지막 단계.
