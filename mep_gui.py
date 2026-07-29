@@ -323,6 +323,8 @@ class App:
         self.btn_build.pack(side="left", padx=4)
         if find_freecadcmd() is None:
             self.btn_build.state(["disabled"])
+        ttk.Button(f, text="(5) 물량 Excel",
+                   command=self._do_boq).pack(side="left", padx=4)
         ttk.Button(f, text="창호일람 Excel↓",
                    command=self._do_schedule_export).pack(side="left", padx=4)
         ttk.Button(f, text="창호일람 불러오기↑",
@@ -659,6 +661,31 @@ class App:
             messagebox.showerror("진단 불가", f"matplotlib 필요: pip install matplotlib\n({e})")
         except Exception as e:
             messagebox.showerror("진단 실패", str(e))
+
+    def _do_boq(self):
+        """물량집계(BOQ) Excel 내보내기 — boq_export.py 재사용.
+        벽(두께별 길이·면적·체적)/기둥(단면별)/슬래브/창호/MEP 규격별 집계."""
+        if not self.data:
+            messagebox.showwarning("Check", "먼저 (2) Parse 를 실행하세요.")
+            return
+        try:
+            import boq_export as BQ
+            base = self.geom_path or self.v_dxf.get().strip() or os.path.join(HERE, "물량")
+            out = os.path.splitext(base)[0].replace(".geometry", "") + "_물량.xlsx"
+            BQ.export_boq_xlsx(self.data, out)
+            secs = BQ.aggregate(self.data)
+            summary = " | ".join(
+                f"{name} {tot[1]}" for name, (_, rows, tot) in secs.items()
+                if rows and isinstance(tot[1], int))
+            self._log(f"물량집계 Excel -> {out}")
+            self._log(f"  {summary}")
+            os.startfile(out)
+        except ImportError:
+            messagebox.showerror("물량 Excel 불가", "openpyxl 필요: pip install openpyxl")
+        except PermissionError:
+            messagebox.showerror("물량 Excel", "출력 파일이 Excel 에서 열려 있습니다. 닫고 다시 시도하세요.")
+        except Exception as e:
+            messagebox.showerror("물량 Excel 실패", str(e))
 
     def _do_ifc_build(self):
         """IfcOpenShell 로 geometry.json → .ifc 빌드 (FreeCAD 불필요).
