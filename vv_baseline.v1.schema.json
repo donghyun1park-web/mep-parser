@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "vv_baseline.v1.schema.json",
+  "title": "MEP CFD Studio verification baseline",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "contract", "candidate_id", "created_at", "git_head", "dirty_paths", "dirty_path_hashes", "python_version", "dependency_snapshot_sha256", "schema_hashes", "benchmark_hashes", "capability_hash", "test_summary", "runtime_skips"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "contract": {"const": "vv_baseline.v1"},
+    "candidate_id": {"type": "string", "pattern": "^baseline-[0-9TZ-]+-[0-9a-f]{12}$"},
+    "created_at": {"type": "string"},
+    "git_head": {"type": "string"},
+    "dirty_paths": {"type": "array", "items": {"type": "string"}},
+    "dirty_path_hashes": {"type": "object", "additionalProperties": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}},
+    "python_version": {"type": "string"},
+    "python_executable": {"type": "string"},
+    "dependency_snapshot_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "schema_hashes": {"type": "object", "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}},
+    "benchmark_hashes": {"type": "object", "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}},
+    "capability_hash": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "test_summary": {"type": "object"},
+    "runtime_skips": {"type": "array", "items": {"type": "object"}},
+    "projects_root": {"type": "string"}
+  }
+}

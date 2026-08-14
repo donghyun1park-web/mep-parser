@@ -1,0 +1,7 @@
+# Exact pins are resolved to requirements-dev.lock during the release build.
+ezdxf==1.4.2
+jsonschema==4.23.0
+matplotlib==3.9.2
+numpy==2.1.3
+pytest==8.3.5
+shapely==2.0.6

@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "toolchain.lock.v1.schema.json",
+  "title": "MEP CFD Studio reproducible toolchain lock",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "contract", "ready", "python", "pip", "packages"],
+  "properties": {
+    "$schema": {"type": "string"},
+    "schema_version": {"const": 1},
+    "contract": {"const": "toolchain.lock.v1"},
+    "ready": {"type": "boolean"},
+    "blocked_reasons": {"type": "array", "items": {"type": "string"}},
+    "python": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "architecture", "installer_sha256"],
+      "properties": {
+        "version": {"type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$"},
+        "architecture": {"const": "x64"},
+        "installer_sha256": {"type": "string", "pattern": "^(?:[0-9a-fA-F]{64})?$"},
+        "executable_name": {"type": "string"}
+      }
+    },
+    "pip": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version"],
+      "properties": {"version": {"type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$"}}
+    },
+    "packages": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["version", "hashes"],
+        "properties": {
+          "version": {"type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$"},
+          "hashes": {"type": "array", "items": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"}}
+        }
+      }
+    }
+  },
+  "allOf": [{
+    "if": {"properties": {"ready": {"const": true}}, "required": ["ready"]},
+    "then": {
+      "properties": {
+        "blocked_reasons": {"maxItems": 0},
+        "python": {"properties": {"installer_sha256": {"minLength": 64}}},
+        "packages": {"additionalProperties": {"properties": {"hashes": {"minItems": 1}}}}
+      }
+    }
+  }]
+}

@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cfd_numerical_sensitivity_job.v1.schema.json",
+  "title": "MEP CFD serial numerical sensitivity input job",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract", "status", "authority", "final_result_target",
+    "pair_manifest_sha256", "selector_sha256", "aggregation",
+    "baseline", "variant", "allowed_variation", "qoi_plan",
+    "job_manifest_sha256"
+  ],
+  "properties": {
+    "contract": {"const": "cfd_numerical_sensitivity_job.v1"},
+    "status": {"const": "PENDING_SOLVER_EVIDENCE"},
+    "authority": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source", "central_orchestrator_required", "case_local_artifact_authoritative"],
+      "properties": {
+        "source": {"const": "cfd_numerical_sensitivity_job"},
+        "central_orchestrator_required": {"const": true},
+        "case_local_artifact_authoritative": {"const": false}
+      }
+    },
+    "final_result_target": {
+      "type": "object", "additionalProperties": false,
+      "required": ["contract", "status", "requires_solver_evidence"],
+      "properties": {
+        "contract": {"const": "numerical_sensitivity.v1"},
+        "status": {"const": "PENDING_SOLVER_EVIDENCE"},
+        "requires_solver_evidence": {"const": true}
+      }
+    },
+    "pair_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "selector_sha256": {"$ref": "#/$defs/sha256"},
+    "aggregation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["scope", "occupied_zone", "exhaust_temperature_rise_k"],
+      "properties": {
+        "scope": {"const": "selected_occupied_volume_band"},
+        "occupied_zone": {"const": "volume_weighted_cell_centers.v1"},
+        "exhaust_temperature_rise_k": {"const": "explicit_solver_postprocess_qoi.v1"}
+      }
+    },
+    "baseline": {"$ref": "#/$defs/baseline"},
+    "variant": {"$ref": "#/$defs/variant"},
+    "allowed_variation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["parameter", "baseline", "variant", "all_other_inputs_equal"],
+      "properties": {
+        "parameter": {"const": "thermal_numerics_profile"},
+        "baseline": {"const": "stabilized_first_order_v1"},
+        "variant": {"const": "design_limited_second_order_v1"},
+        "all_other_inputs_equal": {"const": true}
+      }
+    },
+    "qoi_plan": {
+      "type": "object", "additionalProperties": false,
+      "required": ["contract", "definitions"],
+      "properties": {
+        "contract": {"const": "numerical_sensitivity_qoi_plan.v1"},
+        "definitions": {
+          "type": "array", "minItems": 3, "maxItems": 3,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["name", "limit"],
+            "properties": {"name": {"type": "string", "minLength": 1}, "limit": {"type": "number", "exclusiveMinimum": 0}}
+          }
+        }
+      }
+    },
+    "job_manifest_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+    "side": {
+      "type": "object", "additionalProperties": false,
+      "required": ["run_id", "profile", "case_child", "case_seed_snapshot_sha256", "input_snapshot_sha256", "mesh_sha256", "physical_input_sha256"],
+      "properties": {
+        "run_id": {"type": "string", "minLength": 1},
+        "profile": {"type": "string", "enum": ["stabilized_first_order_v1", "design_limited_second_order_v1"]},
+        "case_child": {"type": "string", "minLength": 1},
+        "case_seed_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+        "input_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+        "mesh_sha256": {"$ref": "#/$defs/sha256"},
+        "physical_input_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "baseline": {
+      "allOf": [
+        {"$ref": "#/$defs/side"},
+        {"properties": {"profile": {"const": "stabilized_first_order_v1"}, "case_child": {"const": "baseline_first_order"}}}
+      ]
+    },
+    "variant": {
+      "allOf": [
+        {"$ref": "#/$defs/side"},
+        {"properties": {"profile": {"const": "design_limited_second_order_v1"}, "case_child": {"const": "variant_second_order"}}}
+      ]
+    }
+  }
+}
