@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "temporal_sensitivity.v1.schema.json",
+  "title": "MEP CFD temporal sensitivity frozen input contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "status", "seed_case_path", "seed_tree_sha256", "anchor_fine_case", "fixed_delta_t_s", "controller", "children", "allowed_variation", "evidence_requirements", "manifest_sha256"],
+  "properties": {
+    "contract": {"const": "temporal_sensitivity.v1"},
+    "status": {"const": "PENDING_SOLVER_EVIDENCE"},
+    "seed_case_path": {"type": "string", "minLength": 1},
+    "seed_tree_sha256": {"$ref": "#/$defs/sha256"},
+    "anchor_fine_case": {"type": ["string", "null"]},
+    "fixed_delta_t_s": {"const": [0.04, 0.02, 0.01]},
+    "controller": {
+      "type": "object", "additionalProperties": false,
+      "required": ["adjust_time_step", "max_co", "limiter_policy"],
+      "properties": {
+        "adjust_time_step": {"const": false},
+        "max_co": {"const": 1.0},
+        "limiter_policy": {"const": "fixed_delta_t_no_controller_intervention.v1"}
+      }
+    },
+    "children": {
+      "type": "array", "minItems": 3, "maxItems": 3,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["case_child", "delta_t_s", "adjust_time_step", "case_seed_tree_sha256", "solver_evidence_status"],
+        "properties": {
+          "case_child": {"type": "string", "enum": ["coarse_dt_0p04", "medium_dt_0p02", "fine_dt_0p01"]},
+          "delta_t_s": {"type": "number", "exclusiveMinimum": 0},
+          "adjust_time_step": {"const": false},
+          "case_seed_tree_sha256": {"$ref": "#/$defs/sha256"},
+          "solver_evidence_status": {"const": "PENDING_SOLVER_EVIDENCE"}
+        }
+      }
+    },
+    "allowed_variation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["parameter", "baseline", "medium", "fine", "all_other_inputs_equal"],
+      "properties": {
+        "parameter": {"const": "delta_t_s"},
+        "baseline": {"const": 0.04},
+        "medium": {"const": 0.02},
+        "fine": {"const": 0.01},
+        "all_other_inputs_equal": {"const": true}
+      }
+    },
+    "evidence_requirements": {
+      "type": "object", "additionalProperties": false,
+      "required": ["minimum_flow_through_time_s", "common_final_window_s", "peak_co_limit", "requires_time_history", "requires_qoi_recomputation"],
+      "properties": {
+        "minimum_flow_through_time_s": {"const": 3.0},
+        "common_final_window_s": {"const": 0.1},
+        "peak_co_limit": {"const": 1.0},
+        "requires_time_history": {"const": true},
+        "requires_qoi_recomputation": {"const": true}
+      }
+    },
+    "manifest_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {"sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"}}
+}
