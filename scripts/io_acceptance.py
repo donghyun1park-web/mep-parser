@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import uuid
@@ -19,6 +20,65 @@ REQUIRED_ROOTS = (
     "_field_jobs",
     "_release_evidence",
 )
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _artifact_probe(case: Path, kind: str, path: Path | None) -> dict[str, Any]:
+    result: dict[str, Any] = {"case": str(case), "kind": kind, "path": str(path) if path else None,
+                              "read": False, "sha256": None, "status": "BLOCKED", "error_code": None}
+    if path is None or not path.is_file():
+        result["error_code"] = f"ARTIFACT_MISSING:{kind}"
+        return result
+    try:
+        digest = _sha256_file(path)
+        result.update({"read": True, "sha256": digest, "status": "PASS"})
+    except OSError as exc:
+        result["error_code"] = f"ARTIFACT_READ_ERROR:{exc.__class__.__name__}"
+    return result
+
+
+def _authoritative_cases(projects_root: Path) -> list[Path]:
+    solver_root = projects_root / "_body_solver"
+    if not solver_root.is_dir():
+        return []
+    markers = {"mesh_manifest.json", "run_manifest.json", "result_manifest.json"}
+    return sorted((path for path in solver_root.rglob("*") if path.is_dir() and any((path / marker).is_file() for marker in markers)), key=str)
+
+
+def _recovered_artifact_probes(projects_root: Path) -> list[dict[str, Any]]:
+    cases = _authoritative_cases(projects_root)
+    if not cases:
+        return [{"case": None, "kind": "authoritative_case", "path": None, "read": False,
+                 "sha256": None, "status": "BLOCKED", "error_code": "AUTHORITATIVE_CASE_MISSING"}]
+    probes: list[dict[str, Any]] = []
+    for case in cases:
+        probes.append(_artifact_probe(case, "log_checkMesh", case / "log.checkMesh"))
+        solver_logs = sorted(path for path in case.glob("log.*") if path.name != "log.checkMesh")
+        probes.append(_artifact_probe(case, "solver_log", solver_logs[0] if solver_logs else None))
+        times = []
+        for candidate in case.iterdir():
+            if candidate.is_dir():
+                try:
+                    times.append((float(candidate.name), candidate))
+                except ValueError:
+                    pass
+        latest = max(times, default=(None, None))[1]
+        for field in ("T", "U", "phi", "V"):
+            probes.append(_artifact_probe(case, f"latest_{field}", latest / field if latest else None))
+        for manifest in ("mesh_manifest.json", "run_manifest.json", "result_manifest.json"):
+            probes.append(_artifact_probe(case, manifest, case / manifest))
+        vtus = sorted(case.rglob("*.vtu"))
+        html = sorted(case.rglob("*.html"))
+        probes.append(_artifact_probe(case, "vtu", vtus[0] if vtus else None))
+        probes.append(_artifact_probe(case, "html", html[0] if html else None))
+    return probes
 
 
 def probe_path(path: Path) -> dict[str, Any]:
@@ -67,7 +127,8 @@ def probe_path(path: Path) -> dict[str, Any]:
 def run_io_acceptance(projects_root: Path) -> dict[str, Any]:
     projects_root = Path(projects_root).resolve()
     probes = [probe_path(projects_root / root) for root in REQUIRED_ROOTS]
-    status = "PASS" if all(item["status"] == "PASS" for item in probes) else "BLOCKED"
+    artifact_probes = _recovered_artifact_probes(projects_root)
+    status = "PASS" if all(item["status"] == "PASS" for item in probes + artifact_probes) else "BLOCKED"
     return {
         "schema_version": 1,
         "contract": "io_acceptance.v1",
@@ -76,6 +137,7 @@ def run_io_acceptance(projects_root: Path) -> dict[str, Any]:
         "roots": list(REQUIRED_ROOTS),
         "status": status,
         "probes": probes,
+        "artifact_probes": artifact_probes,
     }
 
 

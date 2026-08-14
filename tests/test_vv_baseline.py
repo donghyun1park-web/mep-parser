@@ -1,5 +1,7 @@
 import json
 import re
+import hashlib
+import sys
 from pathlib import Path
 
 
@@ -15,6 +17,9 @@ def test_build_vv_baseline_records_identity_and_hash_inventory(tmp_path):
     assert isinstance(payload["dirty_paths"], list)
     assert set(payload["dirty_path_hashes"]) == set(payload["dirty_paths"])
     assert len(payload["dependency_snapshot_sha256"]) == 64
+    assert payload["python_executable_sha256"] == hashlib.sha256(Path(sys.executable).read_bytes()).hexdigest()
+    assert payload["python_architecture"]
+    assert len(payload["installed_distribution_snapshot_sha256"]) == 64
     assert payload["schema_hashes"]
     assert payload["benchmark_hashes"]
     assert payload["test_summary"]["status"] == "NOT_RUN"

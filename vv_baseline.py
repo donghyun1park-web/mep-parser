@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.metadata
 import json
 import os
+import platform
 import subprocess
 import sys
 import uuid
@@ -112,6 +114,14 @@ def _dependency_snapshot(repo_root: Path) -> str:
     return _files_hash(paths, repo_root)
 
 
+def _installed_distribution_snapshot() -> str:
+    rows = []
+    for distribution in importlib.metadata.distributions():
+        name = distribution.metadata.get("Name") or distribution.metadata.get("Summary") or "UNKNOWN"
+        rows.append(f"{name.casefold()}=={distribution.version}")
+    return _sha256_bytes("\n".join(sorted(rows)).encode("utf-8"))
+
+
 def build_vv_baseline(repo_root: Path, projects_root: Path, junit_path: Path | None = None) -> dict[str, Any]:
     repo_root = repo_root.resolve()
     projects_root = projects_root.resolve()
@@ -133,6 +143,9 @@ def build_vv_baseline(repo_root: Path, projects_root: Path, junit_path: Path | N
         "dirty_path_hashes": _dirty_path_hashes(repo_root, dirty_paths),
         "python_version": sys.version,
         "python_executable": str(Path(sys.executable).resolve()),
+        "python_executable_sha256": _sha256_file(Path(sys.executable).resolve()),
+        "python_architecture": platform.architecture()[0],
+        "installed_distribution_snapshot_sha256": _installed_distribution_snapshot(),
         "dependency_snapshot_sha256": _dependency_snapshot(repo_root),
         "schema_hashes": _hash_inventory(repo_root, "*.schema.json"),
         "benchmark_hashes": _hash_inventory(repo_root / "cfd_benchmarks", "*") if (repo_root / "cfd_benchmarks").exists() else {},
@@ -145,14 +158,15 @@ def build_vv_baseline(repo_root: Path, projects_root: Path, junit_path: Path | N
 
 def validate_vv_baseline(payload: dict[str, Any]) -> list[str]:
     required = [
-        "candidate_id", "created_at", "git_head", "dirty_paths", "python_version",
+        "candidate_id", "created_at", "git_head", "dirty_paths", "python_version", "python_executable",
+        "python_executable_sha256", "python_architecture", "installed_distribution_snapshot_sha256",
         "dependency_snapshot_sha256", "schema_hashes", "benchmark_hashes",
         "capability_hash", "test_summary", "runtime_skips", "dirty_path_hashes",
     ]
     blockers = [f"MISSING:{name}" for name in required if name not in payload]
     if payload.get("contract") != "vv_baseline.v1" or payload.get("schema_version") != 1:
         blockers.append("CONTRACT_INVALID")
-    for field in ("dependency_snapshot_sha256",):
+    for field in ("dependency_snapshot_sha256", "python_executable_sha256", "installed_distribution_snapshot_sha256"):
         value = payload.get(field)
         if not isinstance(value, str) or len(value) != 64:
             blockers.append(f"HASH_INVALID:{field}")

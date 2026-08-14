@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "working_validation.v1.schema.json",
+  "title": "MEP CFD Studio single-PC working validation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "created_at", "scope", "status", "working_ready_on_target", "limited_numerical_spotchecks_pass_on_target", "design_citable", "release_ready", "checks", "blockers", "numerical_blockers", "verification_scope", "limitations", "evidence_sha256"],
+  "properties": {
+    "contract": {"const": "working_validation.v1"},
+    "created_at": {"type": "string"},
+    "output_path": {"type": "string"},
+    "scope": {"const": "single_pc_serial_current_user"},
+    "status": {"enum": ["BLOCKED", "WORKING_SINGLE_PC", "NUMERICAL_SPOTCHECK_PASS_SINGLE_PC"]},
+    "working_ready_on_target": {"type": "boolean"},
+    "limited_numerical_spotchecks_pass_on_target": {"type": "boolean"},
+    "design_citable": {"const": false},
+    "release_ready": {"const": false},
+    "checks": {"type": "array", "minItems": 8, "maxItems": 8, "items": {"type": "object", "required": ["id", "status", "blockers"], "properties": {"id": {"enum": ["code_baseline", "filesystem_io", "serial_environment", "working_room_e2e", "real_dxf_screening", "restart_integrity", "exact_heat_verification", "limited_numerical_spotchecks"]}, "status": {"enum": ["PASS", "FAIL", "BLOCKED", "NOT_EVALUATED"]}, "blockers": {"type": "array"}}, "additionalProperties": false}},
+    "blockers": {"type": "array"},
+    "numerical_blockers": {"type": "array"},
+    "verification_scope": {"type": "array", "items": {"type": "string"}},
+    "limitations": {"type": "array", "items": {"type": "string"}},
+    "evidence_sha256": {"type": "object", "additionalProperties": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}
+  }
+}
