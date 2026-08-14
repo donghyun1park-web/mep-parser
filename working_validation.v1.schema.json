@@ -4,22 +4,121 @@
   "title": "MEP CFD Studio single-PC working validation",
   "type": "object",
   "additionalProperties": false,
-  "required": ["contract", "created_at", "scope", "status", "working_ready_on_target", "limited_numerical_spotchecks_pass_on_target", "design_citable", "release_ready", "checks", "blockers", "numerical_blockers", "verification_scope", "limitations", "evidence_sha256"],
+  "required": [
+    "contract", "created_at", "scope", "status", "working_ready_on_target",
+    "limited_numerical_spotchecks_pass_on_target", "design_citable", "release_ready",
+    "checks", "blockers", "numerical_blockers", "verification_scope", "limitations",
+    "evidence_sha256"
+  ],
   "properties": {
     "contract": {"const": "working_validation.v1"},
-    "created_at": {"type": "string"},
-    "output_path": {"type": "string"},
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$"
+    },
+    "output_path": {"type": "string", "minLength": 1},
     "scope": {"const": "single_pc_serial_current_user"},
     "status": {"enum": ["BLOCKED", "WORKING_SINGLE_PC", "NUMERICAL_SPOTCHECK_PASS_SINGLE_PC"]},
     "working_ready_on_target": {"type": "boolean"},
     "limited_numerical_spotchecks_pass_on_target": {"type": "boolean"},
     "design_citable": {"const": false},
     "release_ready": {"const": false},
-    "checks": {"type": "array", "minItems": 8, "maxItems": 8, "items": {"type": "object", "required": ["id", "status", "blockers"], "properties": {"id": {"enum": ["code_baseline", "filesystem_io", "serial_environment", "working_room_e2e", "real_dxf_screening", "restart_integrity", "exact_heat_verification", "limited_numerical_spotchecks"]}, "status": {"enum": ["PASS", "FAIL", "BLOCKED", "NOT_EVALUATED"]}, "blockers": {"type": "array"}}, "additionalProperties": false}},
-    "blockers": {"type": "array"},
-    "numerical_blockers": {"type": "array"},
-    "verification_scope": {"type": "array", "items": {"type": "string"}},
-    "limitations": {"type": "array", "items": {"type": "string"}},
-    "evidence_sha256": {"type": "object", "additionalProperties": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}
+    "checks": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "prefixItems": [
+        {"$ref": "#/$defs/code_baseline"},
+        {"$ref": "#/$defs/filesystem_io"},
+        {"$ref": "#/$defs/serial_environment"},
+        {"$ref": "#/$defs/working_room_e2e"},
+        {"$ref": "#/$defs/real_dxf_screening"},
+        {"$ref": "#/$defs/restart_integrity"},
+        {"$ref": "#/$defs/exact_heat_verification"},
+        {"$ref": "#/$defs/limited_numerical_spotchecks"}
+      ],
+      "items": false
+    },
+    "blockers": {"type": "array", "items": {"$ref": "#/$defs/check"}},
+    "numerical_blockers": {"type": "array", "items": {"$ref": "#/$defs/check"}},
+    "verification_scope": {"const": ["single_pc_serial_current_user"]},
+    "limitations": {"const": ["not_design_citable", "not_release_ready"]},
+    "evidence_sha256": {
+      "type": "object",
+      "additionalProperties": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "NUMERICAL_SPOTCHECK_PASS_SINGLE_PC"}}, "required": ["status"]},
+      "then": {
+        "properties": {
+          "working_ready_on_target": {"const": true},
+          "limited_numerical_spotchecks_pass_on_target": {"const": true},
+          "blockers": {"maxItems": 0},
+          "numerical_blockers": {"maxItems": 0},
+          "checks": {"prefixItems": [
+            {"$ref": "#/$defs/code_baseline_pass"}, {"$ref": "#/$defs/filesystem_io_pass"},
+            {"$ref": "#/$defs/serial_environment_pass"}, {"$ref": "#/$defs/working_room_e2e_pass"},
+            {"$ref": "#/$defs/real_dxf_screening_pass"}, {"$ref": "#/$defs/restart_integrity_pass"},
+            {"$ref": "#/$defs/exact_heat_verification_pass"}, {"$ref": "#/$defs/limited_numerical_spotchecks_pass"}
+          ], "items": false}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "WORKING_SINGLE_PC"}}, "required": ["status"]},
+      "then": {
+        "properties": {
+          "working_ready_on_target": {"const": true},
+          "limited_numerical_spotchecks_pass_on_target": {"const": false},
+          "blockers": {"maxItems": 0},
+          "checks": {"prefixItems": [
+            {"$ref": "#/$defs/code_baseline_pass"}, {"$ref": "#/$defs/filesystem_io_pass"},
+            {"$ref": "#/$defs/serial_environment_pass"}, {"$ref": "#/$defs/working_room_e2e_pass"},
+            {"$ref": "#/$defs/real_dxf_screening_pass"}, {"$ref": "#/$defs/restart_integrity_pass"},
+            {"$ref": "#/$defs/exact_heat_verification"}, {"$ref": "#/$defs/limited_numerical_spotchecks"}
+          ], "items": false}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "BLOCKED"}}, "required": ["status"]},
+      "then": {
+        "properties": {
+          "working_ready_on_target": {"const": false},
+          "limited_numerical_spotchecks_pass_on_target": {"const": false}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "status", "blockers"],
+      "properties": {
+        "id": {"enum": ["code_baseline", "filesystem_io", "serial_environment", "working_room_e2e", "real_dxf_screening", "restart_integrity", "exact_heat_verification", "limited_numerical_spotchecks"]},
+        "status": {"enum": ["PASS", "FAIL", "BLOCKED", "NOT_EVALUATED"]},
+        "blockers": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "code_baseline": {"allOf": [{"$ref": "#/$defs/check"}, {"properties": {"id": {"const": "code_baseline"}}}]},
+    "filesystem_io": {"allOf": [{"$ref": "#/$defs/check"}, {"properties": {"id": {"const": "filesystem_io"}}}]},
+    "serial_environment": {"allOf": [{"$ref": "#/$defs/check"}, {"properties": {"id": {"const": "serial_environment"}}}]},
+    "working_room_e2e": {"allOf": [{"$ref": "#/$defs/check"}, {"properties": {"id": {"const": "working_room_e2e"}}}]},
+    "real_dxf_screening": {"allOf": [{"$ref": "#/$defs/check"}, {"properties": {"id": {"const": "real_dxf_screening"}}}]},
+    "restart_integrity": {"allOf": [{"$ref": "#/$defs/check"}, {"properties": {"id": {"const": "restart_integrity"}}}]},
+    "exact_heat_verification": {"allOf": [{"$ref": "#/$defs/check"}, {"properties": {"id": {"const": "exact_heat_verification"}}}]},
+    "limited_numerical_spotchecks": {"allOf": [{"$ref": "#/$defs/check"}, {"properties": {"id": {"const": "limited_numerical_spotchecks"}}}]},
+    "code_baseline_pass": {"allOf": [{"$ref": "#/$defs/code_baseline"}, {"properties": {"status": {"const": "PASS"}}}]},
+    "filesystem_io_pass": {"allOf": [{"$ref": "#/$defs/filesystem_io"}, {"properties": {"status": {"const": "PASS"}}}]},
+    "serial_environment_pass": {"allOf": [{"$ref": "#/$defs/serial_environment"}, {"properties": {"status": {"const": "PASS"}}}]},
+    "working_room_e2e_pass": {"allOf": [{"$ref": "#/$defs/working_room_e2e"}, {"properties": {"status": {"const": "PASS"}}}]},
+    "real_dxf_screening_pass": {"allOf": [{"$ref": "#/$defs/real_dxf_screening"}, {"properties": {"status": {"const": "PASS"}}}]},
+    "restart_integrity_pass": {"allOf": [{"$ref": "#/$defs/restart_integrity"}, {"properties": {"status": {"const": "PASS"}}}]},
+    "exact_heat_verification_pass": {"allOf": [{"$ref": "#/$defs/exact_heat_verification"}, {"properties": {"status": {"const": "PASS"}}}]},
+    "limited_numerical_spotchecks_pass": {"allOf": [{"$ref": "#/$defs/limited_numerical_spotchecks"}, {"properties": {"status": {"const": "PASS"}}}]}
   }
 }

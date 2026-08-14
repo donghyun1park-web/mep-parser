@@ -4,6 +4,8 @@ import hashlib
 import sys
 from pathlib import Path
 
+from jsonschema import validate
+
 
 def test_build_vv_baseline_records_identity_and_hash_inventory(tmp_path):
     from vv_baseline import build_vv_baseline, write_vv_baseline
@@ -72,3 +74,31 @@ def test_build_vv_baseline_aggregates_pytest_testsuites_root(tmp_path):
     assert payload["test_summary"]["tests"] == 3
     assert payload["test_summary"]["failed"] == 1
     assert payload["test_summary"]["skipped"] == 1
+
+
+def test_validate_vv_baseline_rejects_non_hex_hashes_and_bad_runtime_identity(tmp_path):
+    from vv_baseline import build_vv_baseline, validate_vv_baseline
+
+    payload = build_vv_baseline(Path(__file__).resolve().parents[1], tmp_path / "projects")
+    payload["python_executable_sha256"] = "g" * 64
+    payload["installed_distribution_snapshot_sha256"] = "short"
+    payload["python_executable"] = ""
+    payload["python_version"] = ""
+    payload["python_architecture"] = ""
+
+    blockers = validate_vv_baseline(payload)
+
+    assert "HASH_INVALID:python_executable_sha256" in blockers
+    assert "HASH_INVALID:installed_distribution_snapshot_sha256" in blockers
+    assert "RUNTIME_IDENTITY_INVALID:python_executable" in blockers
+    assert "RUNTIME_IDENTITY_INVALID:python_version" in blockers
+    assert "RUNTIME_IDENTITY_INVALID:python_architecture" in blockers
+
+
+def test_vv_baseline_schema_accepts_strengthened_runtime_provenance(tmp_path):
+    from vv_baseline import build_vv_baseline
+
+    payload = build_vv_baseline(Path(__file__).resolve().parents[1], tmp_path / "projects")
+    schema = json.loads((Path(__file__).resolve().parents[1] / "vv_baseline.v1.schema.json").read_text(encoding="utf-8"))
+
+    validate(payload, schema)

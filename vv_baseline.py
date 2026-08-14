@@ -8,6 +8,7 @@ import importlib.metadata
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 import uuid
@@ -168,8 +169,11 @@ def validate_vv_baseline(payload: dict[str, Any]) -> list[str]:
         blockers.append("CONTRACT_INVALID")
     for field in ("dependency_snapshot_sha256", "python_executable_sha256", "installed_distribution_snapshot_sha256"):
         value = payload.get(field)
-        if not isinstance(value, str) or len(value) != 64:
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
             blockers.append(f"HASH_INVALID:{field}")
+    for field in ("python_executable", "python_version", "python_architecture"):
+        if not isinstance(payload.get(field), str) or not payload[field].strip():
+            blockers.append(f"RUNTIME_IDENTITY_INVALID:{field}")
     return blockers
 
 
