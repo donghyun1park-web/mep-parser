@@ -197,6 +197,13 @@ def test_case_review_schema_accepts_closed_append_only_review():
     validate(_review(), _schema("case_review.v1.schema.json"))
 
 
+def test_case_review_schema_accepts_initial_review_without_supersedes():
+    payload = _review()
+    payload.pop("supersedes_review_ids")
+
+    validate(payload, _schema("case_review.v1.schema.json"))
+
+
 @pytest.mark.parametrize(
     "mutation",
     (

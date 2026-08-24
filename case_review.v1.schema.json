@@ -4,7 +4,7 @@
   "title": "MEP CFD Studio append-only Case Review",
   "type": "object",
   "additionalProperties": false,
-  "required": ["contract", "schema_version", "created_at", "review_id", "reviewer", "decision", "status", "reason", "target", "supersedes_review_ids", "errors"],
+  "required": ["contract", "schema_version", "created_at", "review_id", "reviewer", "decision", "status", "reason", "target", "errors"],
   "properties": {
     "contract": {"const": "case_review.v1"},
     "schema_version": {"const": 1},
