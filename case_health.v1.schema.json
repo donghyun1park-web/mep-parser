@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mep-cfd-studio.local/schemas/case_health.v1.schema.json",
+  "title": "MEP CFD Studio Case Health",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "schema_version", "created_at", "purpose", "evidence", "checks", "status", "citation_status", "citation_decision_table_version", "citation_decision_table", "errors"],
+  "properties": {
+    "contract": {"const": "case_health.v1"},
+    "schema_version": {"const": 1},
+    "created_at": {"$ref": "#/$defs/timestamp"},
+    "purpose": {"enum": ["screening", "design_review_candidate", "benchmark", "field_validation"]},
+    "evidence": {"$ref": "#/$defs/evidence_link"},
+    "case_identity": {"$ref": "#/$defs/case_identity"},
+    "legacy_case_ref": {"$ref": "#/$defs/legacy_case_ref"},
+    "checks": {"$ref": "#/$defs/checks"},
+    "status": {"enum": ["PASS", "FAIL", "BLOCKED", "NOT_EVALUATED"]},
+    "citation_status": {"enum": ["SCREENING_ONLY", "NOT_EVALUATED", "CITATION_BLOCKED", "DESIGN_CITABLE"]},
+    "citation_decision_table_version": {"const": "citation_decision_table.v1"},
+    "citation_decision_table": {
+      "const": [
+        {"id": "invalid_or_stale_evidence_or_required_review", "citation_status": "CITATION_BLOCKED", "reason_code": "CITATION_EVIDENCE_OR_REVIEW_INVALID"},
+        {"id": "purpose_required_check_fail_or_blocked", "citation_status": "CITATION_BLOCKED", "reason_code": "REQUIRED_CHECK_FAILED_OR_BLOCKED"},
+        {"id": "current_rejected_review_for_review_required_purpose", "citation_status": "CITATION_BLOCKED", "reason_code": "REVIEW_REJECTED"},
+        {"id": "purpose_required_check_not_evaluated", "citation_status": "NOT_EVALUATED", "reason_code": "REQUIRED_CHECK_NOT_EVALUATED"},
+        {"id": "benchmark_purpose", "citation_status": "NOT_EVALUATED", "reason_code": "BENCHMARK_NOT_DESIGN_CITABLE"},
+        {"id": "screening_purpose_or_legacy_case_ref", "citation_status": "SCREENING_ONLY", "reason_code": "SCREENING_ONLY"},
+        {"id": "current_unambiguous_approved_review_and_required_checks_pass", "citation_status": "DESIGN_CITABLE", "reason_code": "DESIGN_CITABLE"},
+        {"id": "review_required_purpose_without_current_approval", "citation_status": "NOT_EVALUATED", "reason_code": "REVIEW_REQUIRED"}
+      ]
+    },
+    "errors": {"type": "array", "items": {"$ref": "#/$defs/error"}}
+  },
+  "allOf": [
+    {
+      "oneOf": [
+        {"required": ["case_identity"], "not": {"required": ["legacy_case_ref"]}},
+        {"required": ["legacy_case_ref"], "not": {"required": ["case_identity"]}}
+      ]
+    },
+    {
+      "if": {"required": ["legacy_case_ref"]},
+      "then": {"properties": {"purpose": {"const": "screening"}, "citation_status": {"not": {"const": "DESIGN_CITABLE"}}}}
+    }
+  ],
+  "$defs": {
+    "timestamp": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$"},
+    "path": {"type": "string", "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^/]+(?:/[^/]+)*$"},
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "artifact_key": {"type": "string", "enum": ["geometry", "surface", "mesh", "run", "result", "thermal_input", "thermal_progress", "numerical_sensitivity", "gci", "benchmark", "field_evidence"]},
+    "evidence_link": {
+      "type": "object", "additionalProperties": false, "required": ["contract", "path", "sha256"],
+      "properties": {"contract": {"const": "case_evidence.v1"}, "path": {"$ref": "#/$defs/path"}, "sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "case_identity": {
+      "type": "object", "additionalProperties": false, "required": ["contract", "path", "sha256"],
+      "properties": {"contract": {"const": "case_identity.v1"}, "path": {"$ref": "#/$defs/path"}, "sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "legacy_case_ref": {
+      "type": "object", "additionalProperties": false,
+      "required": ["case_id", "geometry_path", "geometry_sha256", "run_manifest_path", "run_manifest_sha256"],
+      "properties": {
+        "case_id": {"type": "string", "minLength": 1},
+        "geometry_path": {"$ref": "#/$defs/path"}, "geometry_sha256": {"$ref": "#/$defs/sha256"},
+        "run_manifest_path": {"$ref": "#/$defs/path"}, "run_manifest_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "health_check": {
+      "type": "object", "additionalProperties": false, "required": ["status", "reason_codes", "evidence_refs", "impact", "next_actions"],
+      "properties": {
+        "status": {"enum": ["PASS", "FAIL", "BLOCKED", "NOT_EVALUATED"]},
+        "reason_codes": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "evidence_refs": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/artifact_key"}},
+        "impact": {"type": "string", "minLength": 1},
+        "next_actions": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "checks": {
+      "type": "object", "additionalProperties": false,
+      "required": ["geometry_valid", "bc_reviewed", "mesh_checked", "solver_converged", "numerics_verified", "grid_verified", "benchmark_validated", "field_calibrated", "design_ready"],
+      "properties": {
+        "geometry_valid": {"$ref": "#/$defs/health_check"}, "bc_reviewed": {"$ref": "#/$defs/health_check"},
+        "mesh_checked": {"$ref": "#/$defs/health_check"}, "solver_converged": {"$ref": "#/$defs/health_check"},
+        "numerics_verified": {"$ref": "#/$defs/health_check"}, "grid_verified": {"$ref": "#/$defs/health_check"},
+        "benchmark_validated": {"$ref": "#/$defs/health_check"}, "field_calibrated": {"$ref": "#/$defs/health_check"},
+        "design_ready": {"$ref": "#/$defs/health_check"}
+      }
+    },
+    "error": {
+      "type": "object", "additionalProperties": false, "required": ["code"],
+      "properties": {"code": {"type": "string", "minLength": 1}, "detail": {"type": "string", "minLength": 1}, "evidence_ref": {"$ref": "#/$defs/artifact_key"}}
+    }
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mep-cfd-studio.local/schemas/case_review.v1.schema.json",
+  "title": "MEP CFD Studio append-only Case Review",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "schema_version", "created_at", "review_id", "reviewer", "decision", "status", "reason", "target", "supersedes_review_ids", "errors"],
+  "properties": {
+    "contract": {"const": "case_review.v1"},
+    "schema_version": {"const": 1},
+    "created_at": {"$ref": "#/$defs/timestamp"},
+    "review_id": {"type": "string", "minLength": 1},
+    "reviewer": {"type": "string", "minLength": 1},
+    "decision": {"enum": ["APPROVED", "REJECTED"]},
+    "status": {"enum": ["APPROVED", "REJECTED"]},
+    "reason": {"type": "string", "minLength": 1},
+    "target": {"$ref": "#/$defs/target"},
+    "supersedes_review_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "errors": {"type": "array", "items": {"$ref": "#/$defs/error"}}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"decision": {"const": "APPROVED"}}, "required": ["decision"]},
+      "then": {"properties": {"status": {"const": "APPROVED"}}}
+    },
+    {
+      "if": {"properties": {"decision": {"const": "REJECTED"}}, "required": ["decision"]},
+      "then": {"properties": {"status": {"const": "REJECTED"}}}
+    }
+  ],
+  "$defs": {
+    "timestamp": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$"},
+    "path": {"type": "string", "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^/]+(?:/[^/]+)*$"},
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "target": {
+      "type": "object", "additionalProperties": false, "required": ["contract", "path", "sha256"],
+      "properties": {"contract": {"const": "case_evidence.v1"}, "path": {"$ref": "#/$defs/path"}, "sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "error": {
+      "type": "object", "additionalProperties": false, "required": ["code"],
+      "properties": {"code": {"type": "string", "minLength": 1}, "detail": {"type": "string", "minLength": 1}, "evidence_ref": {"type": "string", "minLength": 1}}
+    }
+  }
+}

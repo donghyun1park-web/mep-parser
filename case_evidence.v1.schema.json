@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mep-cfd-studio.local/schemas/case_evidence.v1.schema.json",
+  "title": "MEP CFD Studio Case Evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "schema_version", "created_at", "purpose", "checks", "artifact_refs", "status", "errors"],
+  "properties": {
+    "contract": {"const": "case_evidence.v1"},
+    "schema_version": {"const": 1},
+    "created_at": {"$ref": "#/$defs/timestamp"},
+    "purpose": {"enum": ["screening", "design_review_candidate", "benchmark", "field_validation"]},
+    "case_identity": {"$ref": "#/$defs/case_identity"},
+    "legacy_case_ref": {"$ref": "#/$defs/legacy_case_ref"},
+    "checks": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "prefixItems": [
+        {"$ref": "#/$defs/geometry_valid_check"}, {"$ref": "#/$defs/bc_reviewed_check"},
+        {"$ref": "#/$defs/mesh_checked_check"}, {"$ref": "#/$defs/solver_converged_check"},
+        {"$ref": "#/$defs/numerics_verified_check"}, {"$ref": "#/$defs/grid_verified_check"},
+        {"$ref": "#/$defs/benchmark_validated_check"}, {"$ref": "#/$defs/field_calibrated_check"}
+      ],
+      "items": false
+    },
+    "artifact_refs": {"$ref": "#/$defs/artifact_refs"},
+    "status": {"enum": ["PASS", "FAIL", "BLOCKED", "NOT_EVALUATED"]},
+    "errors": {"type": "array", "items": {"$ref": "#/$defs/error"}}
+  },
+  "allOf": [
+    {
+      "oneOf": [
+        {"required": ["case_identity"], "not": {"required": ["legacy_case_ref"]}},
+        {"required": ["legacy_case_ref"], "not": {"required": ["case_identity"]}}
+      ]
+    },
+    {
+      "if": {"required": ["legacy_case_ref"]},
+      "then": {"properties": {"purpose": {"const": "screening"}}}
+    }
+  ],
+  "$defs": {
+    "timestamp": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$"},
+    "path": {"type": "string", "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^/]+(?:/[^/]+)*$"},
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "artifact_key": {"type": "string", "enum": ["geometry", "surface", "mesh", "run", "result", "thermal_input", "thermal_progress", "numerical_sensitivity", "gci", "benchmark", "field_evidence"]},
+    "link": {
+      "type": "object", "additionalProperties": false, "required": ["path", "sha256"],
+      "properties": {"path": {"$ref": "#/$defs/path"}, "sha256": {"$ref": "#/$defs/sha256"}, "contract": {"type": "string", "minLength": 1}}
+    },
+    "case_identity": {
+      "type": "object", "additionalProperties": false, "required": ["contract", "path", "sha256"],
+      "properties": {"contract": {"const": "case_identity.v1"}, "path": {"$ref": "#/$defs/path"}, "sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "legacy_case_ref": {
+      "type": "object", "additionalProperties": false,
+      "required": ["case_id", "geometry_path", "geometry_sha256", "run_manifest_path", "run_manifest_sha256"],
+      "properties": {
+        "case_id": {"type": "string", "minLength": 1},
+        "geometry_path": {"$ref": "#/$defs/path"}, "geometry_sha256": {"$ref": "#/$defs/sha256"},
+        "run_manifest_path": {"$ref": "#/$defs/path"}, "run_manifest_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "check": {
+      "type": "object", "additionalProperties": false, "required": ["id", "status", "reason_codes", "evidence_refs"],
+      "properties": {
+        "id": {"type": "string"}, "status": {"enum": ["PASS", "FAIL", "BLOCKED", "NOT_EVALUATED"]},
+        "reason_codes": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "evidence_refs": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/artifact_key"}}
+      }
+    },
+    "geometry_valid_check": {"allOf": [{"$ref": "#/$defs/check"}, {"properties": {"id": {"const": "geometry_valid"}}}]},
+    "bc_reviewed_check": {"allOf": [{"$ref": "#/$defs/check"}, {"properties": {"id": {"const": "bc_reviewed"}}}]},
+    "mesh_checked_check": {"allOf": [{"$ref": "#/$defs/check"}, {"properties": {"id": {"const": "mesh_checked"}}}]},
+    "solver_converged_check": {"allOf": [{"$ref": "#/$defs/check"}, {"properties": {"id": {"const": "solver_converged"}}}]},
+    "numerics_verified_check": {"allOf": [{"$ref": "#/$defs/check"}, {"properties": {"id": {"const": "numerics_verified"}}}]},
+    "grid_verified_check": {"allOf": [{"$ref": "#/$defs/check"}, {"properties": {"id": {"const": "grid_verified"}}}]},
+    "benchmark_validated_check": {"allOf": [{"$ref": "#/$defs/check"}, {"properties": {"id": {"const": "benchmark_validated"}}}]},
+    "field_calibrated_check": {"allOf": [{"$ref": "#/$defs/check"}, {"properties": {"id": {"const": "field_calibrated"}}}]},
+    "artifact_refs": {
+      "type": "object", "additionalProperties": false, "required": ["geometry", "surface", "mesh", "run", "result"],
+      "properties": {
+        "geometry": {"$ref": "#/$defs/link"}, "surface": {"$ref": "#/$defs/link"}, "mesh": {"$ref": "#/$defs/link"},
+        "run": {"$ref": "#/$defs/link"}, "result": {"$ref": "#/$defs/link"}, "thermal_input": {"$ref": "#/$defs/link"},
+        "thermal_progress": {"$ref": "#/$defs/link"}, "numerical_sensitivity": {"$ref": "#/$defs/link"},
+        "gci": {"$ref": "#/$defs/link"}, "benchmark": {"$ref": "#/$defs/link"}, "field_evidence": {"$ref": "#/$defs/link"}
+      }
+    },
+    "error": {
+      "type": "object", "additionalProperties": false, "required": ["code"],
+      "properties": {"code": {"type": "string", "minLength": 1}, "detail": {"type": "string", "minLength": 1}, "evidence_ref": {"$ref": "#/$defs/artifact_key"}}
+    }
+  }
+}
