@@ -1,6 +1,8 @@
 import copy
+from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
+import threading
 from unittest import mock
 
 from jsonschema import Draft202012Validator
@@ -344,3 +346,76 @@ def test_final_health_projection_rechecks_new_review_fork(tmp_path):
 
     assert health["citation_status"] == "CITATION_BLOCKED"
     assert "REVIEW_HISTORY_AMBIGUOUS" in _codes(health)
+
+
+def test_health_publish_serializes_cooperating_review_writer(tmp_path):
+    paths, _ = _future_evidence(tmp_path)
+    _approve(paths, "APPROVED")
+    real_replace = cfd_case_health.os.replace
+    real_history = cfd_review._history
+    health_paused = threading.Event()
+    release_health = threading.Event()
+    writer_entered_history = threading.Event()
+    paused_once = False
+
+    def pause_before_health_replace(source, destination):
+        nonlocal paused_once
+        if Path(destination).name == "case_health.v1.json" and not paused_once:
+            paused_once = True
+            health_paused.set()
+            assert release_health.wait(5), "health publish release timed out"
+        return real_replace(source, destination)
+
+    def observe_history(*args, **kwargs):
+        if threading.current_thread().name.startswith("review-writer"):
+            writer_entered_history.set()
+        return real_history(*args, **kwargs)
+
+    with mock.patch.object(
+        cfd_case_health.cfd_evidence, "validate_case_evidence", return_value=[]
+    ), mock.patch.object(
+        cfd_case_health.os, "replace", side_effect=pause_before_health_replace
+    ), mock.patch.object(
+        cfd_review, "_history", side_effect=observe_history
+    ), ThreadPoolExecutor(max_workers=1, thread_name_prefix="health-publisher") as health_pool, ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="review-writer"
+    ) as writer_pool:
+        health_future = health_pool.submit(
+            cfd_case_health.build_case_health,
+            paths["evidence"],
+            projects_root=paths["root"],
+        )
+        assert health_paused.wait(5), "health did not reach final publish"
+        writer_future = writer_pool.submit(_approve, paths, "REJECTED")
+        writer_was_blocked = not writer_entered_history.wait(0.25)
+        release_health.set()
+        first_health = health_future.result(timeout=5)
+        writer_future.result(timeout=5)
+
+    assert writer_was_blocked
+    assert first_health["citation_status"] == "DESIGN_CITABLE"
+    with mock.patch.object(
+        cfd_case_health.cfd_evidence, "validate_case_evidence", return_value=[]
+    ):
+        next_health = cfd_case_health.build_case_health(
+            paths["evidence"], projects_root=paths["root"]
+        )
+    assert next_health["citation_status"] == "CITATION_BLOCKED"
+    assert "REVIEW_HISTORY_AMBIGUOUS" in _codes(next_health)
+
+
+def test_health_publish_failure_cleans_staging_and_releases_review_lock(tmp_path):
+    paths, _ = _future_evidence(tmp_path)
+    _approve(paths, "APPROVED")
+    with mock.patch.object(
+        cfd_case_health.cfd_evidence, "validate_case_evidence", return_value=[]
+    ), mock.patch.object(
+        cfd_case_health.os, "fsync", side_effect=OSError("disk")
+    ), pytest.raises(OSError, match="disk"):
+        cfd_case_health.build_case_health(
+            paths["evidence"], projects_root=paths["root"]
+        )
+
+    assert not list(paths["case"].glob(".case_health.v1.json.*.tmp"))
+    created = _approve(paths, "REJECTED")
+    assert created["decision"] == "REJECTED"

@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
+from contextlib import nullcontext
 from pathlib import Path
 import re
 import time
@@ -16,6 +17,7 @@ import cfd_mesh
 import cfd_occ
 import cfd_power
 import cfd_result_gate
+import cfd_review
 import field_acceptance
 from geometry_v2 import migrate_geometry, validate_for_body_fitted
 
@@ -54,8 +56,26 @@ def _sha256(path):
     return digest.hexdigest()
 
 
-def _current_health_snapshot(root, solver_case):
-    """Build and validate current evidence/health; never consult result_trust.v1."""
+def _review_lock_for_case(root, solver_case):
+    root = Path(root).expanduser().resolve()
+    if not str(solver_case or "").strip():
+        return nullcontext()
+    case = Path(solver_case).expanduser()
+    if not case.is_absolute():
+        case = root / case
+    try:
+        case.relative_to(root)
+    except ValueError:
+        return nullcontext()
+    if not case.is_dir():
+        return nullcontext()
+    return cfd_review.review_state_lock(
+        case / "case_evidence.v1.json", projects_root=root
+    )
+
+
+def _current_health_snapshot_locked(root, solver_case):
+    """Build and validate current evidence/health; caller holds review lock."""
     root = Path(root).expanduser().resolve()
     case = Path(solver_case).expanduser()
     if not case.is_absolute():
@@ -137,6 +157,11 @@ def _current_health_snapshot(root, solver_case):
             "citation_blockers": ["CASE_EVIDENCE_NOT_FOUND"],
             "review_summary": {"status": "INVALID"},
         }
+
+
+def _current_health_snapshot(root, solver_case):
+    with _review_lock_for_case(root, solver_case):
+        return _current_health_snapshot_locked(root, solver_case)
 
 
 def review_terminal_job_citation(root, manifest):
@@ -465,8 +490,9 @@ def run_job(root, job_id, callback=None):
     if existing is None:
         return {"ok": False, "error": "현장 자동 해석 작업을 찾을 수 없습니다."}
     if is_terminal_status(existing.get("status")):
-        reviewed = review_terminal_job_citation(root, existing)
-        _publish(path, reviewed)
+        with _review_lock_for_case(root, existing.get("result_case")):
+            reviewed = review_terminal_job_citation(root, existing)
+            _publish(path, reviewed)
         return {
             "ok": True, "job": job_id, "manifest": reviewed,
             "case": Path(str(reviewed.get("result_case") or "")).name,

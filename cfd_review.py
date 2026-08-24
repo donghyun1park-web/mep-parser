@@ -23,6 +23,7 @@ REVIEW_ID_PATTERN = re.compile(r"^review-[0-9a-f]{32}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _THREAD_LOCKS: dict[str, threading.RLock] = {}
 _THREAD_LOCKS_GUARD = threading.Lock()
+_THREAD_LOCK_DEPTHS = threading.local()
 
 
 def _now() -> str:
@@ -227,6 +228,17 @@ def _review_directory_lock(directory: Path):
     with _THREAD_LOCKS_GUARD:
         thread_lock = _THREAD_LOCKS.setdefault(key, threading.RLock())
     with thread_lock:
+        depths = getattr(_THREAD_LOCK_DEPTHS, "values", None)
+        if depths is None:
+            depths = {}
+            _THREAD_LOCK_DEPTHS.values = depths
+        if depths.get(key, 0):
+            depths[key] += 1
+            try:
+                yield
+            finally:
+                depths[key] -= 1
+            return
         lock_path = directory / ".case_review.lock"
         with lock_path.open("a+b") as stream:
             stream.seek(0, os.SEEK_END)
@@ -237,18 +249,43 @@ def _review_directory_lock(directory: Path):
             if os.name == "nt":
                 import msvcrt
                 msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+                depths[key] = 1
                 try:
                     yield
                 finally:
+                    depths.pop(key, None)
                     stream.seek(0)
                     msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
             else:
                 import fcntl
                 fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+                depths[key] = 1
                 try:
                     yield
                 finally:
+                    depths.pop(key, None)
                     fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def review_state_lock(evidence_path: Path, *, projects_root: Path):
+    """Hold the canonical review-directory lock, reentrantly on one thread."""
+    root = _projects_root(projects_root)
+    raw = Path(evidence_path).expanduser()
+    if not raw.is_absolute():
+        raw = root / raw
+    try:
+        relative = raw.absolute().relative_to(root.absolute())
+    except ValueError as exc:
+        raise ValueError("evidence path must be beneath projects_root") from exc
+    if any(part in {".", ".."} for part in relative.parts):
+        raise ValueError("evidence path must be beneath projects_root")
+    parent = _safe_existing(raw.parent, root, directory=True)
+    if parent is None or _is_reparse(raw):
+        raise ValueError("evidence path has an unsafe parent")
+    directory = _canonical_review_directory(parent / raw.name, root, None)
+    with _review_directory_lock(directory):
+        yield directory
 
 
 def _direct_review_paths(directory: Path) -> list[Path]:
@@ -418,7 +455,9 @@ def create_review(
         raise ValueError("REVIEW_TARGET_CHANGED")
     directory = _canonical_review_directory(target, root, output_dir)
 
-    with _review_directory_lock(directory):
+    with review_state_lock(target, projects_root=root) as locked_directory:
+        if locked_directory != directory:
+            raise ValueError("output_dir must be the canonical evidence _reviews directory")
         try:
             locked_root, locked_target, _, locked_hash, locked_relative = resolve_evidence_target(
                 target, projects_root=root

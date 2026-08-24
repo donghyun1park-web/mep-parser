@@ -368,3 +368,17 @@ def test_validate_review_rejects_hash_matching_schema_invalid_current_target(tmp
     errors = cfd_review.validate_review(review_path, projects_root=paths["root"])
 
     assert "REVIEW_TARGET_SCHEMA_INVALID" in {item["code"] for item in errors}
+
+
+def test_shared_review_state_lock_is_reentrant_on_same_thread(tmp_path):
+    paths = _future_evidence(tmp_path)
+
+    with cfd_review.review_state_lock(
+        paths["evidence"], projects_root=paths["root"]
+    ):
+        with cfd_review.review_state_lock(
+            paths["evidence"], projects_root=paths["root"]
+        ):
+            review = _create(paths)
+
+    assert review["decision"] == "APPROVED"

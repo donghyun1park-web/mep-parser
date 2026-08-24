@@ -239,30 +239,36 @@ def build_case_health(evidence_path: Path, *, projects_root: Path) -> dict:
     _assert_catalog_contract(schema)
     evidence_path = Path(evidence_path)
     projects_root = Path(projects_root)
-    for _ in range(4):
-        created_at = _now()
-        health, root, evidence_file = _project_case_health(
-            evidence_path,
-            projects_root=projects_root,
-            created_at=created_at,
-            validator=validator,
-        )
-        output = evidence_file.parent / "case_health.v1.json"
-        if output.exists() and output.is_symlink():
-            raise ValueError("case health output is unsafe")
-
-        def refresh():
-            verified, verified_root, verified_evidence = _project_case_health(
+    root, evidence_file, _, _, _ = cfd_review.resolve_evidence_target(
+        evidence_path, projects_root=projects_root
+    )
+    with cfd_review.review_state_lock(evidence_file, projects_root=root):
+        for _ in range(4):
+            created_at = _now()
+            health, projected_root, projected_evidence = _project_case_health(
                 evidence_path,
                 projects_root=projects_root,
                 created_at=created_at,
                 validator=validator,
             )
-            if verified_root != root or verified_evidence != evidence_file:
+            if projected_root != root or projected_evidence != evidence_file:
                 raise RuntimeError("CASE_HEALTH_CHANGED_DURING_PUBLISH")
-            return verified
+            output = evidence_file.parent / "case_health.v1.json"
+            if output.exists() and output.is_symlink():
+                raise ValueError("case health output is unsafe")
 
-        published = _atomic_verified_json(output, health, refresh)
-        if published is not None:
-            return published
+            def refresh():
+                verified, verified_root, verified_evidence = _project_case_health(
+                    evidence_path,
+                    projects_root=projects_root,
+                    created_at=created_at,
+                    validator=validator,
+                )
+                if verified_root != root or verified_evidence != evidence_file:
+                    raise RuntimeError("CASE_HEALTH_CHANGED_DURING_PUBLISH")
+                return verified
+
+            published = _atomic_verified_json(output, health, refresh)
+            if published is not None:
+                return published
     raise RuntimeError("CASE_HEALTH_CHANGED_DURING_PUBLISH")

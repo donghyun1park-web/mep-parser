@@ -2,12 +2,16 @@ import json
 from pathlib import Path
 import shutil
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
 import cfd_case_health
 import cfd_evidence
+import cfd_review
 import field_pipeline_job
+from test_cfd_evidence import make_complete_case
 
 
 class FieldPipelineJobTests(unittest.TestCase):
@@ -398,6 +402,98 @@ class FieldPipelineJobTests(unittest.TestCase):
 
         self.assertEqual(snapshot["citation_status"], "CITATION_BLOCKED")
         self.assertNotIn("case_health_sha256", snapshot)
+
+    def test_terminal_manifest_publish_serializes_cooperating_review_writer(self):
+        paths = make_complete_case(Path(self.tmp.name) / "serialized", with_gci=True)
+        evidence = cfd_evidence.build_case_evidence(
+            paths["case"], projects_root=paths["root"]
+        )
+        evidence.pop("legacy_case_ref")
+        evidence["case_identity"] = {
+            "contract": "case_identity.v1",
+            "path": evidence["artifact_refs"]["geometry"]["path"],
+            "sha256": evidence["artifact_refs"]["geometry"]["sha256"],
+        }
+        evidence["purpose"] = "design_review_candidate"
+        evidence["status"] = "PASS"
+        evidence["errors"] = []
+        for check in evidence["checks"]:
+            check.update(status="PASS", reason_codes=[], evidence_refs=[])
+        paths["evidence"].write_text(
+            json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        approved = cfd_review.create_review(
+            paths["evidence"], projects_root=paths["root"],
+            expected_target_sha256=cfd_review.sha256_file(paths["evidence"]),
+            reviewer_id="reviewer", decision="APPROVED", reason="approved",
+        )
+        self.assertEqual(approved["decision"], "APPROVED")
+
+        job_id = "field-" + "a" * 12
+        manifest_path = field_pipeline_job._job_path(paths["root"], job_id)
+        manifest_path.parent.mkdir(parents=True)
+        field_pipeline_job.cfd_gci_job._atomic_json(manifest_path, {
+            "schema_version": 1, "contract": "field_pipeline_job.v1",
+            "engine": "body_fitted_field_pipeline", "created_at": "old",
+            "updated_at": "old", "job": job_id,
+            "status": "analysis_complete_not_citable", "stage": "complete",
+            "attempts": 1, "error": "", "input": {}, "level": {},
+            "result_case": str(paths["case"]),
+        })
+        real_publish = field_pipeline_job._publish
+        real_history = cfd_review._history
+        manifest_paused = threading.Event()
+        release_manifest = threading.Event()
+        writer_entered_history = threading.Event()
+        paused_once = False
+
+        def pause_manifest_publish(path, manifest, callback=None, message=""):
+            nonlocal paused_once
+            if Path(path) == manifest_path and not paused_once:
+                paused_once = True
+                manifest_paused.set()
+                assert release_manifest.wait(5), "manifest publish release timed out"
+            return real_publish(path, manifest, callback, message)
+
+        def observe_history(*args, **kwargs):
+            if threading.current_thread().name.startswith("field-review-writer"):
+                writer_entered_history.set()
+            return real_history(*args, **kwargs)
+
+        def reject_current():
+            return cfd_review.create_review(
+                paths["evidence"], projects_root=paths["root"],
+                expected_target_sha256=cfd_review.sha256_file(paths["evidence"]),
+                reviewer_id="reviewer-2", decision="REJECTED", reason="rejected",
+            )
+
+        with mock.patch.object(
+            field_pipeline_job.cfd_evidence, "build_case_evidence", return_value=evidence
+        ), mock.patch.object(
+            field_pipeline_job.cfd_evidence, "validate_case_evidence", return_value=[]
+        ), mock.patch.object(
+            field_pipeline_job, "_publish", side_effect=pause_manifest_publish
+        ), mock.patch.object(
+            cfd_review, "_history", side_effect=observe_history
+        ), ThreadPoolExecutor(max_workers=1, thread_name_prefix="field-refresh") as field_pool, ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="field-review-writer"
+        ) as writer_pool:
+            field_future = field_pool.submit(
+                field_pipeline_job.run_job, paths["root"], job_id
+            )
+            self.assertTrue(manifest_paused.wait(5), "field did not reach manifest publish")
+            writer_future = writer_pool.submit(reject_current)
+            writer_was_blocked = not writer_entered_history.wait(0.25)
+            release_manifest.set()
+            first = field_future.result(timeout=5)
+            writer_future.result(timeout=5)
+            second = field_pipeline_job.run_job(paths["root"], job_id)
+
+        self.assertTrue(writer_was_blocked)
+        self.assertEqual(first["manifest"]["status"], "complete")
+        self.assertEqual(second["manifest"]["status"], "analysis_complete_not_citable")
+        self.assertEqual(second["manifest"]["citation_status"], "CITATION_BLOCKED")
 
     def test_old_terminal_fixture_without_health_fields_still_loads_and_refreshes(self):
         created = field_pipeline_job.create_job(self.root, self.geometry)
