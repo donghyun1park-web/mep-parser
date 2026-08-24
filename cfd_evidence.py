@@ -553,7 +553,7 @@ def _gci(case: Path, root: Path, gci_root: Path | None, explicit: bool,
             matches.append(path)
         elif selects_case:
             stale_for_case = True
-    if invalid:
+    if invalid and explicit:
         _error(errors, "GCI_SCHEMA_INVALID", "GCI authority contains invalid evidence", "gci")
         return "BLOCKED", None, ["GCI_SCHEMA_INVALID"]
     if stale_for_case and explicit:
@@ -582,6 +582,15 @@ def _field(path: Path | None, root: Path, selected: dict[str, Path | None],
         return "BLOCKED", ["FIELD_EVIDENCE_INVALID"]
     manifest = _read_json(safe)
     _track(source_paths, safe)
+    records = (
+        manifest.get("artifacts")
+        if isinstance(manifest, dict)
+        and isinstance(manifest.get("artifacts"), dict)
+        else {}
+    )
+    for record in records.values():
+        if isinstance(record, dict):
+            _track(source_paths, _resolve_ref(record.get("path"), root))
     validation = field_acceptance.validate_evidence(safe, projects_root=root)
     if not _schema_ok("field", manifest) or validation.get("ok") is not True:
         _error(errors, "FIELD_EVIDENCE_INVALID", "field evidence failed independent validation", "field_evidence")
@@ -590,7 +599,6 @@ def _field(path: Path | None, root: Path, selected: dict[str, Path | None],
         "geometry": "geometry", "surface_manifest": "surface",
         "mesh_manifest": "mesh", "run_manifest": "run", "result_manifest": "result",
     }
-    records = manifest.get("artifacts") if isinstance(manifest.get("artifacts"), dict) else {}
     for raw_key, selected_key in artifact_map.items():
         record = records.get(raw_key) if isinstance(records.get(raw_key), dict) else {}
         resolved = _resolve_ref(record.get("path"), root)

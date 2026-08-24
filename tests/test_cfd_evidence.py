@@ -460,6 +460,73 @@ def make_complete_case(base: Path, *, with_gci: bool = False) -> dict[str, Path]
     }
 
 
+def make_valid_field_evidence(paths: dict[str, Path]) -> tuple[Path, Path]:
+    import ezdxf
+
+    source = paths["root"] / "imports" / "actual-site-unique.dxf"
+    document = ezdxf.new("R2010")
+    document.units = ezdxf.units.MM
+    document.layers.add("ACTUAL-SITE")
+    document.modelspace().add_lwpolyline(
+        [(0, 0), (1000, 0), (1000, 1000), (0, 1000), (0, 0)],
+        dxfattribs={"layer": "ACTUAL-SITE"},
+    )
+    document.saveas(source)
+
+    geometry = _read_json(paths["geometry"])
+    geometry["source"] = str(source.resolve())
+    _write_json(paths["geometry"], geometry)
+
+    surface = _read_json(paths["surface"])
+    surface["source"]["geometry_path"] = str(paths["geometry"].resolve())
+    surface["source"]["geometry_sha256"] = _sha256(paths["geometry"])
+    _write_json(paths["surface"], surface)
+    mesh_surface = paths["mesh"].parent / "surface_manifest.json"
+    solver_surface = paths["case"] / "surface_manifest.json"
+    _copy(paths["surface"], mesh_surface)
+    _copy(paths["surface"], solver_surface)
+
+    mesh_input = _read_json(paths["mesh_input"])
+    mesh_input["surface_manifest_sha256"] = _sha256(mesh_surface)
+    _write_json(paths["mesh_input"], mesh_input)
+    mesh = _read_json(paths["mesh"])
+    mesh["input"]["surface_manifest_sha256"] = _sha256(mesh_surface)
+    mesh["input"]["mesh_input_sha256"] = _sha256(paths["mesh_input"])
+    _write_json(paths["mesh"], mesh)
+    _copy(paths["mesh_input"], paths["case"] / "mesh_input.json")
+    _copy(paths["mesh"], paths["case"] / "mesh_manifest.json")
+
+    thermal = _read_json(paths["thermal"])
+    thermal["mesh_manifest_sha256"] = _sha256(paths["case"] / "mesh_manifest.json")
+    _write_json(paths["thermal"], thermal)
+    run = _read_json(paths["run"])
+    run["input"]["thermal_input_sha256"] = _sha256(paths["thermal"])
+    run["input"]["numerical_provenance"]["thermal_input_sha256"] = _sha256(
+        paths["thermal"]
+    )
+    _write_json(paths["run"], run)
+    result = _read_json(paths["result"])
+    result["mesh_manifest_sha256"] = _sha256(paths["case"] / "mesh_manifest.json")
+    result["run_manifest_sha256"] = _sha256(paths["run"])
+    result["thermal_input_sha256"] = _sha256(paths["thermal"])
+    _write_json(paths["result"], result)
+    _write_json(
+        paths["gci_root"] / "study-a" / "grid_convergence.json",
+        _gci_manifest(paths["case"]),
+    )
+
+    evidence = paths["root"] / "_release_evidence" / "field_dxf" / "actual-site.json"
+    built = cfd_evidence.field_acceptance.build_field_acceptance(
+        source, paths["geometry"], paths["surface"].parent,
+        paths["mesh"].parent, paths["case"], paths["root"], True, evidence,
+    )
+    assert built["ok"], built
+    assert cfd_evidence.field_acceptance.validate_evidence(
+        evidence, projects_root=paths["root"]
+    )["ok"] is True
+    return evidence, source
+
+
 def _check(evidence: dict, check_id: str) -> dict:
     return next(item for item in evidence["checks"] if item["id"] == check_id)
 
@@ -776,6 +843,36 @@ def test_default_gci_authority_with_only_other_case_is_not_evaluated(tmp_path):
     assert "GCI_EVIDENCE_STALE" not in _codes(evidence)
 
 
+def test_default_gci_authority_with_only_malformed_candidate_is_not_evaluated(tmp_path):
+    paths = make_complete_case(tmp_path)
+    _write_json(
+        paths["gci_root"] / "unrelated" / "grid_convergence.json",
+        {"contract": "grid_convergence.v3", "status": "PASS"},
+    )
+
+    evidence = cfd_evidence.build_case_evidence(
+        paths["case"], projects_root=paths["root"]
+    )
+
+    assert _check(evidence, "grid_verified")["status"] == "NOT_EVALUATED"
+    assert "GCI_SCHEMA_INVALID" not in _codes(evidence)
+
+
+def test_default_gci_uses_one_current_match_despite_unrelated_malformed_candidate(tmp_path):
+    paths = make_complete_case(tmp_path, with_gci=True)
+    _write_json(
+        paths["gci_root"] / "unrelated" / "grid_convergence.json",
+        {"contract": "grid_convergence.v3", "status": "PASS"},
+    )
+
+    evidence = cfd_evidence.build_case_evidence(
+        paths["case"], projects_root=paths["root"]
+    )
+
+    assert _check(evidence, "grid_verified")["status"] == "PASS"
+    assert "GCI_SCHEMA_INVALID" not in _codes(evidence)
+
+
 def test_supplied_gci_root_with_benchmark_shaped_manifest_is_blocked(tmp_path):
     paths = make_complete_case(tmp_path)
     _write_json(paths["gci_root"] / "copied" / "grid_convergence.json", {
@@ -1085,3 +1182,17 @@ def test_output_cannot_overwrite_rejected_geometry_candidate(tmp_path):
         )
 
     assert renamed.read_bytes() == original
+
+
+def test_output_cannot_overwrite_valid_field_evidence_source_dxf(tmp_path):
+    paths = make_complete_case(tmp_path, with_gci=True)
+    field_evidence, source_dxf = make_valid_field_evidence(paths)
+    original = source_dxf.read_bytes()
+
+    with pytest.raises(ValueError, match="source artifact"):
+        cfd_evidence.build_case_evidence(
+            paths["case"], projects_root=paths["root"],
+            field_evidence_path=field_evidence, output_path=source_dxf,
+        )
+
+    assert source_dxf.read_bytes() == original
