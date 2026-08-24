@@ -1222,3 +1222,25 @@ def test_output_protects_legacy_field_source_path_spelling(tmp_path, path_spelli
         )
 
     assert source_dxf.read_bytes() == original
+
+
+def test_output_protects_truthy_non_string_legacy_field_source_path(tmp_path):
+    paths = make_complete_case(tmp_path, with_gci=True)
+    field_evidence, source_dxf = make_valid_field_evidence(paths)
+    coerced_source = paths["root"] / "123"
+    _copy(source_dxf, coerced_source)
+    manifest = _read_json(field_evidence)
+    manifest["artifacts"]["source_dxf"]["path"] = 123
+    _write_json(field_evidence, manifest)
+    assert cfd_evidence.field_acceptance.validate_evidence(
+        field_evidence, projects_root=paths["root"]
+    )["ok"] is False
+    original = coerced_source.read_bytes()
+
+    with pytest.raises(ValueError, match="source artifact"):
+        cfd_evidence.build_case_evidence(
+            paths["case"], projects_root=paths["root"],
+            field_evidence_path=field_evidence, output_path=coerced_source,
+        )
+
+    assert coerced_source.read_bytes() == original

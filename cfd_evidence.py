@@ -156,9 +156,7 @@ def _resolve_ref(value: Any, root: Path) -> Path | None:
 
 def _resolve_field_record_for_tracking(value: Any, root: Path) -> Path | None:
     """Mirror legacy field path spelling only to protect contained read sources."""
-    if not isinstance(value, str) or not value:
-        return None
-    raw = Path(value)
+    raw = Path(str(value or ""))
     candidate = raw if raw.is_absolute() else root / raw
     return _safe_existing(candidate, root)
 
