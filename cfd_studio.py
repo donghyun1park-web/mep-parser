@@ -66,6 +66,10 @@ ROOT = os.path.join(HERE, "cfd_projects")   # main()에서 확정
 
 _SAFE_NAME = re.compile(r"^[\w가-힣.\- ]+$")
 MAX_DXF_UPLOAD = 100 * 1024 * 1024
+CASE_REVIEW_MAX_BODY_BYTES = 64 * 1024
+CASE_REVIEW_MAX_REVIEWER_ID_CHARS = 128
+CASE_REVIEW_MAX_REASON_CHARS = 4096
+CASE_REVIEW_MAX_SUPERSEDES = 256
 
 
 # ── 케이스 스캔 ───────────────────────────────────────────────────────────────
@@ -2516,7 +2520,7 @@ def _do_run(name, case_dir, act):
     if r["ok"]:
         act["step"] = "리포트 생성"
         try:
-            cfd_report.generate_report(case_dir)
+            cfd_report.generate_report(case_dir, projects_root=ROOT)
         except Exception as e:
             err = f"리포트 생성 실패: {e}"
     return (r["ok"] and not err), err
@@ -3554,9 +3558,14 @@ class StudioHandler(BaseHTTPRequestHandler):
                 return self._handle_import_dxf(u)
             if path == "/api/case-review":
                 try:
-                    ln = int(self.headers.get("Content-Length") or 0)
-                    body = self.rfile.read(ln).decode("utf-8") if ln else "{}"
-                    p = json.loads(body or "{}")
+                    raw_length = self.headers.get("Content-Length")
+                    if raw_length is None:
+                        raise ValueError("missing Content-Length")
+                    ln = int(raw_length)
+                    if ln <= 0 or ln > CASE_REVIEW_MAX_BODY_BYTES:
+                        raise ValueError("invalid Content-Length")
+                    body = self.rfile.read(ln).decode("utf-8")
+                    p = json.loads(body)
                 except (TypeError, ValueError, UnicodeError, json.JSONDecodeError):
                     return self._json({
                         "ok": False, "code": "INVALID_REQUEST_BODY"
@@ -3712,13 +3721,20 @@ class StudioHandler(BaseHTTPRequestHandler):
             and ".." not in case_name
             and isinstance(reviewer_id, str)
             and bool(reviewer_id.strip())
+            and len(reviewer_id) <= CASE_REVIEW_MAX_REVIEWER_ID_CHARS
             and decision in {"APPROVED", "REJECTED"}
             and isinstance(reason, str)
             and bool(reason.strip())
+            and len(reason) <= CASE_REVIEW_MAX_REASON_CHARS
             and isinstance(target_sha256, str)
             and bool(cfd_review.SHA256_PATTERN.fullmatch(target_sha256))
             and isinstance(supersedes, list)
-            and all(isinstance(item, str) for item in supersedes)
+            and len(supersedes) <= CASE_REVIEW_MAX_SUPERSEDES
+            and all(
+                isinstance(item, str)
+                and bool(cfd_review.REVIEW_ID_PATTERN.fullmatch(item))
+                for item in supersedes
+            )
             and len(supersedes) == len(set(supersedes))
         )
         if not valid_shape:

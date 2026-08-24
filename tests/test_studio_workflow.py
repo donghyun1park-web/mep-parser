@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 import hashlib
+import http.client
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -9,6 +10,7 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 from unittest import mock
 
 import cfd_studio
@@ -52,6 +54,25 @@ def _request_json(base, path, *, payload=None, raw=None, headers=None):
         except json.JSONDecodeError:
             payload = {"raw": body}
         return exc.code, payload, dict(exc.headers)
+
+
+def _raw_review_request(base, content_length, body=b""):
+    """Send an exact Content-Length without urllib normalising it."""
+    endpoint = urlsplit(base)
+    connection = http.client.HTTPConnection(
+        endpoint.hostname, endpoint.port, timeout=10
+    )
+    connection.putrequest("POST", "/api/case-review")
+    connection.putheader("Host", endpoint.netloc)
+    connection.putheader("Content-Type", "application/json")
+    if content_length is not None:
+        connection.putheader("Content-Length", str(content_length))
+    connection.endheaders(body)
+    response = connection.getresponse()
+    payload = json.loads(response.read().decode("utf-8"))
+    status = response.status
+    connection.close()
+    return status, payload
 
 
 class StudioWorkflowTests(unittest.TestCase):
@@ -347,6 +368,28 @@ class StudioWorkflowTests(unittest.TestCase):
         self.assertIn("OpenFOAM", error)
         self.assertIn("4321", error)
         run.assert_not_called()
+
+    def test_legacy_run_passes_authoritative_root_to_report_health_projection(self):
+        act = {"step": "", "time": 0.0, "lines": []}
+        case_dir = Path(self.tmp.name) / "legacy-case"
+        case_dir.mkdir()
+        with mock.patch.object(
+            cfd_studio.cfd_gci_job, "acquire_solver_lock",
+            return_value=("token", {}),
+        ), mock.patch.object(
+            cfd_studio.cfd_gci_job, "release_solver_lock"
+        ), mock.patch.object(
+            cfd_studio, "run_until_closed",
+            return_value={"ok": True, "error": None},
+        ), mock.patch.object(
+            cfd_studio.cfd_report, "generate_report"
+        ) as report:
+            ok, error = cfd_studio._do_run("legacy", str(case_dir), act)
+
+        self.assertTrue(ok, error)
+        report.assert_called_once_with(
+            str(case_dir), projects_root=self.tmp.name
+        )
 
     def test_body_continuation_does_not_start_when_cross_process_solver_slot_is_busy(self):
         solver = Path(self.tmp.name) / "_body_solver" / "sample-thermal"
@@ -855,6 +898,76 @@ class StudioWorkflowTests(unittest.TestCase):
                 self.assertEqual(status, 400, (payload, raw))
         review_dir = paths["case"] / "_reviews"
         self.assertFalse(review_dir.exists())
+
+    def test_case_review_rejects_invalid_and_unbounded_content_lengths_before_service(self):
+        paths = self._authoritative_body_case()
+        valid = {
+            "case": paths["case"].name,
+            "reviewer_id": "reviewer-1",
+            "decision": "APPROVED",
+            "reason": "reviewed",
+            "target_sha256": hashlib.sha256(
+                paths["evidence"].read_bytes()
+            ).hexdigest(),
+        }
+        encoded = json.dumps(valid).encode("utf-8")
+        oversized = json.dumps({
+            **valid, "reason": "x" * (64 * 1024),
+        }).encode("utf-8")
+        with _studio_server() as base, mock.patch.object(
+            cfd_studio.cfd_review, "create_review",
+            side_effect=AssertionError("review service must not run"),
+        ) as create:
+            cases = [
+                (None, b""),
+                (0, b""),
+                ("not-a-number", b""),
+                (-1, encoded),
+                (len(oversized), oversized),
+            ]
+            for content_length, body in cases:
+                with self.subTest(content_length=content_length):
+                    status, payload = _raw_review_request(
+                        base, content_length, body
+                    )
+                    self.assertEqual(status, 400, payload)
+                    self.assertEqual(payload.get("code"), "INVALID_REQUEST_BODY")
+        create.assert_not_called()
+        self.assertFalse((paths["case"] / "_reviews").exists())
+
+    def test_case_review_rejects_http_field_cardinality_before_service(self):
+        paths = self._authoritative_body_case()
+        digest = hashlib.sha256(paths["evidence"].read_bytes()).hexdigest()
+        base_payload = {
+            "case": paths["case"].name,
+            "reviewer_id": "reviewer-1",
+            "decision": "APPROVED",
+            "reason": "reviewed",
+            "target_sha256": digest,
+        }
+        bad_payloads = [
+            {**base_payload, "reviewer_id": "r" * 129},
+            {**base_payload, "reason": "r" * 4097},
+            {**base_payload, "supersedes_review_ids": [
+                f"review-{index:032x}" for index in range(257)
+            ]},
+            {**base_payload, "supersedes_review_ids": ["review-short"]},
+        ]
+        with _studio_server() as base, mock.patch.object(
+            cfd_studio.cfd_review, "create_review",
+            side_effect=AssertionError("review service must not run"),
+        ) as create:
+            for payload in bad_payloads:
+                with self.subTest(field=next(
+                    key for key in payload if payload[key] != base_payload.get(key)
+                )):
+                    status, body, _ = _request_json(
+                        base, "/api/case-review", payload=payload
+                    )
+                    self.assertEqual(status, 400, body)
+                    self.assertEqual(body.get("code"), "INVALID_REQUEST_BODY")
+        create.assert_not_called()
+        self.assertFalse((paths["case"] / "_reviews").exists())
 
     def test_case_review_post_maps_safe_missing_stale_and_post_lock_change(self):
         paths = self._authoritative_body_case()

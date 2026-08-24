@@ -7,6 +7,11 @@
 import unittest
 
 import cfd_advice
+from cfd_status_catalog import (
+    CASE_HEALTH_CHECKS,
+    CITATION_DECISION_TABLE,
+    CITATION_DECISION_TABLE_VERSION,
+)
 
 
 ROOM = {"L": 27.6, "W": 15.9, "H": 10.0}
@@ -37,33 +42,63 @@ BAD_TRUST = {"citable": False, "badge": "결과 인용 불가(폐합 158%)",
 def _case_health(citation_status, *, purpose="design_review_candidate",
                  field_status="PASS", reason="DESIGN_CITABLE"):
     field_reason = [] if field_status == "PASS" else ["FIELD_EVIDENCE_INVALID"]
-    return {
+    checks = {}
+    for check_id in CASE_HEALTH_CHECKS:
+        status = "PASS"
+        reasons = []
+        refs = []
+        if check_id == "design_ready" and citation_status != "DESIGN_CITABLE":
+            status = "NOT_EVALUATED"
+            reasons = [reason]
+        if check_id == "field_calibrated":
+            status = field_status
+            reasons = field_reason
+            refs = [] if field_status == "PASS" else ["field_evidence"]
+        checks[check_id] = {
+            "status": status,
+            "reason_codes": reasons,
+            "evidence_refs": refs,
+            "impact": (
+                "현재 설계 인용 상태를 확인해야 합니다."
+                if check_id == "design_ready" else
+                "현재 검사 상태를 확인해야 합니다."
+            ),
+            "next_actions": ["현재 증적과 검토 상태를 다시 확인하세요."],
+        }
+    status = (
+        "PASS" if citation_status in {"DESIGN_CITABLE", "SCREENING_ONLY"}
+        else "BLOCKED" if citation_status == "CITATION_BLOCKED"
+        else "NOT_EVALUATED"
+    )
+    payload = {
         "contract": "case_health.v1",
+        "schema_version": 1,
+        "created_at": "2026-08-24T00:00:00Z",
         "purpose": purpose,
         "citation_status": citation_status,
-        "errors": [{"code": reason}],
+        "status": status,
+        "citation_decision_table_version": CITATION_DECISION_TABLE_VERSION,
+        "citation_decision_table": [dict(row) for row in CITATION_DECISION_TABLE],
+        "errors": [] if citation_status == "DESIGN_CITABLE" else [{"code": reason}],
         "evidence": {
             "contract": "case_evidence.v1",
             "path": "_body_solver/case-a/case_evidence.v1.json",
             "sha256": "a" * 64,
         },
-        "checks": {
-            "design_ready": {
-                "status": "PASS" if citation_status == "DESIGN_CITABLE" else "NOT_EVALUATED",
-                "reason_codes": [] if citation_status == "DESIGN_CITABLE" else [reason],
-                "evidence_refs": [],
-                "impact": "현재 설계 인용 상태를 확인해야 합니다.",
-                "next_actions": ["현재 증적과 검토 상태를 다시 확인하세요."],
-            },
-            "field_calibrated": {
-                "status": field_status,
-                "reason_codes": field_reason,
-                "evidence_refs": [] if field_status == "PASS" else ["field_evidence"],
-                "impact": "현장 보정 증적이 아직 평가되지 않았습니다.",
-                "next_actions": ["현장 측정 및 TAB 증적을 등록하세요."],
-            },
+        "case_identity": {
+            "contract": "case_identity.v1",
+            "path": "_body_solver/case-a/case_identity.v1.json",
+            "sha256": "b" * 64,
         },
+        "checks": checks,
     }
+    payload["checks"]["field_calibrated"]["impact"] = (
+        "현장 보정 증적이 아직 평가되지 않았습니다."
+    )
+    payload["checks"]["field_calibrated"]["next_actions"] = [
+        "현장 측정 및 TAB 증적을 등록하세요."
+    ]
+    return payload
 
 
 class TrustGate(unittest.TestCase):
@@ -111,6 +146,43 @@ class TrustGate(unittest.TestCase):
         )
         self.assertEqual(recs[0]["group"], "evidence")
         self.assertEqual(recs[0]["priority"], cfd_advice.P_BLOCK)
+
+    def test_schema_table_evidence_and_exact_nine_checks_are_required_to_unseal(self):
+        import copy
+
+        valid = _case_health("DESIGN_CITABLE")
+        invalid = []
+        empty_checks = copy.deepcopy(valid)
+        empty_checks["checks"] = {}
+        invalid.append(empty_checks)
+        missing_check = copy.deepcopy(valid)
+        missing_check["checks"].pop("grid_verified")
+        invalid.append(missing_check)
+        wrong_check = copy.deepcopy(valid)
+        wrong_check["checks"]["geometry_valid"] = {"status": "PASS"}
+        invalid.append(wrong_check)
+        extra_check = copy.deepcopy(valid)
+        extra_check["checks"]["caller_claimed"] = extra_check["checks"]["design_ready"]
+        invalid.append(extra_check)
+        wrong_version = copy.deepcopy(valid)
+        wrong_version["citation_decision_table_version"] = "caller-table.v9"
+        invalid.append(wrong_version)
+        wrong_table = copy.deepcopy(valid)
+        wrong_table["citation_decision_table"] = []
+        invalid.append(wrong_table)
+        wrong_evidence = copy.deepcopy(valid)
+        wrong_evidence["evidence"]["sha256"] = "A" * 64
+        invalid.append(wrong_evidence)
+
+        for health in invalid:
+            with self.subTest(mutation=invalid.index(health)):
+                recs = cfd_advice.recommendations(
+                    _meta([_patch("sup0", "supply", 0.2, 12.0)]),
+                    dict(BASE_METRICS, closure_pct=99.0), None,
+                    GOOD_TRUST, {}, case_health=health,
+                )
+                self.assertEqual(recs[0]["priority"], cfd_advice.P_BLOCK)
+                self.assertEqual(recs[0]["group"], "evidence")
 
 
 class RecommendationGroups(unittest.TestCase):

@@ -1511,7 +1511,8 @@ def _fmt(v, unit="", nd=1):
     return f"{v:,.{nd}f}{unit}"
 
 
-def build_html_report(case_dir, meta, parsed, resid_png, sect_png, metrics, out_html):
+def build_html_report(case_dir, meta, parsed, resid_png, sect_png, metrics,
+                      out_html, *, case_health=None):
     """자립 HTML 해석 리포트(보고서 첨부 품질). preview.py 계열 스타일."""
     import datetime
     import html as _html
@@ -1767,7 +1768,10 @@ def build_html_report(case_dir, meta, parsed, resid_png, sect_png, metrics, out_
     try:
         import cfd_advice
         _forecast = residual_decay_forecast(parsed)
-        recs = cfd_advice.recommendations(meta, m, parsed, trust, _forecast)
+        advice_health = case_health if isinstance(case_health, dict) else {}
+        recs = cfd_advice.recommendations(
+            meta, m, parsed, trust, _forecast, case_health=advice_health
+        )
     except Exception:
         cfd_advice, recs, _forecast = None, [], {}
     _pcolor = {"차단": "#c0392b", "높음": "#b9770e", "보통": "#2874a6", "참고": "#7f8c8d"}
@@ -1851,9 +1855,15 @@ def build_html_report(case_dir, meta, parsed, resid_png, sect_png, metrics, out_
         try:
             base = os.path.splitext(out_html)[0]
             with open(base + "_ai_digest.md", "w", encoding="utf-8") as f:
-                f.write(cfd_advice.ai_digest(meta, m, parsed, trust, _forecast, recs))
+                f.write(cfd_advice.ai_digest(
+                    meta, m, parsed, trust, _forecast, recs,
+                    case_health=advice_health,
+                ))
             with open(base + "_ai_digest.json", "w", encoding="utf-8") as f:
-                f.write(cfd_advice.digest_payload(meta, m, parsed, trust, _forecast, recs))
+                f.write(cfd_advice.digest_payload(
+                    meta, m, parsed, trust, _forecast, recs,
+                    case_health=advice_health,
+                ))
         except Exception:
             pass          # 다이제스트 실패가 본 리포트를 막으면 안 된다
     return out_html
@@ -1868,7 +1878,25 @@ def _load_meta(case_dir):
     return None
 
 
-def generate_report(case_dir, out_html=None, quiet=True):
+def _current_case_health_for_report(case_dir, projects_root):
+    """Recompute one safe Case Health projection or return a sealed sentinel."""
+    if projects_root is None:
+        return {}
+    evidence_path = Path(case_dir) / "case_evidence.v1.json"
+    if not evidence_path.is_file():
+        return {}
+    try:
+        with cfd_review.review_state_lock(
+            evidence_path, projects_root=Path(projects_root)
+        ):
+            return cfd_case_health.build_case_health(
+                evidence_path, projects_root=Path(projects_root)
+            )
+    except Exception:
+        return {}
+
+
+def generate_report(case_dir, out_html=None, quiet=True, *, projects_root=None):
     """케이스 디렉토리 → HTML 리포트 생성(그래프·지표·단면 포함).
     CLI(main)와 스튜디오(cfd_studio)가 공용. 반환: (out_html, metrics) 또는 로그 없으면 예외."""
     logpath = find_log(case_dir)
@@ -1904,7 +1932,11 @@ def generate_report(case_dir, out_html=None, quiet=True):
         sect_png = None
     out_html = out_html or os.path.join(
         case_dir, f"cfd_report_{meta.get('config', {}).get('name', 'case')}.html")
-    build_html_report(case_dir, meta, parsed, resid_png, sect_png, metrics, out_html)
+    case_health = _current_case_health_for_report(case_dir, projects_root)
+    build_html_report(
+        case_dir, meta, parsed, resid_png, sect_png, metrics, out_html,
+        case_health=case_health,
+    )
     return out_html, metrics
 
 

@@ -17,8 +17,16 @@ AI(다이제스트): "판단이 답인 것". 디퓨저를 어디로 옮길지, �
 
 import json
 import math
+from pathlib import Path
 
-from cfd_status_catalog import PURPOSE_PROFILES
+from jsonschema import Draft202012Validator
+
+from cfd_status_catalog import (
+    CASE_HEALTH_CHECKS,
+    CITATION_DECISION_TABLE,
+    CITATION_DECISION_TABLE_VERSION,
+    PURPOSE_PROFILES,
+)
 
 RHO_CP = 1206.0          # ρ0·cp [J/(m³·K)] — cfd_export 와 동일 기준
 
@@ -53,6 +61,28 @@ _CATEGORY_GROUPS = {
     "급배기 균형": "model",
     "현장 검증": "field",
 }
+
+_CASE_HEALTH_SCHEMA = json.loads(
+    Path(__file__).resolve().with_name("case_health.v1.schema.json").read_text(
+        encoding="utf-8"
+    )
+)
+_CASE_HEALTH_VALIDATOR = Draft202012Validator(_CASE_HEALTH_SCHEMA)
+
+
+def _valid_authoritative_health(value):
+    """Accept only the complete Task-1 Case Health contract as authority."""
+    if not isinstance(value, dict):
+        return False
+    if next(_CASE_HEALTH_VALIDATOR.iter_errors(value), None) is not None:
+        return False
+    return (
+        value.get("citation_decision_table_version")
+        == CITATION_DECISION_TABLE_VERSION
+        and value.get("citation_decision_table")
+        == [dict(row) for row in CITATION_DECISION_TABLE]
+        and set(value.get("checks") or {}) == set(CASE_HEALTH_CHECKS)
+    )
 
 
 def _patch_center(p):
@@ -157,15 +187,7 @@ def recommendations(meta, metrics, parsed=None, trust=None, forecast=None,
     patches = meta.get("patches") or []
     recs = []
     authoritative = case_health if case_health is not None else health
-    authoritative_valid = (
-        isinstance(authoritative, dict)
-        and authoritative.get("contract") == "case_health.v1"
-        and authoritative.get("citation_status") in {
-            "SCREENING_ONLY", "NOT_EVALUATED", "CITATION_BLOCKED",
-            "DESIGN_CITABLE",
-        }
-        and isinstance(authoritative.get("checks"), dict)
-    )
+    authoritative_valid = _valid_authoritative_health(authoritative)
     if authoritative is not None:
         citable = (
             authoritative_valid
@@ -465,14 +487,7 @@ def ai_digest(meta, metrics, parsed=None, trust=None, forecast=None, recs=None,
     room = cfg.get("room", {})
     patches = meta.get("patches") or []
     authoritative = case_health if case_health is not None else health
-    authoritative_valid = (
-        isinstance(authoritative, dict)
-        and authoritative.get("contract") == "case_health.v1"
-        and authoritative.get("citation_status") in {
-            "SCREENING_ONLY", "NOT_EVALUATED", "CITATION_BLOCKED",
-            "DESIGN_CITABLE",
-        }
-    )
+    authoritative_valid = _valid_authoritative_health(authoritative)
     if authoritative is None:
         citable = True if trust is None else trust.get("citable", True)
         citation_status = None
@@ -572,14 +587,7 @@ def digest_payload(meta, metrics, parsed=None, trust=None, forecast=None,
                    recs=None, health=None, *, case_health=None):
     """기계 판독용 JSON payload — API 연동·자동화용."""
     authoritative = case_health if case_health is not None else health
-    authoritative_valid = (
-        isinstance(authoritative, dict)
-        and authoritative.get("contract") == "case_health.v1"
-        and authoritative.get("citation_status") in {
-            "SCREENING_ONLY", "NOT_EVALUATED", "CITATION_BLOCKED",
-            "DESIGN_CITABLE",
-        }
-    )
+    authoritative_valid = _valid_authoritative_health(authoritative)
     citable = (
         authoritative_valid
         and authoritative.get("citation_status") == "DESIGN_CITABLE"

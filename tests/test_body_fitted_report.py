@@ -8,6 +8,7 @@ from unittest.mock import patch
 import cfd_report
 import cfd_evidence
 import cfd_review
+from test_cfd_advice import BASE_METRICS, GOOD_TRUST, _case_health, _meta, _patch
 from test_cfd_evidence import make_complete_case
 
 
@@ -49,6 +50,53 @@ def _future_design_case(base, *, reviewer="reviewer-1", reason="reviewed"):
 
 
 class BodyFittedReportTests(unittest.TestCase):
+    def test_legacy_green_report_threads_blocked_health_into_advice_and_digests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "legacy-report.html"
+            parsed = {
+                "n_iters": 1,
+                "crashed": False,
+                "residuals": {},
+                "rho_min": [],
+                "bounding": [],
+                "continuity_global": [],
+            }
+            meta = _meta([_patch("sup0", "supply", 0.2, 12.0)])
+            meta["mesh"] = {"nx": 2, "ny": 2, "nz": 1, "cells": 4}
+            blocked = _case_health(
+                "CITATION_BLOCKED", reason="ARTIFACT_HASH_MISMATCH"
+            )
+            legacy_green = {
+                **GOOD_TRUST,
+                "color": "#1e8449",
+                "contract": "result_trust.v1",
+                "status": "PASS",
+                "run_status": "PASS",
+                "convergence_status": "PASS",
+                "design_ready": True,
+                "citation_status": "DESIGN_CITABLE",
+                "blockers": [],
+                "evidence": {},
+            }
+            with patch.object(
+                cfd_report, "result_trust", return_value=legacy_green
+            ):
+                cfd_report.build_html_report(
+                    tmp, meta, parsed, None, None, BASE_METRICS, out,
+                    case_health=blocked,
+                )
+            digest = out.with_name(out.stem + "_ai_digest.md").read_text(
+                encoding="utf-8"
+            )
+            payload = json.loads(out.with_name(
+                out.stem + "_ai_digest.json"
+            ).read_text(encoding="utf-8"))
+
+        self.assertIn("설계 결론을 내리지 마십시오", digest)
+        self.assertIn("CITATION_BLOCKED", digest)
+        self.assertFalse(payload["citable"])
+        self.assertEqual(payload["citation_status"], "CITATION_BLOCKED")
+        self.assertEqual(payload["recommendations"][0]["group"], "evidence")
     def test_report_uses_authoritative_not_evaluated_gate_when_evidence_is_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
             case = Path(tmp)
