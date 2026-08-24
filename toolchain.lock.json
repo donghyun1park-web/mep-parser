@@ -2,26 +2,41 @@
   "$schema": "toolchain.lock.v1.schema.json",
   "schema_version": 1,
   "contract": "toolchain.lock.v1",
-  "ready": false,
-  "blocked_reasons": [
-    "RELEASE_BUILD_MUST_SUPPLY_PYTHON_INSTALLER_SHA256",
-    "RELEASE_BUILD_MUST_SUPPLY_WHEEL_SHA256_LISTS"
-  ],
+  "ready": true,
+  "blocked_reasons": [],
   "python": {
     "version": "3.12.10",
     "architecture": "x64",
-    "installer_sha256": "",
+    "installer_sha256": "67b5635e80ea51072b87941312d00ec8927c4db9ba18938f7ad2d27b328b95fb",
     "executable_name": "python.exe"
   },
   "pip": {
     "version": "25.1.1"
   },
   "packages": {
-    "ezdxf": {"version": "1.4.2", "hashes": []},
-    "jsonschema": {"version": "4.23.0", "hashes": []},
-    "matplotlib": {"version": "3.9.2", "hashes": []},
-    "numpy": {"version": "2.1.3", "hashes": []},
-    "pytest": {"version": "8.3.5", "hashes": []},
-    "shapely": {"version": "2.0.6", "hashes": []}
+    "attrs": {"version": "26.1.0", "hashes": ["c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309"]},
+    "colorama": {"version": "0.4.6", "hashes": ["4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6"]},
+    "contourpy": {"version": "1.3.3", "hashes": ["8153b8bfc11e1e4d75bcb0bff1db232f9e10b274e0929de9d608027e0d34ff8b"]},
+    "cycler": {"version": "0.12.1", "hashes": ["85cef7cff222d8644161529808465972e51340599459b8ac3ccbac5a854e0d30"]},
+    "ezdxf": {"version": "1.4.2", "hashes": ["ba1aac159807aafd95d865f449d44f00ed041e51dadc50c2aabe9d5569303391"]},
+    "fonttools": {"version": "4.63.0", "hashes": ["59ac449f8cca9b4ffa08d2e7bbadad87ce710d69d1eda5c3c1ce579baa987272"]},
+    "iniconfig": {"version": "2.3.0", "hashes": ["f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12"]},
+    "jsonschema": {"version": "4.23.0", "hashes": ["fbadb6f8b144a8f8cf9f0b89ba94501d143e50411a1278633f56a7acf7fd5566"]},
+    "jsonschema-specifications": {"version": "2025.9.1", "hashes": ["98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe"]},
+    "kiwisolver": {"version": "1.5.0", "hashes": ["f18c2d9782259a6dc132fdc7a63c168cbc74b35284b6d75c673958982a378384"]},
+    "matplotlib": {"version": "3.9.2", "hashes": ["5413401594cfaff0052f9d8b1aafc6d305b4bd7c4331dccd18f561ff7e1d3bd3"]},
+    "numpy": {"version": "2.1.3", "hashes": ["0d30c543f02e84e92c4b1f415b7c6b5326cbe45ee7882b6b77db7195fb971e3a"]},
+    "packaging": {"version": "26.3", "hashes": ["d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c"]},
+    "pillow": {"version": "12.3.0", "hashes": ["a2b55dd6b2a4c4b7d87ffa56bdb33fdc5fdb9a462173861a7bc097f17d91cb09"]},
+    "pip": {"version": "25.1.1", "hashes": ["2913a38a2abf4ea6b64ab507bd9e967f3b53dc1ede74b01b0931e1ce548751af"]},
+    "pluggy": {"version": "1.6.0", "hashes": ["e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746"]},
+    "pyparsing": {"version": "3.3.2", "hashes": ["850ba148bd908d7e2411587e247a1e4f0327839c40e2e5e6d05a007ecc69911d"]},
+    "pytest": {"version": "8.3.5", "hashes": ["c69214aa47deac29fad6c2a4f590b9c4a9fdb16a403176fe154b79c0b4d4d820"]},
+    "python-dateutil": {"version": "2.9.0.post0", "hashes": ["a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427"]},
+    "referencing": {"version": "0.37.0", "hashes": ["381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231"]},
+    "rpds-py": {"version": "2026.6.3", "hashes": ["2c958bf94822e9290a40aaf2a822d4bc5c88099093e3948ad6c571eca9272e5f"]},
+    "shapely": {"version": "2.0.6", "hashes": ["665990c84aece05efb68a21b3523a6b2057e84a1afbef426ad287f0796ef8a48"]},
+    "six": {"version": "1.17.0", "hashes": ["4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274"]},
+    "typing-extensions": {"version": "4.16.0", "hashes": ["481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8"]}
   }
 }

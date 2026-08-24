@@ -10,6 +10,7 @@ from typing import Any
 
 
 _EXACT_VERSION = re.compile(r"^\d+\.\d+\.\d+$")
+_PINNED_PACKAGE_VERSION = re.compile(r"^\d+(?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
 _SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
@@ -49,7 +50,7 @@ def validate_lock(payload: dict[str, Any]) -> list[str]:
                 blockers.append(f"PACKAGE_SECTION_INVALID:{name}")
                 continue
             version = package.get("version")
-            if not isinstance(version, str) or not _EXACT_VERSION.fullmatch(version):
+            if not isinstance(version, str) or not _PINNED_PACKAGE_VERSION.fullmatch(version):
                 blockers.append(f"PACKAGE_VERSION_NOT_EXACT:{name}")
             hashes = package.get("hashes")
             if not isinstance(hashes, list) or not hashes or any(

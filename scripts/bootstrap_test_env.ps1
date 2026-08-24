@@ -33,9 +33,31 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $venvPython = Join-Path $EnvironmentPath 'Scripts\python.exe'
-& $venvPython -m pip install --require-hashes --disable-pip-version-check -r requirements-dev.lock
+$pipHash = $lock.packages.pip.hashes | Select-Object -First 1
+if ($null -eq $pipHash) {
+    throw "PIP_WHEEL_HASH_MISSING"
+}
+
+$pipLockPath = Join-Path $EnvironmentPath '.bootstrap-pip.lock'
+try {
+    Set-Content -LiteralPath $pipLockPath -Value "pip==$($lock.pip.version) --hash=sha256:$pipHash" -Encoding ASCII
+    & $venvPython -m pip install --require-hashes --disable-pip-version-check --index-url https://pypi.org/simple -r $pipLockPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "PIP_INSTALL_FAILED"
+    }
+}
+finally {
+    Remove-Item -LiteralPath $pipLockPath -Force -ErrorAction SilentlyContinue
+}
+
+& $venvPython -m pip install --require-hashes --disable-pip-version-check --index-url https://pypi.org/simple -r requirements-dev.lock
 if ($LASTEXITCODE -ne 0) {
     throw "LOCKED_DEPENDENCY_INSTALL_FAILED"
+}
+
+$installedPip = ((& $venvPython -m pip --version).Trim() -split '\s+')[1]
+if ($installedPip -ne $lock.pip.version) {
+    throw "PIP_IDENTITY_MISMATCH:expected=$($lock.pip.version) actual=$installedPip"
 }
 
 & $venvPython -m pytest --version

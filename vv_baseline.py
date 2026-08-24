@@ -189,6 +189,27 @@ def write_vv_baseline(payload: dict[str, Any], output: Path) -> Path:
     return output
 
 
+def write_vv_baseline_reference(output: Path, projects_root: Path) -> Path:
+    """Write the durable, projects-root-relative link to a canonical baseline artifact."""
+
+    output = Path(output).resolve()
+    projects_root = Path(projects_root).resolve()
+    try:
+        relative_output = output.relative_to(projects_root).as_posix()
+    except ValueError as exc:
+        raise ValueError("BASELINE_OUTPUT_OUTSIDE_PROJECTS_ROOT") from exc
+    reference = output.with_name("baseline_evidence.reference.v1.json")
+    temporary = reference.with_name(f".{reference.name}.{uuid.uuid4().hex}.tmp")
+    payload = {
+        "contract": "vv_baseline.evidence_reference.v1",
+        "baseline_evidence_path": relative_output,
+        "baseline_evidence_sha256": _sha256_file(output),
+    }
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, reference)
+    return reference
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, default=Path("."))
@@ -204,7 +225,8 @@ def main(argv: list[str] | None = None) -> int:
     if output is None:
         parser.error("one of --output or --output-root is required")
     output = write_vv_baseline(payload, output)
-    print(json.dumps({"status": "PASS", "output": str(output), "candidate_id": payload["candidate_id"]}))
+    reference = write_vv_baseline_reference(output, args.projects_root)
+    print(json.dumps({"status": "PASS", "output": str(output), "reference": str(reference), "candidate_id": payload["candidate_id"]}))
     return 0
 
 
