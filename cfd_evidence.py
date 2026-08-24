@@ -154,6 +154,15 @@ def _resolve_ref(value: Any, root: Path) -> Path | None:
     return _safe_existing(root.joinpath(*relative.parts), root)
 
 
+def _resolve_field_record_for_tracking(value: Any, root: Path) -> Path | None:
+    """Mirror legacy field path spelling only to protect contained read sources."""
+    if not isinstance(value, str) or not value:
+        return None
+    raw = Path(value)
+    candidate = raw if raw.is_absolute() else root / raw
+    return _safe_existing(candidate, root)
+
+
 def _resolve_raw(value: Any, root: Path, *, directory: bool = False) -> Path | None:
     if not isinstance(value, str) or not value:
         return None
@@ -590,7 +599,10 @@ def _field(path: Path | None, root: Path, selected: dict[str, Path | None],
     )
     for record in records.values():
         if isinstance(record, dict):
-            _track(source_paths, _resolve_ref(record.get("path"), root))
+            _track(
+                source_paths,
+                _resolve_field_record_for_tracking(record.get("path"), root),
+            )
     validation = field_acceptance.validate_evidence(safe, projects_root=root)
     if not _schema_ok("field", manifest) or validation.get("ok") is not True:
         _error(errors, "FIELD_EVIDENCE_INVALID", "field evidence failed independent validation", "field_evidence")
