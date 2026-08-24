@@ -49,6 +49,21 @@
 | `2026-08-14-mep-cfd-validation-vv-release.md` | L3/L4 과학·현장·출시 evidence | Milestone M3와 M7의 필수 실행 subplan이다. |
 | 본 문서 | 제품 모델, UX, field calibration, comfort, IAQ, CHT, 가속화의 통합 순서 | 2026-08-24 이후 신규 개발의 roadmap authority다. |
 
+### 문서 은퇴 정책
+
+계획 문서 총량은 현재 8종 361KB다. 문서가 늘어날수록 어느 것이 현역인지 판단하는 비용이 커지므로 각 문서에 은퇴 조건을 명시한다.
+
+| 문서 | 은퇴 조건 | 은퇴 후 상태 |
+|---|---|---|
+| `NEXT_SPRINT_2026-08-13.md` | 이미 충족 | 완료 이력 — 백로그 권위 없음 |
+| `NEXT_PHASE_PLAN.md` | M2 Exit 시 | 참조 전용 — body-fitted 형성 이력 |
+| `IMPROVEMENT_PLAN_2026-08.md` | M3 Exit 시 | 참조 전용 — 확정 threshold만 인용 |
+| `2026-08-14-single-pc-working-validation.md` | M1 Exit 시 | 참조 전용 |
+| `2026-08-14-vv-release.md` | M7 Exit 시 | 참조 전용 |
+| 본 문서 | L4 도달 시 | 후속 roadmap으로 이관 |
+
+은퇴한 문서는 삭제하지 않고 첫 줄에 `> **상태: 참조 전용 — <Milestone> 이후 은퇴. 현행 권위는 <문서>.**`를 추가한다.
+
 ## 2. 현재 기준선과 정직한 완료 수준
 
 현재 checkout에는 다음 기반이 실제 코드로 존재한다.
@@ -149,6 +164,19 @@ DXF
 
 `design.v1.schema.json`, `scenario.v1.schema.json`, `case_identity.v1.schema.json`, `case_evidence.v1.schema.json`, `case_health.v1.schema.json`, `case_review.v1.schema.json`, `field_pipeline_job.v2.schema.json`, `hvac_template.v1.schema.json`, `scenario_comparison.v1.schema.json`, `validation_anchor.v1.schema.json`, `benchmark_source.v1.schema.json`, `benchmark_validation.v1.schema.json`, `field_measurement.v1.schema.json`, `field_calibration.v1.schema.json`, `field_validation.v1.schema.json`, `uncertainty_budget.v1.schema.json`, `comfort_manifest.v1.schema.json`, `iaq_input.v1.schema.json`, `iaq_result.v1.schema.json`, `radiation_validation.v1.schema.json`, `surface_thermal_contract.v1.schema.json`, `cht_input.v1.schema.json`, `cht_validation.v1.schema.json`, `mpi_runtime_smoke.v1.schema.json`, `surrogate_model_card.v1.schema.json`.
 
+#### Schema 소비자 요건 — 강제 규칙
+
+§12의 "Schema proliferation ahead of product value" 위험을 원칙이 아니라 **착수 조건**으로 강제한다. 새 schema를 만드는 Task는 그 schema를 도입하기 전에 다음 표를 채워야 한다.
+
+| 필수 항목 | 의미 |
+|---|---|
+| Producer | 이 문서를 쓰는 모듈 |
+| Validator | 위조·stale·hash 불일치를 거부하는 함수 |
+| Consumer | 이 문서를 **읽어서 사용자에게 보여주거나 gate 판정에 쓰는** 화면·보고서·평가기 |
+| Test | producer/validator/consumer를 각각 덮는 test |
+
+**Consumer가 정해지지 않은 schema는 만들지 않는다.** 계획에 남아 있더라도 해당 Task에서 제거하고, 소비자가 생기는 Milestone으로 미룬다. 25개 전부를 만드는 것은 목표가 아니다.
+
 ## 6. 상태 모델
 
 ### Evidence 상태
@@ -181,21 +209,38 @@ DRAFT → REVIEW_REQUIRED → READY_TO_RUN → QUEUED → RUNNING
 
 ## 7. 로드맵과 예상 일정
 
-계획 가정은 주 개발자 1명, CFD/V&V 검토자 part-time 1명, Windows/IT 지원 part-time, 현장/TAB 및 UAT 협조자다. 계산·현장 일정은 코드 개발과 병렬 진행한다.
+계획 가정은 주 개발자 1명, CFD/V&V 검토자 part-time 1명, Windows/IT 지원 part-time, 현장/TAB 및 UAT 협조자다. 계산·현장 일정은 코드 개발과 병렬 진행한다. 이 가정의 실제 가용성은 Task 0 Step 7에서 확인하며, 확보되지 않은 역할이 필요한 Task는 임계경로에서 제외한다.
 
-| Milestone | 목표 | 예상 범위 | Exit |
-|---|---|---:|---|
-| M0 | 기준선·소유권·test bootstrap | 2~5일 | clean 또는 승인된 baseline, 실패 0 |
-| M1 | Case Evidence & Review Gate + Working Single PC | 3~5주 | 실제 DXF 1건 SCREENING_ONLY E2E, recomputation health |
-| M2 | Design → Scenario → Run + compare/template | 4~6주 | 같은 Design의 2개 Scenario 비교·보고 |
-| M3 | Validation anchor, formal V&V, field TAB | 10~16주 | GCI/benchmark/field holdout gate, L3 후보 |
-| M4 | Comfort | 3~5주 | reference vectors, complete inputs, conditional report |
-| M5 | IAQ | 5~8주 | scalar conservation, benchmark, exposure report |
-| M6 | Radiation/CHT | 6~10주 | two-plate + enclosure/CHT benchmark, production fail-closed |
-| M7 | Product hardening and general release | M3와 병렬 6~10주 | frozen RC, package/recovery/UAT/support, L4 |
-| M8 | MPI and surrogate | 각 4~8주 | rank smoke/equivalence 또는 OOD model-card gate |
+### 두 개의 시계
 
-M0~M3와 M7을 병렬화한 core 제품 목표는 14~22주가 현실적이다. M4~M6까지 순차 완료하는 extended physics 목표는 7~11개월 범위로 관리한다. 실패한 계산은 일정을 늘릴 수 있지만 threshold를 낮추는 근거가 되지 않는다.
+이 계획의 작업은 성격이 다른 두 종류이며 **같은 시간 단위로 합산하지 않는다.**
+
+| 시계 | 성격 | 압축 가능성 |
+|---|---|---|
+| **코드 시계** | 모듈·schema·test 구현. 에이전트 보조로 수행 | 압축 가능 |
+| **증거 시계** | solver wall-clock, 현장 TAB 측정, 외부 검토자·UAT 협조 | **압축 불가** |
+
+실측 기준점(2026-08-24): Task 0~4의 코드 작업은 **5.6시간·17 커밋**에 완료됐다. 반면 단일 thermal case의 3.0 FTT는 수 시간~수십 시간이고, 현장 측정과 UAT는 외부 일정에 종속된다.
+
+따라서 **Milestone 기간은 증거 시계로만 산정한다.** 코드 시계가 짧아지는 것은 일정 단축이 아니라 증거 대기 시간이 드러나는 것이다.
+
+| Milestone | 목표 | 코드 시계 | 증거 시계 | Exit |
+|---|---|---:|---:|---|
+| M0 | 기준선·소유권·test bootstrap·원격 반영 | 0.5~1일 | 없음 | clean 또는 승인된 baseline, 실패 0, origin 반영 |
+| M1 | Case Evidence & Review Gate + Working Single PC | 1~3일 | **1~3주** | 실제 DXF 1건 SCREENING_ONLY E2E, recomputation health |
+| M2 | Design → Scenario → Run + compare/template | 3~6일 | 3~5일 | 같은 Design의 2개 Scenario 비교·보고 |
+| M3 | Validation anchor, formal V&V, field TAB | 3~6일 | **10~16주** | GCI/benchmark/field holdout gate, L3 후보 |
+| M4 | Comfort | 2~4일 | 1~2주 | reference vectors, complete inputs, conditional report |
+| M5 | IAQ | 4~7일 | 4~7주 | scalar conservation, benchmark, exposure report |
+| M6 | Radiation/CHT | 4~8일 | 5~9주 | two-plate + enclosure/CHT benchmark, production fail-closed |
+| M7 | Product hardening and general release | 4~8일 | **6~10주** | frozen RC, package/recovery/UAT/support, L4 |
+| M8 | MPI and surrogate | 각 2~5일 | 각 3~7주 | rank smoke/equivalence 또는 OOD model-card gate |
+
+증거 시계의 주요 구속 요인: M1은 solver 실행과 geometry 확정, M3는 GCI 계산과 현장 측정, M7은 설치 검증 2대와 UAT 3명이다.
+
+M0~M3와 M7을 병렬화한 core 제품 목표는 **증거 시계 기준 14~22주**가 현실적이다. M4~M6까지 순차 완료하는 extended physics 목표는 7~11개월 범위로 관리한다. 실패한 계산은 일정을 늘릴 수 있지만 threshold를 낮추는 근거가 되지 않는다.
+
+매 2주 점검에서 실제 코드 시계와 증거 시계를 각각 기록하고, 다음 Milestone 추정을 실측으로 보정한다.
 
 ### 의존성 및 병렬화 규칙
 
@@ -269,7 +314,47 @@ M8-B surrogate: M3/L3 eligible run inventory와 site/design holdout이 선행
 
   기준선 commit이 승인된 후 `codex/case-evidence-review-gate`처럼 작업 단위별 branch를 만든다. dirty working tree 자체에서 large refactor를 시작하지 않는다.
 
-**Gate M0:** tests failed 0, baseline artifact PASS, path ownership 승인, target branch가 없으면 NO-GO.
+- [ ] **Step 6: 승인된 baseline을 원격에 반영한다**
+
+  로컬 commit만으로는 baseline이 보존되지 않는다. 2026-08-24 감사에서 39,046줄과 test 전량이 단일 디스크에만 존재하는 상태가 확인됐다. 승인 후 다음을 수행한다.
+
+  ```powershell
+  git ls-remote origin
+  git push -u origin codex/case-evidence-review-gate
+  ```
+
+  Expected: 원격에 branch가 생성되고 `git rev-list --count <branch> --not --remotes` 가 0이다.
+
+  푸시 전에 필수 안전 점검을 통과해야 한다.
+
+  | 점검 | 기준 |
+  |---|---|
+  | 고객·현장 식별 파일 | 저장소 전체에 0건 |
+  | API key·token·private key | 0건 |
+  | `cfd_projects/` 해석 결과 | 추적되지 않음 |
+  | DXF | 합성 샘플만 |
+
+  저장소가 public이면 실제 현장 데이터를 다루기 전에 private 전환 여부를 결정하고 결과를 baseline evidence에 기록한다. 이 Step은 코드 작업이 아니므로 어떤 Task보다 먼저 완료할 수 있다.
+
+  **2026-08-25 공개 진행 결정:** 사용자(저장소 공개 범위 결정권자)는 `origin`을 public으로 유지하고 이 branch를 공개 push하도록 명시적으로 승인했다. 안전 점검에서 신규 secret, 추적된 `cfd_projects/`, 신규 현장 artifact는 발견되지 않았지만, public `feature/cfd`에 이미 존재하는 `debug_tools/temp_geometry.json`, `temp_export*.dxf`, 관련 screenshot은 실제 도면 파생 가능성이 있어 “clean”으로 표현하지 않는다. 이번 branch가 해당 blob을 새로 추가·변경하지 않는다는 비교 결과와 사용자의 알려진 위험 수용을 예외 근거로 보존한다. 이후 실제 현장 입력·solver 결과는 계속 저장소 밖에 둔다.
+
+- [ ] **Step 7: 역할별 담당자와 가용성을 확인한다**
+
+  §11 RACI의 8개 역할 각각에 대해 실제 담당자 ID와 가용 시점을 기록한다. 확보되지 않은 역할은 다음과 같이 처리한다.
+
+  - 해당 역할이 필요한 Task를 `BLOCKED_NO_OWNER`로 표시한다.
+  - 그 Task를 임계경로와 Milestone 기간 산정에서 제외한다.
+  - 확보 전까지 그 Milestone의 Exit를 선언하지 않는다.
+
+  특히 M3(현장 TAB·독립 CFD 검토자)와 M7(기계설비 사용자 3명·관찰자)은 외부 인력 없이는 착수 자체가 불가능하다. 없는 인력을 전제한 일정을 유일한 기준으로 사용하지 않는다.
+
+- [ ] **Step 8: 최소 CI를 구성한다**
+
+  `.github/workflows/windows-ci.yml`에서 `toolchain.lock.json`이 고정한 Python(현재 3.12.10)으로 전체 test를 실행한다. 다른 patch version에서는 bootstrap 검증 test가 정상적으로 실패하므로 CI runtime을 lock에 맞춘다.
+
+  Expected: push마다 `pytest` failed 0. CI 없이는 test 결과가 개발 PC 한 대에서만 의미를 갖는다.
+
+**Gate M0:** tests failed 0, baseline artifact PASS, path ownership 승인, target branch, **원격 반영 완료**, **역할 가용성 기록**, **CI 최초 green**이 없으면 NO-GO.
 
 ### Task 1: 상태 catalog와 Case Evidence schemas를 고정한다
 
@@ -558,7 +643,37 @@ def validate_review(review_path: Path, *, projects_root: Path) -> list[dict]: ..
   git commit -m "feat: show evidence and review gates in studio"
   ```
 
-### Task 5: WORKING_SINGLE_PC를 실제 code-owned validators로 닫는다
+### Task 4.5: 실제 DXF 1건의 geometry를 확정한다 — MEP 담당자 트랙
+
+이 Task는 코드 작업이 아니라 **기계설비 담당자의 판단 작업**이며, Task 5b/5c의 필수 선행조건이다. 개발 Task와 별도 트랙으로 병렬 진행하고, 담당자 확보 전에는 Task 5c를 착수하지 않는다.
+
+**Files:**
+
+- Read: 대상 현장 DXF와 `*.geometry.json`
+- Produce at runtime: `*.confirmed.geometry.json` (원본은 변경하지 않는다)
+
+**Interfaces:**
+
+- Consumes: Studio의 geometry 확인 화면.
+- Produces: `contract=geometry.v2`, `review.ready=true`, blocker 0인 confirmed geometry.
+
+**현재 상태(2026-08-24 실측):** 저장소 전체에 `*.confirmed.geometry.json`이 **0건**이며, 최신 SGI geometry는 `review.ready=false`다. 즉 M1은 코드가 아니라 이 입력 확정에 막혀 있다.
+
+- [ ] **Step 1: companion plan P7.1을 그대로 실행한다**
+
+  `docs/superpowers/plans/2026-08-14-mep-cfd-validation-vv-release.md`의 Task P7.1 5개 Step을 수행한다: 단일 closed air zone 확정 → 층고·급배기 단말 수·방향 확인 → 총 급기와 총 배기 차이 ≤1% → 발열 kW의 실제 위치·대류분율·근거 확인 → confirmed geometry 저장.
+
+- [ ] **Step 2: 자동 검출값을 승격하지 않는다**
+
+  DXF에서 검출한 공간·단말·장비는 입력 후보일 뿐이다. 위치별 kW 근거가 없으면 장비를 개별 열원으로 만들지 않고, 바닥 균질 발열은 source-location sensitivity 전까지 `SCREENING_ONLY`로 유지한다.
+
+- [ ] **Step 3: 확정 결과를 검증한다**
+
+  Expected: `review.ready=true`, blockers 0, body-fitted issues 0, 원본 DXF hash와 confirmed terminal/heat evidence 보존.
+
+**Gate 4.5:** confirmed geometry 1건이 없으면 Task 5c와 M1 Exit를 선언하지 않는다.
+
+### Task 5a: WORKING_SINGLE_PC validators를 code-owned로 닫는다 — 코드 시계
 
 **Files:**
 
@@ -573,11 +688,27 @@ def validate_review(review_path: Path, *, projects_root: Path) -> list[dict]: ..
 - `evaluate_working_validation(projects_root: Path) -> dict` remains the public evaluator.
 - Each fixed check gets a code-owned validator; `_future_not_implemented()` is no longer used for completed checks.
 
-- [ ] **Step 1: exact companion plan을 실행한다**
+- [ ] **Step 1: exact companion plan의 코드 부분을 실행한다**
 
   Execute Tasks 2~5 in `docs/superpowers/plans/2026-08-14-mep-cfd-single-pc-working-validation.md` without changing its scientific labels. `WORKING_SINGLE_PC` and `NUMERICAL_SPOTCHECK_PASS_SINGLE_PC` remain non-citable and non-release states.
 
-- [ ] **Step 2: serial environment acceptance를 세 번 실행한다**
+- [ ] **Step 2: focused tests를 통과시킨다**
+
+  Run: `& $Python -B -m pytest -q tests/test_working_validation.py tests/test_cfd_capabilities.py tests/test_local_usability_acceptance.py tests/test_cfd_working_room.py tests/test_cfd_verification.py tests/test_cfd_numerical_spotcheck.py`
+
+  Expected: PASS. 실제 solver 실행이 없는 상태에서도 validator는 `BLOCKED`를 정확히 보고해야 한다.
+
+- [ ] **Step 3: commit code only**
+
+  Stage exact producer/schema/test paths. 사용자 DXF, solver case, generated evidence는 source commit에 넣지 않는다.
+
+**Gate 5a:** validator 코드가 모두 존재하고 `_future_not_implemented()`가 완료 check에서 제거됐다.
+
+### Task 5b: 실제 solver 증거를 수집한다 — 증거 시계
+
+이 Task의 각 Step은 solver wall-clock에 묶여 있으며 코드 속도로 압축되지 않는다.
+
+- [ ] **Step 1: serial environment acceptance를 세 번 실행한다**
 
   ```powershell
   & $Python scripts/local_usability_acceptance.py --repo-root . --python-executable $Python --launch-attempts 3 --output cfd_projects/_working_validation/local_usability_acceptance.json
@@ -585,19 +716,31 @@ def validate_review(review_path: Path, *, projects_root: Path) -> list[dict]: ..
 
   Expected: body-fitted runtime ready, current 64-cell acceptance, serial baseline, Studio startup 3/3. MPI may remain BLOCKED.
 
-- [ ] **Step 3: working-room anchor/repeat를 실행한다**
+- [ ] **Step 2: working-room anchor/repeat를 실행한다**
 
   Acceptance: watertight single air volume, `checkMesh` PASS, illegal cells 0, physical time ≥240 s, Co ≤1.0, terminal phi imbalance ≤0.1%, energy closure 95~105%, finite VTU/slices/report. Repeat differences: mean T ≤0.02 K, mean speed ≤0.005 m/s, closure ≤0.5 percentage point.
 
-- [ ] **Step 4: exact heat와 limited spot-check를 실행한다**
+- [ ] **Step 3: exact heat와 limited spot-check를 실행한다**
 
   Acceptance: heat-box analytic mean-temperature relative error ≤1%, storage closure 0.99~1.01, Co ≤1.0, global continuity ≤1e-6. Scheme/time/mesh comparison은 formal GCI가 아니라 two-level engineering spot-check로 라벨링한다.
 
-- [ ] **Step 5: 실제 DXF 1건을 GUI만으로 실행하고 resume한다**
+**Gate 5b:** 세 종류의 실행 증거가 현재 artifact hash로 재검증된다.
+
+### Task 5c: 실제 DXF GUI E2E와 resume 무결성을 확인한다 — 증거 시계
+
+**선행조건:** Task 4.5의 confirmed geometry 1건. 없으면 이 Task를 시작하지 않는다.
+
+- [ ] **Step 1: 실제 DXF 1건을 GUI만으로 실행하고 resume한다**
 
   원본 hash, confirmed geometry, OCC, mesh, thermal checkpoint, report, case evidence가 하나의 chain이어야 한다. 첫 verified checkpoint 뒤 Studio를 종료하고 같은 job을 GUI에서 재개한다. CLI/JSON 수동 편집이 필요하면 product defect로 기록한다.
 
-- [ ] **Step 6: 두 번의 working validation을 비교 publish한다**
+- [ ] **Step 2: 축소 usability check를 수행한다**
+
+  기계설비 담당자 1명에게 완료된 결과 화면을 보여주고 세 가지를 답하게 한다: (1) 이 결과를 어디까지 쓸 수 있는가 (2) 무엇이 막고 있는가 (3) 다음에 무엇을 해야 하는가. 30분 이내, 관찰 기록만 남긴다.
+
+  이것은 M7의 정식 UAT를 대체하지 않는다. 목적은 UX 결함을 M7까지 미루지 않고 M1에서 발견하는 것이다. 세 질문 중 하나라도 답하지 못하면 상태 문구와 next action을 수정한다.
+
+- [ ] **Step 3: 두 번의 working validation을 비교 publish한다**
 
   ```powershell
   & $Python working_validation.py --projects-root cfd_projects --output cfd_projects/_working_validation/run1.json
@@ -607,11 +750,7 @@ def validate_review(review_path: Path, *, projects_root: Path) -> list[dict]: ..
 
   Expected: deterministic evidence and no generated-report self-inventory contamination.
 
-- [ ] **Step 7: commit code only; runtime evidence는 release storage에 보존한다**
-
-  Stage exact producer/schema/test paths. 사용자 DXF, solver case, generated evidence는 source commit에 넣지 않는다.
-
-**Gate M1:** Case Health tamper tests, actual GUI E2E, restart integrity, WORKING_SINGLE_PC가 모두 PASS해야 M2로 이동한다.
+**Gate M1:** Case Health tamper tests, actual GUI E2E, restart integrity, WORKING_SINGLE_PC, 축소 usability check가 모두 PASS해야 M2로 이동한다. Task 4.5가 미완이면 M1은 `BLOCKED_INPUT_CONFIRMATION`이며 코드 완성도와 무관하게 Exit를 선언하지 않는다.
 
 ### Task 6: Design·Scenario·Run contracts와 repository를 만든다
 
@@ -1468,6 +1607,14 @@ def compare_serial_parallel(serial_case: Path, parallel_case: Path) -> dict: ...
 
 - The capability result is opt-in only and is invalidated by runtime, solver, mesh, physics, or evidence-hash drift.
 
+- [ ] **Step 0: 원인규명 spike를 먼저 수행한다 — 기간 상한 1주**
+
+  현재 `MPI_RANK_SPAWN_HANG`의 원인은 확정되지 않았고, 기본 설정과 `vader=none` 모두 실패한 실측만 있다. Step 1 이후를 착수하기 전에 상한 1주의 조사를 수행한다.
+
+  조사 순서: WSL 재시작 → Open MPI 재설치 → `--mca plm isolated` 등 launcher 우회 → MPICH 대체 검토.
+
+  **1주 안에 rank-spawn이 복구되지 않으면 M8-A를 폐기하고 "영구 직렬"로 확정한다.** 원인 미상 항목을 로드맵에 무기한 남겨 두지 않는다. 폐기 시 `runtime_capability.v1`의 `parallel_runtime_ready=false`를 최종 상태로 기록하고, 성능 개선은 직렬 최적화(스킴·완화계수·초기장)로 목표를 바꾼다.
+
 - [ ] **Step 1: isolated rank-spawn을 복구한다**
 
   `mpirun -np 2 hostname`이 timeout 없이 두 rank output을 만든다. WSL distro, OpenMPI path/version, environment override, cleanup result를 artifact로 기록한다.
@@ -1645,6 +1792,9 @@ Reviewer identity는 개인 이름을 코드에 hard-code하지 않고 조직의
 
 | Risk | Early signal | Prevention | Fallback |
 |---|---|---|---|
+| **Single point of failure — 원격 백업 없음** | `git rev-list --count <branch> --not --remotes` > 0 | Task 0 Step 6 원격 반영, Step 8 CI | 코드 작업 중단하고 백업 우선 |
+| **없는 인력을 전제한 일정** | RACI 역할에 담당자 ID 없음 | Task 0 Step 7 가용성 확인 | 해당 Task를 임계경로에서 제외 |
+| **입력 확정 지연이 M1을 막음** | confirmed geometry 0건 | Task 4.5를 별도 트랙으로 병렬 진행 | M1을 `BLOCKED_INPUT_CONFIRMATION`으로 유지 |
 | Dirty worktree ownership conflict | targeted file already modified/untracked | M0 baseline and explicit ownership | stop and request scope approval |
 | Schema proliferation ahead of product value | new contract without consumer/E2E | schema task must ship producer+validator+UI/test | remove unconsumed proposal before merge |
 | Case health duplicates result gate | differing status for same artifact | health consumes authoritative result gate | block release on inconsistency test |
@@ -1669,13 +1819,22 @@ Reviewer identity는 개인 이름을 코드에 hard-code하지 않고 조직의
 
 ## 14. Milestone Exit Checklist
 
+### M0 — Baseline
+
+- [ ] Tests failed 0 and baseline artifact PASS.
+- [ ] Approved baseline pushed to origin; unpushed commit count is 0.
+- [ ] Pre-push safety scan clean, 또는 이미 공개된 선행 blob의 알려진 위험을 저장소 공개 범위 결정권자가 명시적으로 수용하고 이번 branch에 신규 민감 artifact가 없음을 기록.
+- [ ] RACI roles have named owners or are marked `BLOCKED_NO_OWNER` and excluded from the critical path.
+- [ ] CI runs the full suite on the locked Python and is green.
+
 ### M1 — Trust Core
 
 - [ ] Case evidence rejects copied/stale/self-declared PASS.
 - [ ] Human approval cannot override failed evidence.
+- [ ] Confirmed geometry exists for at least one real DXF (Task 4.5).
 - [ ] Actual DXF 1 case reaches report through GUI and resume.
 - [ ] WORKING_SINGLE_PC current artifact PASS.
-- [ ] User can state usable scope and next action from one case-health screen.
+- [ ] User can state usable scope and next action from one case-health screen — verified by the reduced usability check with one MEP engineer, not deferred to M7 UAT.
 
 ### M2 — Repeatable Design
 
@@ -1719,6 +1878,22 @@ case_evidence.v1 + case_health.v1 + case_review.v1
 
 이 slice는 solver/mesh/physics를 바꾸지 않으면서 제품의 핵심을 “계산 실행”에서 “검토 가능한 증거”로 전환한다. 이 branch가 merge되고 M1 gate가 PASS하기 전에는 Design/Scenario UI, comfort, IAQ, radiation production을 병합하지 않는다.
 
+**2026-08-24 개정 — Tasks 1~4 완료 후의 다음 slice:**
+
+Tasks 1~4는 완료됐다. 다음 slice는 코드가 아니라 **보존과 입력 확정**이며, 순서가 중요하다.
+
+```text
+Task 0 Step 6 (원격 반영)        ← 코드 시계 30분, 위험 감소 최대
+  → Task 0 Step 7~8 (역할 확인·CI)
+  → Task 4.5 (geometry 확정)     ← MEP 담당자 트랙, 병렬 시작
+  → Task 5a (validators 코드)    ← 개발 트랙, 병렬 진행
+  → Task 5b (solver 증거)
+  → Task 5c (GUI E2E + 축소 usability)
+  → M1 Exit
+```
+
+Task 0 Step 6은 어떤 코드 Task보다 먼저 수행한다. 현재 Tasks 1~4의 산출물이 단일 디스크에만 존재하므로, 이후 작업을 아무리 진행해도 그 위험은 줄지 않는다.
+
 ## 16. Plan Self-Review Record
 
 - Spec coverage: Exa P0 case evidence/review, P1 scenario/V&V/field calibration, P2 comfort/IAQ/CHT, P3 MPI/surrogate를 각각 Tasks 1~19에 연결했다.
@@ -1728,7 +1903,7 @@ case_evidence.v1 + case_health.v1 + case_review.v1
 - Claim discipline: solver/test/PASS 문자열을 design/release 증거로 사용하지 않고 comfort/IAQ/CHT/MPI/surrogate의 independent gates를 명시했다.
 - External approvals: field/terminal/IAQ/radiation/MPI/surrogate의 미확정 threshold는 승인 전 informational로 고정했다.
 - Placeholders: 실행 시 생성되는 IDs와 runtime paths를 제외한 미정 구현 항목은 없다. Runtime ID는 authoritative manifest가 발행한다.
-- Structural check: Tasks 0~19가 각각 Files와 Interfaces를 가지며 task 번호는 중복·누락 없이 20개다.
+- Structural check: Tasks 0~19가 각각 Files와 Interfaces를 가지며 task 번호는 중복·누락 없이 20개다. 2026-08-24 개정에서 Task 4.5(입력 확정 트랙)를 추가하고 Task 5를 5a/5b/5c로 분할해 실행 단위는 23개다.
 - Path check: 현재 `Modify`/`Preserve` 대상은 baseline에 존재하거나 앞선 task가 명시적으로 생성하며, `Create` 대상은 2026-08-24 checkout에서 존재하지 않음을 대조했다.
 - Markdown check: code fence 수는 짝수이고 `git diff --check`에 whitespace error가 없다.
 
@@ -1744,3 +1919,20 @@ case_evidence.v1 + case_health.v1 + case_review.v1
 - M1 is still open. Task 5 must close the actual working-PC validators, one real-DXF GUI E2E evidence chain, and restart-integrity gate before M2 work starts.
 - No FreeCAD/OpenFOAM/solver run or manual browser/print-preview is claimed by this snapshot.
 - Detailed rulings, per-task commits, review findings, and verification evidence are maintained in the [SDD progress ledger](../../../.superpowers/sdd/2026-08-24-mep-cfd-master-development/progress.md).
+
+## 19. 계획 개정 기록 — 2026-08-24 (검토 반영)
+
+독립 검토에서 방법론은 유지 판정을 받았고, 시간·인력 가정과 계획 밖 안전장치에 대해 6건이 반영됐다.
+
+| ID | 개정 내용 | 반영 위치 |
+|---|---|---|
+| P1 | 일정을 코드 시계와 증거 시계로 분리. Milestone 기간은 증거 시계로만 산정 | §7 |
+| P2 | 원격 반영·역할 확인·최소 CI를 Task 0 Step 6~8로 추가하고 Gate M0에 포함 | Task 0, §14 |
+| P3 | geometry 확정을 Task 4.5 독립 트랙으로 분리 | Task 4.5 |
+| P4 | Task 5를 5a(코드)/5b(solver 증거)/5c(GUI E2E)로 분할 | Task 5a~5c |
+| P5 | 인력 가용성 게이트와 `BLOCKED_NO_OWNER` 처리 규칙 | Task 0 Step 7, §12 |
+| P6 | schema Consumer 필수 요건, 축소 usability check, MPI 1주 spike 상한, 문서 은퇴 정책 | §5, Task 5c, Task 18, §1 |
+
+개정의 근거가 된 실측: Task 0~4 코드 작업 5.6시간·17 커밋, 미푸시 39,046줄, confirmed geometry 0건, 계획서 1,747줄 내 CI·백업 언급 0건.
+
+과학적 규율(evidence/citation 분리, 승인이 증거를 이길 수 없음, 미승인 threshold 격리, 명시적 비목표)은 변경하지 않았다.

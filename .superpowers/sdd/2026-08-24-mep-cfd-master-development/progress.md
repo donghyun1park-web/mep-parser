@@ -161,11 +161,15 @@ Full read-only report: `preflight-scan.md`. The following ledger tables preserve
 
 ## Task status
 
-- Task 0: complete — commits `eef978e`, `8bb9c5e`; review round 2 clean; controller focused verification `38 passed`.
+- Task 0: original code/baseline slice complete — commits `eef978e`, `8bb9c5e`; review round 2 clean; controller focused verification `38 passed`; working-copy plan revision adds Steps 6–8, which remain pending.
 - Task 1: complete — commits `7669d35`, `c0c3c59`; review fix round 1 clean; controller focused verification `45 passed`; controller full verification `675 passed, 14 skipped`.
 - Task 2: complete — commits `77c0cc8`, `b533118`, `f24358c`, `2e9282e`, `458b66f`; final reviewer verdict `CLEAN`; controller focused verification `96 passed`; controller full verification `733 passed, 14 skipped`.
 - Task 3: complete — commits `367ae7b`, `bcd9f11`, `18dfc2f`, `64ead34`; final reviewer verdict `CLEAN`; controller focused verification `148 passed`; controller full verification `785 passed, 14 skipped`.
 - Task 4: complete — commits `fd0bcee`, `24d18aa`; final reviewer verdict `CLEAN`; controller focused verification `260 passed`; controller full verification `808 passed, 14 skipped`.
+- Task 0 Step 6: authorized, push pending — `origin` is public, the feature branch is absent remotely, and the mandatory safety scan found likely real-derived architectural geometry already present in remote `feature/cfd`; on 2026-08-25 the user explicitly accepted that known pre-existing risk and authorized a public branch push. This is not recorded as a clean scan.
+- Task 0 Steps 7–8: pending — RACI owner availability and first-green Windows CI have not been recorded.
+- Task 4.5: pending — confirmed real-DXF geometry and an accountable MEP reviewer are not available.
+- Task 5a–5c: pending — revised plan forbids code work before Task 0 Steps 6–8 and keeps runtime/GUI evidence behind geometry and environment gates.
 - Task 1 pre-dispatch contract audit: `TASK1_BRIEF_READY`.
 - Task 2 pre-dispatch authority audit: `TASK2_BRIEF_READY`.
 - Task 3 pre-dispatch health/review audit: `TASK3_BRIEF_READY`.
@@ -195,3 +199,6 @@ Full read-only report: `preflight-scan.md`. The following ledger tables preserve
 - Task 4 initial review (`64ead34..fd0bcee`): FIX REQUIRED — unbounded review request input, shallow health dictionaries able to unseal advice, and report/digest call sites omitting current health authority.
 - Task 4 fix round (`fd0bcee..24d18aa`): every finding regression-tested and addressed; the loopback guard precedes bounded request parsing, advice accepts only schema-valid authoritative health, and HTML/Markdown/JSON report paths share freshly recomputed health; final scoped verdict `CLEAN`.
 - Controller verification at `24d18aa`: focused Task 4 boundary `260 passed, 7 dependency deprecation warnings in 130.62s`; full authenticated suite `808 passed, 14 skipped, 7 warnings in 582.17s`; JUnit `cfd_projects/_controller_verify/task4-final-full.xml`; exit code 0.
+- 2026-08-25 GitHub/next-gate audit at local HEAD `1342a94`: remote `origin` is public with default branch `master`; remote heads do not include `codex/case-evidence-review-gate`; 22 local commits are not in cached remote refs; GitHub CLI authentication is expired.
+- 2026-08-25 pre-push safety audit: no high-confidence secret/private-key/token signatures; `cfd_projects/` has zero tracked paths; four root sample DXFs are generator-backed synthetic fixtures. `debug_tools/temp_geometry.json`, associated `temp_export*.dxf`, and reviewed screenshots contain detailed likely real-derived B4 architectural geometry/source context. These blobs are byte-identical to public remote `feature/cfd` commit `f951120`, so the risk predates this branch but fails the revised plan's clean public-push gate.
+- 2026-08-25 publication ruling: proceed with public branch backup because the user explicitly selected public continuation after the likely real-derived, already-public geometry risk was disclosed. The branch adds no new sensitive artifact according to the scoped comparison, but acceptance does not convert the safety scan into `clean`; if wrong, the pre-existing public exposure continues and must be remediated separately.
