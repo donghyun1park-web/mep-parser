@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from jsonschema import validate
+import pytest
 
 
 def test_build_vv_baseline_records_identity_and_hash_inventory(tmp_path):
@@ -39,15 +40,52 @@ def test_write_vv_baseline_reference_binds_canonical_relative_path_and_hash(tmp_
 
     repo_root = Path(__file__).resolve().parents[1]
     projects_root = tmp_path / "cfd_projects"
-    output = projects_root / "_release_evidence" / "vv" / "baseline-candidate" / "vv_baseline.json"
+    payload = build_vv_baseline(repo_root, projects_root)
+    output = projects_root / "_release_evidence" / "vv" / payload["candidate_id"] / "vv_baseline.json"
 
-    write_vv_baseline(build_vv_baseline(repo_root, projects_root), output)
+    write_vv_baseline(payload, output)
     reference = write_vv_baseline_reference(output, projects_root)
     payload = json.loads(reference.read_text(encoding="utf-8"))
 
     assert reference.name == "baseline_evidence.reference.v1.json"
-    assert payload["baseline_evidence_path"] == "_release_evidence/vv/baseline-candidate/vv_baseline.json"
+    assert payload["baseline_evidence_path"] == f"_release_evidence/vv/{json.loads(output.read_text(encoding='utf-8'))['candidate_id']}/vv_baseline.json"
     assert payload["baseline_evidence_sha256"] == hashlib.sha256(output.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize("directory, filename", [
+    ("wrong-directory", "vv_baseline.json"),
+    ("candidate", "wrong-name.json"),
+    ("wrong-candidate", "vv_baseline.json"),
+])
+def test_write_vv_baseline_reference_rejects_noncanonical_output(tmp_path, directory, filename):
+    from vv_baseline import build_vv_baseline, write_vv_baseline, write_vv_baseline_reference
+
+    repo_root = Path(__file__).resolve().parents[1]
+    projects_root = tmp_path / "cfd_projects"
+    baseline = build_vv_baseline(repo_root, projects_root)
+    candidate = baseline["candidate_id"]
+    if directory == "candidate":
+        directory = candidate
+    output = projects_root / "_release_evidence" / "vv" / directory / filename
+    write_vv_baseline(baseline, output)
+
+    with pytest.raises(ValueError, match="BASELINE_OUTPUT_CANONICAL_PATH_INVALID"):
+        write_vv_baseline_reference(output, projects_root)
+
+
+def test_write_vv_baseline_reference_rejects_traversal_candidate_id(tmp_path):
+    from vv_baseline import build_vv_baseline, write_vv_baseline_reference
+
+    repo_root = Path(__file__).resolve().parents[1]
+    projects_root = tmp_path / "cfd_projects"
+    baseline = build_vv_baseline(repo_root, projects_root)
+    baseline["candidate_id"] = "../escape"
+    output = projects_root / "_release_evidence" / "escape" / "vv_baseline.json"
+    output.parent.mkdir(parents=True)
+    output.write_text(json.dumps(baseline), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="BASELINE_OUTPUT_CANONICAL_PATH_INVALID"):
+        write_vv_baseline_reference(output, projects_root)
 
 
 def test_build_vv_baseline_recomputes_junit_summary_and_runtime_skips(tmp_path):

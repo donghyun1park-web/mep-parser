@@ -8,6 +8,8 @@
     "version": "3.12.10",
     "architecture": "x64",
     "installer_sha256": "67b5635e80ea51072b87941312d00ec8927c4db9ba18938f7ad2d27b328b95fb",
+    "executable_sha256": "4d6f5f81a4bca11191c4c7c6b43632694d0a4ce74e068619d8fdc161d469859a",
+    "signer_thumbprint": "DE01DAAE82D04F466A576E178F6B07A839238953",
     "executable_name": "python.exe"
   },
   "pip": {

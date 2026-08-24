@@ -14,11 +14,13 @@
     "python": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["version", "architecture", "installer_sha256"],
+      "required": ["version", "architecture", "installer_sha256", "executable_sha256", "signer_thumbprint"],
       "properties": {
         "version": {"type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$"},
         "architecture": {"const": "x64"},
         "installer_sha256": {"type": "string", "pattern": "^(?:[0-9a-fA-F]{64})?$"},
+        "executable_sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+        "signer_thumbprint": {"type": "string", "pattern": "^[0-9a-fA-F]{40}$"},
         "executable_name": {"type": "string"}
       }
     },
@@ -36,7 +38,7 @@
         "additionalProperties": false,
         "required": ["version", "hashes"],
         "properties": {
-          "version": {"type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$"},
+          "version": {"type": "string", "pattern": "^[0-9]+(?:\\.[0-9]+)*(?:\\.post[0-9]+)?$"},
           "hashes": {"type": "array", "items": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"}}
         }
       }

@@ -18,6 +18,9 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
+_CANDIDATE_ID = re.compile(r"^baseline-[0-9TZ-]+-[0-9a-f]{12}$")
+
+
 def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
@@ -198,6 +201,17 @@ def write_vv_baseline_reference(output: Path, projects_root: Path) -> Path:
         relative_output = output.relative_to(projects_root).as_posix()
     except ValueError as exc:
         raise ValueError("BASELINE_OUTPUT_OUTSIDE_PROJECTS_ROOT") from exc
+    try:
+        candidate_id = json.loads(output.read_text(encoding="utf-8"))["candidate_id"]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise ValueError("BASELINE_OUTPUT_CANONICAL_PATH_INVALID") from exc
+    if not isinstance(candidate_id, str) or _CANDIDATE_ID.fullmatch(candidate_id) is None:
+        raise ValueError("BASELINE_OUTPUT_CANONICAL_PATH_INVALID")
+    expected_output = (
+        projects_root / "_release_evidence" / "vv" / candidate_id / "vv_baseline.json"
+    ).resolve()
+    if output != expected_output:
+        raise ValueError("BASELINE_OUTPUT_CANONICAL_PATH_INVALID")
     reference = output.with_name("baseline_evidence.reference.v1.json")
     temporary = reference.with_name(f".{reference.name}.{uuid.uuid4().hex}.tmp")
     payload = {
