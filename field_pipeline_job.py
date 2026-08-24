@@ -63,11 +63,8 @@ def _review_lock_for_case(root, solver_case):
     case = Path(solver_case).expanduser()
     if not case.is_absolute():
         case = root / case
-    try:
-        case.relative_to(root)
-    except ValueError:
-        return nullcontext()
-    if not case.is_dir():
+    case = cfd_review.safe_project_directory(case, projects_root=root)
+    if case is None:
         return nullcontext()
     return cfd_review.review_state_lock(
         case / "case_evidence.v1.json", projects_root=root

@@ -221,6 +221,63 @@ def _canonical_review_directory(
     return safe
 
 
+def safe_project_directory(path: Path, *, projects_root: Path) -> Path | None:
+    """Resolve an existing non-reparse directory physically beneath the root."""
+    root = _projects_root(projects_root)
+    raw = Path(path).expanduser()
+    if not raw.is_absolute():
+        raw = root / raw
+    return _safe_existing(raw, root, directory=True)
+
+
+def _lock_file_stat(lock_path: Path):
+    try:
+        info = lock_path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ValueError("REVIEW_LOCK_UNSAFE") from exc
+    if not stat.S_ISREG(info.st_mode) or _is_reparse(lock_path):
+        raise ValueError("REVIEW_LOCK_UNSAFE")
+    return info
+
+
+def _assert_open_lock_identity(fd: int, lock_path: Path) -> None:
+    try:
+        opened = os.fstat(fd)
+        current = _lock_file_stat(lock_path)
+    except OSError as exc:
+        raise ValueError("REVIEW_LOCK_UNSAFE") from exc
+    if (
+        current is None
+        or not stat.S_ISREG(opened.st_mode)
+        or not os.path.samestat(opened, current)
+    ):
+        raise ValueError("REVIEW_LOCK_UNSAFE")
+
+
+def _open_review_lock(lock_path: Path):
+    flags = os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    for _ in range(4):
+        existing = _lock_file_stat(lock_path)
+        try:
+            if existing is None:
+                fd = os.open(lock_path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+            else:
+                fd = os.open(lock_path, flags)
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            raise ValueError("REVIEW_LOCK_UNSAFE") from exc
+        try:
+            _assert_open_lock_identity(fd, lock_path)
+            return os.fdopen(fd, "r+b")
+        except BaseException:
+            os.close(fd)
+            raise
+    raise ValueError("REVIEW_LOCK_UNSAFE")
+
+
 @contextmanager
 def _review_directory_lock(directory: Path):
     """Serialize cooperating publishers across threads and processes."""
@@ -240,17 +297,20 @@ def _review_directory_lock(directory: Path):
                 depths[key] -= 1
             return
         lock_path = directory / ".case_review.lock"
-        with lock_path.open("a+b") as stream:
+        with _open_review_lock(lock_path) as stream:
             stream.seek(0, os.SEEK_END)
             if stream.tell() == 0:
                 stream.write(b"\0")
                 stream.flush()
+                os.fsync(stream.fileno())
+            _assert_open_lock_identity(stream.fileno(), lock_path)
             stream.seek(0)
             if os.name == "nt":
                 import msvcrt
                 msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
                 depths[key] = 1
                 try:
+                    _assert_open_lock_identity(stream.fileno(), lock_path)
                     yield
                 finally:
                     depths.pop(key, None)
@@ -261,6 +321,7 @@ def _review_directory_lock(directory: Path):
                 fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
                 depths[key] = 1
                 try:
+                    _assert_open_lock_identity(stream.fileno(), lock_path)
                     yield
                 finally:
                     depths.pop(key, None)

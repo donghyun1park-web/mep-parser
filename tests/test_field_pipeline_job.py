@@ -216,6 +216,45 @@ class FieldPipelineJobTests(unittest.TestCase):
         self.assertEqual(result["manifest"]["status"], "analysis_complete_not_citable")
         occ.assert_not_called()
 
+    def test_terminal_refresh_fails_closed_for_lexical_escape_case(self):
+        created = field_pipeline_job.create_job(self.root, self.geometry)
+        inside = self.root / "inside"
+        outside = Path(self.tmp.name) / "outside-case"
+        inside.mkdir()
+        outside.mkdir()
+        forged_case = self.root / "inside" / ".." / ".." / outside.name
+        terminal = dict(created["manifest"])
+        terminal.update(
+            status="complete",
+            result_case=str(forged_case),
+            citation_status="DESIGN_CITABLE",
+            citation_blockers=[],
+            case_evidence_path="stale/case_evidence.v1.json",
+            case_evidence_sha256="a" * 64,
+            case_health_path="stale/case_health.v1.json",
+            case_health_sha256="b" * 64,
+            review_summary={"status": "APPROVED", "review_id": "stale"},
+        )
+        field_pipeline_job.cfd_gci_job._atomic_json(
+            created["manifest_path"], terminal
+        )
+
+        with mock.patch.object(field_pipeline_job.cfd_occ, "run_occ_job") as occ:
+            result = field_pipeline_job.run_job(self.root, created["job"])
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["already_complete"])
+        refreshed = result["manifest"]
+        self.assertEqual(refreshed["status"], "analysis_complete_not_citable")
+        self.assertEqual(refreshed["citation_status"], "CITATION_BLOCKED")
+        self.assertIn("CASE_EVIDENCE_NOT_FOUND", refreshed["citation_blockers"])
+        self.assertEqual(refreshed["review_summary"], {"status": "INVALID"})
+        self.assertNotIn("case_evidence_path", refreshed)
+        self.assertNotIn("case_evidence_sha256", refreshed)
+        self.assertNotIn("case_health_path", refreshed)
+        self.assertNotIn("case_health_sha256", refreshed)
+        occ.assert_not_called()
+
     def test_terminal_refresh_persists_current_validated_snapshots_without_solver_rerun(self):
         created = field_pipeline_job.create_job(self.root, self.geometry)
         case = self.root / "_body_solver" / "previous-result"

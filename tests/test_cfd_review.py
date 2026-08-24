@@ -382,3 +382,33 @@ def test_shared_review_state_lock_is_reentrant_on_same_thread(tmp_path):
             review = _create(paths)
 
     assert review["decision"] == "APPROVED"
+
+
+@pytest.mark.parametrize("operation", ["lock", "create"])
+def test_review_lock_rejects_external_symlink_without_touching_target(
+    tmp_path, operation
+):
+    paths = _future_evidence(tmp_path)
+    reviews = paths["evidence"].parent / "_reviews"
+    reviews.mkdir()
+    sentinel = tmp_path / "external-lock-sentinel"
+    original = b"external sentinel bytes\n"
+    sentinel.write_bytes(original)
+    lock_path = reviews / ".case_review.lock"
+    try:
+        os.symlink(sentinel, lock_path)
+    except OSError as exc:
+        pytest.skip(f"symlink unavailable: {exc}")
+
+    with pytest.raises(ValueError, match="REVIEW_LOCK_UNSAFE"):
+        if operation == "lock":
+            with cfd_review.review_state_lock(
+                paths["evidence"], projects_root=paths["root"]
+            ):
+                pass
+        else:
+            _create(paths)
+
+    assert sentinel.read_bytes() == original
+    assert lock_path.is_symlink()
+    assert not list(reviews.glob("*.case_review.v1.json"))
