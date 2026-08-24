@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mep-cfd-studio.local/schemas/field_dxf_acceptance.v1.schema.json",
+  "title": "MEP CFD Studio field_dxf_acceptance.v1",
+  "type": "object",
+  "required": [
+    "schema_version", "contract", "generator", "created_at", "status",
+    "actual_site_drawing", "source_dxf_path", "source_sha256", "artifacts",
+    "variation", "gates", "errors"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "contract": {"const": "field_dxf_acceptance.v1"},
+    "generator": {"const": "mep-cfd-studio/field-acceptance-v1"},
+    "status": {"enum": ["PASS", "FAIL"]},
+    "actual_site_drawing": {"type": "boolean"},
+    "source_sha256": {"type": "string", "pattern": "^([0-9a-f]{64})?$"},
+    "artifacts": {
+      "type": "object",
+      "required": [
+        "source_dxf", "geometry", "surface_manifest", "mesh_manifest",
+        "run_manifest", "result_manifest"
+      ],
+      "additionalProperties": {
+        "type": "object",
+        "required": ["path", "sha256"],
+        "properties": {
+          "path": {"type": "string"},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      }
+    },
+    "variation": {
+      "type": "object",
+      "required": ["insunits", "extmin", "extmax", "insert_rotations_deg", "layers", "signature"]
+    },
+    "gates": {
+      "type": "object",
+      "required": ["geometry", "surface", "mesh", "solver", "result"],
+      "additionalProperties": {"enum": ["PASS", "FAIL"]}
+    },
+    "errors": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": true
+}

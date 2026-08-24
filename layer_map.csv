@@ -1,10 +1,12 @@
 pattern,category,width,height,thickness
 #chk_U_250212,column,,,
+^DVM[_ -]?INDOOR$,ignore,,,
+^HFB(?:[-_ ]?\d+)?$,equipment,,,
 WALL|벽|CON,wall,200,2800,
 COL|기둥|Block_C,column,,3000,
 SLAB|FLOOR|바닥|슬래브,slab,,,200
 ZONE|ROOM|실|구역,zone,,,
-DOOR|WIND|문|창,opening,,,
+(?<![A-Z0-9])DOORS?(?![A-Z0-9])|WIND|문|창,opening,,,
 PIPE|배관|PIP,pipe,100,,
 DUCT|덕트,duct,400,300,
 TRAY|트레이|CABLE|전선,tray,300,100,

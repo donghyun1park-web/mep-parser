@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "install_recovery_acceptance.v1.schema.json",
+  "title": "MEP CFD Studio install and recovery acceptance",
+  "type": "object",
+  "required": ["schema_version", "contract", "created_at", "status", "project_data_preserved", "scenarios", "checks", "logs", "error"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "contract": {"const": "install_recovery_acceptance.v1"},
+    "generator": {"type": "string"},
+    "created_at": {"type": "string"},
+    "status": {"enum": ["PASS", "FAIL"]},
+    "project_data_preserved": {"type": "boolean"},
+    "scenarios": {
+      "type": "object",
+      "required": ["clean_install", "dependency_repair", "interrupted_job_resume"],
+      "additionalProperties": {"enum": ["PASS", "FAIL"]}
+    },
+    "checks": {"type": "object"},
+    "logs": {"type": "object"},
+    "log_hashes": {"type": "object", "additionalProperties": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"}},
+    "error": {"type": "string"}
+  }
+}

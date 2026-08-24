@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mep-cfd-studio.local/schemas/field_pipeline_job.v1.schema.json",
+  "title": "MEP CFD Studio field_pipeline_job.v1",
+  "type": "object",
+  "required": [
+    "schema_version", "contract", "engine", "created_at", "updated_at",
+    "job", "status", "stage", "attempts", "error", "input", "level"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "contract": {"const": "field_pipeline_job.v1"},
+    "engine": {"const": "body_fitted_field_pipeline"},
+    "job": {"pattern": "^field-[0-9a-f]{12}$"},
+    "status": {
+      "enum": [
+        "queued", "running", "complete", "analysis_complete_not_citable", "FAIL"
+      ]
+    },
+    "attempts": {"type": "integer", "minimum": 0},
+    "error": {"type": "string"},
+    "input": {"type": "object"},
+    "level": {"type": "object"},
+    "resume_history": {"type": "array"},
+    "attempt_history": {"type": "array"}
+  },
+  "additionalProperties": true
+}

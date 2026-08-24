@@ -15,6 +15,7 @@ geometry.json 을 읽어 FreeCAD Arch(BIM) 객체를 생성하고
 import json
 import os
 import sys
+import tempfile
 
 # Windows 한글 출력 크래시 방지
 if hasattr(sys.stdout, 'encoding') and sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
@@ -311,9 +312,10 @@ def build_openings(doc, openings, wall_idx_map, params):
     - subtype='door'  : 바닥~height 개구, 얇은 문짝 판.
     - subtype='window': sill~sill+height 개구, 창틀+유리 판.
     - subtype 없음     : 사각 void 만(기존 동작 보강). radius 없을 때 원통 폴백.
-    recompute 이후·saveAs 이전 호출(비파라메트릭 cut). returns (n_void, n_leaf)."""
+    recompute 이후·saveAs 이전 호출(비파라메트릭 cut).
+    항상 returns (n_void, n_leaf, warning_log)."""
     if not openings:
-        return (0, 0)
+        return (0, 0, "")
     d = params.get("wall", {})
     wall_h = float(d.get("height", 2800.0))
     margin = 100.0
@@ -723,7 +725,11 @@ def _main_impl():
         print(f"  [warn] makeBuilding/recompute: {_be}")
 
     print("[7/8] 문/창 3D (사각형 void + 문짝/창틀) + clash 검사")
-    n_voids, n_leaf = build_openings(doc, el.get("opening", []), wall_idx_map, params)
+    n_voids, n_leaf, opening_log = build_openings(
+        doc, el.get("opening", []), wall_idx_map, params
+    )
+    if opening_log:
+        print(opening_log, end="" if opening_log.endswith("\n") else "\n")
     print(f"  개구부 void={n_voids}개, 문짝/창틀={n_leaf}개")
     struct_objs = walls + cols + slabs
     clashes = check_clashes(struct_objs, mep_objs)
@@ -735,15 +741,18 @@ def _main_impl():
     fcstd = f"{out_base}.FCStd"
     ifc   = f"{out_base}.ifc"
 
-    # ── saveAs: ASCII 임시경로 저장 → GUI Python이 최종경로로 이동 ────────────
+    # ── saveAs: 작업별 ASCII 임시경로 저장 → GUI Python이 최종경로로 이동 ────
     # FreeCAD C++ saveAs 는 한글/공백 경로에서 조용히 실패하거나 빈 파일 생성.
-    # 해결책: builder는 항상 ASCII 경로인 스크립트 디렉토리에 저장하고,
-    #         stdout 으로 임시경로를 알려준다 → GUI가 shutil.move 로 이동.
+    # 해결책: 작업별 고유 임시폴더에 저장하고 stdout 마커를 통해 GUI가
+    #         shutil.move 한다. 고정 파일명을 공유하지 않아 동시 실행이 충돌하지 않는다.
     print("[8/8] 저장")
-    import shutil as _shutil
-    _HERE_B = os.path.dirname(os.path.abspath(__file__))
-    _tmp_fcstd = os.path.join(_HERE_B, "_mep_tmp_out.FCStd")
-    _tmp_ifc   = os.path.join(_HERE_B, "_mep_tmp_out.ifc")
+    _job_root = os.environ.get("MEP_CFD_JOB_ROOT") or None
+    if _job_root:
+        os.makedirs(_job_root, exist_ok=True)
+    _job_dir = tempfile.mkdtemp(prefix="mep_cfd_build_", dir=_job_root)
+    _tmp_fcstd = os.path.join(_job_dir, "model.FCStd")
+    _tmp_ifc   = os.path.join(_job_dir, "model.ifc")
+    print(f"JOB_TMP:{_job_dir}", flush=True)
     print(f"  saveAs → {_tmp_fcstd}")
     _saved_fcstd = False
     try:
@@ -759,7 +768,7 @@ def _main_impl():
         print(f"FCSTD_TMP:{_tmp_fcstd}", flush=True)
         print(f"FCSTD_DST:{os.path.abspath(fcstd)}", flush=True)
     else:
-        print(f"[ERROR] FCStd 저장 실패 — 파일 없음: {_tmp_fcstd}", flush=True)
+        raise RuntimeError(f"FCStd 저장 실패 — 파일 없음: {_tmp_fcstd}")
 
     # IFC 내보내기 (임시 ASCII 경로 → 이동)
     _exporter = None

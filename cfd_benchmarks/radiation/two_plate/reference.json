@@ -1,0 +1,27 @@
+{
+  "contract": "radiation_benchmark_reference.v1",
+  "name": "two_plate_diffuse_grey",
+  "scope": "Serial view-factor benchmark only. Not a field/project radiation result.",
+  "input": {
+    "geometry": "two infinite parallel diffuse-grey plates",
+    "hot_temperature_k": 400.0,
+    "cold_temperature_k": 300.0,
+    "hot_emissivity": 0.8,
+    "cold_emissivity": 0.8
+  },
+  "expected": {
+    "net_flux_w_m2": 661.543682216667,
+    "direction": "hot_plate_to_cold_plate",
+    "qr_patch_sign_convention": {
+      "hot_plate": "negative",
+      "cold_plate": "positive"
+    },
+    "formula": "sigma*(Th^4-Tc^4)/(1/eh+1/ec-1)"
+  },
+  "acceptance": {
+    "view_factor_row_sum_tolerance": 1e-06,
+    "view_factor_reciprocity_tolerance_m2": 1e-06,
+    "internal_radiation_balance_relative_error_max": 0.001,
+    "solver_flux_relative_error_max": 0.05
+  }
+}

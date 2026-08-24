@@ -40,14 +40,20 @@ SIMPLE
     pRefCell        0;
     pRefValue       0;
 
+    // residualControl 은 "여기 도달하면 조기 종료" 기준이다. 느슨하면 온도장이
+    // 초기값 근처에 머문 채로 SIMPLE 이 '수렴' 선언을 하고 멈춘다.
+    // (2026-08 실측 사고: T 1e-2 였는데 실제 T 잔차가 1e-3 이라 언제든 조기종료
+    //  가능한 상태였고, 그 온도장은 평형에서 4 K 벗어나 에너지폐합 158% 였다.)
+    // → 답에 직접 들어가는 U·T 는 1e-5 로 조인다. 최종 신뢰 판정은 잔차가 아니라
+    //   에너지 폐합율(cfd_report.energy_closure)이 한다.
     residualControl
     {
-        p_rgh           1e-2;
-        U               1e-4;
-        T               1e-2;
+        p_rgh           1e-4;
+        U               1e-5;
+        T               1e-5;
 
         // possibly check turbulence fields
-        "(k|epsilon|omega)" 1e-3;
+        "(k|epsilon|omega)" 1e-4;
     }
 }
 

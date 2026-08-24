@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mep-cfd-studio.local/schemas/thermal_progress.v1.schema.json",
+  "title": "MEP CFD Studio thermal_progress.v1",
+  "type": "object",
+  "required": [
+    "schema_version", "contract", "latest_time_s", "completed_duration_s",
+    "required_duration_s", "remaining_duration_s", "flow_through_time_s",
+    "flow_through_fraction", "runs_completed", "total_runtime_seconds",
+    "estimated_remaining_runtime_seconds", "recommended_next_duration_s",
+    "interactive_budget_exceeded", "runs"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "contract": {"const": "thermal_progress.v1"},
+    "latest_time_s": {"type": ["number", "null"]},
+    "completed_duration_s": {"type": "number", "minimum": 0},
+    "required_duration_s": {"type": "number", "minimum": 0},
+    "remaining_duration_s": {"type": "number", "minimum": 0},
+    "flow_through_time_s": {"type": "number", "minimum": 0},
+    "minimum_flow_through_fraction": {"type": "number", "minimum": 0},
+    "flow_through_fraction": {"type": "number", "minimum": 0},
+    "runs_completed": {"type": "integer", "minimum": 1},
+    "total_runtime_seconds": {"type": "number", "minimum": 0},
+    "last_solver_clock_seconds": {"type": ["number", "null"], "minimum": 0},
+    "last_solver_runtime_per_simulated_second": {
+      "type": ["number", "null"], "minimum": 0
+    },
+    "last_fixed_runtime_overhead_seconds": {"type": "number", "minimum": 0},
+    "estimated_remaining_runs": {"type": "integer", "minimum": 0},
+    "estimate_status": {
+      "enum": ["awaiting_continuation_sample", "measured_continuation", "complete"]
+    },
+    "estimated_remaining_runtime_seconds": {"type": ["number", "null"], "minimum": 0},
+    "interactive_runtime_budget_seconds": {"type": "number", "minimum": 0},
+    "interactive_budget_exceeded": {"type": "boolean"},
+    "recommended_next_duration_s": {"type": "number", "minimum": 0},
+    "checkpoint_wall_budget_seconds": {"type": "number", "minimum": 0},
+    "checkpoint_rate_source": {
+      "enum": ["unavailable", "initial_stability_scaled", "measured_continuation"]
+    },
+    "checkpoint_rate_seconds_per_simulated_second": {
+      "type": ["number", "null"], "minimum": 0
+    },
+    "energy_balance": {
+      "type": "object",
+      "required": [
+        "available", "history_complete", "input_energy_j",
+        "stored_sensible_energy_j", "cumulative_exhaust_energy_j",
+        "transient_closure_ratio"
+      ],
+      "properties": {
+        "available": {"type": "boolean"},
+        "history_complete": {"type": "boolean"},
+        "input_energy_j": {"type": "number"},
+        "stored_sensible_energy_j": {"type": ["number", "null"]},
+        "cumulative_exhaust_energy_j": {"type": "number"},
+        "transient_closure_ratio": {"type": ["number", "null"]}
+      },
+      "additionalProperties": true
+    },
+    "runs": {"type": "array"}
+  },
+  "additionalProperties": true
+}

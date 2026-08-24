@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mep-cfd-studio.local/schemas/run_manifest.v1.schema.json",
+  "title": "MEP CFD Studio run_manifest.v1",
+  "type": "object",
+  "required": [
+    "schema_version", "contract", "engine", "created_at", "status",
+    "design_ready", "errors", "warnings", "solver", "airflow", "terminals",
+    "y_plus", "input"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "contract": {"const": "run_manifest.v1"},
+    "engine": {"enum": [
+      "body_fitted_isothermal_rans", "body_fitted_isothermal_urans",
+      "body_fitted_buoyant_urans"
+    ]},
+    "status": {"enum": ["PASS", "WARN", "FAIL"]},
+    "design_ready": {"type": "boolean"},
+    "errors": {"type": "array", "items": {"type": "string"}},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "effective_settings": {"type": "object"},
+    "effective_numerics": {"type": "object"},
+    "input": {
+      "type": "object",
+      "properties": {
+        "thermal_input_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "numerical_provenance": {
+          "type": "object",
+          "required": [
+            "contract", "source", "thermal_input_sha256",
+            "thermal_restart_input_sha256", "effective_settings_sha256",
+            "effective_numerics_sha256", "expected_system", "system"
+          ],
+          "properties": {
+            "contract": {"const": "thermal_numerics_provenance.v1"},
+            "source": {"enum": ["thermal_initial_input", "thermal_restart_input"]},
+            "thermal_input_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+            "thermal_restart_input_sha256": {"type": ["string", "null"]},
+            "effective_settings_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+            "effective_numerics_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+            "expected_system": {
+              "type": "object",
+              "required": ["controlDict", "fvSchemes", "fvSolution"],
+              "properties": {
+                "controlDict": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+                "fvSchemes": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+                "fvSolution": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+              }
+            },
+            "system": {
+              "type": "object",
+              "required": ["controlDict", "fvSchemes", "fvSolution"],
+              "properties": {
+                "controlDict": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+                "fvSchemes": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+                "fvSolution": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+              }
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "y_plus": {
+      "type": "object",
+      "required": [
+        "available", "time", "area_ratio_in_target",
+        "wall_treatment_acceptable_area_ratio", "minimum", "maximum",
+        "area_weighted_average", "patches"
+      ]
+    },
+    "numerical_quality": {
+      "type": "object",
+      "required": [
+        "contract", "status", "design_ready", "profile",
+        "convection_order", "blockers"
+      ],
+      "properties": {
+        "contract": {"const": "numerical_quality.v1"},
+        "status": {"enum": ["PASS", "SCREENING_ONLY", "NOT_EVALUATED"]},
+        "design_ready": {"type": "boolean"},
+        "profile": {"type": "string", "minLength": 1},
+        "convection_order": {"type": "integer", "minimum": 1},
+        "blockers": {"type": "array", "items": {"type": "string"}}
+      },
+      "additionalProperties": true
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"engine": {"const": "body_fitted_buoyant_urans"}},
+        "required": ["engine"]
+      },
+      "then": {
+        "required": [
+          "numerical_quality", "effective_settings", "effective_numerics"
+        ],
+        "properties": {
+          "input": {
+            "required": ["thermal_input_sha256", "numerical_provenance"]
+          }
+        }
+      }
+    }
+  ],
+  "additionalProperties": true
+}

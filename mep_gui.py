@@ -13,32 +13,21 @@ Design:
 """
 import contextlib
 import csv
-import glob
 import io
 import json
 import os
 import subprocess
+import tempfile
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from cfd_capabilities import find_freecadcmd, freecad_headless_command
 import dxf_parser as P
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 CATEGORIES = ["wall", "column", "slab", "zone", "opening", "pipe", "duct", "tray"]
-
-
-def find_freecadcmd():
-    """Auto-detect freecadcmd.exe. Returns None if not found."""
-    cands = [r"C:\Program Files\FreeCAD 1.1\bin\freecadcmd.exe"]
-    cands += glob.glob(r"C:\Program Files\FreeCAD*\bin\freecadcmd.exe")
-    cands += glob.glob(r"C:\Program Files (x86)\FreeCAD*\bin\freecadcmd.exe")
-    for c in cands:
-        if os.path.exists(c):
-            return c
-    return None
-
 
 # ── Layer Map CSV helpers ─────────────────────────────────────────────────────
 
@@ -527,27 +516,32 @@ class App:
             messagebox.showerror("FreeCAD not found", "freecadcmd.exe not found.")
             return
         out = os.path.splitext(self.geom_path)[0].replace(".geometry", "") + "_model"
+        job_dir = tempfile.mkdtemp(prefix="mep_cfd_gui_")
         env = dict(os.environ, MEP_GEOMETRY=self.geom_path, MEP_OUT=out,
-                   PYTHONIOENCODING="utf-8")
+                   MEP_CFD_JOB_ROOT=job_dir, PYTHONIOENCODING="utf-8")
+        command = freecad_headless_command(
+            fc, os.path.join(HERE, "freecad_builder.py"), job_dir
+        )
         self.btn_build.state(["disabled"])
         self._log(f"Build started... (freecadcmd) -> {out}.FCStd / .ifc")
 
         def run():
             try:
-                r = subprocess.run([fc, os.path.join(HERE, "freecad_builder.py")],
+                r = subprocess.run(command,
                                    cwd=HERE, env=env, capture_output=True,
                                    text=True, encoding="utf-8", errors="replace",
                                    timeout=900)
-                self.root.after(0, lambda: self._build_done(r, out))
+                self.root.after(0, lambda: self._build_done(r, out, job_dir))
             except Exception as e:
                 # Python 3: 람다에서 except 변수 참조 시 소멸 → 명시적 캡처
                 _msg = str(e) or repr(type(e))
                 self.root.after(0, lambda msg=_msg: (
                     self._log(f"[Error] Build failed: {msg}"),
+                    self._log(f"  진단 폴더: {job_dir}"),
                     self.btn_build.state(["!disabled"])))
         threading.Thread(target=run, daemon=True).start()
 
-    def _build_done(self, r, out):
+    def _build_done(self, r, out, job_dir=None):
         import shutil
         # stdout 파싱: FCSTD_TMP/FCSTD_DST 마커로 임시파일 → 최종경로 이동
         fcstd_tmp = fcstd_dst = ifc_tmp = ifc_dst = None
@@ -587,6 +581,13 @@ class App:
         ok = os.path.exists(fcstd_dst or (out + ".FCStd"))
         self._log(f"Build {'complete' if ok else 'FAILED'}: {fcstd_dst or out + '.FCStd'}"
                   + (" ✓ IFC" if ifc_dst and os.path.exists(ifc_dst) else ""))
+        temporary_outputs_remain = any(
+            path and os.path.exists(path) for path in (fcstd_tmp, ifc_tmp)
+        )
+        if ok and not temporary_outputs_remain and job_dir:
+            shutil.rmtree(job_dir, ignore_errors=True)
+        elif job_dir:
+            self._log(f"  진단/복구 폴더 보존: {job_dir}")
         self.btn_build.state(["!disabled"])
 
 

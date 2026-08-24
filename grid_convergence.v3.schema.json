@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mep-cfd-studio.local/schemas/grid_convergence.v3.schema.json",
+  "title": "MEP CFD Studio grid_convergence.v3",
+  "type": "object",
+  "required": [
+    "schema_version", "contract", "engine", "created_at", "status",
+    "design_ready", "uncertainty_limit_pct", "errors", "warnings",
+    "comparison", "cases", "metrics"
+  ],
+  "properties": {
+    "schema_version": {"const": 3},
+    "contract": {"const": "grid_convergence.v3"},
+    "engine": {"const": "body_fitted_thermal_mesh_uncertainty_lsr"},
+    "status": {"enum": ["PASS", "FAIL"]},
+    "design_ready": {"type": "boolean"},
+    "uncertainty_limit_pct": {"type": "number", "exclusiveMinimum": 0},
+    "errors": {"type": "array", "items": {"type": "string"}},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "comparison": {
+      "type": "object",
+      "required": [
+        "method", "method_doi", "grid_count",
+        "minimum_flow_through_fraction", "window_flow_through_fraction",
+        "refinement_ratios_fine_to_coarse", "spatial_aggregation",
+        "temporal_aggregation", "heat_source_contract"
+      ],
+      "properties": {
+        "grid_count": {"type": "integer", "minimum": 4},
+        "heat_source_contract": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "name", "source_element_ids", "power_kw",
+              "convective_fraction", "applied_convective_power_w", "evidence"
+            ]
+          }
+        }
+      }
+    },
+    "cases": {
+      "type": "array", "minItems": 4,
+      "items": {
+        "type": "object",
+        "required": ["cell_count", "metrics", "diagnostics", "time_window", "provenance"],
+        "properties": {
+          "provenance": {
+            "type": "object",
+            "required": [
+              "run_manifest_sha256", "result_manifest_sha256",
+              "mesh_manifest_sha256", "thermal_input_sha256"
+            ]
+          }
+        }
+      }
+    },
+    "metrics": {
+      "type": "array", "minItems": 3, "maxItems": 3,
+      "items": {
+        "type": "object",
+        "required": [
+          "key", "label", "unit", "fine", "grid_values",
+          "grid_width_ratios", "convergence", "observed_order",
+          "extrapolated", "uncertainty_method", "uncertainty_fine",
+          "uncertainty_fine_pct", "error_estimator", "fit_weighting",
+          "fit_standard_deviation", "data_range_parameter",
+          "safety_factor", "uncertainty_status", "window_drift_pct",
+          "stationarity_limit_pct", "stationarity_status", "limit_pct", "status"
+        ]
+      }
+    }
+  },
+  "additionalProperties": true
+}

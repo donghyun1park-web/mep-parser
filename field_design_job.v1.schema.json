@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mep-cfd-studio.local/schemas/field_design_job.v1.schema.json",
+  "title": "MEP CFD Studio field_design_job.v1",
+  "type": "object",
+  "required": [
+    "schema_version", "contract", "case", "status", "stage", "started_at",
+    "updated_at", "attempts", "target_flow_through_fraction",
+    "flow_through_fraction", "resume_history", "error"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "contract": {"const": "field_design_job.v1"},
+    "status": {"enum": ["running", "complete", "FAIL"]},
+    "target_flow_through_fraction": {"const": 3.0},
+    "flow_through_fraction": {"type": "number", "minimum": 0},
+    "attempts": {"type": "integer", "minimum": 1},
+    "resume_history": {"type": "array"},
+    "error": {"type": "string"}
+  },
+  "additionalProperties": true
+}

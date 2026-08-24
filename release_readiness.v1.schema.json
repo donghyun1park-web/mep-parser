@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "release_readiness.v1.schema.json",
+  "title": "MEP CFD Studio release readiness",
+  "type": "object",
+  "required": ["schema_version", "contract", "created_at", "status", "limited_beta_ready", "product_ready", "checks", "next_actions"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "contract": {"const": "release_readiness.v1"},
+    "created_at": {"type": "string"},
+    "status": {"enum": ["PASS", "BLOCKED"]},
+    "limited_beta_ready": {"type": "boolean"},
+    "product_ready": {"type": "boolean"},
+    "checks": {
+      "type": "array",
+      "minItems": 5,
+      "items": {
+        "type": "object",
+        "required": ["id", "label", "status", "detail", "evidence"],
+        "properties": {
+          "id": {"type": "string"}, "label": {"type": "string"},
+          "status": {"enum": ["PASS", "BLOCKED"]},
+          "detail": {"type": "string"},
+          "evidence": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "next_actions": {"type": "array", "items": {"type": "string"}}
+  }
+}

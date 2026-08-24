@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mep-cfd-studio.local/schemas/geometry.v2.schema.json",
+  "title": "MEP CFD Studio geometry.v2",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "contract",
+    "source",
+    "units",
+    "source_units",
+    "coordinate_system",
+    "levels",
+    "elements",
+    "review"
+  ],
+  "properties": {
+    "schema_version": {"const": 2},
+    "contract": {"const": "geometry.v2"},
+    "source": {"type": "string"},
+    "units": {"const": "mm"},
+    "source_units": {
+      "type": "object",
+      "required": ["millimetres_per_source_unit", "normalized_length_unit", "assumed"]
+    },
+    "coordinate_system": {
+      "type": "object",
+      "required": ["axis_convention", "origin_mm", "rotation_deg", "millimetres_to_metres"],
+      "properties": {
+        "axis_convention": {"const": "XY_Z_UP"},
+        "origin_mm": {
+          "type": "array",
+          "prefixItems": [{"type": "number"}, {"type": "number"}, {"type": "number"}],
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "millimetres_to_metres": {"const": 0.001}
+      }
+    },
+    "levels": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "label", "elevation_mm"]
+      }
+    },
+    "elements": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {"$ref": "#/$defs/element"}
+      }
+    },
+    "review": {
+      "type": "object",
+      "required": ["engine", "ready", "blocking", "blocker_count", "items", "screening_voxel_allowed"]
+    }
+  },
+  "$defs": {
+    "element": {
+      "type": "object",
+      "required": [
+        "id",
+        "id_stability",
+        "category",
+        "source_ref",
+        "confirmed",
+        "confirmation_state",
+        "semantic",
+        "level_id"
+      ],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "id_stability": {
+          "enum": ["source_derived", "geometry_derived", "geometry_derived_duplicate"]
+        },
+        "category": {"type": "string"},
+        "source_ref": {
+          "type": "object",
+          "required": ["handles", "layer", "block_name", "entity_type"]
+        },
+        "confirmed": {"type": "boolean"},
+        "confirmation_state": {"enum": ["confirmed", "unconfirmed"]},
+        "semantic": {
+          "type": "object",
+          "properties": {
+            "role": {"type": "string"},
+            "power_kw": {"type": "number", "exclusiveMinimum": 0},
+            "input_power_w": {"type": "number", "exclusiveMinimum": 0},
+            "convective_fraction": {
+              "type": "number", "minimum": 0, "maximum": 1
+            },
+            "radiative_fraction": {
+              "type": "number", "minimum": 0, "maximum": 1
+            },
+            "convective_power_w": {"type": "number", "minimum": 0},
+            "radiative_power_w": {"type": "number", "minimum": 0},
+            "evidence": {"type": "string", "minLength": 1},
+            "source_type": {"type": "string", "minLength": 1},
+            "override_of_dxf": {"type": "boolean"}
+          },
+          "allOf": [{
+            "if": {
+              "required": ["role"],
+              "properties": {"role": {"const": "heat_source"}}
+            },
+            "then": {
+              "required": [
+                "input_power_w", "convective_fraction", "radiative_fraction",
+                "convective_power_w", "radiative_power_w", "evidence", "source_type"
+              ],
+              "properties": {"source_type": {"const": "user_confirmed"}}
+            }
+          }]
+        },
+        "level_id": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

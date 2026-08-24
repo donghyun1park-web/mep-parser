@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "numerical_sensitivity.v1.schema.json",
+  "title": "MEP CFD numerical sensitivity evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "status",
+    "provenance",
+    "baseline",
+    "variant",
+    "allowed_variation",
+    "qoi_comparisons"
+  ],
+  "properties": {
+    "contract": {"const": "numerical_sensitivity.v1"},
+    "status": {"const": "PASS"},
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["explicit_job", "source", "job_id"],
+      "properties": {
+        "explicit_job": {"const": true},
+        "source": {"const": "cfd_numerical_sensitivity_job"},
+        "job_id": {"type": "string", "minLength": 1}
+      }
+    },
+    "baseline": {"$ref": "#/$defs/baselineRun"},
+    "variant": {"$ref": "#/$defs/variantRun"},
+    "allowed_variation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["parameter", "baseline", "variant", "all_other_inputs_equal"],
+      "properties": {
+        "parameter": {"const": "thermal_numerics_profile"},
+        "baseline": {"const": "stabilized_first_order_v1"},
+        "variant": {"const": "design_limited_second_order_v1"},
+        "all_other_inputs_equal": {"const": true}
+      }
+    },
+    "qoi_comparisons": {
+      "type": "array",
+      "minItems": 3,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/qoiComparison"},
+      "allOf": [
+        {"contains": {"properties": {"name": {"const": "occupied_zone_mean_temperature_k"}}, "required": ["name"]}},
+        {"contains": {"properties": {"name": {"const": "occupied_zone_mean_speed_m_s"}}, "required": ["name"]}},
+        {"contains": {"properties": {"name": {"const": "exhaust_temperature_rise_k"}}, "required": ["name"]}}
+      ]
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{64}$"
+    },
+    "residual1e4": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["final", "tail_maximum", "tail_samples", "limit"],
+      "properties": {
+        "final": {"type": "number", "minimum": 0},
+        "tail_maximum": {"type": "number", "minimum": 0},
+        "tail_samples": {"type": "integer", "minimum": 5},
+        "limit": {"type": "number", "exclusiveMinimum": 0, "maximum": 0.0001}
+      }
+    },
+    "residual1e5": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["final", "tail_maximum", "tail_samples", "limit"],
+      "properties": {
+        "final": {"type": "number", "minimum": 0},
+        "tail_maximum": {"type": "number", "minimum": 0},
+        "tail_samples": {"type": "integer", "minimum": 5},
+        "limit": {"type": "number", "exclusiveMinimum": 0, "maximum": 0.00001}
+      }
+    },
+    "solverEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ended",
+        "fatal_error",
+        "peak_courant",
+        "courant_limit",
+        "residuals",
+        "continuity",
+        "phi_balance",
+        "energy_closure_basis"
+      ],
+      "properties": {
+        "ended": {"const": true},
+        "fatal_error": {"const": false},
+        "peak_courant": {"type": "number", "minimum": 0},
+        "courant_limit": {"type": "number", "exclusiveMinimum": 0},
+        "residuals": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["Ux", "Uy", "Uz", "p_rgh", "T", "k", "omega"],
+          "properties": {
+            "Ux": {"$ref": "#/$defs/residual1e4"},
+            "Uy": {"$ref": "#/$defs/residual1e4"},
+            "Uz": {"$ref": "#/$defs/residual1e4"},
+            "p_rgh": {"$ref": "#/$defs/residual1e4"},
+            "T": {"$ref": "#/$defs/residual1e5"},
+            "k": {"$ref": "#/$defs/residual1e4"},
+            "omega": {"$ref": "#/$defs/residual1e4"}
+          }
+        },
+        "continuity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["global", "limit"],
+          "properties": {
+            "global": {"type": "number"},
+            "limit": {"type": "number", "exclusiveMinimum": 0, "maximum": 0.000001}
+          }
+        },
+        "phi_balance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["available", "imbalance_ratio", "limit"],
+          "properties": {
+            "available": {"const": true},
+            "imbalance_ratio": {"type": "number", "minimum": 0},
+            "limit": {"type": "number", "exclusiveMinimum": 0, "maximum": 0.001}
+          }
+        },
+        "energy_closure_basis": {
+          "const": "solver_positive_phi_and_owner_cell_temperature"
+        }
+      }
+    },
+    "baselineRun": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "run_hash", "mesh_hash", "physical_input_hash", "solver_evidence"],
+      "properties": {
+        "profile": {"const": "stabilized_first_order_v1"},
+        "run_hash": {"$ref": "#/$defs/sha256"},
+        "mesh_hash": {"$ref": "#/$defs/sha256"},
+        "physical_input_hash": {"$ref": "#/$defs/sha256"},
+        "solver_evidence": {"$ref": "#/$defs/solverEvidence"}
+      }
+    },
+    "variantRun": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "run_hash", "mesh_hash", "physical_input_hash", "solver_evidence"],
+      "properties": {
+        "profile": {"const": "design_limited_second_order_v1"},
+        "run_hash": {"$ref": "#/$defs/sha256"},
+        "mesh_hash": {"$ref": "#/$defs/sha256"},
+        "physical_input_hash": {"$ref": "#/$defs/sha256"},
+        "solver_evidence": {"$ref": "#/$defs/solverEvidence"}
+      }
+    },
+    "qoiComparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "baseline", "variant", "absolute_difference", "limit", "passed"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "baseline": {"type": "number"},
+        "variant": {"type": "number"},
+        "absolute_difference": {"type": "number", "minimum": 0},
+        "limit": {"type": "number", "exclusiveMinimum": 0},
+        "passed": {"const": true}
+      }
+    }
+  }
+}

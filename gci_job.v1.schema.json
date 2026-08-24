@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mep-cfd-studio.local/schemas/gci_job.v1.schema.json",
+  "title": "MEP CFD Studio gci_job.v1",
+  "type": "object",
+  "required": [
+    "schema_version", "contract", "engine", "created_at", "updated_at",
+    "study", "status", "stage", "attempts", "error", "input", "levels"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "contract": {"const": "gci_job.v1"},
+    "engine": {"const": "body_fitted_thermal_gci_job"},
+    "study": {"pattern": "^gci-[0-9a-f]{12}$"},
+    "status": {"enum": ["queued", "running", "complete", "FAIL"]},
+    "attempts": {"type": "integer", "minimum": 0},
+    "attempt_started_at": {"type": "string"},
+    "last_attempt_elapsed_s": {"type": ["number", "null"], "minimum": 0},
+    "total_elapsed_s": {"type": "number", "minimum": 0},
+    "attempt_history": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["attempt", "started_at", "finished_at", "elapsed_s", "status"],
+        "properties": {
+          "attempt": {"type": "integer", "minimum": 1},
+          "started_at": {"type": "string"},
+          "finished_at": {"type": "string"},
+          "elapsed_s": {"type": "number", "minimum": 0},
+          "status": {"enum": ["complete", "FAIL"]},
+          "error": {"type": "string"}
+        }
+      }
+    },
+    "resume_history": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["resumed_at", "previous_status", "previous_stage", "previous_attempt", "completed_levels", "checkpoint_times_s"],
+        "properties": {
+          "resumed_at": {"type": "string"},
+          "previous_status": {"enum": ["running", "FAIL"]},
+          "previous_stage": {"type": "string"},
+          "previous_attempt": {"type": "integer", "minimum": 1},
+          "completed_levels": {"type": "array", "items": {"type": "string"}},
+          "checkpoint_times_s": {"type": "object"}
+        }
+      }
+    },
+    "error": {"type": "string"},
+    "input": {"type": "object"},
+    "levels": {
+      "type": "array", "minItems": 3, "maxItems": 4,
+      "items": {
+        "type": "object",
+        "required": [
+          "name", "background_cell_m", "status", "stage", "error",
+          "mesh_case", "isothermal_case", "thermal_case"
+        ],
+        "properties": {
+          "reused_from_study": {"pattern": "^gci-[0-9a-f]{12}$"},
+          "stage_started_at": {"type": "string"},
+          "live_message": {"type": "string", "maxLength": 500},
+          "live_updated_at": {"type": "string"}
+        }
+      }
+    }
+  },
+  "additionalProperties": true
+}

@@ -5,9 +5,10 @@
 #   column → 정사각 한 변, opening → 원 지름. height: 기둥 3D 높이.
 pattern,category,width,height,thickness
 COL|기둥|PILLAR|^C_,column,400,3000,
-DOOR|문|^SD|^SSD,opening,900,,
+(?<![A-Z0-9])DOORS?(?![A-Z0-9])|문|^SD|^SSD,opening,900,,
 WIND|창|WINDOW,opening,1200,,
 ELEV|엘리베이터|elevator,equipment,2000,,
 STAIR|계단|CORE,slab,,,200
 # [Phase 2.7] MEP 장비 블록 (위치 추출만, 3D 빌드 후속)
+DIFF|DIFFUSER|GRILLE|REGISTER|디퓨저|그릴|급기구|배기구,equipment,600,,
 PUMP|AHU|FAN|PANEL|VAV|FCU|장비|펌프|분전반,equipment,800,,

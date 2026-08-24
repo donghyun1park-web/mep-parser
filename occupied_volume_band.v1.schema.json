@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "occupied_volume_band.v1.schema.json",
+  "title": "MEP CFD occupied volume-band selector",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "coordinate_source",
+    "z_min_agl_m",
+    "z_max_agl_m"
+  ],
+  "properties": {
+    "contract": {"const": "occupied_volume_band.v1"},
+    "coordinate_source": {"const": "cell_center_m_agl"},
+    "z_min_agl_m": {"type": "number", "minimum": 0},
+    "z_max_agl_m": {"type": "number", "exclusiveMinimum": 0},
+    "xy_bounds_m": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x_min_m", "x_max_m", "y_min_m", "y_max_m"],
+      "properties": {
+        "x_min_m": {"type": "number"},
+        "x_max_m": {"type": "number"},
+        "y_min_m": {"type": "number"},
+        "y_max_m": {"type": "number"}
+      }
+    }
+  }
+}

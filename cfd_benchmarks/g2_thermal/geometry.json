@@ -1,0 +1,88 @@
+{
+  "source": "MEP CFD Studio G2 thermal benchmark",
+  "units": "mm",
+  "scale_applied": 1.0,
+  "source_insunits": 4,
+  "params": {
+    "wall": {"height": 2800.0},
+    "column": {"height": 2800.0}
+  },
+  "floors": [{"z": 0.0, "label": "Ground"}],
+  "elements": {
+    "wall": [],
+    "column": [
+      {
+        "kind": "polyline",
+        "closed": true,
+        "points": [[500, 500], [900, 500], [900, 900], [500, 900]],
+        "source_handle": "COL1"
+      }
+    ],
+    "slab": [],
+    "zone": [
+      {
+        "kind": "polyline",
+        "closed": true,
+        "points": [[0, 0], [4000, 0], [4000, 3000], [0, 3000]],
+        "source_handle": "ZONE1",
+        "confirmed": true,
+        "semantic": {
+          "kind": "space",
+          "ceiling_height_mm": 2800.0
+        }
+      }
+    ],
+    "opening": [],
+    "pipe": [],
+    "duct": [],
+    "tray": [],
+    "equipment": [
+      {
+        "kind": "polyline",
+        "closed": true,
+        "points": [[2000, 1000], [2500, 1000], [2500, 1500], [2000, 1500]],
+        "source_handle": "EQ1",
+        "confirmed": true,
+        "semantic": {
+          "kind": "equipment",
+          "role": "heat_source",
+          "height_mm": 1000.0,
+          "power_kw": 1.0,
+          "convective_fraction": 0.8,
+          "evidence": "benchmark:g2_thermal_reference",
+          "source_type": "user_confirmed"
+        }
+      },
+      {
+        "kind": "circle",
+        "center": [1200, 2200],
+        "radius": 200,
+        "source_handle": "SA1",
+        "block_name": "SUPPLY_DIFFUSER",
+        "confirmed": true,
+        "semantic": {
+          "kind": "air_terminal",
+          "role": "supply",
+          "airflow_cmh": 500.0,
+          "host_surface": "ceiling",
+          "normal": [0, 0, -1]
+        }
+      },
+      {
+        "kind": "circle",
+        "center": [3300, 2200],
+        "radius": 200,
+        "source_handle": "EA1",
+        "block_name": "EXHAUST_DIFFUSER",
+        "confirmed": true,
+        "semantic": {
+          "kind": "air_terminal",
+          "role": "exhaust",
+          "airflow_cmh": 500.0,
+          "host_surface": "ceiling",
+          "normal": [0, 0, 1]
+        }
+      }
+    ]
+  }
+}

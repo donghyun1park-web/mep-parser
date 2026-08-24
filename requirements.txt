@@ -1,0 +1,6 @@
+# MEP CFD Studio - Python dependencies
+# FreeCAD and WSL OpenFOAM are external applications and are checked separately.
+ezdxf>=1.1,<2
+shapely>=2,<3
+numpy>=1.26,<3
+matplotlib>=3.8,<4

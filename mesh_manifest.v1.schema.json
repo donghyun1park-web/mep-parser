@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mep-cfd-studio.local/schemas/mesh_manifest.v1.schema.json",
+  "title": "MEP CFD Studio mesh_manifest.v1",
+  "type": "object",
+  "required": [
+    "schema_version", "contract", "engine", "created_at", "status", "errors",
+    "warnings", "profile", "surface", "mesh", "strict_diagnostics", "layer", "y_plus", "patches", "default_faces", "occ_volume_m3",
+    "mesh_volume_error_ratio", "input", "tools"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "contract": {"const": "mesh_manifest.v1"},
+    "engine": {"const": "body_fitted_airflow"},
+    "status": {"enum": ["PASS", "FAIL"]},
+    "errors": {"type": "array", "items": {"type": "string"}},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "profile": {"enum": ["quick", "detailed"]},
+    "surface": {
+      "type": "object",
+      "required": ["closed", "illegal_triangles", "unconnected_parts", "triangles"]
+    },
+    "mesh": {
+      "type": "object",
+      "required": [
+        "mesh_ok", "fatal", "failed_checks", "concave_cells", "cells", "regions", "min_volume_m3",
+        "total_volume_m3", "max_non_orthogonality", "max_skewness"
+      ]
+    },
+    "strict_diagnostics": {
+      "type": "object",
+      "required": ["mesh_ok", "fatal", "failed_checks", "concave_cells"]
+    },
+    "layer": {
+      "type": "object",
+      "required": [
+        "enabled", "extruded_faces", "candidate_faces", "coverage_ratio",
+        "added_cells", "patches", "expected_patches"
+      ]
+    },
+    "y_plus": {
+      "type": "object",
+      "required": ["status", "target_min", "target_max", "measured_wall_area_ratio"]
+    },
+    "patches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name", "role", "mesh_patch_name", "faces", "mesh_area_m2",
+          "occ_area_m2", "area_error_ratio"
+        ]
+      }
+    },
+    "default_faces": {"type": "integer", "minimum": 0},
+    "occ_volume_m3": {"type": "number", "exclusiveMinimum": 0},
+    "mesh_volume_error_ratio": {"type": "number", "minimum": 0}
+  },
+  "additionalProperties": true
+}

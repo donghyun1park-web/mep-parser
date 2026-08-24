@@ -40,11 +40,13 @@ except ImportError:
 
 # CSV 없을 때 폴백 규칙 (정규식, 카테고리, 파라미터)
 DEFAULT_LAYER_RULES = [
+    (r"^DVM[_ -]?INDOOR$", "ignore", {}),
+    (r"^HFB(?:[-_ ]?\d+)?$", "equipment", {}),
     (r"WALL|벽|CON", "wall", {}),
     (r"COL|기둥|Block_C", "column", {}),
     (r"SLAB|FLOOR|바닥|슬래브|STAIR|계단", "slab", {}),
     (r"ZONE|ROOM|실|구역", "zone", {}),
-    (r"DOOR|WIND|문|창|OPEN", "opening", {}),
+    (r"(?<![A-Z0-9])DOORS?(?![A-Z0-9])|WIND|문|창|OPEN", "opening", {}),
     (r"CEN|중심", "wall", {}),  # 중심선도 벽체로 간주하는 경우
     # [Phase 2.7] MEP — 데이터 추출만(3D 빌드 후속). 중심선 + 치수.
     (r"PIPE|배관|PIPING", "pipe", {}),
@@ -54,9 +56,10 @@ DEFAULT_LAYER_RULES = [
 # CSV 없을 때 폴백 블록 규칙 (블록명 정규식 → 카테고리)
 DEFAULT_BLOCK_RULES = [
     (r"COL|기둥|PILLAR", "column", {}),
-    (r"DOOR|문", "opening", {}),
+    (r"(?<![A-Z0-9])DOORS?(?![A-Z0-9])|문", "opening", {}),
     (r"WIND|창", "opening", {}),
     # [Phase 2.7] MEP 장비는 블록 참조가 일반적
+    (r"DIFF|DIFFUSER|GRILLE|REGISTER|디퓨저|그릴|급기구|배기구", "equipment", {}),
     (r"PUMP|AHU|FAN|PANEL|VAV|FCU|장비|펌프|분전반", "equipment", {}),
 ]
 # [Phase 2.7] MEP 카테고리 (벽 평행선 검출 제외, z·치수 주석 부착 대상)
@@ -67,6 +70,276 @@ DEFAULT_PARAMS = {
     "slab": {"thickness": 200.0},
 }
 ARC_SEG_PER_RAD = 8.0
+
+# DXF $INSUNITS code -> millimetres per drawing unit.  geometry.json uses mm as
+# its single length contract, so every supported source unit is normalised here.
+# Codes follow the AutoCAD/ezdxf InsertUnits enumeration (0..24).
+_INSUNITS_TO_MM = {
+    1: 25.4,                         # inches
+    2: 304.8,                        # feet
+    3: 1_609_344.0,                  # miles
+    4: 1.0,                          # millimetres
+    5: 10.0,                         # centimetres
+    6: 1_000.0,                      # metres
+    7: 1_000_000.0,                  # kilometres
+    8: 0.0000254,                    # microinches
+    9: 0.0254,                       # mils
+    10: 914.4,                       # yards
+    11: 1.0e-7,                      # angstroms
+    12: 1.0e-6,                      # nanometres
+    13: 1.0e-3,                      # microns
+    14: 100.0,                        # decimetres
+    15: 10_000.0,                     # decametres
+    16: 100_000.0,                    # hectometres
+    17: 1.0e12,                       # gigametres
+    18: 1.495978707e14,               # astronomical units
+    19: 9.4607304725808e18,           # light years
+    20: 3.085677581491367e19,         # parsecs
+    21: 304.8006096012192,            # US survey feet (1200/3937 m)
+    22: 25.4000508001016,             # US survey inches
+    23: 914.4018288036576,            # US survey yards
+    24: 1_609_347.2186944373,         # US survey miles
+}
+
+
+def _insunits_to_mm_scale(insunits):
+    """Return ``(mm_per_unit, warning)`` for a DXF ``$INSUNITS`` value.
+
+    Unitless and unknown codes cannot be converted deterministically.  They
+    deliberately keep the historical 1 drawing unit == 1 mm assumption, but
+    now surface that assumption in ``geometry.json['warnings']`` instead of
+    silently producing a plausibly shaped model at the wrong scale.
+    """
+    try:
+        code = int(insunits)
+    except (TypeError, ValueError):
+        return 1.0, (f"$INSUNITS={insunits!r}(알 수 없음): 좌표를 mm로 가정했습니다. "
+                     "CAD 도면 단위를 확인하세요.")
+    if code == 0:
+        return 1.0, ("$INSUNITS=0(무단위): 좌표를 mm로 가정했습니다. "
+                     "CAD의 삽입 단위를 확인하거나 mm로 설정하세요.")
+    scale = _INSUNITS_TO_MM.get(code)
+    if scale is None:
+        return 1.0, (f"$INSUNITS={code}(지원하지 않는 단위): 좌표를 mm로 가정했습니다. "
+                     "CAD 도면 단위를 확인하세요.")
+    return scale, None
+
+
+_AIR_TERMINAL_LAYER_RE = re.compile(r"^HFB(?:[-_ ]?\d+)?$", re.IGNORECASE)
+_INDOOR_UNIT_LAYER_RE = re.compile(r"^DVM[_ -]?INDOOR$", re.IGNORECASE)
+
+
+def _modelspace_unit_profile(msp, header_scale):
+    """Collect scale plausibility signals without mutating any DXF entity."""
+    xs, ys, repeated_circles = [], [], {}
+    for entity in msp:
+        try:
+            rec = entity_to_record(entity, 1.0)
+        except Exception:
+            rec = None
+        if not rec:
+            continue
+        if rec.get("kind") == "circle":
+            cx, cy = rec["center"]
+            radius = abs(float(rec.get("radius") or 0.0))
+            xs.extend((cx - radius, cx + radius))
+            ys.extend((cy - radius, cy + radius))
+            if _AIR_TERMINAL_LAYER_RE.fullmatch(str(rec.get("layer") or "")):
+                diameter = round(radius * 2.0, 3)
+                repeated_circles[diameter] = repeated_circles.get(diameter, 0) + 1
+        else:
+            for point in rec.get("points") or []:
+                xs.append(float(point[0]))
+                ys.append(float(point[1]))
+    raw_extent = None
+    if xs and ys:
+        raw_extent = [min(xs), min(ys), max(xs), max(ys)]
+    signals = []
+    if raw_extent:
+        raw_span = max(raw_extent[2] - raw_extent[0], raw_extent[3] - raw_extent[1])
+        if (header_scale > 1.0 and 10_000.0 <= raw_span <= 2_000_000.0
+                and raw_span * header_scale > 500_000.0):
+            signals.append("IMPLAUSIBLE_HEADER_SCALED_EXTENT")
+    repeated = max(repeated_circles.items(), key=lambda item: item[1], default=(0.0, 0))
+    if (repeated[1] >= 5 and 50.0 <= repeated[0] <= 2_000.0
+            and repeated[0] * header_scale > 2_000.0):
+        signals.append("REPEATED_TERMINAL_SIZED_CIRCLES")
+    return {
+        "raw_extent": raw_extent,
+        "repeated_circle_diameter": repeated[0] or None,
+        "repeated_circle_count": repeated[1],
+        "signals": signals,
+        "suspect_header": len(signals) >= 2,
+    }
+
+
+def _resolve_unit_scale(msp, insunits, unit_override):
+    header_scale, warning = _insunits_to_mm_scale(insunits)
+    mode = str(unit_override or "header").strip().lower()
+    if mode not in ("auto", "header", "mm"):
+        raise ValueError("unit_override는 auto/header/mm 중 하나여야 합니다")
+    profile = _modelspace_unit_profile(msp, header_scale)
+    auto_corrected = mode == "auto" and profile["suspect_header"]
+    scale = 1.0 if mode == "mm" or auto_corrected else header_scale
+    selected_unit = "mm" if scale == 1.0 else "header"
+    detection = {
+        **profile,
+        "mode": mode,
+        "header_scale": header_scale,
+        "scale_applied": scale,
+        "selected_unit": selected_unit,
+        "recommended_unit": "mm" if profile["suspect_header"] else "header",
+        "auto_corrected": auto_corrected,
+        "confidence": "high" if profile["suspect_header"] else "normal",
+    }
+    return scale, warning, detection
+
+
+def _text_role_markers(msp, scale):
+    markers = []
+    for entity in msp:
+        if not _INDOOR_UNIT_LAYER_RE.fullmatch(str(getattr(entity.dxf, "layer", "") or "")):
+            continue
+        if entity.dxftype() not in ("TEXT", "MTEXT"):
+            continue
+        try:
+            text = entity.plain_text() if hasattr(entity, "plain_text") else entity.dxf.text
+            token = re.sub(r"[^A-Z]", "", str(text).upper())
+            role = "supply" if token == "SA" else "exhaust" if token == "RA" else None
+            if not role:
+                continue
+            insert = entity.dxf.insert
+            handle = getattr(entity.dxf, "handle", None)
+            markers.append({
+                "role": role, "point": [insert.x * scale, insert.y * scale],
+                "handle": str(handle) if handle else None,
+                "layer": str(getattr(entity.dxf, "layer", "") or ""),
+            })
+        except Exception:
+            continue
+    return markers
+
+
+def _apply_terminal_role_suggestions(terminals, markers):
+    """Attach reviewable SA/RA recommendations; never confirm a CFD boundary."""
+    if not markers:
+        return
+    for terminal in terminals:
+        center = terminal.get("center")
+        semantic = terminal.get("semantic") or {}
+        if not center or semantic.get("kind") != "air_terminal":
+            continue
+        ranked = sorted(
+            (((center[0] - marker["point"][0]) ** 2
+              + (center[1] - marker["point"][1]) ** 2, marker)
+             for marker in markers),
+            key=lambda item: item[0],
+        )
+        if not ranked:
+            continue
+        best_distance, best = ranked[0]
+        other = next((distance for distance, marker in ranked
+                      if marker["role"] != best["role"]), None)
+        semantic.update({
+            "role": "unresolved",
+            "role_source": "review_required",
+            "suggested_role": best["role"],
+            "role_suggestion_source": "nearest_sa_ra_text",
+            "role_suggestion_distance_mm": round(math.sqrt(best_distance), 1),
+            "role_suggestion_confidence": round(
+                max(0.0, min(1.0, 1.0 - math.sqrt(best_distance) / math.sqrt(other))), 3
+            ) if other and other > 0 else 0.0,
+        })
+        terminal["semantic"] = semantic
+
+
+def _indoor_unit_candidates(markers):
+    """Collapse each nearby SA/RA text pair into one review-only EHP candidate."""
+    supplies = sorted((item for item in markers if item["role"] == "supply"),
+                      key=lambda item: (item["point"][0], item["point"][1]))
+    returns = [item for item in markers if item["role"] == "exhaust"]
+    unused = set(range(len(returns)))
+    records = []
+    for index, supply in enumerate(supplies, 1):
+        ranked = sorted(
+            (((supply["point"][0] - returns[i]["point"][0]) ** 2
+              + (supply["point"][1] - returns[i]["point"][1]) ** 2, i)
+             for i in unused),
+            key=lambda item: item[0],
+        )
+        if not ranked or math.sqrt(ranked[0][0]) > 5_000.0:
+            continue
+        _, return_index = ranked[0]
+        unused.remove(return_index)
+        returned = returns[return_index]
+        xs = (supply["point"][0], returned["point"][0])
+        ys = (supply["point"][1], returned["point"][1])
+        x0, x1 = min(xs) - 300.0, max(xs) + 300.0
+        y_mid = sum(ys) / 2.0
+        y0, y1 = y_mid - 700.0, y_mid + 700.0
+        handles = sorted(handle for handle in
+                         (supply.get("handle"), returned.get("handle")) if handle)
+        records.append({
+            "kind": "polyline", "closed": True,
+            "points": [[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]],
+            "layer": "DVM_INDOOR", "source_layer": "DVM_INDOOR",
+            "source_entity_type": "TEXT_PAIR_INFERENCE",
+            "source_handle": None, "source_handles": handles,
+            "confirmed": False,
+            "semantic": {
+                "kind": "equipment", "role": "solid",
+                "role_source": "sa_ra_pair_inference",
+                "equipment_type": "ducted_ehp_indoor_unit",
+                "equipment_index": index,
+                "needs_review": True,
+            },
+        })
+    return records
+
+
+def _zone_candidates_from_layers(walls, terminals):
+    """Rank open layer extents as review-only room candidates."""
+    centers = [record.get("center") for record in terminals if record.get("center")]
+    if not centers:
+        return []
+    grouped = {}
+    for record in walls:
+        layer = str(record.get("source_layer") or record.get("layer") or "")
+        points = list(record.get("centerline") or record.get("points") or [])
+        if layer and points:
+            grouped.setdefault(layer, []).extend(points)
+    candidates = []
+    for layer, points in grouped.items():
+        if len(points) < 4:
+            continue
+        x0, y0, x1, y1 = _bbox(points)
+        width, height = x1 - x0, y1 - y0
+        if not (3_000.0 <= width <= 250_000.0 and 3_000.0 <= height <= 250_000.0):
+            continue
+        inside = sum(1 for x, y in centers if x0 <= x <= x1 and y0 <= y <= y1)
+        coverage = inside / len(centers)
+        if inside < 4 or coverage < 0.5:
+            continue
+        bbox = [round(float(value), 3) for value in (x0, y0, x1, y1)]
+        candidates.append({
+            "source_layer": layer,
+            "bbox_mm": bbox,
+            "points": [[bbox[0], bbox[1]], [bbox[2], bbox[1]],
+                       [bbox[2], bbox[3]], [bbox[0], bbox[3]], [bbox[0], bbox[1]]],
+            "length_m": round(width / 1000.0, 3),
+            "width_m": round(height / 1000.0, 3),
+            "area_m2": round(width * height / 1_000_000.0, 3),
+            "terminal_count": inside,
+            "terminal_coverage": round(coverage, 3),
+            "method": "terminal_coverage_layer_extent",
+            "confirmed": False,
+            "needs_review": True,
+            "warnings": ["INFERRED_ENVELOPE", "OPEN_BOUNDARY_REVIEW"],
+        })
+    candidates.sort(key=lambda item: (-item["terminal_coverage"],
+                                      -item["terminal_count"], item["area_m2"],
+                                      item["source_layer"]))
+    return candidates
 
 # ── [Phase 1] 평행선 벽 검출 튜닝 상수 ───────────────────────
 WALL_ANGLE_TOL_DEG = 5.0      # 평행 판정 허용 사이각(도)
@@ -155,33 +428,63 @@ def entity_to_record(e, scale):
     """DXF 엔티티 → 정규화 레코드 (polyline/circle). 미지원이면 None."""
     t = e.dxftype()
     layer = getattr(e.dxf, "layer", "")
+    handle = getattr(e.dxf, "handle", None)
+    source = {
+        "source_handle": str(handle) if handle else None,
+        "source_handles": [str(handle)] if handle else [],
+        "source_layer": layer,
+        "source_entity_type": t,
+    }
     if t == "LINE":
         s, d = e.dxf.start, e.dxf.end
         return {"kind": "polyline", "closed": False, "layer": layer,
-                "points": [[s.x * scale, s.y * scale], [d.x * scale, d.y * scale]]}
+                "points": [[s.x * scale, s.y * scale], [d.x * scale, d.y * scale]],
+                **source}
     if t == "LWPOLYLINE":
         pts, closed = lwpolyline_points(e)
         return {"kind": "polyline", "closed": closed, "layer": layer,
-                "points": [[p[0] * scale, p[1] * scale] for p in pts]}
+                "points": [[p[0] * scale, p[1] * scale] for p in pts], **source}
     if t == "POLYLINE":
         pts = [[v.dxf.location.x * scale, v.dxf.location.y * scale] for v in e.vertices]
-        return {"kind": "polyline", "closed": e.is_closed, "layer": layer, "points": pts}
+        return {"kind": "polyline", "closed": e.is_closed, "layer": layer,
+                "points": pts, **source}
     if t == "CIRCLE":
         c = e.dxf.center
         return {"kind": "circle", "center": [c.x * scale, c.y * scale],
-                "radius": e.dxf.radius * scale, "layer": layer}
+                "radius": e.dxf.radius * scale, "layer": layer, **source}
     if t == "ARC":
         c = e.dxf.center
         pts = arc_to_points(c.x, c.y, e.dxf.radius, e.dxf.start_angle, e.dxf.end_angle)
         # arc 식별자 보존: 문 스윙 호 판별(classify_geometry)에 사용
         return {"kind": "polyline", "closed": False, "layer": layer, "from_arc": True,
                 "arc_radius": e.dxf.radius * scale,
-                "points": [[p[0] * scale, p[1] * scale] for p in pts]}
+                "points": [[p[0] * scale, p[1] * scale] for p in pts], **source}
     if t == "SPLINE":
         pts = [[p[0] * scale, p[1] * scale] for p in e.control_points]
         return ({"kind": "polyline", "closed": e.closed, "layer": layer,
-                 "points": pts} if pts else None)
+                 "points": pts, **source} if pts else None)
     return None
+
+
+def _provenance_fields(*records):
+    """Combine DXF provenance when parser post-processing merges geometry."""
+    handles = set()
+    for rec in records:
+        if not rec:
+            continue
+        handles.update(str(h) for h in (rec.get("source_handles") or []) if h)
+        if rec.get("source_handle"):
+            handles.add(str(rec["source_handle"]))
+    ordered = sorted(handles)
+    first = next((rec for rec in records if rec), {})
+    return {
+        "source_handle": ordered[0] if len(ordered) == 1 else None,
+        "source_handles": ordered,
+        "source_layer": first.get("source_layer") or first.get("layer", ""),
+        "source_entity_type": first.get("source_entity_type", ""),
+        **({"source_block_name": first.get("source_block_name") or first.get("block_name")}
+           if first.get("source_block_name") or first.get("block_name") else {}),
+    }
 
 
 def _centroid(rec):
@@ -260,14 +563,16 @@ def insert_to_records(insert, scale, category, attrs):
                  if r["kind"] == "circle" or (r["kind"] == "polyline" and r.get("closed"))]
         if solid:
             return solid
-        return [_box_record(cx, cy, (size or 400.0) * scale,
-                            (size or 400.0) * scale, rot)]
+        # attrs/default dimensions are already expressed in geometry.json's mm
+        # contract.  Only source-DXF coordinates need ``scale``.
+        return [_box_record(cx, cy, size or 400.0,
+                            size or 400.0, rot)]
     if category == "opening":
         circ = [r for r in exploded if r["kind"] == "circle"]
         if circ:
             return circ
         return [{"kind": "circle", "center": [round(cx, 3), round(cy, 3)],
-                 "radius": round((size or 900.0) * scale / 2.0, 3)}]
+                 "radius": round((size or 900.0) / 2.0, 3)}]
     if category == "slab":
         # 계단코어 등: 닫힌 폴리라인(윤곽선)만 슬래브로. 내부 LINE들(A-STAIR 등) 제외.
         closed = [r for r in exploded
@@ -284,8 +589,8 @@ def insert_to_records(insert, scale, category, attrs):
                 xs = [p[0] for p in r["points"]]; ys = [p[1] for p in r["points"]]
                 return (max(xs) - min(xs)) * (max(ys) - min(ys))
             return [max(closed, key=_area)]
-        return [_box_record(cx, cy, (size or 800.0) * scale,
-                            (size or 800.0) * scale, rot)]
+        return [_box_record(cx, cy, size or 800.0,
+                            size or 800.0, rot)]
     # wall/zone 등: 열린 선도 포함
     return [r for r in exploded if r["kind"] == "polyline"]
 
@@ -339,6 +644,7 @@ def join_connected_lines(wall_records):
             if start in visited:
                 continue
             visited.add(start)
+            chain_indices = {start}
             pts0 = wall_records[start]["points"]
             chain_pts = [list(pts0[0]), list(pts0[1])]
             chain_seen = {ptkey(chain_pts[0]), ptkey(chain_pts[1])}
@@ -355,6 +661,7 @@ def join_connected_lines(wall_records):
                 if ptkey(new_pt) in chain_seen:
                     break  # 루프 방지
                 visited.add(j)
+                chain_indices.add(j)
                 chain_pts.append(new_pt)
                 chain_seen.add(ptkey(new_pt))
 
@@ -370,12 +677,14 @@ def join_connected_lines(wall_records):
                 if ptkey(new_pt) in chain_seen:
                     break
                 visited.add(j)
+                chain_indices.add(j)
                 chain_pts.insert(0, new_pt)
                 chain_seen.add(ptkey(new_pt))
 
             nr = copy.deepcopy(wall_records[start])
             nr["points"] = chain_pts
             nr["closed"] = False
+            nr.update(_provenance_fields(*(wall_records[i] for i in sorted(chain_indices))))
             joined.append(nr)
 
     # keep_idx 레코드(LWPOLYLINE 등) + 새 joined 레코드
@@ -403,7 +712,8 @@ def _wall_segments(wall_records):
             segs.append({"p1": a, "p2": b, "dir": (ux, uy), "len": ln,
                          "src": idx, "layer": rec.get("layer", ""),
                          "overrides": rec.get("overrides", {}),
-                         "z_base": rec.get("z_base", 0.0)})
+                         "z_base": rec.get("z_base", 0.0),
+                         **_provenance_fields(rec)})
     return segs
 
 
@@ -445,7 +755,8 @@ def _merge_collinear_segments(segs, gap_tol=None):
                 cur = {"p1": a, "p2": bb, "dir": (ux, uy), "len": ln,
                        "src": cur.get("src"), "layer": cur.get("layer", ""),
                        "overrides": cur.get("overrides") or nxt.get("overrides", {}),
-                       "z_base": cur.get("z_base", 0.0)}
+                       "z_base": cur.get("z_base", 0.0),
+                       **_provenance_fields(cur, nxt)}
             else:
                 out.append(cur)
                 cur = dict(nxt)
@@ -539,6 +850,7 @@ def detect_wall_pairs(wall_records, params):
                     "needs_review": False, "z_base": zb,
                     "layer": segs[i].get("layer", ""),
                     "seg_length": round(seg_len, 1),
+                    **_provenance_fields(segs[i], segs[j]),
                     **({"overrides": ov} if ov else {})})
     for k, s in enumerate(segs):
         if k in matched:
@@ -552,6 +864,7 @@ def detect_wall_pairs(wall_records, params):
                     "needs_review": True, "z_base": s.get("z_base", 0.0),
                     "layer": s.get("layer", ""),
                     "seg_length": round(seg_len, 1),
+                    **_provenance_fields(s),
                     **({"overrides": s["overrides"]} if s["overrides"] else {})})
 
     # ② 닫힌 폴리선: 원본 레코드 그대로 추가 (pairing="closed" 마킹만)
@@ -608,6 +921,7 @@ def repair_single_walls(wall_records, params):
                     "needs_review": False, "z_base": segs[i].get("z_base", 0.0),
                     "layer": segs[i].get("layer", ""),
                     "seg_length": round(seg_len, 1),
+                    **_provenance_fields(segs[i], segs[j]),
                     **({"overrides": ov} if ov else {})})
 
     # face-style 여부: 기존 paired + 2차 페어링으로 생긴 paired 합으로 판단
@@ -653,6 +967,7 @@ def repair_single_walls(wall_records, params):
                         "needs_review": True, "z_base": s.get("z_base", 0.0),
                         "layer": s.get("layer", ""),
                         "seg_length": round(s["len"], 1),
+                        **_provenance_fields(s),
                         **({"overrides": ov} if ov else {})})
             continue
         ux, uy = s["dir"]
@@ -681,6 +996,7 @@ def repair_single_walls(wall_records, params):
                     "needs_review": True, "z_base": s.get("z_base", 0.0),
                     "layer": s.get("layer", ""),
                     "seg_length": round(s["len"], 1),
+                    **_provenance_fields(s),
                     **({"overrides": ov} if ov else {})})
     return out
 
@@ -744,6 +1060,7 @@ def _merge_two_segments(seg1, seg2):
               "pairing": rec1.get("pairing", "single"),
               "needs_review": bool(rec1.get("needs_review") or rec2.get("needs_review")),
               "z_base": rec1.get("z_base", 0.0),  # [4b]
+              **_provenance_fields(rec1, rec2),
               **({"overrides": ov} if ov else {})}
     return {"c1": a, "c2": b, "rec": merged}
 
@@ -1065,18 +1382,117 @@ def assign_zones(elements, zones):
             rec["zone"] = next((i for i, poly in polys if poly.contains(pt)), None)
 
 
+def _connected_column_components(records, endpoint_tol=CORNER_SNAP_TOL_MM,
+                                 z_tol=1.0):
+    """Split open column records into endpoint-connected components.
+
+    Real drawings commonly place every column outline on one ``A-COLS`` layer.
+    Grouping an entire layer into one convex hull therefore creates a single
+    building-sized column.  This spatial-hash + union-find pass only joins
+    records whose endpoints are within ``endpoint_tol`` on the same elevation.
+    Input and component order are preserved for deterministic JSON output.
+    """
+    if not records:
+        return []
+    if endpoint_tol <= 0:
+        raise ValueError("endpoint_tol must be positive")
+
+    parent = list(range(len(records)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i, j):
+        ri, rj = find(i), find(j)
+        if ri == rj:
+            return
+        # The smaller root keeps component ordering deterministic.
+        if ri < rj:
+            parent[rj] = ri
+        else:
+            parent[ri] = rj
+
+    grid = {}
+    tol2 = endpoint_tol * endpoint_tol
+    for i, rec in enumerate(records):
+        pts = rec.get("points") or []
+        if not pts:
+            continue
+        endpoints = (pts[0], pts[-1]) if len(pts) > 1 else (pts[0],)
+        try:
+            z = float(rec.get("z_base", 0.0))
+        except (TypeError, ValueError):
+            z = 0.0
+        for p in endpoints:
+            if not isinstance(p, (list, tuple)) or len(p) < 2:
+                continue
+            try:
+                x, y = float(p[0]), float(p[1])
+            except (TypeError, ValueError):
+                continue
+            gx, gy = math.floor(x / endpoint_tol), math.floor(y / endpoint_tol)
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for j, qx, qy, qz in grid.get((gx + dx, gy + dy), ()):
+                        if abs(z - qz) > z_tol:
+                            continue
+                        if (x - qx) ** 2 + (y - qy) ** 2 <= tol2:
+                            union(i, j)
+            grid.setdefault((gx, gy), []).append((i, x, y, z))
+
+    grouped = {}
+    for i, rec in enumerate(records):
+        grouped.setdefault(find(i), []).append(rec)
+    return [grouped[root] for root in sorted(grouped)]
+
+
 def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAMS,
-          use_ai=False, use_vision=False, api_key=None, ai_threshold=0.8):
+          use_ai=False, use_vision=False, api_key=None, ai_threshold=0.8,
+          unit_override="header"):
     """DXF → geometry.json dict.
     use_ai: 텍스트 LLM 분류 + 고신뢰 자동적용. use_vision: Vision 폴백.
     ai_threshold: best_classification confidence 이 값 초과면 자동 카테고리 적용."""
     doc = ezdxf.readfile(dxf_path)
     msp = doc.modelspace()
-    scale = 1000.0 if doc.header.get("$INSUNITS", 0) == 6 else 1.0
-    result = {"source": dxf_path, "units": "mm", "scale_applied": scale, "params": params,
+    insunits = doc.header.get("$INSUNITS", 0)
+    scale, unit_warning, unit_detection = _resolve_unit_scale(
+        msp, insunits, unit_override,
+    )
+    result = {"source": dxf_path, "source_insunits": int(insunits or 0),
+              "units": "mm", "scale_applied": scale, "params": params,
               "elements": {"wall": [], "column": [], "slab": [], "zone": [], "opening": [],
                            "pipe": [], "duct": [], "tray": [], "equipment": []},
-              "warnings": []}
+              "warnings": [], "unit_detection": unit_detection,
+              "source_units": {
+                  "insunits": int(insunits or 0),
+                  "header_millimetres_per_source_unit": unit_detection["header_scale"],
+                  "millimetres_per_source_unit": scale,
+                  "selected_unit": unit_detection["selected_unit"],
+                  "selection_source": ("auto_preview_requires_confirmation" if unit_detection["auto_corrected"]
+                                       else "user_override" if unit_override in ("mm", "header")
+                                       else "header"),
+                  "normalized_length_unit": "mm",
+                  "assumed": False,
+              },
+              "unit_review": {
+                  "required": bool(unit_detection["auto_corrected"]),
+                  "suspect": unit_detection["suspect_header"],
+                  "resolved": not unit_detection["auto_corrected"],
+                  "recommended_unit": unit_detection["recommended_unit"],
+                  "signals": unit_detection["signals"],
+              }}
+    if unit_warning:
+        result["warnings"].append(unit_warning)
+    if unit_detection["auto_corrected"]:
+        result["warnings"].append(
+            "DXF 헤더는 inch이지만 도면 크기와 반복 원형 심볼이 mm 작성 패턴이라 "
+            "좌표를 mm로 자동 보정했습니다. 해석 구역 치수를 확인하세요."
+        )
+    role_markers = _text_role_markers(msp, scale)
+    raw_walls, ignored_layers = [], {}
     unmapped, unmapped_blocks, n_inserts, unmapped_recs = {}, {}, 0, {}
     unmapped_block_recs = {}      # 블록명 → explode 기하 샘플(제안 통계용)
     unmapped_block_entities = {}  # 블록명 → INSERT 엔티티(AI 자동적용 재추출용)
@@ -1085,6 +1501,10 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         if e.dxftype() == "INSERT":
             n_inserts += 1
             bname = e.dxf.get("name", "") or ""
+            if (_INDOOR_UNIT_LAYER_RE.fullmatch(str(e.dxf.layer or ""))
+                    or _INDOOR_UNIT_LAYER_RE.fullmatch(str(bname))):
+                ignored_layers[e.dxf.layer] = ignored_layers.get(e.dxf.layer, 0) + 1
+                continue
             cat, attrs = classify(bname, block_rules) if block_rules else (None, {})
             if cat is None:
                 cat, attrs = classify(e.dxf.layer, rules)  # 레이어 폴백
@@ -1102,6 +1522,21 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
                 continue
             elev = _entity_elevation(e, scale)
             for rec in insert_to_records(e, scale, cat, attrs):
+                # Preserve the semantic identity of the INSERT.  Virtual
+                # entities often live on layer 0, so without this field the CFD
+                # workflow cannot distinguish a diffuser from a pump/panel.
+                rec["block_name"] = bname
+                parent_handle = getattr(e.dxf, "handle", None)
+                child_handles = set(rec.get("source_handles") or [])
+                if rec.get("source_handle"):
+                    child_handles.add(rec["source_handle"])
+                if parent_handle:
+                    child_handles.add(str(parent_handle))
+                rec["source_handle"] = str(parent_handle) if parent_handle else None
+                rec["source_handles"] = sorted(str(h) for h in child_handles if h)
+                rec["source_layer"] = getattr(e.dxf, "layer", "")
+                rec["source_entity_type"] = "INSERT"
+                rec["source_block_name"] = bname
                 if attrs:
                     rec["overrides"] = attrs
                 if cat in MEP_CATEGORIES:
@@ -1109,8 +1544,33 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
                 else:
                     rec["z_base"] = elev  # [4b] 층 분리용 Z 기준
                 result["elements"].setdefault(cat, []).append(rec)
+                if cat == "wall":
+                    raw_walls.append(copy.deepcopy(rec))
+            continue
+        layer_name = str(e.dxf.layer or "")
+        if _AIR_TERMINAL_LAYER_RE.fullmatch(layer_name):
+            if e.dxftype() == "CIRCLE":
+                rec = entity_to_record(e, scale)
+                if rec:
+                    rec["elevation"] = _entity_elevation(e, scale)
+                    rec["confirmed"] = False
+                    rec["semantic"] = {
+                        "kind": "air_terminal", "role": "unresolved",
+                        "role_source": "review_required",
+                        "terminal_type": "round", "host_surface": "ceiling",
+                        "diameter_mm": round(float(rec["radius"]) * 2.0, 3),
+                    }
+                    result["elements"]["equipment"].append(rec)
+            else:
+                ignored_layers[layer_name] = ignored_layers.get(layer_name, 0) + 1
+            continue
+        if _INDOOR_UNIT_LAYER_RE.fullmatch(layer_name):
+            ignored_layers[layer_name] = ignored_layers.get(layer_name, 0) + 1
             continue
         cat, attrs = classify(e.dxf.layer, rules)
+        if cat == "ignore":
+            ignored_layers[layer_name] = ignored_layers.get(layer_name, 0) + 1
+            continue
         if cat is None:
             unmapped[e.dxf.layer] = unmapped.get(e.dxf.layer, 0) + 1
             bucket = unmapped_recs.setdefault(e.dxf.layer, [])
@@ -1135,6 +1595,8 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         else:
             rec["z_base"] = elev  # [4b] 층 분리용 Z 기준(단층=0.0)
         result["elements"].setdefault(cat, []).append(rec)
+        if cat == "wall":
+            raw_walls.append(copy.deepcopy(rec))
 
     # ── [Phase B] AI 분류 + 고신뢰 자동적용 (wall 후처리 전에 요소 합류) ─────────
     # 미매핑 레이어/블록 → 제안 생성 → (옵션)LLM/Vision → confidence>임계 자동 카테고리.
@@ -1159,6 +1621,12 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
                                  unmapped_recs, unmapped_block_entities,
                                  scale, threshold=ai_threshold)
     result["suggestions"] = suggestions
+    result["elements"]["equipment"].extend(_indoor_unit_candidates(role_markers))
+    _apply_terminal_role_suggestions(result["elements"]["equipment"], role_markers)
+    result["zone_candidates"] = _zone_candidates_from_layers(
+        raw_walls, result["elements"]["equipment"],
+    )
+    result["ignored_layers"] = ignored_layers
 
     # [Phase 1-pre] 개별 LINE 연결: 끝점 공유 2점 레코드 → 다중점 폴리라인 병합
     _n_raw = len(result["elements"]["wall"])
@@ -1168,8 +1636,9 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         print(f"  [join] LINE 연결: {_n_raw}개 → {_n_joined}개 레코드")
         
     # --- [Column Bounding Box Grouping] ---
-    # FreeCAD DXF export groups 6 lines (4 outline + 2 X-lines) into one unique layer (e.g. Block_C_600X835)
-    # Group these lines by layer, and convert them to a single closed bounding box.
+    # FreeCAD DXF export may express a column as 4 outline + 2 diagonal lines.
+    # Multiple real columns usually share one A-COLS layer, so split that layer
+    # into endpoint-connected components before computing each component hull.
     col_by_layer = {}
     new_cols = []
     for c in result["elements"]["column"]:
@@ -1182,49 +1651,53 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
             else:
                 new_cols.append(c)
                 
-    for layer, recs in col_by_layer.items():
-        all_pts = []
-        for r in recs:
-            all_pts.extend(r.get("points", []))
-        if not all_pts:
-            continue
-            
-        try:
-            from shapely.geometry import MultiPoint
-            hull = MultiPoint(all_pts).convex_hull
-            if hull.geom_type == 'Polygon':
-                coords = list(hull.exterior.coords)
-                pts = [[c[0], c[1]] for c in coords]
-            else:
+    for layer, layer_recs in col_by_layer.items():
+        for recs in _connected_column_components(layer_recs):
+            all_pts = []
+            for r in recs:
+                all_pts.extend(r.get("points", []))
+            if not all_pts:
+                new_cols.extend(recs)
+                continue
+
+            try:
+                from shapely.geometry import MultiPoint
+                hull = MultiPoint(all_pts).convex_hull
+                if hull.geom_type == 'Polygon':
+                    coords = list(hull.exterior.coords)
+                    pts = [[c[0], c[1]] for c in coords]
+                else:
+                    pts = None
+            except ImportError:
                 pts = None
-        except ImportError:
-            pts = None
-            
-        if not pts:
-            # Fallback to AABB if shapely fails or shape is invalid
-            min_x = min(p[0] for p in all_pts)
-            max_x = max(p[0] for p in all_pts)
-            min_y = min(p[1] for p in all_pts)
-            max_y = max(p[1] for p in all_pts)
-            pts = [[min_x, min_y], [max_x, min_y], [max_x, max_y], [min_x, max_y], [min_x, min_y]]
-            
-        # Get width estimate
-        xs = [p[0] for p in pts]
-        min_x, max_x = min(xs), max(xs)
-        
-        merged = {
-            "kind": "polyline",
-            "closed": True,
-            "points": pts,
-            "centerline": pts,
-            "width_detected": max_x - min_x,
-            "confidence": 1.0,
-            "pairing": "closed",
-            "layer": layer,
-            "z_base": recs[0].get("z_base", 0.0),
-            "overrides": recs[0].get("overrides", {})
-        }
-        new_cols.append(merged)
+
+            if not pts:
+                # Fallback to AABB if shapely is unavailable or the hull is not a polygon.
+                min_x = min(p[0] for p in all_pts)
+                max_x = max(p[0] for p in all_pts)
+                min_y = min(p[1] for p in all_pts)
+                max_y = max(p[1] for p in all_pts)
+                pts = [[min_x, min_y], [max_x, min_y], [max_x, max_y],
+                       [min_x, max_y], [min_x, min_y]]
+
+            # Get width estimate
+            xs = [p[0] for p in pts]
+            min_x, max_x = min(xs), max(xs)
+
+            merged = {
+                "kind": "polyline",
+                "closed": True,
+                "points": pts,
+                "centerline": pts,
+                "width_detected": max_x - min_x,
+                "confidence": 1.0,
+                "pairing": "closed",
+                "layer": layer,
+                "z_base": recs[0].get("z_base", 0.0),
+                "overrides": recs[0].get("overrides", {}),
+                **_provenance_fields(*recs),
+            }
+            new_cols.append(merged)
 
     
     result["elements"]["column"] = new_cols
@@ -1300,7 +1773,8 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
                 f"[계단 의심] 레이어 '{_ly}': 짧은 벽 {_cnt}개 (<{int(_STAIR_LEN_THRESHOLD)}mm). "
                 "계단/장식선이면 layer_map.csv 에서 카테고리를 'slab' 으로 변경하세요.")
 
-    return result
+    from geometry_v2 import migrate_geometry
+    return migrate_geometry(result, source_path=dxf_path)
 
 
 # ── [MEP Phase 1] 인벤토리 스캐너 ────────────────────────────

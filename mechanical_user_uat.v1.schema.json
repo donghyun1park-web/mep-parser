@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mep-cfd-studio.local/schemas/mechanical_user_uat.v1.schema.json",
+  "title": "MEP CFD Studio mechanical_user_uat.v1",
+  "type": "object",
+  "required": [
+    "schema_version", "contract", "generator", "created_at", "session_id",
+    "participant_role", "participant_id", "observed_by", "started_at",
+    "completed_at", "tasks", "critical_incidents", "field_evidence",
+    "first_project_completed", "setup_minutes", "fatal_usability_errors",
+    "assistance_count", "errors", "status"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "contract": {"const": "mechanical_user_uat.v1"},
+    "generator": {"const": "mep-cfd-studio/mechanical-uat-v1"},
+    "participant_role": {"const": "mechanical_facility"},
+    "status": {"enum": ["PASS", "FAIL", "INVALID"]},
+    "first_project_completed": {"type": "boolean"},
+    "setup_minutes": {"type": ["number", "null"], "minimum": 0},
+    "fatal_usability_errors": {"type": "integer", "minimum": 0},
+    "assistance_count": {"type": "integer", "minimum": 0},
+    "tasks": {
+      "type": "array", "minItems": 6, "maxItems": 6,
+      "items": {
+        "type": "object",
+        "required": ["id", "status", "started_at", "completed_at", "assistance_count", "notes"]
+      }
+    },
+    "field_evidence": {
+      "type": "object", "required": ["path", "sha256"],
+      "properties": {"sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+    },
+    "errors": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": true
+}

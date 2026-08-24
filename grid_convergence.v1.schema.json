@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mep-cfd-studio.local/schemas/grid_convergence.v1.schema.json",
+  "title": "MEP CFD Studio grid_convergence.v1",
+  "type": "object",
+  "required": [
+    "schema_version", "contract", "engine", "created_at", "status",
+    "design_ready", "gci_limit_pct", "errors", "warnings", "comparison",
+    "cases", "metrics"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "contract": {"const": "grid_convergence.v1"},
+    "engine": {"const": "body_fitted_thermal_gci"},
+    "status": {"enum": ["PASS", "FAIL"]},
+    "design_ready": {"type": "boolean"},
+    "gci_limit_pct": {"type": "number", "exclusiveMinimum": 0},
+    "errors": {"type": "array", "items": {"type": "string"}},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "comparison": {
+      "type": "object",
+      "properties": {
+        "heat_source_contract": {
+          "type": "array",
+          "items": {"type": "object"}
+        }
+      }
+    },
+    "cases": {"type": "array", "minItems": 3, "maxItems": 3},
+    "metrics": {
+      "type": "array",
+      "minItems": 3,
+      "items": {
+        "type": "object",
+        "required": [
+          "key", "label", "unit", "fine", "medium", "coarse",
+          "convergence", "observed_order", "extrapolated", "gci_fine_pct",
+          "limit_pct", "status"
+        ]
+      }
+    }
+  },
+  "additionalProperties": true
+}

@@ -14,9 +14,391 @@ continuity·rho·bounding(불안정 신호)·크래시를 수치로 뽑아, 안�
 외부 의존성 없음(stdlib + matplotlib, 이미 프로젝트에서 사용).
 """
 import argparse
+import html
+import json
 import os
 import re
 import sys
+
+import cfd_convergence_spec
+
+def generate_gci_report(study_dir, out_html=None):
+    """Generate a self-contained Korean mesh-uncertainty report."""
+    study_dir = os.path.abspath(study_dir)
+    try:
+        with open(os.path.join(study_dir, "grid_convergence.json"), encoding="utf-8") as f:
+            manifest = json.load(f)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return {"ok": False, "error": f"GCI 결과를 읽지 못했습니다: {exc}"}
+
+    def number(value, digits=3):
+        return "산출 불가" if value is None else f"{float(value):.{digits}f}"
+
+    is_v2 = manifest.get("contract") == "grid_convergence.v2"
+    is_v3 = manifest.get("contract") == "grid_convergence.v3"
+    uses_time_window = is_v2 or is_v3
+    case_rows = "".join(
+        "<tr><td>{}</td><td>{:,}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+            html.escape(str(row.get("name", ""))), int(row.get("cell_count") or 0),
+            number(row.get("effective_grid_width_m"), 5), number(row.get("time_s"), 3),
+            int((row.get("time_window") or {}).get("snapshot_count") or 0)
+            if uses_time_window else "—",
+        ) for row in manifest.get("cases") or []
+    )
+    metric_rows = "".join(
+        "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>"
+        "<td class='{}'>{}</td></tr>".format(
+            html.escape(str(row.get("label", ""))) + " (" +
+            html.escape(str(row.get("unit", ""))) + ")",
+            number(row.get("fine")), number(row.get("medium")),
+            number(row.get("coarse")),
+            "산출 불가" if (row.get("uncertainty_fine_pct") if is_v3
+                            else row.get("gci_fine_pct")) is None
+            else number(row.get("uncertainty_fine_pct") if is_v3
+                        else row.get("gci_fine_pct"), 2) + "%",
+            (number(row.get("window_drift_pct"), 2) + "%"
+             if is_v3 else "—"),
+            "pass" if row.get("status") == "PASS" else "fail",
+            html.escape(str(row.get("status", ""))),
+        ) for row in manifest.get("metrics") or []
+    )
+    status = str(manifest.get("status", "UNKNOWN"))
+    comparison = manifest.get("comparison") or {}
+    heat_sources = comparison.get("heat_source_contract") or []
+
+    def source_reference(row):
+        """Render only immutable CAD reference fields recorded by the case."""
+        provenance = row.get("provenance")
+        reference_kind = row.get("source_reference_kind")
+        if isinstance(provenance, dict):
+            reference_kind = reference_kind or provenance.get("source_reference_kind")
+        if reference_kind == "manual_input":
+            return "사용자 입력"
+        ref = row.get("source_ref")
+        if not isinstance(ref, dict):
+            return "확인 불가"
+        labels = (("handle", "handle"), ("source_handle", "handle"),
+                  ("layer", "layer"), ("block_name", "block"))
+        parts = []
+        seen = set()
+        for key, label in labels:
+            value = ref.get(key)
+            text = str(value).strip() if value is not None else ""
+            token = (label, text)
+            if text and token not in seen:
+                parts.append(f"{label}:{text}")
+                seen.add(token)
+        return html.escape(" · ".join(parts) or "확인 불가")
+
+    def source_review_status(row):
+        """Make a preserved DXF-derived user override visible in the report."""
+        provenance = row.get("provenance")
+        override = row.get("override_of_dxf") is True
+        if isinstance(provenance, dict):
+            override = override or provenance.get("override_of_dxf") is True
+        return "DXF 원본 + 사용자 변경" if override else "사용자 확인"
+
+    heat_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(row.get('source_label') or row.get('name') or '장비'))}</td>"
+        f"<td>{html.escape(str(row.get('source_id') or ', '.join(str(item) for item in (row.get('source_element_ids') or [])) or '확인 불가'))}</td>"
+        f"<td>{source_reference(row)}</td>"
+        f"<td>{source_review_status(row)}</td>"
+        f"<td>{number(row.get('power_kw'), 3)} kW</td>"
+        f"<td>{number(row.get('requested_convective_power_w', row.get('convective_power_w')), 1)} W</td>"
+        f"<td>{number(row.get('applied_convective_power_w', row.get('convective_power_w')), 1)} W</td>"
+        f"<td>{html.escape(str(row.get('evidence') or '근거 미기록'))}</td>"
+        "</tr>"
+        for row in heat_sources
+    )
+    heat_contract_html = ""
+    if heat_sources:
+        heat_contract_html = (
+            "<h2>검증 열원 계약</h2>"
+            "<p><small>아래 장비 원본 ID·열원 근거·실제 적용 대류열이 동일한 사례만 "
+            "메시 불확실성 비교에 사용했습니다.</small></p>"
+            "<table><tr><th>장비</th><th>원본 ID</th><th>입력 출처</th><th>검토 상태</th><th>입력</th>"
+            "<th>요청 대류</th><th>CFD 대류 적용</th><th>근거</th></tr>"
+            + heat_rows + "</table>"
+        )
+    status_class = "pass" if status == "PASS" else "fail"
+    method_note = (
+        "v3는 최소 4개 격자에 Eça–Hoekstra(2014) 최소제곱근 절차를 적용합니다. "
+        "비정렬 격자 산포가 있으면 Richardson GCI로 오인하지 않고 적합 오차, "
+        "표준편차와 안전계수를 합친 95% 메시 불확실성으로 판정합니다. DOI "
+        "10.1016/j.jcp.2014.01.006. 마지막 시간창의 각 지표 변화도 2% 이하인지 "
+        "별도 정상성 gate로 확인합니다."
+        if is_v3 else
+        "v2는 최소 1.0 유동 교환시간을 계산하고 마지막 0.1 유동 교환시간의 "
+        "T/U/V를 셀 체적으로 가중한 뒤 시간 적분합니다. 전역 최고온도는 열원 "
+        "모서리 국부 극값 진단으로만 남기며 GCI gate에 사용하지 않습니다."
+        if is_v2 else
+        "온도는 절대온도가 아니라 기준온도 대비 상승량으로 비교합니다. v1은 "
+        "최종 한 시점의 셀 개수 기준 통계입니다. 과도 URANS 설계 확정에는 "
+        "체적가중 시간창을 사용하는 v2를 권장합니다."
+    )
+    ratios = comparison.get("refinement_ratios_fine_to_coarse") or [
+        comparison.get("refinement_ratio_medium_to_fine"),
+        comparison.get("refinement_ratio_coarse_to_medium"),
+    ]
+    ratio_text = " / ".join(number(value) for value in ratios if value is not None)
+    grid_count = int(comparison.get("grid_count") or len(manifest.get("cases") or []))
+    measure_name = "세분 메시 불확실성" if is_v3 else "세분 GCI"
+    limit_value = (manifest.get("uncertainty_limit_pct") if is_v3
+                   else manifest.get("gci_limit_pct"))
+    body = f"""<!doctype html><html lang='ko'><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'><title>MEP CFD Studio 메시 독립성 보고서</title>
+<style>body{{font-family:Segoe UI,Malgun Gothic,sans-serif;background:#f4f7fa;color:#1d2b36;margin:0}}main{{max-width:920px;margin:24px auto;background:#fff;padding:28px;border-radius:14px}}h1{{color:#244f73;margin-top:0}}table{{width:100%;border-collapse:collapse;margin:12px 0 24px}}th,td{{border-bottom:1px solid #dce5ec;padding:9px;text-align:right}}th:first-child,td:first-child{{text-align:left}}.pass{{color:#207245;font-weight:700}}.fail{{color:#a92c2c;font-weight:700}}.note{{background:#fff6d8;border-left:5px solid #d39b00;padding:12px;line-height:1.55}}small{{color:#64727c}}</style></head><body><main>
+<h1>{grid_count}수준 메시 불확실성 보고서</h1><p>종합 판정 <b class='{status_class}'>{html.escape(status)}</b> · 허용 기준 {number(limit_value, 1)}%</p>
+<p><small>유효 격자폭 h=(공기 체적/셀 수)^(1/3), 세분비 {ratio_text}, 비교 물리시간 {number(comparison.get('physical_time_s'))} s</small></p>
+<h2>비교 결과</h2><table><tr><th>지표</th><th>세분</th><th>중간</th><th>거친</th><th>{measure_name}</th><th>시간창 변화</th><th>판정</th></tr>{metric_rows}</table>
+<h2>입력 사례</h2><table><tr><th>사례</th><th>셀 수</th><th>유효 격자폭 (m)</th><th>물리시간 (s)</th><th>시간창 스냅샷</th></tr>{case_rows}</table>
+{heat_contract_html}
+<p class='note'>{html.escape(method_note)}</p>
+</main></body></html>"""
+    out_html = out_html or os.path.join(study_dir, "gci_report.html")
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(out_html)), exist_ok=True)
+        temporary = out_html + ".tmp"
+        with open(temporary, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(body)
+        os.replace(temporary, out_html)
+    except OSError as exc:
+        return {"ok": False, "error": f"GCI 보고서를 저장하지 못했습니다: {exc}"}
+    return {"ok": True, "path": os.path.abspath(out_html), "status": status}
+
+
+def generate_body_fitted_report(case_dir, out_html=None):
+    """Generate a compact self-contained report from VTU result artifacts."""
+    case_dir = os.path.abspath(case_dir)
+    try:
+        with open(os.path.join(case_dir, "result_manifest.json"), encoding="utf-8") as f:
+            result_manifest = json.load(f)
+        with open(os.path.join(case_dir, result_manifest["summary_path"]), encoding="utf-8") as f:
+            summary = json.load(f)
+        with open(os.path.join(case_dir, "run_manifest.json"), encoding="utf-8") as f:
+            run = json.load(f)
+    except (OSError, KeyError, ValueError, json.JSONDecodeError) as exc:
+        return {"ok": False, "error": f"body-fitted 결과를 읽지 못했습니다: {exc}"}
+    try:
+        with open(os.path.join(case_dir, "thermal_input.json"), encoding="utf-8") as f:
+            thermal_input = json.load(f)
+    except (OSError, ValueError, json.JSONDecodeError):
+        thermal_input = {}
+    # The body-fitted result gate owns the citation decision.  A solver
+    # manifest's status/design_ready fields are only evidence consumed by the
+    # gate; they must never be promoted directly by this presentation layer.
+    try:
+        import cfd_result_gate
+        result_gate = cfd_result_gate.evaluate_body_fitted_case(case_dir)
+    except Exception as exc:  # A report must remain readable for incomplete cases.
+        result_gate = {
+            "citation_status": "NOT_EVALUATED",
+            "status": "NOT_EVALUATED",
+            "citable": False,
+            "blockers": ["result_gate"],
+            "reasons": [f"결과 게이트를 확인하지 못했습니다: {exc}"],
+        }
+    progress = run.get("thermal_progress") or {}
+    energy = progress.get("energy_balance") or {}
+    temperature = summary.get("temperature") or {}
+    velocity = summary.get("velocity") or {}
+    hot = temperature.get("hottest_cell") or {}
+    peak = velocity.get("peak_cell") or {}
+    slices = result_manifest.get("slices") or []
+    warnings = run.get("warnings") or []
+    estimated = progress.get("estimated_remaining_runtime_seconds")
+
+    def number(value, digits=3, suffix=""):
+        if value is None:
+            return "확인 불가"
+        try:
+            return f"{float(value):.{digits}f}{suffix}"
+        except (TypeError, ValueError):
+            return "확인 불가"
+
+    def percentage(value, digits=1):
+        try:
+            return number(float(value) * 100, digits, "%")
+        except (TypeError, ValueError):
+            return number(None, digits, "%")
+
+    def source_reference(source):
+        """Show immutable DXF identity only when the thermal input retained it."""
+        provenance = source.get("provenance")
+        reference_kind = source.get("source_reference_kind")
+        if isinstance(provenance, dict):
+            reference_kind = reference_kind or provenance.get("source_reference_kind")
+        if reference_kind == "manual_input":
+            return "사용자 입력"
+        ref = source.get("source_ref")
+        if not isinstance(ref, dict):
+            return "확인 불가"
+        labels = (("handle", "handle"), ("source_handle", "handle"),
+                  ("layer", "layer"), ("block_name", "block"))
+        parts = []
+        seen = set()
+        for key, label in labels:
+            value = ref.get(key)
+            text = str(value).strip() if value is not None else ""
+            token = (label, text)
+            if text and token not in seen:
+                parts.append(f"{label}:{text}")
+                seen.add(token)
+        return html.escape(" · ".join(parts) or "확인 불가")
+
+    def source_review_status(source):
+        """Make a preserved DXF-derived user override visible in the report."""
+        provenance = source.get("provenance")
+        override = source.get("override_of_dxf") is True
+        if isinstance(provenance, dict):
+            override = override or provenance.get("override_of_dxf") is True
+        return "DXF 원본 + 사용자 변경" if override else "사용자 확인"
+
+    def coordinate(row):
+        values = row.get("centre_m") or []
+        return ", ".join(f"{float(value):.3f}" for value in values) if values else "확인 불가"
+
+    heat_contract = dict(thermal_input.get("heat") or {})
+    heat_sources = list(thermal_input.get("heat_sources")
+                        or heat_contract.get("sources") or [])
+    requested_heat = heat_contract.get("requested_convective_power_w")
+    if requested_heat is None:
+        requested_heat = heat_contract.get("applied_convective_power_w")
+    applied_heat = heat_contract.get("applied_convective_power_w")
+    deferred_heat = heat_contract.get("deferred_convective_power_w", 0.0)
+    source_heat_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(source.get('source_label') or source.get('name') or '장비'))}</td>"
+        f"<td>{html.escape(str(source.get('source_id') or ', '.join(str(item) for item in (source.get('source_element_ids') or [])) or '확인 불가'))}</td>"
+        f"<td>{source_reference(source)}</td>"
+        f"<td>{source_review_status(source)}</td>"
+        f"<td>{number(source.get('power_kw'), 3, ' kW')}</td>"
+        f"<td>{number(source.get('convective_fraction'), 3)}</td>"
+        f"<td>{percentage(source.get('radiative_fraction'))}</td>"
+        f"<td>{number(source.get('requested_convective_power_w', source.get('convective_power_w')), 1, ' W')}</td>"
+        f"<td>{number(source.get('applied_convective_power_w', source.get('convective_power_w')), 1, ' W')}</td>"
+        f"<td>{number(source.get('deferred_convective_power_w', 0.0), 1, ' W')}</td>"
+        f"<td>{html.escape(str(source.get('evidence') or '근거 미기록'))}</td>"
+        "</tr>"
+        for source in heat_sources
+    )
+    heat_contract_html = ""
+    if heat_sources or heat_contract:
+        scale = heat_contract.get("application_scale")
+        scale_note = ""
+        try:
+            if scale is not None and abs(float(scale) - 1.0) > 1e-12:
+                scale_note = (
+                    "<p class='warn'><b>열원 스케일 단계:</b> 현재 CFD에는 요청 대류열의 "
+                    f"{float(scale):.3g}배만 적용되었습니다. 이 결과는 설계 확정용이 아닙니다.</p>"
+                )
+        except (TypeError, ValueError):
+            scale_note = "<p class='warn'>열원 스케일 값을 해석할 수 없어 설계 확정에 사용할 수 없습니다.</p>"
+        heat_contract_html = f"""<h2>확정 장비 열원 계약</h2>
+<p>입력 열량 {number(heat_contract.get('input_power_w'), 1, ' W')} · 요청 대류 {number(requested_heat, 1, ' W')} · CFD 대류 적용 {number(applied_heat, 1, ' W')} · 보류 대류 {number(deferred_heat, 1, ' W')} · 미모델 복사 {number(heat_contract.get('excluded_radiative_power_w'), 1, ' W')}</p>
+<table><tr><th>장비</th><th>원본 ID</th><th>입력 출처</th><th>검토 상태</th><th>입력</th><th>대류비</th><th>복사비</th><th>요청 대류</th><th>CFD 대류 적용</th><th>보류 대류</th><th>근거</th></tr>{source_heat_rows or '<tr><td colspan="11">장비별 열원 목록이 없습니다.</td></tr>'}</table>
+{scale_note}<small>현재 body-fitted 경로는 대류분만 공기영역에 적용합니다. 복사분은 별도 복사 검증 전까지 미모델입니다.</small>"""
+
+    slice_rows = "".join(
+        f"<tr><td>{html.escape(str(item.get('axis', '')).upper())}</td>"
+        f"<td>{number(item.get('target_m'), 3, ' m')}</td>"
+        f"<td>{int(item.get('sample_count') or 0):,}</td></tr>"
+        for item in slices
+    )
+    warning_rows = "".join(f"<li>{html.escape(str(item))}</li>" for item in warnings)
+    citation_status = str(result_gate.get("citation_status") or "NOT_EVALUATED")
+    citation_labels = {
+        "DESIGN_CITABLE": "설계 인용 가능",
+        "SCREENING_ONLY": "스크리닝 전용",
+        "NOT_EVALUATED": "설계 인용 불가(검증 미완료)",
+    }
+    citation_class = {
+        "DESIGN_CITABLE": "pass",
+        "SCREENING_ONLY": "warn",
+    }.get(citation_status, "fail")
+    gate_blockers = list(result_gate.get("blockers") or [])
+    gate_reasons = list(result_gate.get("reasons") or [])
+    gate_details = "".join(
+        f"<li><code>{html.escape(str(item))}</code></li>" for item in gate_blockers
+    ) or "<li>없음</li>"
+    gate_reasons_html = "".join(
+        f"<li>{html.escape(str(item))}</li>" for item in gate_reasons
+    ) or "<li>없음</li>"
+
+    numerical_quality = run.get("numerical_quality")
+    numerical_quality_html = ""
+    if isinstance(numerical_quality, dict):
+        quality_blockers = " · ".join(str(item) for item in (numerical_quality.get("blockers") or [])) or "없음"
+        courant = numerical_quality.get("courant") if isinstance(numerical_quality.get("courant"), dict) else {}
+        wall_treatment = (numerical_quality.get("wall_treatment")
+                          if isinstance(numerical_quality.get("wall_treatment"), dict) else {})
+        flux_balance = (numerical_quality.get("flux_balance")
+                        if isinstance(numerical_quality.get("flux_balance"), dict) else {})
+        wall_ratio = wall_treatment.get("acceptable_area_ratio")
+        flux_ratio = flux_balance.get("imbalance_ratio")
+        numerical_quality_html = f"""<h2>수치 품질 근거</h2>
+<table><tr><th>프로파일</th><th>상태</th><th>피크 Courant / 게이트</th><th>y+ 벽 처리 적용 면적</th><th>단말 phi 불평형</th></tr>
+<tr><td><code>{html.escape(str(numerical_quality.get('profile') or '확인 불가'))}</code></td>
+<td><b>{html.escape(str(numerical_quality.get('status') or '확인 불가'))}</b></td>
+<td>{number(courant.get('peak_maximum'), 3)} / {number(courant.get('gate'), 3)}</td>
+<td>{percentage(wall_ratio, 1)}</td>
+<td>{percentage(flux_ratio, 3)}</td></tr></table>
+<p><b>수치 품질 blocker:</b> {html.escape(quality_blockers)}</p>"""
+    body = f"""<!doctype html><html lang='ko'><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>MEP CFD Studio 상세 열·부력 결과</title>
+<style>
+body{{font-family:Segoe UI,Malgun Gothic,sans-serif;margin:0;background:#f4f7fa;color:#1e2b36}}
+main{{max-width:980px;margin:24px auto;background:white;padding:28px;border-radius:14px;box-shadow:0 4px 20px #18334d18}}
+h1{{margin-top:0;color:#244f73}} .warn{{background:#fff6d8;border-left:5px solid #d59b00;padding:12px}} .pass{{background:#e9f7ef;border-left:5px solid #207245;padding:12px}} .fail{{background:#fff0f0;border-left:5px solid #a92c2c;padding:12px}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin:18px 0}}
+.card{{border:1px solid #dce5ec;border-radius:10px;padding:14px}} .value{{font-size:1.45rem;font-weight:700}}
+table{{width:100%;border-collapse:collapse;margin:12px 0}} th,td{{border-bottom:1px solid #e2e8ed;padding:9px;text-align:left}}
+small{{color:#5d6a73}} code{{background:#eef3f6;padding:2px 5px;border-radius:4px}}
+</style></head><body><main>
+<h1>상세 열·부력 결과 요약</h1>
+<section class='{citation_class}'><b>결과 게이트: {html.escape(citation_status)}</b> · {html.escape(citation_labels.get(citation_status, '설계 인용 불가(미확인 상태)'))}
+<p>보고서의 설계 인용 가능 여부는 이 게이트 판정만 따릅니다. 실행 manifest의 <code>design_ready</code> 값만으로 승격하지 않습니다.</p>
+<p><b>차단 항목</b></p><ul>{gate_details}</ul>
+<p><b>판정 사유</b></p><ul>{gate_reasons_html}</ul></section>
+<p>상태 <b>{html.escape(str(run.get('status', 'UNKNOWN')))}</b> · 물리시간 {number(summary.get('time_s'), 3, ' s')} · 셀 {int(summary.get('cell_count') or 0):,}</p>
+<div class='grid'>
+ <div class='card'>최저온도<div class='value'>{number(temperature.get('minimum'), 3, ' K')}</div></div>
+ <div class='card'>최고온도<div class='value'>{number(temperature.get('maximum'), 3, ' K')}</div></div>
+ <div class='card'>평균속도<div class='value'>{number(velocity.get('mean_speed'), 3, ' m/s')}</div></div>
+ <div class='card'>최고속도<div class='value'>{number(velocity.get('maximum_speed'), 3, ' m/s')}</div></div>
+</div>
+{numerical_quality_html}
+{heat_contract_html}
+<h2>주요 위치</h2>
+<table><tr><th>항목</th><th>값</th><th>셀 중심좌표 x,y,z (m)</th></tr>
+<tr><td>최고온도 셀</td><td>{number(hot.get('temperature_k'), 3, ' K')}</td><td>{coordinate(hot)}</td></tr>
+<tr><td>최고속도 셀</td><td>{number(peak.get('speed_m_s'), 3, ' m/s')}</td><td>{coordinate(peak)}</td></tr></table>
+<h2>계산 진행률</h2>
+<table><tr><th>누적 물리시간</th><th>필요 물리시간</th><th>유동 교환시간 확보율</th><th>예상 남은 실제시간</th></tr>
+<tr><td>{number(progress.get('completed_duration_s'), 2, ' s')}</td><td>{number(progress.get('required_duration_s'), 2, ' s')}</td>
+<td>{number((progress.get('flow_through_fraction') or 0)*100, 2, '%')}</td><td>{number(None if estimated is None else estimated/60, 1, ' min')}</td></tr></table>
+<h2>과도 에너지 폐합</h2>
+<p>누적 투입열과 <b>실내 축열 + 누적 배기열</b>을 비교합니다. 초기 가열 중에는 배기 회수율만으로 수렴을 판정하지 않습니다.</p>
+<table><tr><th>누적 투입열</th><th>실내 축열</th><th>누적 배기열</th><th>과도 폐합률</th></tr>
+<tr><td>{number(energy.get('input_energy_j'), 1, ' J')}</td>
+<td>{number(energy.get('stored_sensible_energy_j'), 1, ' J')}</td>
+<td>{number(energy.get('cumulative_exhaust_energy_j'), 1, ' J')}</td>
+<td>{number(None if energy.get('transient_closure_ratio') is None else energy.get('transient_closure_ratio')*100, 2, '%')}</td></tr></table>
+<small>계산 방법: <code>{html.escape(str(energy.get('method') or '확인 불가'))}</code> · 배기 이력 완전성: {'완전' if energy.get('history_complete') else '불완전'}</small>
+<h2>좌표 기반 중앙 단면</h2>
+<table><tr><th>축</th><th>목표 좌표</th><th>표본 셀</th></tr>{slice_rows}</table>
+<small>단면은 대표 셀 길이 절반 폭 안의 cell 중심을 좌표로 선택합니다. 통계는 <code>{html.escape(str(summary.get('aggregation')))}</code>이며 체적가중 평균이 아닙니다.</small>
+<h2>남은 진단</h2><ul>{warning_rows or '<li>없음</li>'}</ul>
+</main></body></html>"""
+    out_html = out_html or os.path.join(case_dir, "body_fitted_report.html")
+    try:
+        with open(out_html, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(body)
+    except OSError as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "report_path": out_html, "summary": summary}
 
 # ── 로그 파싱 정규식 (표준 OpenFOAM SIMPLE/PIMPLE 로그) ──────────────────────
 _RE_TIME = re.compile(r"^Time = ([\d.eE+-]+)\s*$")
@@ -106,6 +488,50 @@ def parse_log(text):
         "crashed": crashed,
         "n_iters": len(iters),
     }
+
+
+# 단일 정의는 cfd_convergence_spec 을 참고 — 여기서는 재정의하지 않고 그대로 가져온다.
+CONVERGENCE_TARGETS = cfd_convergence_spec.FORECAST_TARGET_RESIDUALS
+
+
+def residual_decay_forecast(parsed, targets=None, tail_frac=0.35, min_points=20):
+    """잔차 시계열의 로그선형 감쇠율 → 목표 잔차까지 남은 반복수 추정.
+
+    왜 필요한가: 잔차 그래프만 봐서는 "아직 내려가는 중"인지 "정체"인지 구분이 안 되고,
+    남은 계산량은 더더욱 모른다. 실측 사고에서 T 잔차는 1e-3 에서 반복당 0.1% 씩만
+    감소 중이었다 — 1e-5 까지 약 4,600회가 더 필요한 상태였는데 리포트는 그냥
+    '계산완료'로 표시됐다. 감쇠율을 회귀로 뽑으면 "몇 회 더" 를 숫자로 말할 수 있다.
+
+    반환: {field: {last, target, rate_per_iter, iters_to_target}}
+          iters_to_target=0 은 이미 도달, None 은 정체/발산(반복만으로는 도달 불가).
+    """
+    import math
+    targets = targets or CONVERGENCE_TARGETS
+    out = {}
+    for field, target in targets.items():
+        ser = [v for v in (parsed.get("residuals", {}).get(field) or [])
+               if v is not None and v > 0]
+        if len(ser) < min_points:
+            continue
+        tail = ser[-max(min_points, int(len(ser) * tail_frac)):]
+        n = len(tail)
+        xs = list(range(n))
+        ys = [math.log(v) for v in tail]
+        mx, my = sum(xs) / n, sum(ys) / n
+        den = sum((x - mx) ** 2 for x in xs)
+        if den <= 0:
+            continue
+        slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / den
+        last = tail[-1]
+        info = {"last": last, "target": target, "rate_per_iter": slope}
+        if last <= target:
+            info["iters_to_target"] = 0
+        elif slope < -1e-12:
+            info["iters_to_target"] = int(math.ceil(math.log(last / target) / (-slope)))
+        else:
+            info["iters_to_target"] = None
+        out[field] = info
+    return out
 
 
 def diagnose(parsed):
@@ -409,9 +835,10 @@ def field_metrics(case_dir, meta):
             out["supply_cmh"] = sup_cmh
             out["ach"] = sup_cmh / vol_eff
             out["supply_full_wall"] = False
-        out["n_supply"] = len({p["name"].split("_q")[0] for p in patches
-                               if p["role"] == "supply"})
-        out["n_exhaust"] = sum(1 for p in patches if p["role"] == "exhaust")
+        out["n_supply"] = len({p.get("parent_name") or p["name"].split("_q")[0]
+                               for p in patches if p["role"] == "supply"})
+        out["n_exhaust"] = len({p.get("parent_name") or p["name"].split("_q")[0]
+                                for p in patches if p["role"] == "exhaust"})
     # 발열 kW 케이스: 에너지 폐합 검증(신뢰 지표)
     ec = energy_closure(case_dir, meta)
     if ec:
@@ -420,6 +847,21 @@ def field_metrics(case_dir, meta):
         out["closure_osc"] = ec.get("closure_osc")
         out["outlet_dT"] = ec["outlet_dT"]
         out["mass_err_pct"] = ec.get("mass_err_pct")
+    # 해석적 평형온도(에너지수지 해) — CFD 결과의 독립 교차검증 기준.
+    # CFD 배기온도가 이 값에서 크게 벗어나면 미수렴이거나 발열·유량 설정 오류다.
+    try:
+        import cfd_export
+        T_eq_K, eq_info = cfd_export.equilibrium_temperature(
+            meta.get("config", {}), meta.get("patches"))
+        if T_eq_K is not None:
+            out["T_eq_C"] = T_eq_K - 273.15
+            out["T_eq_dT_K"] = eq_info.get("delta_T_K")
+            out["flush_time_s"] = eq_info.get("flush_time_s")
+            if ec and ec.get("outlet_dT") is not None:
+                # CFD 가 낸 배기 상승온도 vs 이론 상승온도
+                out["T_eq_gap_K"] = ec["outlet_dT"] - eq_info["delta_T_K"]
+    except Exception:
+        pass          # 교차검증은 부가정보 — 실패해도 본 리포트는 나와야 한다
     return out
 
 
@@ -509,27 +951,241 @@ def find_log(path):
     return None
 
 
-def convergence_badge(parsed, metrics):
-    """수렴 판정 → (배지문구, 색). 리포트·대시보드(cfd_studio)가 같은 판정 공유.
-    발열 kW 케이스는 '에너지 폐합율'이 잔차보다 신뢰성 높은 게이트(부력지배 약유동은
-    잔차가 떨어져도 에너지가 안 닫힘 → 미수렴을 잔차가 오판, 실측 확인)."""
+def _read_solver_log(log_path):
+    """Read a solver log through one testable, permission-aware seam."""
+    with open(log_path, encoding="utf-8", errors="replace") as handle:
+        return handle.read()
+
+
+def _load_opening_boundary_verification(case_dir):
+    """Load optional result-side opening evidence without mutating input meta."""
+    path = os.path.join(case_dir, "opening_boundary_verification.v1.json")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    return payload if payload.get("contract") == "opening_boundary_verification.v1" else None
+
+
+# 에너지 폐합 허용범위 [%]. 정상상태·단열벽이면 넣은 열 = 나간 열이므로 100 이어야 한다.
+CLOSURE_OK = (90.0, 110.0)      # 이 안이면 양호
+CLOSURE_HARD = (75.0, 125.0)    # 이 밖은 물리적으로 성립 불가 → 결과 인용 차단
+
+
+def _legacy_result_trust(parsed, metrics):
+    """결과를 '설계 근거로 인용해도 되는가'로 판정. dict 반환.
+
+    잔차만 보면 "계산은 끝났다"가 되지만, 정상상태·단열벽 케이스에서 에너지 폐합율이
+    100%에서 크게 벗어났다는 것은 넣은 열과 나간 열이 안 맞는다는 뜻이고, 그 상태의
+    온도 수치는 물리적 의미가 없다. 실측 사고에서 폐합 158%(= 나간 열이 넣은 열의
+    1.6배, 불가능)였는데 리포트는 노란 '미수렴' 배지만 달고 평균온도 26.7 °C 를
+    그대로 실었다 — 그 값은 사실상 초기장 300 K 였다.
+
+    반환 키:
+      badge/color  — 기존 배지(하위호환)
+      citable      — False 면 온도·ΔT 를 인용하면 안 된다
+      reasons      — 인용 불가 사유(사람이 읽는 문장)
+    """
+    # Keep the old badge wording, but never let this compatibility adapter own
+    # a third copy of the screening threshold contract.  The authoritative
+    # limits live in cfd_convergence_spec and are exposed by the result gate.
+    import cfd_result_gate
+
     m = metrics or {}
     cont_ok = parsed["continuity_global"] and abs(parsed["continuity_global"][-1][1]) < 1e-3
+    thresholds = cfd_result_gate.RESIDUAL_LIMITS
+    checked = []
+    for field, limit in thresholds.items():
+        values = [v for v in (parsed.get("residuals", {}).get(field) or []) if v is not None]
+        if values:
+            checked.append(values[-1] <= limit)
+    residual_ok = bool(checked) and all(checked)
     clo = m.get("closure_pct")
+    reasons = []
     if parsed.get("crashed"):
-        return ("발산/크래시", "#c0392b")
+        return {"badge": "발산/크래시", "color": "#c0392b", "citable": False,
+                "reasons": ["솔버가 발산/크래시로 중단됨 — 결과 없음."]}
     if clo is not None:
         osc = m.get("closure_osc") or 0
+        mass = m.get("mass_err_pct")
+        mass_ok = mass is None or abs(mass) <= 5.0
+        closure_ok = CLOSURE_OK[0] <= clo <= CLOSURE_OK[1]
+        closure_hard_fail = not (CLOSURE_HARD[0] <= clo <= CLOSURE_HARD[1])
+        osc_ok = osc <= 10.0
         tag = f"{clo:.0f}%" + (f"±{osc:.0f}" if osc >= 5 else "")
-        if 90 <= clo <= 110:
-            return (f"수렴(에너지폐합 {tag})", "#1e8449")
-        return (f"미수렴(에너지폐합 {tag})", "#b9770e")
-    if cont_ok:
-        return ("수렴(양호)", "#1e8449")
-    return ("부분수렴/확인필요", "#b9770e")
+        if closure_hard_fail:
+            # 넣은 열과 나간 열이 25% 넘게 어긋남 = 정상상태 에너지수지 위반.
+            # 대개 초기장이 아직 안 빠졌거나(반복 부족) 발열/유량 설정 오류다.
+            cause = ("배기로 나가는 열이 주입 열보다 많다 — 초기장 잔열이 아직 배출 중"
+                     "(반복 부족)이거나 초기온도가 평형보다 높게 설정됨"
+                     if clo > 100 else
+                     "주입 열이 배기로 안 나온다 — 아직 실내에 축열 중(반복 부족)이거나 누설")
+            reasons.append(
+                f"에너지 폐합율 {clo:.0f}% — 정상상태에서는 100%여야 한다. {cause}."
+                " 이 상태의 온도·ΔT 는 설계 근거로 인용할 수 없다.")
+            return {"badge": f"결과 인용 불가(폐합 {tag})", "color": "#c0392b",
+                    "citable": False, "reasons": reasons}
+        if closure_ok and cont_ok and mass_ok and osc_ok and residual_ok:
+            return {"badge": f"수렴·폐합 양호({tag})", "color": "#1e8449",
+                    "citable": True, "reasons": []}
+        if closure_ok:
+            if not residual_ok:
+                reasons.append("주요 잔차가 목표 미달 — 추가 반복 권장.")
+            if not cont_ok:
+                reasons.append("연속방정식 누적오차 큼.")
+            if not mass_ok:
+                reasons.append(f"급배기 질량수지 오차 {mass:.1f}%.")
+            if not osc_ok:
+                reasons.append(f"폐합율이 ±{osc:.0f}% 진동 — 정상상태 미도달 가능.")
+            return {"badge": f"계산완료·추가확인(폐합 {tag})", "color": "#b9770e",
+                    "citable": True, "reasons": reasons}
+        reasons.append(f"에너지 폐합율 {clo:.0f}% — 허용범위"
+                       f"({CLOSURE_OK[0]:.0f}~{CLOSURE_OK[1]:.0f}%) 밖. 반복 부족이 가장 흔한 원인.")
+        return {"badge": f"미수렴(에너지폐합 {tag})", "color": "#b9770e",
+                "citable": False, "reasons": reasons}
+    if cont_ok and residual_ok:
+        return {"badge": "수렴(양호)", "color": "#1e8449", "citable": True, "reasons": []}
+    return {"badge": "부분수렴/확인필요", "color": "#b9770e", "citable": False,
+            "reasons": ["연속방정식 또는 잔차가 목표 미달 — 결과 신뢰도 확인 필요."]}
 
 
-def case_summary(case_dir):
+def _energy_balance_required(meta):
+    """Return whether this case injects a non-zero volumetric heat load.
+
+    A volume source is the only legacy/screening heat model for which the
+    energy-closure calculation is a required result check.  Prefer the
+    exported case metadata; fall back to the input config for older cases
+    that predate the ``heat`` metadata block.
+    """
+    def positive(value):
+        try:
+            return float(value) > 0.0
+        except (TypeError, ValueError):
+            return False
+
+    heat = meta.get("heat") if isinstance(meta, dict) else None
+    if isinstance(heat, dict):
+        return heat.get("mode") == "volume" and positive(heat.get("power_w"))
+
+    config = (meta or {}).get("config") or {}
+    config_heat = config.get("heat") or {}
+    return positive(config_heat.get("power_w")) or positive(config_heat.get("power_kw"))
+
+
+def result_trust(parsed, metrics, model_quality=None, energy_required=False,
+                 opening_preflight=None, opening_verification=None):
+    """Return the legacy badge plus the shared ``result_trust.v1`` contract.
+
+    ``badge`` and ``color`` remain stable for existing reports.  The added
+    contract fields make a warning unambiguously non-citable and keep the
+    structured-grid screening path separate from body-fitted design review.
+    """
+    import cfd_result_gate
+
+    legacy = _legacy_result_trust(parsed, metrics)
+    gate = cfd_result_gate.evaluate_screening_result(
+        parsed,
+        metrics,
+        model_quality=model_quality,
+        energy_required=energy_required,
+        opening_preflight=opening_preflight,
+        opening_verification=opening_verification,
+    )
+    # The legacy helper keeps familiar wording for trustworthy screening
+    # results, but it intentionally tolerated missing fields for historical
+    # reports.  A current result gate fails closed on missing evidence; do not
+    # present its non-citable state with a green legacy badge.
+    if (gate["status"] in ("NOT_EVALUATED", "FAIL")
+            and legacy["citable"]):
+        if gate["status"] == "FAIL":
+            legacy["badge"], legacy["color"] = "결과 인용 불가", "#c0392b"
+        elif gate["status"] == "NOT_EVALUATED":
+            legacy["badge"], legacy["color"] = "결과 평가 불가", "#b9770e"
+        else:
+            legacy["badge"], legacy["color"] = "결과 추가 확인 필요", "#b9770e"
+        if gate["reasons"]:
+            legacy["reasons"] = list(gate["reasons"])
+    legacy.update({
+        "contract": gate["contract"],
+        "status": gate["status"],
+        "run_status": gate["run_status"],
+        "convergence_status": gate["convergence_status"],
+        "design_ready": gate["design_ready"],
+        "citation_status": gate["citation_status"],
+        "citable": gate["citable"],
+        "blockers": gate["blockers"],
+        "evidence": gate["evidence"],
+    })
+    if not legacy["reasons"]:
+        legacy["reasons"] = gate["reasons"]
+    return legacy
+
+
+def convergence_badge(parsed, metrics):
+    """하위호환 래퍼 — (배지문구, 색). 판정 본체는 result_trust()."""
+    t = result_trust(parsed, metrics)
+    return (t["badge"], t["color"])
+
+
+def _opening_preflight_summary(preflight):
+    """Return dashboard-safe opening evidence without changing CFD policy.
+
+    ``supply_u`` remains the area-weighted velocity actually applied to
+    snapped OpenFOAM patches.  When physical terminals are available, expose
+    the corresponding design-face velocity separately so a coarse mesh never
+    makes a snapped value look like a catalogue/design value.
+    """
+    unavailable = {
+        "opening_preflight_status": "NOT_AVAILABLE",
+        "opening_resolution_ok": None,
+        "jet_metrics_citable": None,
+        "opening_terminal_count": 0,
+        "opening_warning_count": 0,
+        "design_supply_u": None,
+        "snapped_supply_u": None,
+    }
+    if not isinstance(preflight, dict) or preflight.get("contract") != "opening_preflight.v2":
+        return unavailable
+
+    terminals = preflight.get("terminals")
+    terminals = terminals if isinstance(terminals, list) else []
+    warnings = preflight.get("warnings")
+    warnings = warnings if isinstance(warnings, list) else []
+
+    def aggregate_face_velocity(area_key, flow_key):
+        area_total = 0.0
+        flow_total = 0.0
+        for terminal in terminals:
+            if not isinstance(terminal, dict) or terminal.get("role") != "supply":
+                continue
+            try:
+                area = float(terminal.get(area_key))
+                flow = float(terminal.get(flow_key))
+            except (TypeError, ValueError):
+                continue
+            if area > 0.0 and flow >= 0.0:
+                area_total += area
+                flow_total += flow
+        if area_total <= 0.0:
+            return None
+        return round(flow_total / 3600.0 / area_total, 6)
+
+    terminal_count = preflight.get("terminal_count")
+    if not isinstance(terminal_count, int) or terminal_count < 0:
+        terminal_count = len(terminals)
+    return {
+        "opening_preflight_status": "AVAILABLE",
+        "opening_resolution_ok": bool(preflight.get("opening_resolution_ok")),
+        "jet_metrics_citable": bool(preflight.get("jet_metrics_citable")),
+        "opening_terminal_count": terminal_count,
+        "opening_warning_count": len(warnings),
+        "design_supply_u": aggregate_face_velocity("requested_area_m2", "design_cmh"),
+        "snapped_supply_u": aggregate_face_velocity("snapped_area_m2", "applied_normal_cmh"),
+    }
+
+
+def _case_summary_uncached(case_dir):
     """케이스 폴더 → 대시보드 행 dict. 실행 전(meta만)·실행 후·리포트 유무 모두 처리.
     meta 없으면 None(케이스 아님)."""
     import glob as _glob
@@ -537,17 +1193,45 @@ def case_summary(case_dir):
     meta = _load_meta(case_dir)
     if not meta:
         return None
+    opening_verification = _load_opening_boundary_verification(case_dir)
     cfg = meta.get("config", {})
     room = cfg.get("room", {})
     heat = meta.get("heat", {})
-    Uvec = cfg.get("inlet", {}).get("U", [0, 0, 0])
-    supply_u = math.sqrt(sum(float(v) ** 2 for v in Uvec)) if Uvec else 0.0
+    # 개구부 모드에서는 cfg.inlet.U가 비어 있고 실제 급기속도는 patches에 있다.
+    # 패치 면적으로 가중한 속도 크기를 표시하면 분할된 4-way 패치와 격자 스냅을
+    # 모두 반영하면서, 기존 벽 전체 급기 케이스의 표시도 그대로 유지할 수 있다.
+    weighted_speed = 0.0
+    supply_area = 0.0
+    for patch in meta.get("patches") or []:
+        if patch.get("role") != "supply":
+            continue
+        try:
+            area = float(patch.get("area") or 0.0)
+            vector = patch.get("U")
+            if vector:
+                speed = math.sqrt(sum(float(value) ** 2 for value in vector))
+            elif area > 0 and patch.get("cmh") is not None:
+                speed = float(patch["cmh"]) / (3600.0 * area)
+            else:
+                continue
+        except (TypeError, ValueError):
+            continue
+        if area > 0:
+            weighted_speed += speed * area
+            supply_area += area
+
+    if supply_area > 0:
+        supply_u = weighted_speed / supply_area
+    else:
+        Uvec = cfg.get("inlet", {}).get("U", [0, 0, 0])
+        supply_u = math.sqrt(sum(float(v) ** 2 for v in Uvec)) if Uvec else 0.0
     if heat.get("mode") == "volume":
         heat_label = f"{heat.get('power_w', 0) / 1000.0:g} kW"
     elif heat.get("mode") == "surface":
         heat_label = f"바닥 {heat.get('floor_T', '?')}K"
     else:
         heat_label = "—"
+    opening_summary = _opening_preflight_summary(meta.get("opening_preflight"))
     out = {
         "dir": os.path.basename(os.path.abspath(case_dir)),
         "name": cfg.get("name") or os.path.basename(case_dir),
@@ -560,23 +1244,67 @@ def case_summary(case_dir):
         "mtime": os.path.getmtime(os.path.join(case_dir, "cfd_case_meta.json")),
         "status": "created",
         "badge": "미실행", "badge_color": "#7f8c8d",
+        "result_contract": "result_trust.v1",
+        "result_status": "NOT_EVALUATED",
+        "run_status": "NOT_EVALUATED",
+        "convergence_status": "NOT_EVALUATED",
+        "design_ready": False,
+        "citation_status": "NOT_EVALUATED",
+        "citable": False,
+        "blockers": ["solver_not_run"],
         "T_avg_C": None, "T_max_C": None, "dT_rise": None,
         "closure_pct": None, "outlet_dT": None, "n_iters": None,
         "gci": meta.get("gci"),
         "report": None,
         "from_geometry": bool(meta.get("from_geometry")),
+        "opening_verification_status": (
+            opening_verification.get("status") if opening_verification else "NOT_AVAILABLE"
+        ),
+        **opening_summary,
     }
     logp = find_log(case_dir)
     if logp:
         out["status"] = "ran"
-        with open(logp, encoding="utf-8", errors="replace") as f:
-            parsed = parse_log(f.read())
+        try:
+            parsed = parse_log(_read_solver_log(logp))
+        except OSError:
+            out.update({
+                "status": "unreadable",
+                "badge": "솔버 로그 접근 불가",
+                "badge_color": "#c0392b",
+                "result_status": "NOT_EVALUATED",
+                "run_status": "NOT_EVALUATED",
+                "convergence_status": "NOT_EVALUATED",
+                "design_ready": False,
+                "citation_status": "NOT_EVALUATED",
+                "citable": False,
+                "blockers": ["solver_log_unreadable"],
+            })
+            return out
         metrics = None
         try:
             metrics = field_metrics(case_dir, meta)
         except Exception:
             pass
-        out["badge"], out["badge_color"] = convergence_badge(parsed, metrics)
+        trust = result_trust(
+            parsed,
+            metrics,
+            model_quality=meta.get("model_quality"),
+            energy_required=_energy_balance_required(meta),
+            opening_preflight=meta.get("opening_preflight"),
+            opening_verification=opening_verification,
+        )
+        out["badge"], out["badge_color"] = trust["badge"], trust["color"]
+        out.update({
+            "result_contract": trust["contract"],
+            "result_status": trust["status"],
+            "run_status": trust["run_status"],
+            "convergence_status": trust["convergence_status"],
+            "design_ready": trust["design_ready"],
+            "citation_status": trust["citation_status"],
+            "citable": trust["citable"],
+            "blockers": trust["blockers"],
+        })
         out["n_iters"] = parsed["n_iters"]
         if metrics:
             for k in ("T_avg_C", "T_max_C", "dT_rise", "closure_pct", "outlet_dT",
@@ -588,6 +1316,52 @@ def case_summary(case_dir):
         if out["status"] == "ran":
             out["status"] = "reported"
     return out
+
+
+def _latest_case_report(case_dir):
+    import glob as _glob
+
+    reports = _glob.glob(os.path.join(case_dir, "cfd_report_*.html"))
+    return max(reports, key=os.path.getmtime) if reports else None
+
+
+def case_summary(case_dir):
+    """Return one case summary, using a validated on-disk cache when fresh.
+
+    The cache belongs here rather than in the Studio scanner so CLI and GUI
+    callers use the same freshness rules.  A result calculated while solver
+    files are changing is returned to the caller but never published.
+    """
+    import cfd_case_cache
+
+    def fingerprint():
+        return cfd_case_cache.summary_fingerprint(
+            case_dir,
+            log_path=find_log(case_dir),
+            report_path=_latest_case_report(case_dir),
+        )
+
+    try:
+        with cfd_case_cache.case_lock(case_dir):
+            before = fingerprint()
+            cached = cfd_case_cache.load(case_dir, before)
+            # A solver can append a log or write a field after the cache read.
+            # Never serve the cached result unless the inputs still match.
+            if cached is not None and before == fingerprint():
+                return cached
+            summary = _case_summary_uncached(case_dir)
+            # A permission/transient I/O hold must be retried next time.  It
+            # is not a result of this input state and must never become a
+            # sticky dashboard cache entry after access is repaired.
+            if (summary is not None and summary.get("status") != "unreadable"
+                    and before == fingerprint()):
+                try:
+                    cfd_case_cache.publish(case_dir, before, summary)
+                except OSError:
+                    pass
+            return summary
+    except OSError:
+        return _case_summary_uncached(case_dir)
 
 
 def _b64(png_path):
@@ -605,12 +1379,56 @@ def _fmt(v, unit="", nd=1):
 def build_html_report(case_dir, meta, parsed, resid_png, sect_png, metrics, out_html):
     """자립 HTML 해석 리포트(보고서 첨부 품질). preview.py 계열 스타일."""
     import datetime
+    import html as _html
     cfg = meta.get("config", {})
     name = cfg.get("name", os.path.basename(case_dir))
     room = cfg.get("room", {})
     diag = diagnose(parsed)
     m = metrics or {}
-    badge, bcol = convergence_badge(parsed, metrics)
+    opening_verification = _load_opening_boundary_verification(case_dir)
+    trust = result_trust(
+        parsed,
+        metrics,
+        model_quality=meta.get("model_quality"),
+        energy_required=_energy_balance_required(meta),
+        opening_preflight=meta.get("opening_preflight"),
+        opening_verification=opening_verification,
+    )
+    badge, bcol = trust["badge"], trust["color"]
+    citable = trust.get("citable", True)
+
+    # 부제는 케이스 실제 내용에서 유도한다(과거엔 "전기실 발열·환기"가 하드코딩돼
+    # 로비 EHP 케이스에도 그대로 붙어 제목과 어긋났다).
+    _scope = []
+    if m.get("heat_kw") is not None:
+        _scope.append(f"발열 {m['heat_kw']:g} kW")
+    if m.get("supply_cmh"):
+        _scope.append(f"급기 {m['supply_cmh']:,.0f} CMH")
+    if m.get("ach"):
+        _scope.append(f"{m['ach']:.2f} ACH")
+    scope_label = " · ".join(_scope + ["정상상태 부력유동 해석"])
+
+    # 인용 불가 판정이면 최상단에 정지 배너를 띄우고, 남은 반복수까지 숫자로 제시한다.
+    trust_banner = ""
+    if not citable:
+        items = list(trust.get("reasons") or [])
+        fc = residual_decay_forecast(parsed)
+        need = {f: i["iters_to_target"] for f, i in fc.items()
+                if i["iters_to_target"]}
+        if need:
+            worst = max(need, key=lambda f: need[f])
+            items.append(
+                f"현재 잔차 감쇠율 기준 목표 도달까지 <b>약 {need[worst]:,}회</b> 추가 반복 필요"
+                f"(최다 필요 필드 {worst}, 현재 {parsed['n_iters']:,}회 수행)."
+                + (" 정체 필드: " + ", ".join(f for f, i in fc.items()
+                                             if i["iters_to_target"] is None)
+                   if any(i["iters_to_target"] is None for i in fc.values()) else ""))
+        if m.get("T_eq_C") is not None:
+            items.append(
+                f"에너지수지 해(단열벽 정상상태)로는 실내 평형온도가 <b>{m['T_eq_C']:.1f} °C</b> 여야 한다"
+                " — 이 값과 CFD 온도의 차이가 미수렴 정도를 나타낸다.")
+        trust_banner = ('<div class="stop"><b>✗ 이 결과는 설계 근거로 인용할 수 없습니다.</b><ul>'
+                        + "".join(f"<li>{x}</li>" for x in items) + "</ul></div>")
     # 해석조건(입력 가정) 행
     assum = []
     fg = meta.get("from_geometry")
@@ -627,47 +1445,140 @@ def build_html_report(case_dir, meta, parsed, resid_png, sect_png, metrics, out_
     assum.append(("격자", f"{meta['mesh']['nx']}×{meta['mesh']['ny']}×{meta['mesh']['nz']} = {meta['mesh']['cells']:,} cells (셀 {cfg.get('mesh',{}).get('cell','?')} m)"))
     assum.append(("솔버", "buoyantBoussinesqSimpleFoam (정상상태·부력·비압축 Boussinesq)"))
     patches = meta.get("patches")
+    quality = meta.get("model_quality") or {}
+    if quality:
+        assum.append(("형상 모델", "균일격자 다공성 셀 근사(예비 스크리닝·확정설계용 아님)"))
     if patches:
         # v2 급배기구 목록 (스냅된 실면적·실풍량)
         seen = {}
         for p in patches:
-            base = p["name"].split("_q")[0]
+            base = p.get("parent_name") or p["name"].split("_q")[0]
             e = seen.setdefault(base, {"role": p["role"], "type": p.get("type"),
-                                       "wall": p["wall"], "area": 0.0, "cmh": 0.0})
+                                       "wall": p["wall"], "area": 0.0, "cmh": 0.0,
+                                       "target_cmh": p.get("design_cmh")})
             e["area"] += p.get("area") or 0
             e["cmh"] += p.get("cmh") or 0
         rows_txt = " · ".join(
             (f"{k}[{v['type']},{v['wall']}] {v['area']:.2f}㎡ {v['cmh']:.0f}CMH" if v["role"] == "supply"
-             else f"{k}[배기,{v['wall']}] {v['area']:.2f}㎡")
+             else f"{k}[배기,{v['wall']}] {v['area']:.2f}㎡"
+                  + (f" 설계목표 {v['target_cmh']:.0f}CMH(압력출구·실제유량은 결과 phi 확인)"
+                     if v.get("target_cmh") is not None else "(압력출구·실제유량은 결과 phi 확인)"))
             for k, v in seen.items())
         assum.append(("급배기구", rows_txt))
         assum.append(("총 급기(설계)", f"{_fmt(m.get('supply_cmh'),' CMH',0)} · {_fmt(m.get('ach'),' ACH',1)}"))
+        preflight = meta.get("opening_preflight") or {}
+        if preflight.get("contract") == "opening_preflight.v2":
+            terminal_rows = preflight.get("terminals") or []
+            jet_ok = bool(preflight.get("jet_metrics_citable"))
+            pressure_targets = [row for row in terminal_rows
+                                if row.get("flow_control") == "pressure_outlet"]
+            note = ("부모 단말 기준 스냅 면적·정상속도 사전검증. "
+                    + ("제트/최대유속 지표 사용 가능" if jet_ok else
+                       "제트·최대유속은 설계 판단에 사용하지 않음(개구부 해상도/사분면 균형 확인 필요)"))
+            if pressure_targets:
+                note += "; 배기 설계 CMH는 압력출구 목표값이며 실제 배기량은 결과 phi로 확인"
+            assum.append(("개구부 사전검증", note))
+        opening_result = _load_opening_boundary_verification(case_dir)
+        if opening_result:
+            terminal_checks = opening_result.get("terminals") or []
+            area_warn = sum(1 for row in terminal_checks if row.get("area_status") == "WARN")
+            flow_warn = sum(1 for row in terminal_checks if row.get("flow_status") == "WARN")
+            actual_note = (f"{opening_result.get('status')} — 실제 boundary 면적/phi 유량 검증 "
+                           f"(면적 경고 {area_warn}, 유량 경고 {flow_warn})")
+            if opening_result.get("status") in ("PARTIAL", "NOT_AVAILABLE"):
+                actual_note += "; polyMesh 또는 phi 미회수 항목은 재검증 필요"
+            assum.append(("개구부 결과검증", actual_note))
     elif m.get("supply_cmh"):
         fw = " ※최소모델: 벽면 전체를 급기로 단순화 → 풍량·ACH 비현실적, 급배기구(openings) 모드 권장" if m.get("supply_full_wall") else ""
         assum.append(("급기(가정)", f"{_fmt(m.get('supply_U'),' m/s',3)} × {_fmt(m.get('supply_area'),' m²',1)} = {_fmt(m.get('supply_cmh'),' CMH',0)} · {_fmt(m.get('ach'),' ACH',1)}{fw}"))
     assum.append(("급기온도(가정)", _fmt(m.get("T_supply_C"), " °C", 1)))
+    # 벽 열경계는 결과 해석의 전제다. 단열이 아니면 벽으로 열이 드나들어 에너지수지가
+    # 급배기만으로 닫히지 않으므로, 폐합율 판정의 의미도 달라진다 → 명시적으로 공개.
+    assum.append(("벽 열경계", "단열(zeroGradient) — 벽·바닥·천장 통과 열손실 0 가정. "
+                              "실제 구조체 열손실이 있으면 실온은 이보다 낮아진다."))
+    assum.append(("초기장 온도", (f"{m['T_eq_C']:.1f} °C (에너지수지 평형해로 초기화 — "
+                                "초기장 배출 과도기를 없애 수렴 가속)")
+                  if m.get("T_eq_C") is not None else "설정값"))
     heat = cfg.get("heat", {})
+    # 발열이 '바닥층 균질 체적원'이면 장비 위치별 국부 과열은 계산에 들어있지 않다.
+    # 그런데 결과표의 '최고 온도'는 마치 핫스팟인 것처럼 읽힌다 — 실측 사고에서
+    # 평균 26.7 / 최고 27.2 (편차 0.5 K)를 보고 "핫스팟 없음"으로 오독될 뻔했다.
+    # 실제 의미는 "핫스팟을 모델에 안 넣었다" 이므로 리포트가 먼저 말해야 한다.
+    hotspot_resolved = meta.get("heat", {}).get("via") == "obstacles"
     if m.get("heat_kw") is not None:
-        if meta.get("heat", {}).get("via") == "obstacles":
+        if hotspot_resolved:
             eqz = meta.get("equip_zones") or []
-            assum.append(("발열(입력)", f"{_fmt(m.get('heat_kw'),' kW',1)} — 장비 {len(eqz)}대 위치별 체적 발열"
-                          f"({', '.join(str(e['kw'])+'kW' for e in eqz)}) → 국소 핫스팟 계산"))
+            heat_meta = meta.get("heat") or {}
+            input_w = float(heat_meta.get("input_power_w") or heat_meta.get("power_w") or 0.0)
+            applied_w = float(heat_meta.get("applied_convective_power_w")
+                              or heat_meta.get("power_w") or 0.0)
+            excluded_w = float(heat_meta.get("excluded_radiative_power_w") or 0.0)
+            source_rows = []
+            for source in eqz:
+                label = _html.escape(str(source.get("source_label")
+                                             or source.get("source_id") or "장비"))
+                sid = _html.escape(str(source.get("source_id") or ""))
+                evidence = _html.escape(str(source.get("evidence") or "근거 미기록"))
+                source_rows.append(
+                    f"{label}{f'[{sid}]' if sid else ''}: "
+                    f"입력 {float(source.get('input_power_w') or 0) / 1000:g} kW, "
+                    f"대류 적용 {float(source.get('convective_power_w') or 0) / 1000:g} kW, "
+                    f"근거 {evidence}"
+                )
+            assum.append((
+                "발열(입력·적용)",
+                f"장비 {len(eqz)}대 위치별 다공성-voxel 체적원 — "
+                f"입력 {_fmt(input_w / 1000,' kW',1)}, "
+                f"CFD 대류 주입 {_fmt(applied_w / 1000,' kW',1)}, "
+                f"미모델 복사 {_fmt(excluded_w / 1000,' kW',1)}. "
+                + "<br>".join(source_rows)
+                + "<br><span style=\"color:#7a5c00\">복사분은 현재 legacy 스크리닝에 적용되지 않습니다.</span>",
+            ))
         else:
-            assum.append(("발열(입력)", f"{_fmt(m.get('heat_kw'),' kW',1)} — 바닥층 체적 발열원(계산서 총발열 직결). 실발열량 반영 시 값 지정."))
+            n_eq = (meta.get("from_geometry") or {}).get("equipment")
+            detected = f"도면에서 장비 {n_eq}대가 감지됐으나 " if n_eq else ""
+            assum.append(("발열(입력)",
+                          f"{_fmt(m.get('heat_kw'),' kW',1)} — 바닥층 <b>균질</b> 체적 발열원"
+                          f"(계산서 총발열 직결). {detected}위치·개별 발열량은 반영되지 않았습니다 → "
+                          f"<b>반(盤) 단위 국부 과열(핫스팟) 판정 불가</b>. "
+                          f"핫스팟 검토가 목적이면 장비별 위치·발열량을 입력해야 합니다."))
     elif heat.get("floor_T") is not None:
         assum.append(("발열(가정)", f"바닥 {heat.get('floor_T','?')}K 고정온도 = 장비 총발열 단순화 (실발열량 아님)"))
 
-    # 결과 지표 행
+    # 결과 지표 행. 인용 불가 판정이면 온도 계열 수치마다 표식을 붙인다
+    # (실측 사고: 폐합 158% 인데도 평균온도 26.7 °C 가 그대로 인용됐다 — 초기값이었다).
     res = []
-    res.append(("평균 온도", _fmt(m.get("T_avg_C"), " °C", 1)))
-    res.append(("최고 온도(핫스팟)", _fmt(m.get("T_max_C"), " °C", 1)))
-    res.append(("최저 온도", _fmt(m.get("T_min_C"), " °C", 1)))
-    res.append(("급기 대비 상승 ΔT", _fmt(m.get("dT_rise"), " K", 1)))
-    res.append(("최대 유속", _fmt(m.get("U_max"), " m/s", 3)))
+    warn = "" if citable else ' <b style="color:#c0392b">✗ 인용 금지</b>'
+    res.append(("평균 온도", _fmt(m.get("T_avg_C"), " °C", 1) + warn))
+    res.append(("최고 온도(핫스팟)" if hotspot_resolved else "최고 온도(장내 최대·핫스팟 아님)",
+                _fmt(m.get("T_max_C"), " °C", 1) + warn
+                + ("" if hotspot_resolved else
+                   ' <span style="color:#7a5c00">— 균질 발열원이라 장비 국부 과열은 미포함</span>')))
+    res.append(("최저 온도", _fmt(m.get("T_min_C"), " °C", 1) + warn))
+    res.append(("급기 대비 상승 ΔT", _fmt(m.get("dT_rise"), " K", 1) + warn))
+    opening_preflight = meta.get("opening_preflight") or {}
+    jet_metrics_citable = (
+        opening_preflight.get("jet_metrics_citable")
+        if opening_preflight.get("contract") == "opening_preflight.v2" else True
+    )
+    if patches and not jet_metrics_citable:
+        res.append(("최대 유속", "설계 판단 불가 — 개구부 해상도 또는 4-way 사분면 균형을 개선한 뒤 재생성"))
+    else:
+        res.append(("최대 유속", _fmt(m.get("U_max"), " m/s", 3)))
+    # 해석적 교차검증: 단열벽·정상상태면 배기온도는 T_sup + Q/(ρ·cp·V̇) 여야 한다.
+    # CFD 값이 이 값과 크게 다르면 미수렴이거나 발열·유량 설정이 잘못된 것이다.
+    if m.get("T_eq_C") is not None:
+        cross = f"{m['T_eq_C']:.1f} °C"
+        if m.get("T_eq_gap_K") is not None:
+            gap = m["T_eq_gap_K"]
+            ok = abs(gap) <= 1.0
+            cross += (f" &nbsp;(CFD 배기온도와 차 {gap:+.1f} K"
+                      f" &nbsp;<b>{'✓ 일치' if ok else '✗ 불일치 — 미수렴/설정오류'}</b>)")
+        res.append(("이론 평형온도 (에너지수지 해)", cross))
     if m.get("closure_pct") is not None:
         cv = m["closure_pct"]
         osc = m.get("closure_osc") or 0
-        mark = "✓ 신뢰" if 90 <= cv <= 110 else "✗ 미수렴 — 반복↑ 또는 급기유속 현실화 필요"
+        mark = "✓ 에너지수지 양호" if 90 <= cv <= 110 else "✗ 에너지수지 불량 — 추가 수렴 필요"
         oscnote = f" ±{osc:.0f} (진동 유동 — 최근 스냅샷 평균)" if osc >= 5 else ""
         res.append(("에너지 폐합율 (주입열=배기열)", f"{cv:.0f}%{oscnote} &nbsp;<b>{mark}</b>"))
         res.append(("배기 온도상승(유량가중)", _fmt(m.get("outlet_dT"), " K", 2)))
@@ -685,6 +1596,63 @@ def build_html_report(case_dir, meta, parsed, resid_png, sect_png, metrics, out_
 
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     diag_html = "<br>".join(x.replace("★", "⚠") for x in diag)
+    model_warn = (f'<div class="warn">⚠ <b>형상 모델 한계:</b> {quality.get("warning")}</div>'
+                  if quality.get("warning") else "")
+    # 급배기구가 격자에 뭉개지면 제트 도달거리·최대유속을 신뢰할 수 없다.
+    # (에너지수지는 유량으로 정해지므로 온도 평균은 영향이 작지만, 국소 기류는 못 쓴다.)
+    try:
+        import cfd_export as _cx
+        _dr = _cx.diffuser_resolution(cfg, patches)
+    except Exception:
+        _dr = None
+    if _dr and _dr["under"]:
+        w = _dr["worst"]
+        model_warn += (
+            f'<div class="warn">⚠ <b>급배기구 격자 해상도 부족:</b> '
+            f'{len(_dr["under"])}/{_dr["n_total"]}개 개구부가 한 변 {_dr["min_cells"]:g}셀 미만입니다'
+            f'(최소 <code>{w["name"]}</code> {w["area_m2"]:.3f} m² = 한 변 {w["side_m"]:.2f} m '
+            f'≈ <b>{w["cells_per_side"]:.1f}셀</b>, 현재 셀 {_dr["cell_m"]:g} m). '
+            f'토출 제트가 격자에 뭉개져 <b>제트 도달거리·확산·최대유속</b>은 신뢰할 수 없습니다. '
+            f'해상하려면 셀 ≤ <b>{_dr["recommended_cell_m"]:.3f} m</b>(또는 실디퓨저 면적 반영). '
+            f'실온·에너지수지는 유량으로 결정되므로 영향이 상대적으로 작습니다.</div>')
+    # 설계 개선 추천(결정론) — 미수렴이면 엔진이 스스로 설계 항목을 봉인한다.
+    if _dr and _dr["under"]:
+        directional = _dr["worst"]
+        if (directional.get("quadrant_resolution_ok") is False or
+                directional.get("quadrant_balance_ok") is False):
+            child_cells = directional.get("child_min_cells_per_side")
+            detail = (f" 4-way child minimum {child_cells:.1f} cells."
+                      if isinstance(child_cells, (int, float)) else "")
+            model_warn += (
+                '<div class="warn"><b>4-way directional jet limitation:</b> '
+                'The parent terminal flow is conserved, but child quadrants are '
+                'not balanced/resolved. Do not use maximum velocity or throw for '
+                'design decisions.' + detail + '</div>'
+            )
+    try:
+        import cfd_advice
+        _forecast = residual_decay_forecast(parsed)
+        recs = cfd_advice.recommendations(meta, m, parsed, trust, _forecast)
+    except Exception:
+        cfd_advice, recs, _forecast = None, [], {}
+    _pcolor = {"차단": "#c0392b", "높음": "#b9770e", "보통": "#2874a6", "참고": "#7f8c8d"}
+
+    def _md_b(s):
+        """추천 문구는 마크다운(**강조**)이 원본 — AI 다이제스트와 HTML 이 같은 문자열을
+        쓰도록 하고, HTML 쪽에서만 태그로 바꾼다."""
+        return re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", str(s))
+
+    if recs:
+        rec_html = "".join(
+            f'<tr><td style="white-space:nowrap"><b style="color:{_pcolor.get(r["priority"], "#333")}">'
+            f'{r["priority"]}</b><br><small>{r["category"]}</small></td>'
+            f'<td>{_md_b(r["finding"])}<br><b>→ {_md_b(r["action"])}</b>'
+            f'<br><small style="color:#777">근거: {_md_b(r["basis"])}</small></td></tr>'
+            for r in recs)
+        rec_html = ('<table><tr><th style="width:14%">우선순위</th>'
+                    '<th>지적사항 / 조치</th></tr>' + rec_html + "</table>")
+    else:
+        rec_html = "<p>(추천 없음)</p>"
     sect_img = f'<img src="{_b64(sect_png)}" alt="단면">' if sect_png and os.path.exists(sect_png) else "<p>(단면 없음 — 결과 필드 미기록)</p>"
     resid_img = f'<img src="{_b64(resid_png)}" alt="수렴">' if resid_png and os.path.exists(resid_png) else ""
 
@@ -702,16 +1670,19 @@ def build_html_report(case_dir, meta, parsed, resid_png, sect_png, metrics, out_
  th,td{{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top}}
  th{{width:34%;background:var(--card);font-weight:600;color:#333}}
  .warn{{background:#fff8e1;border:1px solid #f0d060;border-radius:8px;padding:10px 14px;font-size:13px;color:#7a5c00;margin:10px 0}}
+ .stop{{background:#fdecea;border:2px solid #c0392b;border-radius:8px;padding:12px 16px;font-size:13.5px;color:#7b1d13;margin:12px 0;line-height:1.7}}
+ .stop ul{{margin:8px 0 0 18px;padding:0}} .stop li{{margin:3px 0}}
  .diag{{background:var(--card);border-left:4px solid var(--accent);padding:12px 16px;font-size:13.5px;line-height:1.7;border-radius:4px}}
  img{{max-width:100%;height:auto;border:1px solid var(--line);border-radius:6px;margin-top:8px}}
  .foot{{color:var(--muted);font-size:12px;margin-top:28px;border-top:1px solid var(--line);padding-top:12px}}
  code{{background:#eee;padding:1px 6px;border-radius:4px;font-size:12px}}
 </style></head><body><div class="page">
  <h1>CFD 해석 리포트 — {name} <span class="badge">{badge}</span></h1>
- <div class="sub">전기실 발열·환기 정상상태 해석 · 생성 {now} · case <code>{os.path.basename(case_dir)}</code></div>
-
+ <div class="sub">{scope_label} · 생성 {now} · case <code>{os.path.basename(case_dir)}</code></div>
+ {trust_banner}
  <div class="warn">⚠ <b>본 리포트의 풍량·발열·온도는 설계 <u>가정값</u>이며 확정 설계값이 아닙니다.</b>
   실디퓨저 면적·장비별 실발열량·급기조건을 반영하면 수치가 달라집니다. 방법론·경향 검토용입니다.</div>
+ {model_warn}
 
  <h2>1. 수렴성 판정</h2>
  <div class="diag">{diag_html}</div>
@@ -728,11 +1699,28 @@ def build_html_report(case_dir, meta, parsed, resid_png, sect_png, metrics, out_
  <div class="sub">좌: 수평면(작업/장비 높이) 온도분포 — 핫스팟 위치. 우: 길이방향 수직면 — 바닥 발열에 의한
   온도 성층과 급기→배기 기류(흰 화살표). 색 범례 단위 °C.</div>
 
+ <h2>5. 설계 개선 추천</h2>
+ {rec_html}
+ <div class="sub">위 항목은 입력값·기하·에너지수지로부터 <b>규칙 기반 계산</b>된 것입니다(추정 아님).
+  배치 재설계·대안 비교 같은 판단이 필요하면 함께 저장된
+  <code>cfd_ai_digest_*.md</code> 를 Claude 등 AI 에 붙여넣으십시오 — HTML 리포트는
+  이미지가 포함돼 용량이 크므로 그 다이제스트가 AI 입력용입니다.</div>
+
  <div class="foot">생성 도구: cfd_report.py (도면→CFD 파이프라인) · OpenFOAM {meta.get('_of','v1912')} ·
   재현: <code>python cfd_export.py &lt;config&gt; -o &lt;case&gt; &amp;&amp; python cfd_run.py &lt;case&gt; &amp;&amp; python cfd_report.py &lt;case&gt;</code></div>
 </div></body></html>"""
     with open(out_html, "w", encoding="utf-8") as f:
         f.write(html)
+    # AI 검토용 다이제스트 — HTML 은 base64 이미지 때문에 수백 KB 라 붙여넣기 부적합.
+    if cfd_advice is not None:
+        try:
+            base = os.path.splitext(out_html)[0]
+            with open(base + "_ai_digest.md", "w", encoding="utf-8") as f:
+                f.write(cfd_advice.ai_digest(meta, m, parsed, trust, _forecast, recs))
+            with open(base + "_ai_digest.json", "w", encoding="utf-8") as f:
+                f.write(cfd_advice.digest_payload(meta, m, parsed, trust, _forecast, recs))
+        except Exception:
+            pass          # 다이제스트 실패가 본 리포트를 막으면 안 된다
     return out_html
 
 
