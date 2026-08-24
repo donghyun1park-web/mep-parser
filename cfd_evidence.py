@@ -232,6 +232,13 @@ def _error(errors: list[dict[str, str]], code: str, detail: str,
         errors.append(row)
 
 
+def _track(source_paths: set[Path], *paths: Path | None) -> None:
+    """Record every real raw file consulted during recomputation."""
+    for path in paths:
+        if path is not None and path.is_file():
+            source_paths.add(path.resolve())
+
+
 def _link(path: Path, root: Path, contract: str) -> dict[str, str]:
     digest = _sha256(path) if path.is_file() else ZERO_SHA256
     return {"path": _stored_path(path, root), "sha256": digest, "contract": contract}
@@ -308,7 +315,9 @@ def _summary_ok(value: dict | None) -> bool:
 
 
 def _surface_validation(path: Path, payload: dict | None, geometry: Path | None,
-                        root: Path, errors: list[dict[str, str]]) -> bool:
+                        root: Path, errors: list[dict[str, str]],
+                        source_paths: set[Path]) -> bool:
+    _track(source_paths, path)
     ok = True
     if not _schema_ok("surface", payload):
         _error(errors, "SURFACE_SCHEMA_INVALID", "surface manifest schema is invalid", "surface")
@@ -351,7 +360,9 @@ def _surface_validation(path: Path, payload: dict | None, geometry: Path | None,
         if artifact is None:
             _error(errors, "MISSING_ARTIFACT", f"surface output {path_key} is missing or unsafe", "surface")
             ok = False
-        elif outputs.get(hash_key) != _sha256(artifact):
+        else:
+            _track(source_paths, artifact)
+        if artifact is not None and outputs.get(hash_key) != _sha256(artifact):
             _error(errors, "SURFACE_OUTPUT_HASH_MISMATCH", f"surface output {path_key} is stale", "surface")
             ok = False
     return ok
@@ -359,7 +370,9 @@ def _surface_validation(path: Path, payload: dict | None, geometry: Path | None,
 
 def _mesh_validation(path: Path, payload: dict | None, surface: Path | None,
                      solver_case: Path, root: Path,
-                     errors: list[dict[str, str]]) -> bool:
+                     errors: list[dict[str, str]],
+                     source_paths: set[Path]) -> bool:
+    _track(source_paths, path)
     ok = True
     if not _schema_ok("mesh", payload):
         _error(errors, "MESH_SCHEMA_INVALID", "mesh manifest schema is invalid", "mesh")
@@ -381,6 +394,7 @@ def _mesh_validation(path: Path, payload: dict | None, surface: Path | None,
     copied_surface = _safe_existing(path.parent / "surface_manifest.json", root)
     mesh_input_path = _safe_existing(path.parent / "mesh_input.json", root)
     mesh_input = _read_json(mesh_input_path) if mesh_input_path else None
+    _track(source_paths, copied_surface, mesh_input_path)
     if (surface is None or copied_surface is None
             or _sha256(copied_surface) != _sha256(surface)):
         _error(errors, "MESH_SURFACE_CHAIN_MISMATCH", "mesh surface copy is not canonical", "mesh")
@@ -394,6 +408,7 @@ def _mesh_validation(path: Path, payload: dict | None, surface: Path | None,
             _error(errors, "MESH_SURFACE_CHAIN_MISMATCH", "mesh input surface hash is stale", "mesh")
             ok = False
         stl = _safe_existing(path.parent / "constant" / "triSurface" / "air_volume_regions.stl", root)
+        _track(source_paths, stl)
         if stl is None or mesh_input.get("surface_stl_sha256") != _sha256(stl):
             _error(errors, "MESH_INPUT_HASH_MISMATCH", "mesh input STL hash is stale", "mesh")
             ok = False
@@ -405,6 +420,7 @@ def _mesh_validation(path: Path, payload: dict | None, surface: Path | None,
     for name in ("surface_manifest.json", "mesh_input.json", "mesh_manifest.json"):
         canonical = path.parent / name
         solver_copy = _safe_existing(solver_case / name, root)
+        _track(source_paths, canonical, solver_copy)
         if solver_copy is None or _sha256(solver_copy) != _sha256(canonical):
             _error(errors, "SOLVER_MESH_CHAIN_MISMATCH", f"solver copy {name} is stale", "mesh")
             ok = False
@@ -413,7 +429,9 @@ def _mesh_validation(path: Path, payload: dict | None, surface: Path | None,
 
 def _result_validation(case: Path, result: dict | None, run_path: Path,
                        mesh_path: Path, thermal_path: Path, root: Path,
-                       errors: list[dict[str, str]]) -> bool:
+                       errors: list[dict[str, str]],
+                       source_paths: set[Path]) -> bool:
+    _track(source_paths, case / "result_manifest.json")
     ok = True
     if not _schema_ok("result", result):
         _error(errors, "RESULT_SCHEMA_INVALID", "result manifest schema is invalid", "result")
@@ -434,6 +452,7 @@ def _result_validation(case: Path, result: dict | None, run_path: Path,
     source_path = _safe_child(case, source.get("path"), root)
     summary_path = _safe_child(case, result.get("summary_path"), root)
     summary = _read_json(summary_path) if summary_path else None
+    _track(source_paths, source_path, summary_path)
     if (source_path is None or source.get("sha256") != _sha256(source_path)
             or summary_path is None or result.get("summary_sha256") != _sha256(summary_path)
             or not _summary_ok(summary)):
@@ -449,6 +468,7 @@ def _result_validation(case: Path, result: dict | None, run_path: Path,
             ok = False
             continue
         path = _safe_child(case, item.get("path"), root)
+        _track(source_paths, path)
         payload = _read_json(path) if path else None
         if (path is None or item.get("sha256") != _sha256(path)
                 or not isinstance(payload, dict) or payload.get("axis") != item.get("axis")
@@ -461,10 +481,13 @@ def _result_validation(case: Path, result: dict | None, run_path: Path,
 
 def _select_matching_copy(root: Path, namespace: str, filename: str,
                           copied: Path | None, artifact: str,
-                          errors: list[dict[str, str]]) -> Path | None:
+                          errors: list[dict[str, str]],
+                          source_paths: set[Path]) -> Path | None:
     candidates, unsafe = _direct_candidates(root, namespace, filename)
+    _track(source_paths, copied, *candidates)
     if unsafe:
         _error(errors, "PATH_ESCAPE", f"unsafe {artifact} candidate", artifact)
+        return None
     if copied is None:
         _error(errors, "MISSING_ARTIFACT", f"missing solver {artifact} copy", artifact)
         return None
@@ -481,7 +504,8 @@ def _select_matching_copy(root: Path, namespace: str, filename: str,
 
 
 def _gci(case: Path, root: Path, gci_root: Path | None, explicit: bool,
-         provenance: dict[str, str], errors: list[dict[str, str]]) -> tuple[str, Path | None, list[str]]:
+         provenance: dict[str, str], errors: list[dict[str, str]],
+         source_paths: set[Path]) -> tuple[str, Path | None, list[str]]:
     authority = gci_root if gci_root is not None else root / "_body_gci"
     default_root = root / "_body_gci"
     if authority.exists():
@@ -495,8 +519,14 @@ def _gci(case: Path, root: Path, gci_root: Path | None, explicit: bool,
             return "BLOCKED", None, ["GCI_EVIDENCE_INVALID"]
         return "NOT_EVALUATED", None, ["GCI_NOT_FOUND"]
     candidates, unsafe = _direct_candidates(authority.parent, authority.name, "grid_convergence.json")
-    invalid = unsafe
+    _track(source_paths, *candidates)
+    if unsafe:
+        _error(errors, "PATH_ESCAPE", "unsafe GCI candidate", "gci")
+        return "BLOCKED", None, ["PATH_ESCAPE"]
+    invalid = False
     matches: list[Path] = []
+    stale_for_case = False
+    pass_candidates = 0
     for path in candidates:
         manifest = _read_json(path)
         if not _schema_ok("gci", manifest):
@@ -504,32 +534,45 @@ def _gci(case: Path, root: Path, gci_root: Path | None, explicit: bool,
             continue
         if manifest.get("status") != "PASS" or manifest.get("design_ready") is not True:
             continue
+        pass_candidates += 1
         current = False
+        selects_case = False
         for item in manifest.get("cases") or []:
             if not isinstance(item, dict):
                 continue
             selected = _resolve_raw(item.get("path"), root, directory=True)
             item_provenance = item.get("provenance")
-            if (selected == case and isinstance(item_provenance, dict)
-                    and all(item_provenance.get(key) == value
-                            for key, value in provenance.items())):
-                current = True
-                break
+            if selected == case:
+                selects_case = True
+                if (isinstance(item_provenance, dict)
+                        and all(item_provenance.get(key) == value
+                                for key, value in provenance.items())):
+                    current = True
+                    break
         if current:
             matches.append(path)
+        elif selects_case:
+            stale_for_case = True
+    if invalid:
+        _error(errors, "GCI_SCHEMA_INVALID", "GCI authority contains invalid evidence", "gci")
+        return "BLOCKED", None, ["GCI_SCHEMA_INVALID"]
+    if stale_for_case and explicit:
+        _error(errors, "GCI_EVIDENCE_STALE", "GCI evidence for the selected case is stale", "gci")
+        return "BLOCKED", None, ["GCI_EVIDENCE_STALE"]
     if len(matches) > 1:
         _error(errors, "AMBIGUOUS_GCI_EVIDENCE", "multiple current GCI manifests", "gci")
         return "BLOCKED", None, ["AMBIGUOUS_GCI_EVIDENCE"]
     if len(matches) == 1:
         return "PASS", matches[0], []
-    if invalid and explicit:
-        _error(errors, "GCI_SCHEMA_INVALID", "supplied GCI evidence is unsafe or invalid", "gci")
-        return "BLOCKED", None, ["GCI_SCHEMA_INVALID"]
+    if pass_candidates and explicit:
+        _error(errors, "GCI_EVIDENCE_STALE", "GCI authority has no current selected-case match", "gci")
+        return "BLOCKED", None, ["GCI_EVIDENCE_STALE"]
     return "NOT_EVALUATED", None, ["GCI_NOT_FOUND"]
 
 
 def _field(path: Path | None, root: Path, selected: dict[str, Path | None],
-           errors: list[dict[str, str]]) -> tuple[str, list[str]]:
+           errors: list[dict[str, str]],
+           source_paths: set[Path]) -> tuple[str, list[str]]:
     if path is None:
         return "NOT_EVALUATED", ["FIELD_EVIDENCE_NOT_SUPPLIED"]
     safe = _safe_existing(path, root)
@@ -538,6 +581,7 @@ def _field(path: Path | None, root: Path, selected: dict[str, Path | None],
         _error(errors, "FIELD_EVIDENCE_INVALID", "field evidence path is unsafe", "field_evidence")
         return "BLOCKED", ["FIELD_EVIDENCE_INVALID"]
     manifest = _read_json(safe)
+    _track(source_paths, safe)
     validation = field_acceptance.validate_evidence(safe, projects_root=root)
     if not _schema_ok("field", manifest) or validation.get("ok") is not True:
         _error(errors, "FIELD_EVIDENCE_INVALID", "field evidence failed independent validation", "field_evidence")
@@ -558,24 +602,32 @@ def _field(path: Path | None, root: Path, selected: dict[str, Path | None],
 
 
 def _compute(case_dir: Path, *, projects_root: Path, gci_root: Path | None,
-             gci_explicit: bool, field_evidence_path: Path | None) -> dict:
+             gci_explicit: bool, field_evidence_path: Path | None,
+             source_paths: set[Path] | None = None) -> dict:
     root = projects_root
     case = case_dir
     errors: list[dict[str, str]] = []
+    source_paths = source_paths if source_paths is not None else set()
 
     solver_surface = _safe_existing(case / "surface_manifest.json", root)
     solver_mesh = _safe_existing(case / "mesh_manifest.json", root)
     surface_path = _select_matching_copy(
-        root, "_occ_geometry", "surface_manifest.json", solver_surface, "surface", errors
+        root, "_occ_geometry", "surface_manifest.json", solver_surface, "surface", errors,
+        source_paths,
     )
     mesh_path = _select_matching_copy(
-        root, "_body_mesh", "mesh_manifest.json", solver_mesh, "mesh", errors
+        root, "_body_mesh", "mesh_manifest.json", solver_mesh, "mesh", errors,
+        source_paths,
     )
     surface_payload = _read_json(surface_path) if surface_path else _read_json(solver_surface) if solver_surface else None
     source = surface_payload.get("source") if isinstance(surface_payload, dict) and isinstance(surface_payload.get("source"), dict) else {}
     geometry_path = _resolve_raw(source.get("geometry_path"), root)
+    _track(source_paths, geometry_path)
     if geometry_path is None:
         _error(errors, "MISSING_ARTIFACT", "geometry is missing or unsafe", "geometry")
+        geometry_path = case / "missing-geometry.json"
+    elif geometry_path.suffix.lower() != ".json":
+        _error(errors, "GEOMETRY_PATH_INVALID", "geometry authority must be a .json file", "geometry")
         geometry_path = case / "missing-geometry.json"
     elif _generated(geometry_path, root):
         _error(errors, "GENERATED_SOURCE_EXCLUDED", "geometry is under a generated namespace", "geometry")
@@ -588,6 +640,10 @@ def _compute(case_dir: Path, *, projects_root: Path, gci_root: Path | None,
                        ("thermal_input", thermal_path), ("thermal_progress", progress_path)):
         if _safe_existing(path, root) is None:
             _error(errors, "MISSING_ARTIFACT", f"missing {name}", name if name in {"run", "result"} else name)
+    _track(
+        source_paths, geometry_path if geometry_path.is_file() else None,
+        run_path, result_path, thermal_path, progress_path,
+    )
 
     geometry = _read_json(geometry_path) if geometry_path.is_file() else None
     geometry_ok = True
@@ -601,11 +657,13 @@ def _compute(case_dir: Path, *, projects_root: Path, gci_root: Path | None,
     surface_ok = surface_path is not None and _surface_validation(
         surface_path or solver_surface, surface_payload, geometry_path if geometry_path.is_file() else None,
         root, errors,
+        source_paths,
     )
 
     mesh_payload = _read_json(mesh_path) if mesh_path else _read_json(solver_mesh) if solver_mesh else None
     mesh_ok = mesh_path is not None and _mesh_validation(
-        mesh_path or solver_mesh, mesh_payload, surface_path, case, root, errors
+        mesh_path or solver_mesh, mesh_payload, surface_path, case, root, errors,
+        source_paths,
     )
 
     thermal = _read_json(thermal_path)
@@ -650,10 +708,16 @@ def _compute(case_dir: Path, *, projects_root: Path, gci_root: Path | None,
     numerical_ok = not numerical_issues
     if numerical_issues:
         _error(errors, "NUMERICAL_PROVENANCE_INVALID", ",".join(numerical_issues), "run")
+    for relative_path in cfd_result_gate.THERMAL_NUMERICS_SYSTEM_FILES.values():
+        _track(source_paths, _safe_existing(case / relative_path, root))
+    provenance_record = run_input.get("numerical_provenance") if isinstance(run_input.get("numerical_provenance"), dict) else {}
+    if provenance_record.get("source") == "thermal_restart_input":
+        _track(source_paths, _safe_existing(case / "thermal_restart_input.json", root))
 
     result = _read_json(result_path)
     result_ok = _result_validation(
-        case, result, run_path, case / "mesh_manifest.json", thermal_path, root, errors
+        case, result, run_path, case / "mesh_manifest.json", thermal_path, root, errors,
+        source_paths,
     )
     if isinstance(result, dict) and isinstance(progress, dict):
         if _finite(result.get("time_s")) != _finite(progress.get("latest_time_s")):
@@ -676,7 +740,7 @@ def _compute(case_dir: Path, *, projects_root: Path, gci_root: Path | None,
         "thermal_input_sha256": refs["thermal_input"]["sha256"],
     }
     grid_status, gci_path, grid_reasons = _gci(
-        case, root, gci_root, gci_explicit, provenance, errors
+        case, root, gci_root, gci_explicit, provenance, errors, source_paths
     )
     if gci_path:
         refs["gci"] = _link(gci_path, root, "grid_convergence.v3")
@@ -686,7 +750,7 @@ def _compute(case_dir: Path, *, projects_root: Path, gci_root: Path | None,
         {"geometry": geometry_path if geometry_path.is_file() else None,
          "surface": surface_path, "mesh": mesh_path, "run": run_path,
          "result": result_path},
-        errors,
+        errors, source_paths,
     )
     if field_evidence_path is not None and _safe_existing(field_evidence_path, root):
         refs["field_evidence"] = _link(
@@ -761,6 +825,23 @@ def _safe_optional(path: Path | None, root: Path) -> Path | None:
     return raw
 
 
+def _canonical_gci_root(path: Path | None, root: Path) -> Path | None:
+    if path is None:
+        return None
+    raw = _safe_optional(path, root)
+    canonical = root / "_body_gci"
+    try:
+        if raw.absolute().resolve() != canonical.absolute().resolve():
+            raise ValueError
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ValueError(
+            "gci_root must be the canonical projects_root/_body_gci authority"
+        ) from exc
+    if raw.exists() and _safe_existing(raw, root, directory=True) is None:
+        raise ValueError("gci_root must be the canonical projects_root/_body_gci authority")
+    return canonical
+
+
 def _validate_output(path: Path, root: Path, source_paths: set[Path]) -> Path:
     raw = path if path.is_absolute() else root / path
     try:
@@ -808,13 +889,14 @@ def build_case_evidence(
 ) -> dict:
     """Recompute current raw evidence and atomically publish one screening record."""
     root, case = _prepare_context(Path(case_dir), Path(projects_root))
-    gci_arg = _safe_optional(gci_root, root)
+    gci_arg = _canonical_gci_root(gci_root, root)
     field_arg = _safe_optional(field_evidence_path, root)
+    source_paths: set[Path] = set()
     evidence = _compute(
         case, projects_root=root, gci_root=gci_arg,
         gci_explicit=gci_root is not None, field_evidence_path=field_arg,
+        source_paths=source_paths,
     )
-    source_paths = set()
     for record in evidence["artifact_refs"].values():
         path = _resolve_ref(record["path"], root)
         if path:
@@ -876,12 +958,18 @@ def validate_case_evidence(
         return errors
     gci_record = refs.get("gci") if isinstance(refs.get("gci"), dict) else None
     gci_path = _resolve_ref(gci_record.get("path"), root) if gci_record else None
-    gci_root = gci_path.parent.parent if gci_path is not None else None
+    explicit_gci_error = any(
+        isinstance(item, dict) and item.get("code") in {
+            "GCI_EVIDENCE_INVALID", "GCI_EVIDENCE_STALE",
+        }
+        for item in (stored.get("errors") or [])
+    )
+    gci_root = root / "_body_gci" if gci_path is not None or explicit_gci_error else None
     field_record = refs.get("field_evidence") if isinstance(refs.get("field_evidence"), dict) else None
     field_path = _resolve_ref(field_record.get("path"), root) if field_record else None
     current = _compute(
         case, projects_root=root, gci_root=gci_root,
-        gci_explicit=gci_path is not None, field_evidence_path=field_path,
+        gci_explicit=explicit_gci_error, field_evidence_path=field_path,
     )
     comparable_stored = {key: value for key, value in stored.items() if key != "created_at"}
     comparable_current = {key: value for key, value in current.items() if key != "created_at"}

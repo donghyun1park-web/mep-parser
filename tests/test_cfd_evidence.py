@@ -42,6 +42,15 @@ def _copy(source: Path, target: Path) -> None:
     shutil.copy2(source, target)
 
 
+def _directory_symlink(target: Path, link: Path) -> None:
+    target.mkdir(parents=True, exist_ok=True)
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.symlink(target, link, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlink creation unavailable: {exc}")
+
+
 def _geometry() -> dict:
     return {
         "schema_version": 2,
@@ -519,6 +528,27 @@ def test_geometry_change_after_surface_is_blocked(tmp_path):
     assert "GEOMETRY_HASH_MISMATCH" in _codes(evidence)
 
 
+def test_geometry_authority_requires_json_suffix(tmp_path):
+    paths = make_complete_case(tmp_path)
+    renamed = paths["geometry"].with_suffix(".txt")
+    paths["geometry"].replace(renamed)
+    for surface_path in (
+        paths["surface"], paths["mesh"].parent / "surface_manifest.json",
+        paths["case"] / "surface_manifest.json",
+    ):
+        surface = _read_json(surface_path)
+        surface["source"]["geometry_path"] = renamed.relative_to(paths["root"]).as_posix()
+        surface["source"]["geometry_sha256"] = _sha256(renamed)
+        _write_json(surface_path, surface)
+
+    evidence = cfd_evidence.build_case_evidence(
+        paths["case"], projects_root=paths["root"]
+    )
+
+    assert _check(evidence, "geometry_valid")["status"] == "BLOCKED"
+    assert "GEOMETRY_PATH_INVALID" in _codes(evidence)
+
+
 def test_current_producer_absolute_geometry_source_is_contained_and_accepted(tmp_path):
     paths = make_complete_case(tmp_path)
     for surface_path in (
@@ -708,7 +738,7 @@ def test_multiple_matching_gci_manifests_are_blocked(tmp_path):
     assert "AMBIGUOUS_GCI_EVIDENCE" in _codes(evidence)
 
 
-def test_stale_other_case_gci_is_not_current(tmp_path):
+def test_stale_other_case_gci_blocks_the_grid_authority(tmp_path):
     paths = make_complete_case(tmp_path, with_gci=True)
     manifest_path = paths["gci_root"] / "study-a" / "grid_convergence.json"
     manifest = _read_json(manifest_path)
@@ -717,11 +747,33 @@ def test_stale_other_case_gci_is_not_current(tmp_path):
     _write_json(manifest_path, manifest)
 
     evidence = cfd_evidence.build_case_evidence(
+        paths["case"], projects_root=paths["root"], gci_root=paths["gci_root"]
+    )
+
+    assert _check(evidence, "grid_verified")["status"] == "BLOCKED"
+    assert "GCI_EVIDENCE_STALE" in _codes(evidence)
+    assert "gci" not in evidence["artifact_refs"]
+    assert cfd_evidence.validate_case_evidence(
+        paths["evidence"], projects_root=paths["root"]
+    ) == []
+
+
+def test_default_gci_authority_with_only_other_case_is_not_evaluated(tmp_path):
+    paths = make_complete_case(tmp_path, with_gci=True)
+    manifest_path = paths["gci_root"] / "study-a" / "grid_convergence.json"
+    manifest = _read_json(manifest_path)
+    other_case = paths["root"] / "_body_solver" / "case-other"
+    other_case.mkdir()
+    for item in manifest["cases"]:
+        item["path"] = str(other_case.resolve())
+    _write_json(manifest_path, manifest)
+
+    evidence = cfd_evidence.build_case_evidence(
         paths["case"], projects_root=paths["root"]
     )
 
     assert _check(evidence, "grid_verified")["status"] == "NOT_EVALUATED"
-    assert "gci" not in evidence["artifact_refs"]
+    assert "GCI_EVIDENCE_STALE" not in _codes(evidence)
 
 
 def test_supplied_gci_root_with_benchmark_shaped_manifest_is_blocked(tmp_path):
@@ -738,16 +790,65 @@ def test_supplied_gci_root_with_benchmark_shaped_manifest_is_blocked(tmp_path):
     assert "GCI_SCHEMA_INVALID" in _codes(evidence)
 
 
-def test_explicit_unreadable_gci_root_is_blocked_not_treated_as_absent(tmp_path):
+def test_explicit_unreadable_canonical_gci_root_is_blocked_not_treated_as_absent(tmp_path):
     paths = make_complete_case(tmp_path)
 
     evidence = cfd_evidence.build_case_evidence(
         paths["case"], projects_root=paths["root"],
-        gci_root=paths["root"] / "_body_gci" / "missing-root",
+        gci_root=paths["gci_root"],
     )
 
     assert _check(evidence, "grid_verified")["status"] == "BLOCKED"
     assert "GCI_EVIDENCE_INVALID" in _codes(evidence)
+
+
+def test_explicit_narrowed_gci_study_root_is_rejected(tmp_path):
+    paths = make_complete_case(tmp_path, with_gci=True)
+
+    with pytest.raises(ValueError, match="canonical projects_root/_body_gci"):
+        cfd_evidence.build_case_evidence(
+            paths["case"], projects_root=paths["root"],
+            gci_root=paths["gci_root"] / "study-a",
+        )
+
+
+def test_canonical_gci_root_with_sibling_study_revalidates_cleanly(tmp_path):
+    paths = make_complete_case(tmp_path, with_gci=True)
+    source = paths["gci_root"] / "study-a" / "grid_convergence.json"
+    sibling = paths["gci_root"] / "study-b" / "grid_convergence.json"
+    _copy(source, sibling)
+    source.unlink()
+
+    evidence = cfd_evidence.build_case_evidence(
+        paths["case"], projects_root=paths["root"], gci_root=paths["gci_root"]
+    )
+
+    assert _check(evidence, "grid_verified")["status"] == "PASS"
+    assert cfd_evidence.validate_case_evidence(
+        paths["evidence"], projects_root=paths["root"]
+    ) == []
+
+
+@pytest.mark.parametrize(
+    ("namespace", "check_id"),
+    [
+        ("_occ_geometry", "geometry_valid"),
+        ("_body_mesh", "mesh_checked"),
+        ("_body_gci", "grid_verified"),
+    ],
+)
+def test_unsafe_sibling_candidate_blocks_its_authority(tmp_path, namespace, check_id):
+    paths = make_complete_case(tmp_path, with_gci=True)
+    outside = tmp_path / f"outside-{namespace}"
+    link = paths["root"] / namespace / "unsafe-linked-candidate"
+    _directory_symlink(outside, link)
+
+    evidence = cfd_evidence.build_case_evidence(
+        paths["case"], projects_root=paths["root"]
+    )
+
+    assert _check(evidence, check_id)["status"] == "BLOCKED"
+    assert "PATH_ESCAPE" in _codes(evidence)
 
 
 def test_numerical_preparation_is_never_discovered_as_final_authority(tmp_path):
@@ -938,3 +1039,49 @@ def test_output_must_be_safe_and_cannot_overwrite_a_source(tmp_path):
             paths["case"], projects_root=paths["root"],
             output_path=tmp_path / "outside.json",
         )
+
+
+@pytest.mark.parametrize(
+    "raw_source",
+    ["fvSchemes", "mesh_input", "surface_stl", "result_vtu", "result_slice"],
+)
+def test_output_cannot_overwrite_authoritative_raw_child(tmp_path, raw_source):
+    paths = make_complete_case(tmp_path)
+    targets = {
+        "fvSchemes": paths["case"] / "system" / "fvSchemes",
+        "mesh_input": paths["mesh_input"],
+        "surface_stl": paths["surface"].parent / "air_volume_regions.stl",
+        "result_vtu": paths["source_vtu"],
+        "result_slice": paths["case"] / "results" / "slices" / "x_mid.json",
+    }
+    target = targets[raw_source]
+    original = target.read_bytes()
+
+    with pytest.raises(ValueError, match="source artifact"):
+        cfd_evidence.build_case_evidence(
+            paths["case"], projects_root=paths["root"], output_path=target
+        )
+
+    assert target.read_bytes() == original
+
+
+def test_output_cannot_overwrite_rejected_geometry_candidate(tmp_path):
+    paths = make_complete_case(tmp_path)
+    renamed = paths["geometry"].with_suffix(".txt")
+    paths["geometry"].replace(renamed)
+    for surface_path in (
+        paths["surface"], paths["mesh"].parent / "surface_manifest.json",
+        paths["case"] / "surface_manifest.json",
+    ):
+        surface = _read_json(surface_path)
+        surface["source"]["geometry_path"] = renamed.relative_to(paths["root"]).as_posix()
+        surface["source"]["geometry_sha256"] = _sha256(renamed)
+        _write_json(surface_path, surface)
+    original = renamed.read_bytes()
+
+    with pytest.raises(ValueError, match="source artifact"):
+        cfd_evidence.build_case_evidence(
+            paths["case"], projects_root=paths["root"], output_path=renamed
+        )
+
+    assert renamed.read_bytes() == original
