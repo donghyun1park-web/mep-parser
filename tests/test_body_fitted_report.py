@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -5,6 +6,46 @@ import unittest
 from unittest.mock import patch
 
 import cfd_report
+import cfd_evidence
+import cfd_review
+from test_cfd_evidence import make_complete_case
+
+
+def _write_json(path, payload):
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _future_design_case(base, *, reviewer="reviewer-1", reason="reviewed"):
+    paths = make_complete_case(base, with_gci=True)
+    evidence = cfd_evidence.build_case_evidence(
+        paths["case"], projects_root=paths["root"]
+    )
+    evidence.pop("legacy_case_ref")
+    evidence["case_identity"] = {
+        "contract": "case_identity.v1",
+        "path": evidence["artifact_refs"]["geometry"]["path"],
+        "sha256": evidence["artifact_refs"]["geometry"]["sha256"],
+    }
+    evidence["purpose"] = "design_review_candidate"
+    evidence["status"] = "PASS"
+    evidence["errors"] = []
+    for check in evidence["checks"]:
+        check.update(status="PASS", reason_codes=[], evidence_refs=[])
+    _write_json(paths["evidence"], evidence)
+    review = cfd_review.create_review(
+        paths["evidence"],
+        projects_root=paths["root"],
+        expected_target_sha256=hashlib.sha256(
+            paths["evidence"].read_bytes()
+        ).hexdigest(),
+        reviewer_id=reviewer,
+        decision="APPROVED",
+        reason=reason,
+    )
+    return paths, review
 
 
 class BodyFittedReportTests(unittest.TestCase):
@@ -82,6 +123,8 @@ class BodyFittedReportTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertIn("상세 열·부력 결과 요약", text)
         self.assertIn("NOT_EVALUATED", text)
+        self.assertIn("Case Evidence", text)
+        self.assertIn("설계 인용 불가", text)
         self.assertNotIn("스크리닝 결과", text)
         self.assertIn("293.974 K", text)
         self.assertIn("1.420 m/s", text)
@@ -185,7 +228,7 @@ class BodyFittedReportTests(unittest.TestCase):
         self.assertIn("사용자 입력", text)
         self.assertNotIn("DXF 출처", text)
 
-    def test_report_shows_authoritative_design_gate_and_numerical_evidence(self):
+    def test_legacy_result_gate_cannot_create_design_review_banner(self):
         with tempfile.TemporaryDirectory() as tmp:
             case = Path(tmp)
             (case / "results").mkdir()
@@ -217,11 +260,96 @@ class BodyFittedReportTests(unittest.TestCase):
 
         self.assertTrue(result["ok"], result)
         evaluate.assert_called_once_with(str(case))
-        self.assertIn("DESIGN_CITABLE", text)
+        self.assertNotIn("설계 검토 인용 가능", text)
+        self.assertIn("Case Evidence", text)
+        self.assertIn("레거시 결과 게이트", text)
         self.assertIn("design_limited_second_order_v1", text)
         self.assertIn("0.820", text)
         self.assertIn("91.0%", text)
         self.assertIn("0.030%", text)
+
+    def test_screening_report_has_exact_top_and_print_watermark_and_fixed_check_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = make_complete_case(Path(tmp), with_gci=True)
+            cfd_evidence.build_case_evidence(
+                paths["case"], projects_root=paths["root"]
+            )
+
+            result = cfd_report.generate_body_fitted_report(
+                paths["case"], projects_root=paths["root"]
+            )
+            text = Path(result["report_path"]).read_text(encoding="utf-8")
+
+        self.assertTrue(result["ok"], result)
+        watermark = "초기안 비교용 · 설계 인용 불가"
+        self.assertEqual(text.count(watermark), 1)
+        self.assertLess(text.index(watermark), text.index("<h1>"))
+        self.assertIn("@media print", text)
+        self.assertIn("first-content", text)
+        order = [
+            "geometry_valid", "bc_reviewed", "mesh_checked",
+            "solver_converged", "numerics_verified", "grid_verified",
+            "benchmark_validated", "field_calibrated", "design_ready",
+        ]
+        positions = [text.index(check_id) for check_id in order]
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotIn("설계 검토 인용 가능", text)
+
+    def test_design_citable_report_shows_only_validated_review_binding_and_escapes_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, review = _future_design_case(
+                Path(tmp), reviewer="<script>alert(1)</script>",
+                reason="<b>approved & bound</b>",
+            )
+            with patch.object(
+                cfd_report.cfd_case_health.cfd_evidence,
+                "validate_case_evidence", return_value=[],
+            ):
+                result = cfd_report.generate_body_fitted_report(
+                    paths["case"], projects_root=paths["root"]
+                )
+            text = Path(result["report_path"]).read_text(encoding="utf-8")
+
+        self.assertTrue(result["ok"], result)
+        self.assertIn("DESIGN_CITABLE", text)
+        self.assertIn("설계 검토 인용 가능", text)
+        self.assertIn("design_review_candidate", text)
+        self.assertIn(review["review_id"], text)
+        self.assertIn(review["target"]["sha256"], text)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", text)
+        self.assertIn("&lt;b&gt;approved &amp; bound&lt;/b&gt;", text)
+        self.assertNotIn("<script>alert(1)</script>", text)
+        self.assertNotIn("<b>approved & bound</b>", text)
+
+    def test_blocked_and_not_evaluated_reports_are_non_green_and_forbid_design_wording(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = make_complete_case(Path(tmp))
+            cfd_evidence.build_case_evidence(
+                paths["case"], projects_root=paths["root"]
+            )
+            baseline = cfd_report.cfd_case_health.build_case_health(
+                paths["evidence"], projects_root=paths["root"]
+            )
+            for status in ("CITATION_BLOCKED", "NOT_EVALUATED"):
+                health = json.loads(json.dumps(baseline))
+                health["citation_status"] = status
+                health["errors"] = [{"code": "REVIEW_REQUIRED"}]
+                with self.subTest(status=status), patch.object(
+                    cfd_report.cfd_case_health, "build_case_health",
+                    return_value=health,
+                ), patch.object(
+                    cfd_report.cfd_case_health, "review_summary",
+                    return_value={"status": "MISSING"},
+                ):
+                    out = paths["case"] / f"{status}.html"
+                    result = cfd_report.generate_body_fitted_report(
+                        paths["case"], out, projects_root=paths["root"]
+                    )
+                    text = out.read_text(encoding="utf-8")
+                self.assertTrue(result["ok"], result)
+                self.assertIn(f"citation-banner {status.lower().replace('_', '-')}", text)
+                self.assertNotIn("citation-banner pass", text)
+                self.assertNotIn("설계 검토 인용 가능", text)
 
 
 if __name__ == "__main__":

@@ -34,6 +34,38 @@ BAD_TRUST = {"citable": False, "badge": "결과 인용 불가(폐합 158%)",
              "reasons": ["에너지 폐합율 158% — 정상상태에서는 100%여야 한다."]}
 
 
+def _case_health(citation_status, *, purpose="design_review_candidate",
+                 field_status="PASS", reason="DESIGN_CITABLE"):
+    field_reason = [] if field_status == "PASS" else ["FIELD_EVIDENCE_INVALID"]
+    return {
+        "contract": "case_health.v1",
+        "purpose": purpose,
+        "citation_status": citation_status,
+        "errors": [{"code": reason}],
+        "evidence": {
+            "contract": "case_evidence.v1",
+            "path": "_body_solver/case-a/case_evidence.v1.json",
+            "sha256": "a" * 64,
+        },
+        "checks": {
+            "design_ready": {
+                "status": "PASS" if citation_status == "DESIGN_CITABLE" else "NOT_EVALUATED",
+                "reason_codes": [] if citation_status == "DESIGN_CITABLE" else [reason],
+                "evidence_refs": [],
+                "impact": "현재 설계 인용 상태를 확인해야 합니다.",
+                "next_actions": ["현재 증적과 검토 상태를 다시 확인하세요."],
+            },
+            "field_calibrated": {
+                "status": field_status,
+                "reason_codes": field_reason,
+                "evidence_refs": [] if field_status == "PASS" else ["field_evidence"],
+                "impact": "현장 보정 증적이 아직 평가되지 않았습니다.",
+                "next_actions": ["현장 측정 및 TAB 증적을 등록하세요."],
+            },
+        },
+    }
+
+
 class TrustGate(unittest.TestCase):
     def test_unconverged_result_emits_blocking_recommendation_first(self):
         recs = cfd_advice.recommendations(
@@ -50,6 +82,75 @@ class TrustGate(unittest.TestCase):
             _meta([_patch("sup0", "supply", 0.2, 12.0)]),
             dict(BASE_METRICS, closure_pct=99.0), {"n_iters": 5000}, GOOD_TRUST, {})
         self.assertFalse(any(r["priority"] == cfd_advice.P_BLOCK for r in recs))
+
+    def test_authoritative_health_blocks_legacy_citable_true_and_is_first(self):
+        recs = cfd_advice.recommendations(
+            _meta([_patch("sup0", "supply", 0.2, 12.0)]),
+            BASE_METRICS, None, GOOD_TRUST, {},
+            case_health=_case_health(
+                "CITATION_BLOCKED", reason="REVIEW_REJECTED"
+            ),
+        )
+        self.assertEqual(recs[0]["priority"], cfd_advice.P_BLOCK)
+        self.assertEqual(recs[0]["group"], "evidence")
+        self.assertEqual(recs[0]["group_label"], "증적·검토")
+        self.assertIn("REVIEW_REJECTED", recs[0]["basis"])
+
+    def test_authoritative_design_health_overrides_stale_legacy_false(self):
+        recs = cfd_advice.recommendations(
+            _meta([_patch("sup0", "supply", 0.2, 12.0)]),
+            dict(BASE_METRICS, closure_pct=99.0), None, BAD_TRUST, {},
+            health=_case_health("DESIGN_CITABLE"),
+        )
+        self.assertFalse(any(row["priority"] == cfd_advice.P_BLOCK for row in recs))
+
+    def test_invalid_health_shape_fails_closed(self):
+        recs = cfd_advice.recommendations(
+            _meta([_patch("sup0", "supply", 0.2, 12.0)]),
+            BASE_METRICS, None, GOOD_TRUST, {}, case_health={"citation_status": "DESIGN_CITABLE"},
+        )
+        self.assertEqual(recs[0]["group"], "evidence")
+        self.assertEqual(recs[0]["priority"], cfd_advice.P_BLOCK)
+
+
+class RecommendationGroups(unittest.TestCase):
+    def test_adds_group_fields_after_the_five_legacy_fields_without_rewording(self):
+        patches = [
+            _patch("sup0", "supply", 5.0, 5.0),
+            _patch("exh0", "exhaust", 5.5, 5.0),
+        ]
+        recs = cfd_advice.recommendations(
+            _meta(patches), BASE_METRICS, None, BAD_TRUST, {}
+        )
+        self.assertEqual(list(recs[0])[:5], [
+            "priority", "category", "finding", "action", "basis",
+        ])
+        self.assertEqual(set(recs[0]) - {
+            "priority", "category", "finding", "action", "basis",
+        }, {"group", "group_label"})
+        self.assertEqual(recs[0]["finding"],
+                         "결과가 수렴/에너지수지 기준을 통과하지 못했습니다. "
+                         "에너지 폐합율 158% — 정상상태에서는 100%여야 한다.")
+        by_category = {row["category"]: row["group"] for row in recs}
+        self.assertEqual(by_category["해석 신뢰도"], "evidence")
+        self.assertEqual(by_category["풍량"], "input")
+        self.assertEqual(by_category["급배기 배치"], "model")
+        self.assertEqual(by_category["발열 모델"], "model")
+
+    def test_required_missing_field_evidence_stays_not_evaluated_in_field_group(self):
+        health = _case_health(
+            "NOT_EVALUATED", purpose="field_validation",
+            field_status="NOT_EVALUATED", reason="REQUIRED_CHECK_NOT_EVALUATED",
+        )
+        recs = cfd_advice.recommendations(
+            _meta([_patch("sup0", "supply", 0.2, 12.0)]),
+            BASE_METRICS, None, GOOD_TRUST, {}, case_health=health,
+        )
+        field = [row for row in recs if row["group"] == "field"]
+        self.assertEqual(len(field), 1)
+        self.assertIn("NOT_EVALUATED", field[0]["finding"])
+        self.assertNotIn("PASS", field[0]["finding"])
+        self.assertEqual(field[0]["group_label"], "현장 검증")
 
 
 class RequiredAirflow(unittest.TestCase):
@@ -228,6 +329,28 @@ class Digest(unittest.TestCase):
         self.assertFalse(payload["citable"])
         self.assertEqual(payload["n_iters"], 1000)
         self.assertTrue(payload["recommendations"])
+
+    def test_authoritative_health_seals_markdown_and_json_despite_legacy_trust(self):
+        import json
+        meta = _meta([_patch("sup0", "supply", 0.2, 12.0)])
+        health = _case_health(
+            "CITATION_BLOCKED", reason="ARTIFACT_HASH_MISMATCH"
+        )
+        recs = cfd_advice.recommendations(
+            meta, BASE_METRICS, None, GOOD_TRUST, {}, case_health=health,
+        )
+        digest = cfd_advice.ai_digest(
+            meta, BASE_METRICS, None, GOOD_TRUST, {}, recs,
+            case_health=health,
+        )
+        payload = json.loads(cfd_advice.digest_payload(
+            meta, BASE_METRICS, None, GOOD_TRUST, {}, recs,
+            case_health=health,
+        ))
+        self.assertIn("설계 결론을 내리지 마십시오", digest)
+        self.assertIn("CITATION_BLOCKED", digest)
+        self.assertFalse(payload["citable"])
+        self.assertEqual(payload["citation_status"], "CITATION_BLOCKED")
 
 
 if __name__ == "__main__":

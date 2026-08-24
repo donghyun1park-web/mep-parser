@@ -18,6 +18,8 @@ AI(다이제스트): "판단이 답인 것". 디퓨저를 어디로 옮길지, �
 import json
 import math
 
+from cfd_status_catalog import PURPOSE_PROFILES
+
 RHO_CP = 1206.0          # ρ0·cp [J/(m³·K)] — cfd_export 와 동일 기준
 
 # 추천 우선순위
@@ -33,6 +35,24 @@ FACE_VELOCITY_WARN = 4.0
 SHORT_CIRCUIT_MIN_M = 2.0
 # 목표 실온 후보 — 용도가 지정 안 됐을 때 표로 제시(추측하지 않는다)
 DEFAULT_TARGET_TEMPS_C = (24.0, 26.0, 28.0, 40.0)
+
+GROUP_LABELS = {
+    "evidence": "증적·검토",
+    "input": "입력 조건",
+    "model": "해석 모델",
+    "field": "현장 검증",
+}
+_CATEGORY_GROUPS = {
+    "해석 신뢰도": "evidence",
+    "풍량": "input",
+    "디퓨저 사양": "input",
+    "급배기 배치": "model",
+    "개구부 모델링": "model",
+    "격자": "model",
+    "발열 모델": "model",
+    "급배기 균형": "model",
+    "현장 검증": "field",
+}
 
 
 def _patch_center(p):
@@ -126,7 +146,8 @@ def required_airflow_cmh(power_w, T_supply_C, target_room_C):
     return power_w / (RHO_CP * dT) * 3600.0
 
 
-def recommendations(meta, metrics, parsed=None, trust=None, forecast=None):
+def recommendations(meta, metrics, parsed=None, trust=None, forecast=None,
+                    health=None, *, case_health=None):
     """결과 → 설계 추천 목록.
 
     반환: [{priority, category, finding, action, basis}] — basis 는 판단 근거(수식·수치).
@@ -135,10 +156,55 @@ def recommendations(meta, metrics, parsed=None, trust=None, forecast=None):
     cfg = meta.get("config", {})
     patches = meta.get("patches") or []
     recs = []
-    citable = True if trust is None else trust.get("citable", True)
+    authoritative = case_health if case_health is not None else health
+    authoritative_valid = (
+        isinstance(authoritative, dict)
+        and authoritative.get("contract") == "case_health.v1"
+        and authoritative.get("citation_status") in {
+            "SCREENING_ONLY", "NOT_EVALUATED", "CITATION_BLOCKED",
+            "DESIGN_CITABLE",
+        }
+        and isinstance(authoritative.get("checks"), dict)
+    )
+    if authoritative is not None:
+        citable = (
+            authoritative_valid
+            and authoritative.get("citation_status") == "DESIGN_CITABLE"
+        )
+    else:
+        citable = True if trust is None else trust.get("citable", True)
 
     # ── 0. 신뢰 게이트 ────────────────────────────────────────────────
-    if not citable:
+    if not citable and authoritative is not None:
+        design = (
+            authoritative.get("checks", {}).get("design_ready", {})
+            if authoritative_valid else {}
+        )
+        errors = (authoritative.get("errors") or []) if authoritative_valid else []
+        reason_codes = [
+            str(row.get("code")) for row in errors
+            if isinstance(row, dict) and row.get("code")
+        ]
+        evidence = (authoritative.get("evidence") or {}) if authoritative_valid else {}
+        recs.append({
+            "priority": P_BLOCK,
+            "category": "해석 신뢰도",
+            "finding": (
+                f"Case Health {authoritative.get('citation_status')}: "
+                f"{design.get('impact') or '권위 있는 Case Health 형식을 확인할 수 없습니다.'}"
+                if authoritative_valid else
+                "권위 있는 Case Health 형식을 확인할 수 없어 설계 판단을 봉인했습니다."
+            ),
+            "action": (
+                " ".join(str(item) for item in (design.get("next_actions") or []))
+                or "Case Evidence와 Case Health를 다시 생성·검증하십시오."
+            ),
+            "basis": (
+                "Case Health 사유 " + (", ".join(reason_codes) or "없음")
+                + " · evidence " + str(evidence.get("sha256") or "확인 불가")
+            ),
+        })
+    elif not citable:
         need_txt = ""
         if forecast:
             need = {f: i["iters_to_target"] for f, i in forecast.items()
@@ -157,6 +223,31 @@ def recommendations(meta, metrics, parsed=None, trust=None, forecast=None):
             "basis": f"에너지 폐합율 {m.get('closure_pct', float('nan')):.0f}% "
                      "(정상상태·단열벽이면 100%)",
         })
+
+    if authoritative_valid:
+        profile = PURPOSE_PROFILES.get(authoritative.get("purpose")) or {}
+        field = authoritative.get("checks", {}).get("field_calibrated") or {}
+        if (
+            "field_calibrated" in (profile.get("required_checks") or ())
+            and field.get("status") != "PASS"
+        ):
+            recs.append({
+                "priority": P_BLOCK,
+                "category": "현장 검증",
+                "finding": (
+                    f"현장 보정 상태 {field.get('status') or 'NOT_EVALUATED'}. "
+                    f"{field.get('impact') or ''}"
+                ).strip(),
+                "action": " ".join(
+                    str(item) for item in (field.get("next_actions") or [])
+                ) or "현장 측정 및 TAB 증적을 완료하십시오.",
+                "basis": (
+                    "Case Health field_calibrated · 사유 "
+                    + (", ".join(str(item) for item in (field.get("reason_codes") or [])) or "없음")
+                    + " · 증적 "
+                    + (", ".join(str(item) for item in (field.get("evidence_refs") or [])) or "없음")
+                ),
+            })
 
     # ── 1. 풍량 적정성 (수렴 여부와 무관하게 입력값만으로 판정 가능) ──
     power_w = (m.get("heat_kw") or 0) * 1000.0
@@ -341,7 +432,7 @@ def recommendations(meta, metrics, parsed=None, trust=None, forecast=None):
             })
 
     # ── 6. 질량수지 ───────────────────────────────────────────────────
-    if m.get("mass_err_pct") is not None and abs(m["mass_err_pct"]) > 5.0:
+    if citable and m.get("mass_err_pct") is not None and abs(m["mass_err_pct"]) > 5.0:
         recs.append({
             "priority": P_HIGH, "category": "급배기 균형",
             "finding": f"배기 순유량이 설계 급기 대비 {m['mass_err_pct']:+.1f}% 어긋납니다.",
@@ -350,12 +441,19 @@ def recommendations(meta, metrics, parsed=None, trust=None, forecast=None):
             "basis": "(배기 − 급기)/급기, 허용 ±5%",
         })
 
+    for row in recs:
+        group = _CATEGORY_GROUPS.get(row["category"], "model")
+        row["group"] = group
+        row["group_label"] = GROUP_LABELS[group]
     order = {P_BLOCK: 0, P_HIGH: 1, P_MED: 2, P_INFO: 3}
-    recs.sort(key=lambda r: order.get(r["priority"], 9))
+    recs.sort(key=lambda r: (
+        order.get(r["priority"], 9), 0 if r["group"] == "evidence" else 1
+    ))
     return recs
 
 
-def ai_digest(meta, metrics, parsed=None, trust=None, forecast=None, recs=None):
+def ai_digest(meta, metrics, parsed=None, trust=None, forecast=None, recs=None,
+              health=None, *, case_health=None):
     """Claude 등 LLM 에 붙여넣을 압축 다이제스트(마크다운).
 
     HTML 리포트는 base64 이미지 때문에 수백 KB 라 붙여넣기에 부적합하다.
@@ -366,7 +464,27 @@ def ai_digest(meta, metrics, parsed=None, trust=None, forecast=None, recs=None):
     cfg = meta.get("config", {})
     room = cfg.get("room", {})
     patches = meta.get("patches") or []
-    citable = True if trust is None else trust.get("citable", True)
+    authoritative = case_health if case_health is not None else health
+    authoritative_valid = (
+        isinstance(authoritative, dict)
+        and authoritative.get("contract") == "case_health.v1"
+        and authoritative.get("citation_status") in {
+            "SCREENING_ONLY", "NOT_EVALUATED", "CITATION_BLOCKED",
+            "DESIGN_CITABLE",
+        }
+    )
+    if authoritative is None:
+        citable = True if trust is None else trust.get("citable", True)
+        citation_status = None
+    else:
+        citable = (
+            authoritative_valid
+            and authoritative.get("citation_status") == "DESIGN_CITABLE"
+        )
+        citation_status = (
+            authoritative.get("citation_status")
+            if authoritative_valid else "NOT_EVALUATED"
+        )
     L = []
 
     L.append("# CFD 해석 다이제스트 (AI 검토 입력용)")
@@ -409,6 +527,8 @@ def ai_digest(meta, metrics, parsed=None, trust=None, forecast=None, recs=None):
     L.append("")
 
     L.append("## Facts — 해석 결과")
+    if citation_status:
+        L.append(f"- Case Health 인용 상태: **{citation_status}**")
     L.append(f"- 신뢰 판정: **{(trust or {}).get('badge', '?')}** "
              f"(설계 인용 가능 = {'예' if citable else '**아니오**'})")
     if m.get("closure_pct") is not None:
@@ -448,13 +568,35 @@ def ai_digest(meta, metrics, parsed=None, trust=None, forecast=None, recs=None):
     return "\n".join(L)
 
 
-def digest_payload(meta, metrics, parsed=None, trust=None, forecast=None, recs=None):
+def digest_payload(meta, metrics, parsed=None, trust=None, forecast=None,
+                   recs=None, health=None, *, case_health=None):
     """기계 판독용 JSON payload — API 연동·자동화용."""
-    return json.dumps({
-        "citable": True if trust is None else trust.get("citable", True),
+    authoritative = case_health if case_health is not None else health
+    authoritative_valid = (
+        isinstance(authoritative, dict)
+        and authoritative.get("contract") == "case_health.v1"
+        and authoritative.get("citation_status") in {
+            "SCREENING_ONLY", "NOT_EVALUATED", "CITATION_BLOCKED",
+            "DESIGN_CITABLE",
+        }
+    )
+    citable = (
+        authoritative_valid
+        and authoritative.get("citation_status") == "DESIGN_CITABLE"
+        if authoritative is not None else
+        (True if trust is None else trust.get("citable", True))
+    )
+    payload = {
+        "citable": citable,
         "badge": (trust or {}).get("badge"),
         "metrics": {k: v for k, v in (metrics or {}).items()
                     if isinstance(v, (int, float, str)) or v is None},
         "n_iters": (parsed or {}).get("n_iters"),
         "recommendations": recs or [],
-    }, ensure_ascii=False, indent=2)
+    }
+    if authoritative is not None:
+        payload["citation_status"] = (
+            authoritative.get("citation_status")
+            if authoritative_valid else "NOT_EVALUATED"
+        )
+    return json.dumps(payload, ensure_ascii=False, indent=2)

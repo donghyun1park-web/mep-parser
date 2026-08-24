@@ -41,6 +41,8 @@ import cfd_physics
 import cfd_occ
 import cfd_report
 import cfd_result_gate
+import cfd_case_health
+import cfd_review
 import field_acceptance
 import field_pipeline_job
 import release_audit
@@ -83,7 +85,11 @@ def _body_solver_case(name):
     if not name or not _SAFE_NAME.match(name) or ".." in name:
         return None
     root = Path(ROOT, "_body_solver").resolve()
-    target = (root / name).resolve()
+    target = cfd_review.safe_project_directory(
+        Path(ROOT, "_body_solver", name), projects_root=Path(ROOT)
+    )
+    if target is None:
+        return None
     try:
         target.relative_to(root)
     except ValueError:
@@ -121,12 +127,37 @@ def body_result_payload(case_name):
             slices[item["axis"]] = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, KeyError, ValueError, json.JSONDecodeError) as exc:
         return {"ok": False, "error": f"상세 결과를 읽지 못했습니다: {exc}"}
+    evidence_path = case / "case_evidence.v1.json"
+    case_health = None
+    review_summary = {
+        "status": "NOT_AVAILABLE",
+        "reason_codes": ["CASE_EVIDENCE_NOT_FOUND"],
+    }
+    if evidence_path.is_file():
+        try:
+            with cfd_review.review_state_lock(
+                evidence_path, projects_root=Path(ROOT)
+            ):
+                case_health = cfd_case_health.build_case_health(
+                    evidence_path, projects_root=Path(ROOT)
+                )
+                review_summary = cfd_case_health.review_summary(
+                    evidence_path, projects_root=Path(ROOT)
+                )
+        except Exception:
+            # A broken evidence chain must not hide a readable legacy result.
+            case_health = None
+            review_summary = {
+                "status": "INVALID",
+                "reason_codes": ["CITATION_EVIDENCE_OR_REVIEW_INVALID"],
+            }
     return {
         "ok": True, "case": case.name, "manifest": manifest,
         "run_manifest": run_manifest,
         "result_gate": cfd_result_gate.evaluate_body_fitted_case(case),
         "design_job": field_design_job_status(case.name),
         "summary": summary, "slices": slices,
+        "case_health": case_health, "review_summary": review_summary,
     }
 
 
@@ -2404,7 +2435,9 @@ def _do_field_design_run(case_name, act):
                     and (case / "result_manifest.json").is_file()):
                 job.update(status="complete", stage="complete", completed_at=_utc_now())
                 publish("complete", "3.0 교환시간 설계 검토 계산 완료")
-                report = cfd_report.generate_body_fitted_report(case)
+                report = cfd_report.generate_body_fitted_report(
+                    case, projects_root=ROOT
+                )
                 return True, None, {
                     "case": case_name, "flow_through_fraction": fraction,
                     "report_url": "/body-report/" + quote(case_name)
@@ -3069,7 +3102,9 @@ def run_body_fitted_thermal(mesh_case_path, initial_case_path, settings=None):
         cfd_gci_job.release_solver_lock(ROOT, token)
     result["thermal_input"] = built.get("thermal_input")
     result["screening_only"] = True
-    report = cfd_report.generate_body_fitted_report(solver_dir)
+    report = cfd_report.generate_body_fitted_report(
+        solver_dir, projects_root=ROOT
+    )
     if report.get("ok"):
         result["report_url"] = "/body-report/" + quote(solver_dir.name)
     if (solver_dir / "result_manifest.json").is_file():
@@ -3102,7 +3137,9 @@ def continue_body_fitted_thermal(solver_case_path, settings=None):
         )
     finally:
         cfd_gci_job.release_solver_lock(ROOT, token)
-    report = cfd_report.generate_body_fitted_report(solver_case)
+    report = cfd_report.generate_body_fitted_report(
+        solver_case, projects_root=ROOT
+    )
     if report.get("ok"):
         result["report_url"] = "/body-report/" + quote(solver_case.name)
     if (solver_case / "result_manifest.json").is_file():
@@ -3442,6 +3479,27 @@ class StudioHandler(BaseHTTPRequestHandler):
         if m:
             result = body_result_payload(m.group(1))
             return self._json(result, 200 if result.get("ok") else 404)
+        m = re.match(r"^/api/case-health/([^/]+)$", path)
+        if m:
+            case_name = m.group(1)
+            case = _body_solver_case(case_name)
+            if case is None:
+                return self._json({
+                    "ok": False,
+                    "code": "CASE_EVIDENCE_NOT_FOUND",
+                    "case": case_name,
+                }, 404)
+            evidence_path = case / "case_evidence.v1.json"
+            if not evidence_path.is_file():
+                return self._json({
+                    "ok": False,
+                    "code": "CASE_EVIDENCE_NOT_FOUND",
+                    "case": case.name,
+                }, 404)
+            health = cfd_case_health.build_case_health(
+                evidence_path, projects_root=Path(ROOT)
+            )
+            return self._json(health)
         m = re.match(r"^/api/field-design-status/([^/]+)$", path)
         if m:
             result = field_design_status_payload(m.group(1))
@@ -3494,6 +3552,16 @@ class StudioHandler(BaseHTTPRequestHandler):
             path = unquote(u.path)
             if path == "/api/import-dxf":
                 return self._handle_import_dxf(u)
+            if path == "/api/case-review":
+                try:
+                    ln = int(self.headers.get("Content-Length") or 0)
+                    body = self.rfile.read(ln).decode("utf-8") if ln else "{}"
+                    p = json.loads(body or "{}")
+                except (TypeError, ValueError, UnicodeError, json.JSONDecodeError):
+                    return self._json({
+                        "ok": False, "code": "INVALID_REQUEST_BODY"
+                    }, 400)
+                return self._handle_case_review(p)
             ln = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(ln).decode("utf-8") if ln else "{}"
             p = json.loads(body or "{}")
@@ -3617,6 +3685,96 @@ class StudioHandler(BaseHTTPRequestHandler):
                 self._json({"error": str(e)}, 500)
             except Exception:
                 pass
+
+    def _handle_case_review(self, payload):
+        required = {
+            "case", "reviewer_id", "decision", "reason", "target_sha256",
+        }
+        optional = {"supersedes_review_ids"}
+        if not isinstance(payload, dict) or set(payload) - required - optional:
+            return self._json({
+                "ok": False, "code": "INVALID_REQUEST_BODY"
+            }, 400)
+        if not required.issubset(payload):
+            return self._json({
+                "ok": False, "code": "INVALID_REQUEST_BODY"
+            }, 400)
+        case_name = payload.get("case")
+        reviewer_id = payload.get("reviewer_id")
+        decision = payload.get("decision")
+        reason = payload.get("reason")
+        target_sha256 = payload.get("target_sha256")
+        supersedes = payload.get("supersedes_review_ids", [])
+        valid_shape = (
+            isinstance(case_name, str)
+            and bool(case_name)
+            and bool(_SAFE_NAME.fullmatch(case_name))
+            and ".." not in case_name
+            and isinstance(reviewer_id, str)
+            and bool(reviewer_id.strip())
+            and decision in {"APPROVED", "REJECTED"}
+            and isinstance(reason, str)
+            and bool(reason.strip())
+            and isinstance(target_sha256, str)
+            and bool(cfd_review.SHA256_PATTERN.fullmatch(target_sha256))
+            and isinstance(supersedes, list)
+            and all(isinstance(item, str) for item in supersedes)
+            and len(supersedes) == len(set(supersedes))
+        )
+        if not valid_shape:
+            return self._json({
+                "ok": False, "code": "INVALID_REQUEST_BODY"
+            }, 400)
+        case = _body_solver_case(case_name)
+        if case is None:
+            return self._json({
+                "ok": False,
+                "code": "CASE_EVIDENCE_NOT_FOUND",
+                "case": case_name,
+            }, 404)
+        evidence_path = case / "case_evidence.v1.json"
+        if not evidence_path.is_file():
+            return self._json({
+                "ok": False,
+                "code": "CASE_EVIDENCE_NOT_FOUND",
+                "case": case.name,
+            }, 404)
+        try:
+            review = cfd_review.create_review(
+                evidence_path,
+                projects_root=Path(ROOT),
+                expected_target_sha256=target_sha256,
+                reviewer_id=reviewer_id,
+                decision=decision,
+                reason=reason,
+                supersedes_review_ids=supersedes,
+            )
+            with cfd_review.review_state_lock(
+                evidence_path, projects_root=Path(ROOT)
+            ):
+                health = cfd_case_health.build_case_health(
+                    evidence_path, projects_root=Path(ROOT)
+                )
+                summary = cfd_case_health.review_summary(
+                    evidence_path, projects_root=Path(ROOT)
+                )
+        except ValueError as exc:
+            code = str(exc)
+            if "REVIEW_TARGET_CHANGED" in code or "review target" in code:
+                return self._json({
+                    "ok": False,
+                    "code": "REVIEW_TARGET_CHANGED",
+                    "case": case.name,
+                }, 409)
+            return self._json({
+                "ok": False, "code": code or "INVALID_REQUEST_BODY"
+            }, 400)
+        return self._json({
+            "ok": True,
+            "review": review,
+            "review_summary": summary,
+            "case_health": health,
+        }, 201)
 
     def _handle_import_dxf(self, u):
         """raw POST DXF 업로드(최대 100 MiB) → 자동 파싱 → geometry.json."""
@@ -3852,17 +4010,22 @@ label{font-size:.82rem;color:var(--muted);display:grid;gap:4px}select,button,a.b
 button{cursor:pointer}button.active{background:var(--accent);color:#fff;border-color:var(--accent)}a.btn{text-decoration:none}.panel{margin-top:14px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:12px}
 canvas{display:block;width:100%;height:620px;border-radius:8px;background:#f9fbfc;touch-action:none}.legend{display:flex;align-items:center;gap:8px;margin-top:9px;color:var(--muted);font-size:.84rem}
 .bar{height:12px;flex:1;max-width:340px;border-radius:8px;background:linear-gradient(90deg,#2864c7,#34b4c4,#eac33b,#d84336)}
- #readout{min-height:26px;margin-top:8px;font-size:.9rem}.trust{margin-top:8px;padding:8px 10px;border-radius:7px;font-size:.86rem;background:#fff6d8;border-left:4px solid #d39b00}.trust.ok{background:#e8f6ed;border-left-color:#207245}.trust.screening{background:#edf5fa;border-left-color:#245f8e}.trust.warn{background:#fff0ee;border-left-color:#b64032}.notice{margin-top:12px;padding:10px 12px;background:#fff6d8;border-left:4px solid #d39b00;font-size:.88rem}
-@media(max-width:700px){canvas{height:470px}.top{align-items:stretch}.controls{width:100%}}
+ #readout{min-height:26px;margin-top:8px;font-size:.9rem}.notice{margin-top:12px;padding:10px 12px;background:#fff6d8;border-left:4px solid #d39b00;font-size:.88rem}.screening-watermark{margin:0 0 12px;padding:10px 14px;border:2px solid #d39b00;border-radius:8px;background:#fff6d8;color:#704f00;font-weight:800;text-align:center}.screening-watermark[hidden]{display:none}
+.case-health{margin-top:14px;border:1px solid var(--line);border-left:6px solid #778895;border-radius:12px;padding:14px;background:#fff}.case-health h2{font-size:1.05rem;margin:0 0 8px}.case-health p{margin:5px 0;line-height:1.5}.case-health.design-citable{background:#e8f6ed;border-left-color:#207245}.case-health.screening-only,.case-health.not-evaluated{background:#fff6d8;border-left-color:#d39b00}.case-health.citation-blocked,.case-health.missing{background:#fff0ee;border-left-color:#b64032}.case-health .status{font-weight:700}details.evidence{margin-top:10px;border:1px solid var(--line);border-radius:9px;padding:9px 11px;background:#f8fafb}details.evidence summary{cursor:pointer;color:var(--accent);font-weight:600}details.evidence pre{white-space:pre-wrap;word-break:break-word;font-size:.76rem;color:#52636f}
+@media(max-width:700px){canvas{height:470px}.top{align-items:stretch}.controls{width:100%}}@media print{.screening-watermark{display:block;position:relative;break-inside:avoid;page-break-after:avoid}}
 </style></head><body><main>
+<div id="screeningWatermark" class="screening-watermark" hidden>초기안 비교용 · 설계 인용 불가</div>
 <div class="top"><div><h1>상세 열·부력 단면 결과</h1><p class="sub" id="meta">결과를 불러오는 중…</p></div>
- <div id="trust" class="trust">결과 신뢰도를 확인하는 중입니다.</div>
  <div class="controls">
  <button id="designRun" type="button">3.0 교환시간까지 자동 계산</button>
  <button id="view2" class="active" type="button">2D 단면</button><button id="view3" type="button">3D 세 단면</button>
  <label>축<select id="axis"><option value="x">X 중앙</option><option value="y">Y 중앙</option><option value="z" selected>Z 중앙</option></select></label>
  <label>표시값<select id="field"><option value="T">온도 (K)</option><option value="speed">속도 (m/s)</option></select></label>
 </div></div>
+<section id="caseHealth" class="case-health missing"><h2>Case Health</h2>
+<p class="status" id="healthStatus">증적 상태를 확인하는 중입니다.</p>
+<p id="healthImpact"></p><p id="healthBlockers"></p><p id="healthActions"></p></section>
+<details id="evidenceDetails" class="evidence"><summary>근거 보기</summary><pre id="rawEvidence"></pre></details>
 <div class="panel"><canvas id="plot" role="img" aria-label="비정형 CFD 단면 결과"></canvas>
 <div class="legend"><span id="lo">-</span><span class="bar" aria-hidden="true"></span><span id="hi">-</span><span id="unit"></span></div>
 <div id="readout" aria-live="polite">셀 위에 마우스를 올리면 좌표와 값을 확인할 수 있습니다.</div></div>
@@ -3870,7 +4033,7 @@ canvas{display:block;width:100%;height:620px;border-radius:8px;background:#f9fbf
 </main><script>
 const CASE=__CASE_JSON__, canvas=document.getElementById('plot'), ctx=canvas.getContext('2d');
 const axisEl=document.getElementById('axis'),fieldEl=document.getElementById('field'),readout=document.getElementById('readout');
-let payload=null,mode='2d',marks=[],baseMeta='',designComplete=false,fttComplete=false;
+let payload=null,mode='2d',marks=[],baseMeta='',designComplete=false,fttComplete=false,legacyResultGate={};
 const val=s=>fieldEl.value==='T'?Number(s.temperature_k):Number(s.speed_m_s);
 const unit=()=>fieldEl.value==='T'?'K':'m/s';
 function color(v,lo,hi){const t=hi>lo?Math.max(0,Math.min(1,(v-lo)/(hi-lo))):.5;const h=220*(1-t);return `hsl(${h} 68% 50%)`}
@@ -3888,14 +4051,16 @@ function draw3(){const {w,h}=size(),samples=Object.values(payload.slices).flatMa
  const corners=[];for(const x of [min[0],max[0]])for(const y of [min[1],max[1]])for(const z of [min[2],max[2]])corners.push([x,y,z]);const edge=[[0,1],[0,2],[0,4],[1,3],[1,5],[2,3],[2,6],[3,7],[4,5],[4,6],[5,7],[6,7]];ctx.strokeStyle='#aab9c4';edge.forEach(e=>{const a=proj(corners[e[0]]),b=proj(corners[e[1]]);ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke()});
  samples.sort((a,b)=>(a.centre_m[0]+a.centre_m[1]+a.centre_m[2])-(b.centre_m[0]+b.centre_m[1]+b.centre_m[2])).forEach(s=>{const p=proj(s.centre_m);ctx.fillStyle=color(val(s),r.lo,r.hi);ctx.globalAlpha=.62;ctx.fillRect(p.x-2,p.y-2,4,4);marks.push({x:p.x,y:p.y,s})});ctx.globalAlpha=1;ctx.fillStyle='#52636f';ctx.font='12px Segoe UI';ctx.fillText(`X/Y/Z 중앙 단면 · ${samples.length.toLocaleString()} samples`,20,22)}
 function draw(){if(!payload)return;mode==='2d'?draw2():draw3()}
- function renderResultGate(gate){const status=(gate&&gate.citation_status)||'NOT_EVALUATED',citable=gate&&gate.citable===true,blockers=Array.isArray(gate&&gate.blockers)?gate.blockers:[];let label='평가 보류',cls='warn';if(status==='DESIGN_CITABLE'&&citable){label='설계 검토 인용 가능';cls='ok'}else if(status==='SCREENING_ONLY'&&citable){label='스크리닝 결과(설계 인용 불가)';cls='screening'}const detail=blockers.filter(x=>x!=='screening_engine').join(', ');const node=document.getElementById('trust');node.className='trust '+cls;node.textContent=`결과 신뢰도: ${label}${detail?' · 확인 항목: '+detail:''}`}
+function renderCaseHealth(health,review){const node=document.getElementById('caseHealth'),status=health&&health.citation_status||'NOT_AVAILABLE',approved=review&&review.status==='APPROVED';document.getElementById('screeningWatermark').hidden=status!=='SCREENING_ONLY';const classes={DESIGN_CITABLE:'case-health design-citable',SCREENING_ONLY:'case-health screening-only',NOT_EVALUATED:'case-health not-evaluated',CITATION_BLOCKED:'case-health citation-blocked',NOT_AVAILABLE:'case-health missing'};node.className=(status==='DESIGN_CITABLE'&&!approved)?classes.NOT_EVALUATED:(classes[status]||classes.NOT_AVAILABLE);if(!health){healthStatus.textContent='CASE_EVIDENCE_NOT_FOUND · 설계 인용 불가';healthImpact.textContent='현재 Case Evidence를 찾을 수 없어 결과의 사용 범위를 판단할 수 없습니다.';healthBlockers.textContent='차단 사유: CASE_EVIDENCE_NOT_FOUND';healthActions.textContent='다음 조치: 현재 케이스의 Case Evidence를 다시 생성하세요.';return}const design=health.checks.design_ready,errors=Array.isArray(health.errors)?health.errors:[],codes=errors.map(x=>x.code).filter(Boolean);healthStatus.textContent=`${status} · 원본 검사 ${health.status||design.status||'NOT_EVALUATED'} · 목적 ${health.purpose||'확인 불가'}`;healthImpact.textContent='사용 범위: '+(health.checks.design_ready.impact||'현재 증적 상태를 확인하세요.');healthBlockers.textContent='차단 사유: '+(codes.join(', ')||'없음');healthActions.textContent='다음 조치: '+((health.checks.design_ready.next_actions||[]).join(' · ')||'현재 증적과 검토 기록을 함께 보관하세요.')}
+function renderResultGate(gate){legacyResultGate=gate||{}}
+function renderEvidence(j){rawEvidence.textContent=JSON.stringify({evidence:j.case_health&&j.case_health.evidence,review_summary:j.review_summary,legacy_result_gate:legacyResultGate,numerical_quality:j.run_manifest&&j.run_manifest.numerical_quality,thermal_progress:j.run_manifest&&j.run_manifest.thermal_progress},null,2)}
  function selectMode(next){mode=next;document.getElementById('view2').classList.toggle('active',next==='2d');document.getElementById('view3').classList.toggle('active',next==='3d');axisEl.disabled=next==='3d';draw()}
 document.getElementById('view2').onclick=()=>selectMode('2d');document.getElementById('view3').onclick=()=>selectMode('3d');axisEl.onchange=draw;fieldEl.onchange=draw;window.addEventListener('resize',draw);
 canvas.addEventListener('pointermove',e=>{if(!marks.length)return;const r=canvas.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top;let best=null,d=144;for(const m of marks){const q=(m.x-x)**2+(m.y-y)**2;if(q<d){best=m;d=q}}if(!best)return;const s=best.s,p=s.centre_m;readout.textContent=`좌표 (${p.map(v=>Number(v).toFixed(3)).join(', ')}) m · 온도 ${Number(s.temperature_k).toFixed(3)} K · 속도 ${Number(s.speed_m_s).toFixed(3)} m/s`});
-function renderDesign(j){const f=Number(j.flow_through_fraction||0),state=j.runtime_state||'idle';fttComplete=j.design_ready&&f>=3;designComplete=fttComplete&&payload&&payload.result_gate&&payload.result_gate.citation_status==='DESIGN_CITABLE'&&payload.result_gate.citable===true;designRun.disabled=state==='queued'||state==='running';designRun.textContent=designComplete?'설계 검토 인용 가능 · 결과 새로고침':fttComplete?'3.0 FTT 계산 완료 · 설계 인용 전 증거 확인 필요':state==='running'?`자동 계산 중 · ${f.toFixed(2)} / 3.00 FTT`:state==='queued'?'자동 계산 대기 중':`3.0 교환시간까지 자동 계산 · ${f.toFixed(2)} FTT`;document.getElementById('meta').textContent=baseMeta+(baseMeta?' · ':'')+`유동 교환시간 ${f.toFixed(2)} / 3.00`}
+function renderDesign(j){const f=Number(j.flow_through_fraction||0),state=j.runtime_state||'idle';fttComplete=j.design_ready&&f>=3;designComplete=fttComplete&&payload&&payload.case_health&&payload.case_health.citation_status==='DESIGN_CITABLE'&&payload.review_summary&&payload.review_summary.status==='APPROVED';designRun.disabled=state==='queued'||state==='running';designRun.textContent=designComplete?'설계 검토 인용 가능 · 결과 새로고침':fttComplete?'3.0 FTT 계산 완료 · 설계 인용 전 증거 확인 필요':state==='running'?`자동 계산 중 · ${f.toFixed(2)} / 3.00 FTT`:state==='queued'?'자동 계산 대기 중':`3.0 교환시간까지 자동 계산 · ${f.toFixed(2)} FTT`;document.getElementById('meta').textContent=baseMeta+(baseMeta?' · ':'')+`유동 교환시간 ${f.toFixed(2)} / 3.00`}
 async function pollDesign(){try{const r=await fetch('/api/field-design-status/'+encodeURIComponent(CASE)),j=await r.json();if(j.ok)renderDesign(j)}catch(e){}}
 designRun.onclick=async()=>{if(designComplete||fttComplete){location.reload();return}if(!confirm('현재 체크포인트에서 최소 3.0 유동 교환시간까지 자동으로 이어 계산합니다. 계산 중 창을 닫아도 작업은 계속됩니다. 시작할까요?'))return;designRun.disabled=true;try{const r=await fetch('/api/start-field-design-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({case:CASE})}),j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||'자동 계산 시작 실패');pollDesign()}catch(e){readout.textContent=e.message;designRun.disabled=false}};
-fetch('/api/body-results/'+encodeURIComponent(CASE)).then(r=>r.json()).then(j=>{if(!j.ok)throw Error(j.error||'결과 없음');payload=j;const s=j.summary;baseMeta=`${CASE} · ${Number(s.time_s).toFixed(3)} s · ${Number(s.cell_count).toLocaleString()} cells`;document.getElementById('meta').textContent=baseMeta;renderResultGate(j.result_gate);draw();pollDesign()}).catch(e=>{document.getElementById('meta').textContent=e.message;readout.textContent='결과를 표시하지 못했습니다.'});setInterval(pollDesign,5000);
+fetch('/api/body-results/'+encodeURIComponent(CASE)).then(r=>r.json()).then(j=>{if(!j.ok)throw Error(j.error||'결과 없음');payload=j;const s=j.summary;baseMeta=`${CASE} · ${Number(s.time_s).toFixed(3)} s · ${Number(s.cell_count).toLocaleString()} cells`;document.getElementById('meta').textContent=baseMeta;renderCaseHealth(j.case_health,j.review_summary);renderResultGate(j.result_gate);renderEvidence(j);draw();pollDesign()}).catch(e=>{document.getElementById('meta').textContent=e.message;readout.textContent='결과를 표시하지 못했습니다.'});setInterval(pollDesign,5000);
 </script></body></html>"""
 
 

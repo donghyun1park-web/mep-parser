@@ -17,10 +17,14 @@ import argparse
 import html
 import json
 import os
+from pathlib import Path
 import re
 import sys
 
 import cfd_convergence_spec
+import cfd_case_health
+import cfd_review
+from cfd_status_catalog import CASE_HEALTH_CHECKS, status_descriptor
 
 def generate_gci_report(study_dir, out_html=None):
     """Generate a self-contained Korean mesh-uncertainty report."""
@@ -168,7 +172,7 @@ def generate_gci_report(study_dir, out_html=None):
     return {"ok": True, "path": os.path.abspath(out_html), "status": status}
 
 
-def generate_body_fitted_report(case_dir, out_html=None):
+def generate_body_fitted_report(case_dir, out_html=None, *, projects_root=None):
     """Generate a compact self-contained report from VTU result artifacts."""
     case_dir = os.path.abspath(case_dir)
     try:
@@ -185,9 +189,8 @@ def generate_body_fitted_report(case_dir, out_html=None):
             thermal_input = json.load(f)
     except (OSError, ValueError, json.JSONDecodeError):
         thermal_input = {}
-    # The body-fitted result gate owns the citation decision.  A solver
-    # manifest's status/design_ready fields are only evidence consumed by the
-    # gate; they must never be promoted directly by this presentation layer.
+    # Retain the old gate as diagnostic provenance only. Case Health is the
+    # sole citation authority for this report.
     try:
         import cfd_result_gate
         result_gate = cfd_result_gate.evaluate_body_fitted_case(case_dir)
@@ -199,6 +202,55 @@ def generate_body_fitted_report(case_dir, out_html=None):
             "blockers": ["result_gate"],
             "reasons": [f"결과 게이트를 확인하지 못했습니다: {exc}"],
         }
+    evidence_path = Path(case_dir) / "case_evidence.v1.json"
+    case_health = None
+    review_summary = {
+        "status": "NOT_AVAILABLE",
+        "reason_codes": ["CASE_EVIDENCE_NOT_FOUND"],
+    }
+    review_binding = None
+    health_failure = "CASE_EVIDENCE_NOT_FOUND"
+    if projects_root is not None and evidence_path.is_file():
+        try:
+            with cfd_review.review_state_lock(
+                evidence_path, projects_root=Path(projects_root)
+            ):
+                case_health = cfd_case_health.build_case_health(
+                    evidence_path, projects_root=Path(projects_root)
+                )
+                review_summary = cfd_case_health.review_summary(
+                    evidence_path, projects_root=Path(projects_root)
+                )
+                if (
+                    case_health.get("citation_status") == "DESIGN_CITABLE"
+                    and review_summary.get("status") == "APPROVED"
+                    and review_summary.get("review_id")
+                ):
+                    review_path = (
+                        evidence_path.parent / "_reviews" /
+                        f"{review_summary['review_id']}.case_review.v1.json"
+                    )
+                    if cfd_review.validate_review(
+                        review_path, projects_root=Path(projects_root)
+                    ):
+                        raise ValueError("current review binding is invalid")
+                    candidate = json.loads(review_path.read_text(encoding="utf-8"))
+                    if (
+                        candidate.get("review_id") != review_summary.get("review_id")
+                        or (candidate.get("target") or {}).get("sha256")
+                        != (case_health.get("evidence") or {}).get("sha256")
+                    ):
+                        raise ValueError("current review binding changed")
+                    review_binding = candidate
+            health_failure = ""
+        except Exception:
+            case_health = None
+            review_summary = {
+                "status": "INVALID",
+                "reason_codes": ["CITATION_EVIDENCE_OR_REVIEW_INVALID"],
+            }
+            review_binding = None
+            health_failure = "CITATION_EVIDENCE_OR_REVIEW_INVALID"
     progress = run.get("thermal_progress") or {}
     energy = progress.get("energy_balance") or {}
     temperature = summary.get("temperature") or {}
@@ -307,16 +359,94 @@ def generate_body_fitted_report(case_dir, out_html=None):
         for item in slices
     )
     warning_rows = "".join(f"<li>{html.escape(str(item))}</li>" for item in warnings)
-    citation_status = str(result_gate.get("citation_status") or "NOT_EVALUATED")
-    citation_labels = {
-        "DESIGN_CITABLE": "설계 인용 가능",
-        "SCREENING_ONLY": "스크리닝 전용",
-        "NOT_EVALUATED": "설계 인용 불가(검증 미완료)",
-    }
-    citation_class = {
-        "DESIGN_CITABLE": "pass",
-        "SCREENING_ONLY": "warn",
-    }.get(citation_status, "fail")
+    citation_status = (
+        str(case_health.get("citation_status") or "NOT_EVALUATED")
+        if isinstance(case_health, dict) else "NOT_EVALUATED"
+    )
+    if citation_status == "DESIGN_CITABLE" and not review_binding:
+        citation_status = "CITATION_BLOCKED"
+        health_failure = "CITATION_EVIDENCE_OR_REVIEW_INVALID"
+    reason_codes = [
+        str(item.get("code")) for item in ((case_health or {}).get("errors") or [])
+        if isinstance(item, dict) and item.get("code")
+    ]
+    if health_failure and health_failure not in reason_codes:
+        reason_codes.insert(0, health_failure)
+    descriptor_code = reason_codes[0] if reason_codes else citation_status
+    try:
+        citation_descriptor = status_descriptor(descriptor_code)
+    except ValueError:
+        citation_descriptor = status_descriptor(
+            "DESIGN_CITABLE" if citation_status == "DESIGN_CITABLE"
+            else "CITATION_BLOCKED"
+        )
+    citation_class = citation_status.lower().replace("_", "-")
+
+    checks = (case_health or {}).get("checks") or {}
+    if checks:
+        evidence_rows = "".join(
+            "<tr>"
+            f"<td><code>{html.escape(check_id)}</code></td>"
+            f"<td>{html.escape(str((checks.get(check_id) or {}).get('status') or 'NOT_EVALUATED'))}</td>"
+            f"<td>{html.escape(str((checks.get(check_id) or {}).get('impact') or ''))}</td>"
+            f"<td>{html.escape(' · '.join(str(item) for item in ((checks.get(check_id) or {}).get('next_actions') or [])))}</td>"
+            f"<td>{html.escape(', '.join(str(item) for item in ((checks.get(check_id) or {}).get('reason_codes') or [])) or '없음')}</td>"
+            f"<td>{html.escape(', '.join(str(item) for item in ((checks.get(check_id) or {}).get('evidence_refs') or [])) or '없음')}</td>"
+            "</tr>"
+            for check_id in CASE_HEALTH_CHECKS
+        )
+    else:
+        missing_descriptor = status_descriptor("CASE_EVIDENCE_NOT_FOUND")
+        evidence_rows = "".join(
+            "<tr>"
+            f"<td><code>{html.escape(check_id)}</code></td>"
+            "<td>NOT_EVALUATED</td>"
+            f"<td>{html.escape(missing_descriptor['impact'])}</td>"
+            f"<td>{html.escape(missing_descriptor['next_action'])}</td>"
+            "<td>CASE_EVIDENCE_NOT_FOUND</td><td>없음</td></tr>"
+            for check_id in CASE_HEALTH_CHECKS
+        )
+
+    binding_html = ""
+    if citation_status == "DESIGN_CITABLE" and review_binding:
+        identity = (
+            case_health.get("case_identity")
+            or case_health.get("legacy_case_ref") or {}
+        )
+        identity_value = identity.get("path") or identity.get("case_id") or "확인 불가"
+        target = review_binding.get("target") or {}
+        binding_html = (
+            "<p><b>검증 범위:</b> "
+            f"{html.escape(str(case_health.get('purpose') or ''))} · "
+            f"{html.escape(', '.join(CASE_HEALTH_CHECKS))}</p>"
+            "<p><b>Evidence ID:</b> "
+            f"{html.escape(str(identity_value))} · "
+            f"<b>Reviewer:</b> {html.escape(str(review_binding.get('reviewer') or ''))} · "
+            f"<b>Review ID:</b> {html.escape(str(review_binding.get('review_id') or ''))}</p>"
+            "<details class='evidence-detail'><summary>근거 보기</summary>"
+            f"<p>Evidence: <code>{html.escape(str((case_health.get('evidence') or {}).get('path') or ''))}</code>"
+            f" · SHA-256 <code>{html.escape(str((case_health.get('evidence') or {}).get('sha256') or ''))}</code></p>"
+            f"<p>Target: <code>{html.escape(str(target.get('path') or ''))}</code>"
+            f" · SHA-256 <code>{html.escape(str(target.get('sha256') or ''))}</code></p>"
+            f"<p>Review reason: {html.escape(str(review_binding.get('reason') or ''))}</p></details>"
+        )
+
+    if citation_status == "SCREENING_ONLY":
+        citation_banner = "<div class='citation-banner screening-only first-content'><b>초기안 비교용 · 설계 인용 불가</b></div>"
+    elif citation_status == "DESIGN_CITABLE" and review_binding:
+        citation_banner = (
+            "<div class='citation-banner design-citable first-content'><b>"
+            "설계 검토 인용 가능 · DESIGN_CITABLE</b>"
+            f"{binding_html}</div>"
+        )
+    else:
+        citation_banner = (
+            f"<div class='citation-banner {html.escape(citation_class)} first-content'><b>"
+            f"설계 인용 불가 · {html.escape(citation_status)}</b>"
+            f"<p>{html.escape(citation_descriptor['impact'])}</p>"
+            f"<p>다음 조치: {html.escape(citation_descriptor['next_action'])}</p>"
+            f"<p>사유 코드: {html.escape(', '.join(reason_codes) or 'CASE_EVIDENCE_NOT_FOUND')}</p></div>"
+        )
     gate_blockers = list(result_gate.get("blockers") or [])
     gate_reasons = list(result_gate.get("reasons") or [])
     gate_details = "".join(
@@ -352,16 +482,22 @@ def generate_body_fitted_report(case_dir, out_html=None):
 body{{font-family:Segoe UI,Malgun Gothic,sans-serif;margin:0;background:#f4f7fa;color:#1e2b36}}
 main{{max-width:980px;margin:24px auto;background:white;padding:28px;border-radius:14px;box-shadow:0 4px 20px #18334d18}}
 h1{{margin-top:0;color:#244f73}} .warn{{background:#fff6d8;border-left:5px solid #d59b00;padding:12px}} .pass{{background:#e9f7ef;border-left:5px solid #207245;padding:12px}} .fail{{background:#fff0f0;border-left:5px solid #a92c2c;padding:12px}}
+.citation-banner{{margin:0 0 18px;padding:14px;border-left:6px solid #778895;border-radius:8px;background:#f2f5f7}}.citation-banner.design-citable{{background:#e9f7ef;border-left-color:#207245}}.citation-banner.screening-only,.citation-banner.not-evaluated{{background:#fff6d8;border-left-color:#d59b00}}.citation-banner.citation-blocked{{background:#fff0f0;border-left-color:#a92c2c}}.evidence-detail{{margin:10px 0;padding:8px 10px;border:1px solid #dce5ec;border-radius:8px;background:#f8fafb}}.evidence-detail summary{{cursor:pointer;font-weight:700;color:#244f73}}
 .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin:18px 0}}
 .card{{border:1px solid #dce5ec;border-radius:10px;padding:14px}} .value{{font-size:1.45rem;font-weight:700}}
 table{{width:100%;border-collapse:collapse;margin:12px 0}} th,td{{border-bottom:1px solid #e2e8ed;padding:9px;text-align:left}}
 small{{color:#5d6a73}} code{{background:#eef3f6;padding:2px 5px;border-radius:4px}}
+@media print{{main{{margin:0;box-shadow:none}}.first-content{{break-inside:avoid;page-break-after:avoid;margin-top:0}}}}
 </style></head><body><main>
+{citation_banner}
 <h1>상세 열·부력 결과 요약</h1>
-<section class='{citation_class}'><b>결과 게이트: {html.escape(citation_status)}</b> · {html.escape(citation_labels.get(citation_status, '설계 인용 불가(미확인 상태)'))}
-<p>보고서의 설계 인용 가능 여부는 이 게이트 판정만 따릅니다. 실행 manifest의 <code>design_ready</code> 값만으로 승격하지 않습니다.</p>
-<p><b>차단 항목</b></p><ul>{gate_details}</ul>
-<p><b>판정 사유</b></p><ul>{gate_reasons_html}</ul></section>
+<h2>Case Evidence 검사표</h2>
+<table><tr><th>검사</th><th>상태</th><th>영향</th><th>다음 조치</th><th>사유 코드</th><th>증적 참조</th></tr>{evidence_rows}</table>
+<details class='evidence-detail'><summary>근거 보기 · 레거시 결과 게이트 및 수치 진단</summary>
+<p><b>레거시 결과 게이트:</b> {html.escape(str(result_gate.get('citation_status') or 'NOT_EVALUATED'))} · Case Health 인용 판단에 사용하지 않음</p>
+<p><b>레거시 차단 항목</b></p><ul>{gate_details}</ul>
+<p><b>레거시 판정 사유</b></p><ul>{gate_reasons_html}</ul>
+{numerical_quality_html}</details>
 <p>상태 <b>{html.escape(str(run.get('status', 'UNKNOWN')))}</b> · 물리시간 {number(summary.get('time_s'), 3, ' s')} · 셀 {int(summary.get('cell_count') or 0):,}</p>
 <div class='grid'>
  <div class='card'>최저온도<div class='value'>{number(temperature.get('minimum'), 3, ' K')}</div></div>
@@ -369,7 +505,6 @@ small{{color:#5d6a73}} code{{background:#eef3f6;padding:2px 5px;border-radius:4p
  <div class='card'>평균속도<div class='value'>{number(velocity.get('mean_speed'), 3, ' m/s')}</div></div>
  <div class='card'>최고속도<div class='value'>{number(velocity.get('maximum_speed'), 3, ' m/s')}</div></div>
 </div>
-{numerical_quality_html}
 {heat_contract_html}
 <h2>주요 위치</h2>
 <table><tr><th>항목</th><th>값</th><th>셀 중심좌표 x,y,z (m)</th></tr>

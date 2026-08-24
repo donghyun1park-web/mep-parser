@@ -1,3 +1,5 @@
+from contextlib import contextmanager
+import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -10,6 +12,46 @@ import urllib.request
 from unittest import mock
 
 import cfd_studio
+import cfd_evidence
+import cfd_review
+from test_cfd_evidence import make_complete_case
+
+
+@contextmanager
+def _studio_server():
+    server = cfd_studio.ThreadingHTTPServer(
+        ("127.0.0.1", 0), cfd_studio.StudioHandler
+    )
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=10)
+
+
+def _request_json(base, path, *, payload=None, raw=None, headers=None):
+    data = raw
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        base + path,
+        data=data,
+        headers={"Content-Type": "application/json", **(headers or {})},
+        method="POST" if data is not None else "GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.status, json.load(response), dict(response.headers)
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8")
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            payload = {"raw": body}
+        return exc.code, payload, dict(exc.headers)
 
 
 class StudioWorkflowTests(unittest.TestCase):
@@ -36,6 +78,14 @@ class StudioWorkflowTests(unittest.TestCase):
         cfd_studio.ENVIRONMENT_ACCEPTANCE = self.old_acceptance
         cfd_studio.RUN.update(self.old_run)
         self.tmp.cleanup()
+
+    def _authoritative_body_case(self):
+        paths = make_complete_case(Path(self.tmp.name))
+        cfd_studio.ROOT = str(paths["root"])
+        cfd_evidence.build_case_evidence(
+            paths["case"], projects_root=paths["root"]
+        )
+        return paths
 
     def test_environment_refresh_writes_project_local_manifest(self):
         capabilities = {
@@ -632,7 +682,7 @@ class StudioWorkflowTests(unittest.TestCase):
         ) as run, mock.patch.object(
             cfd_studio.cfd_report, "generate_body_fitted_report",
             return_value={"ok": True},
-        ):
+        ) as report:
             ok, error, details = cfd_studio._do_field_design_run(
                 "actual-field-thermal", act
             )
@@ -647,6 +697,7 @@ class StudioWorkflowTests(unittest.TestCase):
         self.assertEqual(job["status"], "complete")
         self.assertEqual(job["attempts"], 2)
         self.assertEqual(job["resume_history"][0]["checkpoint_time_s"], 100.0)
+        report.assert_called_once_with(solver, projects_root=self.tmp.name)
 
     def test_body_result_payload_loads_only_project_local_slice_files(self):
         case = Path(self.tmp.name) / "_body_solver" / "sample-thermal"
@@ -673,6 +724,11 @@ class StudioWorkflowTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(set(result["slices"]), {"x", "y", "z"})
         self.assertEqual(result["result_gate"]["citation_status"], "NOT_EVALUATED")
+        self.assertIsNone(result["case_health"])
+        self.assertEqual(result["review_summary"], {
+            "status": "NOT_AVAILABLE",
+            "reason_codes": ["CASE_EVIDENCE_NOT_FOUND"],
+        })
 
         outside = Path(self.tmp.name) / "outside-summary.json"
         outside.write_text(json.dumps({"outside": True}), encoding="utf-8")
@@ -681,6 +737,243 @@ class StudioWorkflowTests(unittest.TestCase):
         }), encoding="utf-8")
         self.assertFalse(cfd_studio.body_result_payload("sample-thermal")["ok"])
         self.assertFalse(cfd_studio.body_result_payload("../sample-thermal")["ok"])
+
+    def test_body_result_payload_preserves_legacy_keys_and_rebuilds_current_health(self):
+        paths = self._authoritative_body_case()
+        legacy_keys = {
+            "ok", "case", "manifest", "run_manifest", "result_gate",
+            "design_job", "summary", "slices",
+        }
+
+        first = cfd_studio.body_result_payload(paths["case"].name)
+        self.assertTrue(first["ok"], first)
+        self.assertTrue(legacy_keys.issubset(first))
+        self.assertEqual(first["case_health"]["contract"], "case_health.v1")
+        self.assertEqual(first["review_summary"]["status"], "MISSING")
+
+        run = json.loads(paths["run"].read_text(encoding="utf-8"))
+        run["status"] = "FAIL"
+        paths["run"].write_text(json.dumps(run), encoding="utf-8")
+        stale_cache = paths["case"] / "case_health.v1.json"
+        cached = json.loads(stale_cache.read_text(encoding="utf-8"))
+        cached["citation_status"] = "DESIGN_CITABLE"
+        stale_cache.write_text(json.dumps(cached), encoding="utf-8")
+
+        second = cfd_studio.body_result_payload(paths["case"].name)
+        self.assertTrue(second["ok"], second)
+        self.assertEqual(second["case_health"]["citation_status"], "CITATION_BLOCKED")
+        self.assertIn(
+            "ARTIFACT_HASH_MISMATCH",
+            [row["code"] for row in second["case_health"]["errors"]],
+        )
+
+    def test_case_health_get_is_fresh_no_store_and_maps_missing_and_defects(self):
+        paths = self._authoritative_body_case()
+        missing = paths["root"] / "_body_solver" / "missing-evidence"
+        missing.mkdir()
+        with _studio_server() as base:
+            status, health, headers = _request_json(
+                base, f"/api/case-health/{paths['case'].name}"
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(health["contract"], "case_health.v1")
+            self.assertEqual(headers.get("Cache-Control"), "no-store")
+
+            status, body, _ = _request_json(
+                base, "/api/case-health/missing-evidence"
+            )
+            self.assertEqual(status, 404)
+            self.assertEqual(body, {
+                "ok": False,
+                "code": "CASE_EVIDENCE_NOT_FOUND",
+                "case": "missing-evidence",
+            })
+
+            status, _, _ = _request_json(base, "/api/case-health/not-a-case")
+            self.assertEqual(status, 404)
+
+            with mock.patch.object(
+                cfd_studio.cfd_case_health, "build_case_health",
+                side_effect=RuntimeError("infrastructure failed"),
+            ):
+                status, body, _ = _request_json(
+                    base, f"/api/case-health/{paths['case'].name}"
+                )
+            self.assertEqual(status, 500)
+            self.assertNotIn("case_health", body)
+
+    def test_case_review_post_creates_hash_bound_record_and_refreshes_health(self):
+        paths = self._authoritative_body_case()
+        digest = hashlib.sha256(paths["evidence"].read_bytes()).hexdigest()
+        with _studio_server() as base:
+            status, body, headers = _request_json(base, "/api/case-review", payload={
+                "case": paths["case"].name,
+                "reviewer_id": "reviewer-1",
+                "decision": "APPROVED",
+                "reason": "current evidence reviewed",
+                "target_sha256": digest,
+                "supersedes_review_ids": [],
+            }, headers={"Origin": base, "Sec-Fetch-Site": "same-origin"})
+
+        self.assertEqual(status, 201, body)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["review"]["target"]["sha256"], digest)
+        self.assertEqual(body["review_summary"]["status"], "APPROVED")
+        self.assertEqual(body["case_health"]["contract"], "case_health.v1")
+        self.assertEqual(headers.get("Cache-Control"), "no-store")
+        reviews = list((paths["case"] / "_reviews").glob("*.case_review.v1.json"))
+        self.assertEqual(len(reviews), 1)
+        self.assertEqual(cfd_review.validate_review(
+            reviews[0], projects_root=paths["root"]
+        ), [])
+
+    def test_case_review_post_rejects_closed_body_violations_without_writing(self):
+        paths = self._authoritative_body_case()
+        digest = hashlib.sha256(paths["evidence"].read_bytes()).hexdigest()
+        baseline = {
+            "case": paths["case"].name,
+            "reviewer_id": "reviewer-1",
+            "decision": "APPROVED",
+            "reason": "reviewed",
+            "target_sha256": digest,
+        }
+        bad_requests = [
+            (None, b"{"),
+            ([], None),
+            ({**baseline, "unknown": True}, None),
+            ({key: value for key, value in baseline.items() if key != "reason"}, None),
+            ({**baseline, "decision": "PENDING"}, None),
+            ({**baseline, "target_sha256": "ABC"}, None),
+            ({**baseline, "case": "../escape"}, None),
+            ({**baseline, "supersedes_review_ids": ["review-" + "a" * 32] * 2}, None),
+        ]
+        with _studio_server() as base:
+            for payload, raw in bad_requests:
+                status, _, _ = _request_json(
+                    base, "/api/case-review", payload=payload, raw=raw
+                )
+                self.assertEqual(status, 400, (payload, raw))
+        review_dir = paths["case"] / "_reviews"
+        self.assertFalse(review_dir.exists())
+
+    def test_case_review_post_maps_safe_missing_stale_and_post_lock_change(self):
+        paths = self._authoritative_body_case()
+        request = {
+            "case": paths["case"].name,
+            "reviewer_id": "reviewer-1",
+            "decision": "APPROVED",
+            "reason": "reviewed",
+            "target_sha256": "f" * 64,
+        }
+        missing = paths["root"] / "_body_solver" / "safe-missing"
+        missing.mkdir()
+        with _studio_server() as base:
+            status, body, _ = _request_json(base, "/api/case-review", payload=request)
+            self.assertEqual(status, 409)
+            self.assertEqual(body["code"], "REVIEW_TARGET_CHANGED")
+            self.assertFalse((paths["case"] / "_reviews").exists())
+
+            status, body, _ = _request_json(
+                base, "/api/case-review", payload={**request, "case": "safe-missing"}
+            )
+            self.assertEqual(status, 404)
+            self.assertEqual(body["code"], "CASE_EVIDENCE_NOT_FOUND")
+
+            request["target_sha256"] = hashlib.sha256(
+                paths["evidence"].read_bytes()
+            ).hexdigest()
+            with mock.patch.object(
+                cfd_studio.cfd_review, "create_review",
+                side_effect=ValueError("REVIEW_TARGET_CHANGED"),
+            ):
+                status, body, _ = _request_json(
+                    base, "/api/case-review", payload=request
+                )
+            self.assertEqual(status, 409)
+            self.assertEqual(body["code"], "REVIEW_TARGET_CHANGED")
+
+        review_dir = paths["case"] / "_reviews"
+        records = list(review_dir.glob("*.case_review.v1.json")) if review_dir.exists() else []
+        self.assertEqual(records, [])
+
+    def test_body_solver_routes_reject_in_root_reparse_aliases(self):
+        body_root = Path(self.tmp.name) / "_body_solver"
+        target = body_root / "physical-case"
+        target.mkdir(parents=True)
+        alias = body_root / "alias-case"
+        try:
+            alias.symlink_to(target, target_is_directory=True)
+        except OSError as exc:
+            self.skipTest(f"directory symlinks unavailable: {exc}")
+        self.assertIsNone(cfd_studio._body_solver_case("alias-case"))
+
+    def test_case_review_local_guard_runs_before_parsing_or_service(self):
+        paths = self._authoritative_body_case()
+        with _studio_server() as base, mock.patch.object(
+            cfd_studio.cfd_review, "create_review"
+        ) as create:
+            rejected_headers = [
+                {
+                    "Origin": "https://malicious.example",
+                    "Sec-Fetch-Site": "cross-site",
+                },
+                {"Origin": base, "Sec-Fetch-Site": "same-site"},
+                {
+                    "Origin": "https://malicious.example",
+                    "Sec-Fetch-Site": "same-origin",
+                },
+                {"Host": "project.example:8090"},
+            ]
+            for headers in rejected_headers:
+                status, _, _ = _request_json(
+                    base, "/api/case-review", raw=b"{", headers=headers,
+                )
+                self.assertEqual(status, 403, headers)
+        create.assert_not_called()
+
+    def test_case_review_unexpected_service_defect_is_500(self):
+        paths = self._authoritative_body_case()
+        request = {
+            "case": paths["case"].name,
+            "reviewer_id": "reviewer-1",
+            "decision": "APPROVED",
+            "reason": "reviewed",
+            "target_sha256": hashlib.sha256(
+                paths["evidence"].read_bytes()
+            ).hexdigest(),
+        }
+        with _studio_server() as base, mock.patch.object(
+            cfd_studio.cfd_review, "create_review",
+            side_effect=RuntimeError("review storage offline"),
+        ):
+            status, body, _ = _request_json(
+                base, "/api/case-review", payload=request
+            )
+        self.assertEqual(status, 500)
+        self.assertNotEqual(body.get("code"), "REVIEW_TARGET_CHANGED")
+
+    def test_body_results_ui_uses_case_health_catalog_copy_and_hides_raw_evidence(self):
+        page = cfd_studio.PAGE_BODY_RESULTS
+        self.assertIn("function renderCaseHealth(health,review)", page)
+        self.assertIn("health.citation_status==='DESIGN_CITABLE'", page)
+        self.assertIn("review&&review.status==='APPROVED'", page)
+        self.assertIn("SCREENING_ONLY", page)
+        self.assertIn("CITATION_BLOCKED", page)
+        self.assertIn("NOT_EVALUATED", page)
+        self.assertIn("case-health screening-only", page)
+        self.assertIn("case-health citation-blocked", page)
+        self.assertNotIn("case-health screening-only green", page)
+        self.assertIn("health.checks.design_ready.impact", page)
+        self.assertIn("next_actions", page)
+        self.assertIn("<summary>근거 보기</summary>", page)
+        self.assertIn("초기안 비교용 · 설계 인용 불가", page)
+        self.assertIn("@media print", page)
+        self.assertNotIn('<div id="trust"', page)
+        primary_end = page.index("<details id=\"evidenceDetails\"")
+        primary = page[page.index("id=\"caseHealth\""):primary_end]
+        self.assertNotIn("residual", primary.lower())
+        self.assertNotIn("sha256", primary.lower())
+        self.assertIn("legacy_result_gate", page)
 
     def test_body_gci_study_accepts_three_or_four_project_local_cases(self):
         self.assertIn("메시 불확실성 확인", cfd_studio.PAGE_BODY_GCI)
@@ -803,7 +1096,9 @@ class StudioWorkflowTests(unittest.TestCase):
 
     def test_body_result_button_does_not_call_ftt_completion_design_ready(self):
         self.assertNotIn("설계 검토 계산 완료", cfd_studio.PAGE_BODY_RESULTS)
-        self.assertIn("payload&&payload.result_gate", cfd_studio.PAGE_BODY_RESULTS)
+        self.assertIn("payload&&payload.case_health", cfd_studio.PAGE_BODY_RESULTS)
+        self.assertNotIn("designComplete=fttComplete&&payload&&payload.result_gate",
+                         cfd_studio.PAGE_BODY_RESULTS)
         self.assertIn("fttComplete", cfd_studio.PAGE_BODY_RESULTS)
 
     def test_completed_field_case_is_discovered_and_registered_without_paths(self):
