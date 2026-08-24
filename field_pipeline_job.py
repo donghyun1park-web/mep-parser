@@ -10,6 +10,8 @@ import re
 import time
 
 import cfd_gci_job
+import cfd_case_health
+import cfd_evidence
 import cfd_mesh
 import cfd_occ
 import cfd_power
@@ -38,42 +40,68 @@ def is_terminal_status(status):
     return status in TERMINAL_STATUSES
 
 
-def _citation_gate(root, solver_case):
-    """Evaluate citation readiness without treating a gate problem as a solve failure."""
+_HEALTH_SNAPSHOT_KEYS = (
+    "case_evidence_path", "case_evidence_sha256",
+    "case_health_path", "case_health_sha256", "review_summary",
+)
+
+
+def _sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _current_health_snapshot(root, solver_case):
+    """Build and validate current evidence/health; never consult result_trust.v1."""
+    root = Path(root).expanduser().resolve()
+    case = Path(solver_case).expanduser()
+    if not case.is_absolute():
+        case = root / case
     try:
-        gate = cfd_result_gate.evaluate_body_fitted_case(
-            solver_case, gci_root=Path(root) / "_body_gci"
+        case = case.resolve(strict=True)
+        case.relative_to(root)
+        cfd_evidence.build_case_evidence(case, projects_root=root)
+        evidence_path = case / "case_evidence.v1.json"
+        evidence_errors = cfd_evidence.validate_case_evidence(
+            evidence_path, projects_root=root
         )
-    except Exception as exc:  # fail closed; the raw CFD result remains viewable
+        if evidence_errors:
+            raise ValueError("current Case Evidence failed revalidation")
+        health = cfd_case_health.build_case_health(
+            evidence_path, projects_root=root
+        )
+        health_path = case / "case_health.v1.json"
+        citation_status = health.get("citation_status")
+        if citation_status not in {
+            "SCREENING_ONLY", "NOT_EVALUATED", "CITATION_BLOCKED", "DESIGN_CITABLE",
+        }:
+            raise ValueError("current Case Health has an invalid citation status")
+        blockers = [
+            item["code"] for item in health.get("errors") or []
+            if isinstance(item, dict) and isinstance(item.get("code"), str)
+        ]
+        if citation_status == "DESIGN_CITABLE":
+            blockers = []
         return {
-            "contract": cfd_result_gate.CONTRACT,
-            "status": "NOT_EVALUATED",
-            "design_ready": False,
-            "citation_status": "NOT_EVALUATED",
-            "citable": False,
-            "blockers": ["result_gate_error"],
-            "reasons": [f"결과 인용 가능성 판정을 완료하지 못했습니다: {exc}"],
+            "citation_status": citation_status,
+            "citation_blockers": list(dict.fromkeys(blockers)),
+            "case_evidence_path": evidence_path.relative_to(root).as_posix(),
+            "case_evidence_sha256": _sha256(evidence_path),
+            "case_health_path": health_path.relative_to(root).as_posix(),
+            "case_health_sha256": _sha256(health_path),
+            "review_summary": cfd_case_health.review_summary(
+                evidence_path, projects_root=root
+            ),
         }
-    if not isinstance(gate, dict):
+    except Exception:
         return {
-            "contract": cfd_result_gate.CONTRACT,
-            "status": "NOT_EVALUATED",
-            "design_ready": False,
-            "citation_status": "NOT_EVALUATED",
-            "citable": False,
-            "blockers": ["result_gate_invalid"],
-            "reasons": ["결과 인용 가능성 판정 형식이 올바르지 않습니다."],
+            "citation_status": "CITATION_BLOCKED",
+            "citation_blockers": ["CASE_EVIDENCE_NOT_FOUND"],
+            "review_summary": {"status": "INVALID"},
         }
-    return gate
-
-
-def _is_design_citable(gate):
-    return (
-        gate.get("status") == "PASS"
-        and gate.get("design_ready") is True
-        and gate.get("citation_status") == "DESIGN_CITABLE"
-        and gate.get("citable") is True
-    )
 
 
 def review_terminal_job_citation(root, manifest):
@@ -86,25 +114,22 @@ def review_terminal_job_citation(root, manifest):
     reviewed = dict(manifest or {})
     if not is_terminal_status(reviewed.get("status")):
         return reviewed
+    for key in (*_HEALTH_SNAPSHOT_KEYS, "citation_reasons", "citation_gate"):
+        reviewed.pop(key, None)
     solver_case = str(reviewed.get("result_case") or "").strip()
-    if solver_case:
-        gate = _citation_gate(root, solver_case)
-    else:
-        gate = {
-            "contract": cfd_result_gate.CONTRACT,
-            "status": "NOT_EVALUATED",
-            "design_ready": False,
-            "citation_status": "NOT_EVALUATED",
-            "citable": False,
-            "blockers": ["result_case_missing"],
-            "reasons": ["완료된 현장 해석의 결과 케이스를 찾지 못했습니다."],
+    snapshot = (
+        _current_health_snapshot(root, solver_case)
+        if solver_case
+        else {
+            "citation_status": "CITATION_BLOCKED",
+            "citation_blockers": ["CASE_EVIDENCE_NOT_FOUND"],
+            "review_summary": {"status": "MISSING"},
         }
+    )
     reviewed.update(
-        status="complete" if _is_design_citable(gate) else ANALYSIS_COMPLETE_NOT_CITABLE,
-        citation_status=gate.get("citation_status") or "NOT_EVALUATED",
-        citation_blockers=list(gate.get("blockers") or []),
-        citation_reasons=list(gate.get("reasons") or []),
-        citation_gate=gate,
+        status=("complete" if snapshot["citation_status"] == "DESIGN_CITABLE"
+                else ANALYSIS_COMPLETE_NOT_CITABLE),
+        **snapshot,
     )
     return reviewed
 
@@ -269,7 +294,7 @@ def create_job(root, geometry_path, settings=None):
         },
         "result_case": "", "report_path": "",
         "citation_status": "NOT_EVALUATED", "citation_blockers": [],
-        "citation_reasons": [], "citation_gate": None,
+        "review_summary": {"status": "MISSING"},
     }
     cfd_gci_job._atomic_json(path, manifest)
     return {"ok": True, "job": job_id, "manifest": manifest,
@@ -361,9 +386,11 @@ def _run_unlocked(root, job_id, callback=None):
             latest_time_s=progress.get("latest_time_s"),
             flow_through_fraction=float(progress.get("flow_through_fraction") or 0),
         )
-        citation_gate = _citation_gate(root, completed)
-        design_citable = _is_design_citable(citation_gate)
-        final_status = "complete" if design_citable else ANALYSIS_COMPLETE_NOT_CITABLE
+        snapshot = _current_health_snapshot(root, completed)
+        final_status = (
+            "complete" if snapshot["citation_status"] == "DESIGN_CITABLE"
+            else ANALYSIS_COMPLETE_NOT_CITABLE
+        )
         elapsed = round(time.monotonic() - started, 3)
         attempts = list(manifest.get("attempt_history") or [])
         attempts.append({"attempt": manifest["attempts"], "started_at": started_at,
@@ -373,10 +400,7 @@ def _run_unlocked(root, job_id, callback=None):
             status=final_status, stage="complete", error="",
             result_case=str(completed),
             report_path=str(Path(completed) / "body_fitted_report.html"),
-            citation_status=citation_gate.get("citation_status") or "NOT_EVALUATED",
-            citation_blockers=list(citation_gate.get("blockers") or []),
-            citation_reasons=list(citation_gate.get("reasons") or []),
-            citation_gate=citation_gate,
+            **snapshot,
             completed_at=_now(), attempt_history=attempts,
             last_attempt_elapsed_s=elapsed,
             total_elapsed_s=round(float(manifest.get("total_elapsed_s") or 0) + elapsed, 3),
@@ -407,6 +431,7 @@ def run_job(root, job_id, callback=None):
         return {"ok": False, "error": "현장 자동 해석 작업을 찾을 수 없습니다."}
     if is_terminal_status(existing.get("status")):
         reviewed = review_terminal_job_citation(root, existing)
+        _publish(path, reviewed)
         return {
             "ok": True, "job": job_id, "manifest": reviewed,
             "case": Path(str(reviewed.get("result_case") or "")).name,

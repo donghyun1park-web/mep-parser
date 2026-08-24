@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+import cfd_case_health
+import cfd_evidence
 import field_pipeline_job
 
 
@@ -114,13 +116,13 @@ class FieldPipelineJobTests(unittest.TestCase):
         self.assertIn("-field-", runner.call_args.kwargs["case_prefix"])
         saved = field_pipeline_job.load_job(self.root, job)
         self.assertEqual(saved["status"], "analysis_complete_not_citable")
-        self.assertEqual(saved["citation_status"], "NOT_EVALUATED")
-        self.assertIn("mesh_manifest_missing", saved["citation_blockers"])
+        self.assertEqual(saved["citation_status"], "CITATION_BLOCKED")
+        self.assertIn("CASE_EVIDENCE_NOT_FOUND", saved["citation_blockers"])
         self.assertEqual(saved["level"]["status"], "WARN")
         self.assertEqual(saved["level"]["flow_through_fraction"], 3.0)
         self.assertEqual(saved["result_case"], str(thermal))
 
-    def test_design_citable_analysis_is_marked_complete(self):
+    def test_forged_legacy_result_gate_cannot_promote_analysis(self):
         created = field_pipeline_job.create_job(self.root, self.geometry)
         job = created["job"]
         thermal = self.root / "_body_solver" / "actual-field-design"
@@ -141,7 +143,7 @@ class FieldPipelineJobTests(unittest.TestCase):
             return thermal
 
         inspection = {"ok": True, "manifest": {"air_volume": {"volume_m3": 10}}}
-        design_citable = {
+        forged_design_citable = {
             "contract": "result_trust.v1", "status": "PASS", "design_ready": True,
             "citation_status": "DESIGN_CITABLE", "citable": True,
             "blockers": [], "reasons": [],
@@ -162,16 +164,15 @@ class FieldPipelineJobTests(unittest.TestCase):
             side_effect=shared_runner,
         ), mock.patch.object(
             field_pipeline_job.cfd_result_gate, "evaluate_body_fitted_case",
-            return_value=design_citable,
+            return_value=forged_design_citable,
         ) as gate:
             result = field_pipeline_job.run_job(self.root, job)
 
         self.assertTrue(result["ok"], result)
         saved = field_pipeline_job.load_job(self.root, job)
-        self.assertEqual(saved["status"], "complete")
-        self.assertEqual(saved["citation_status"], "DESIGN_CITABLE")
-        self.assertEqual(saved["citation_blockers"], [])
-        gate.assert_called_once_with(thermal, gci_root=self.root / "_body_gci")
+        self.assertEqual(saved["status"], "analysis_complete_not_citable")
+        self.assertNotEqual(saved["citation_status"], "DESIGN_CITABLE")
+        gate.assert_not_called()
 
     def test_terminal_job_is_live_reviewed_before_claiming_design_citation(self):
         thermal = self.root / "_body_solver" / "previous-complete"
@@ -180,22 +181,15 @@ class FieldPipelineJobTests(unittest.TestCase):
             "status": "complete", "result_case": str(thermal),
             "citation_status": "DESIGN_CITABLE", "citation_blockers": [],
         }
-        not_citable = {
-            "contract": "result_trust.v1", "status": "NOT_EVALUATED",
-            "design_ready": False, "citation_status": "NOT_EVALUATED",
-            "citable": False, "blockers": ["gci"], "reasons": ["missing GCI"],
-        }
         with mock.patch.object(
-            field_pipeline_job.cfd_result_gate, "evaluate_body_fitted_case",
-            return_value=not_citable,
+            field_pipeline_job.cfd_evidence, "build_case_evidence",
+            side_effect=ValueError("no current evidence"),
         ):
-            reviewed = field_pipeline_job.review_terminal_job_citation(
-                self.root, manifest
-            )
+            reviewed = field_pipeline_job.review_terminal_job_citation(self.root, manifest)
 
         self.assertEqual(reviewed["status"], "analysis_complete_not_citable")
-        self.assertEqual(reviewed["citation_status"], "NOT_EVALUATED")
-        self.assertEqual(reviewed["citation_blockers"], ["gci"])
+        self.assertEqual(reviewed["citation_status"], "CITATION_BLOCKED")
+        self.assertIn("CASE_EVIDENCE_NOT_FOUND", reviewed["citation_blockers"])
 
     def test_terminal_job_is_not_relaunched_for_citation_refresh(self):
         created = field_pipeline_job.create_job(self.root, self.geometry)
@@ -207,15 +201,9 @@ class FieldPipelineJobTests(unittest.TestCase):
         field_pipeline_job.cfd_gci_job._atomic_json(
             created["manifest_path"], terminal
         )
-        held = {
-            "contract": "result_trust.v1", "status": "NOT_EVALUATED",
-            "design_ready": False, "citation_status": "NOT_EVALUATED",
-            "citable": False, "blockers": ["gci"], "reasons": ["missing GCI"],
-        }
-
         with mock.patch.object(
-            field_pipeline_job.cfd_result_gate, "evaluate_body_fitted_case",
-            return_value=held,
+            field_pipeline_job.cfd_evidence, "build_case_evidence",
+            side_effect=ValueError("missing raw chain"),
         ), mock.patch.object(field_pipeline_job.cfd_occ, "run_occ_job") as occ:
             result = field_pipeline_job.run_job(self.root, created["job"])
 
@@ -223,6 +211,99 @@ class FieldPipelineJobTests(unittest.TestCase):
         self.assertTrue(result["already_complete"])
         self.assertEqual(result["manifest"]["status"], "analysis_complete_not_citable")
         occ.assert_not_called()
+
+    def test_terminal_refresh_persists_current_validated_snapshots_without_solver_rerun(self):
+        created = field_pipeline_job.create_job(self.root, self.geometry)
+        case = self.root / "_body_solver" / "previous-result"
+        case.mkdir(parents=True)
+        evidence_path = case / "case_evidence.v1.json"
+        health_path = case / "case_health.v1.json"
+        evidence_path.write_text('{"contract":"case_evidence.v1"}\n', encoding="utf-8")
+        health_path.write_text('{"contract":"case_health.v1"}\n', encoding="utf-8")
+        terminal = dict(created["manifest"])
+        terminal.update(status="complete", stage="complete", result_case=str(case))
+        field_pipeline_job.cfd_gci_job._atomic_json(created["manifest_path"], terminal)
+        evidence = {"contract": "case_evidence.v1"}
+        health = {
+            "contract": "case_health.v1", "citation_status": "DESIGN_CITABLE",
+            "errors": [{"code": "DESIGN_CITABLE"}],
+        }
+        with mock.patch.object(
+            field_pipeline_job.cfd_evidence, "build_case_evidence", return_value=evidence,
+        ), mock.patch.object(
+            field_pipeline_job.cfd_evidence, "validate_case_evidence", return_value=[],
+        ), mock.patch.object(
+            field_pipeline_job.cfd_case_health, "build_case_health", return_value=health,
+        ), mock.patch.object(
+            field_pipeline_job.cfd_case_health, "review_summary",
+            return_value={"status": "APPROVED", "review_id": "review-" + "a" * 32},
+        ), mock.patch.object(field_pipeline_job.cfd_occ, "run_occ_job") as occ:
+            result = field_pipeline_job.run_job(self.root, created["job"])
+
+        self.assertTrue(result["already_complete"])
+        self.assertEqual(result["manifest"]["status"], "complete")
+        self.assertEqual(result["manifest"]["citation_status"], "DESIGN_CITABLE")
+        self.assertEqual(result["manifest"]["citation_blockers"], [])
+        self.assertEqual(
+            result["manifest"]["case_evidence_path"],
+            evidence_path.relative_to(self.root).as_posix(),
+        )
+        self.assertEqual(
+            result["manifest"]["case_health_path"],
+            health_path.relative_to(self.root).as_posix(),
+        )
+        self.assertEqual(
+            field_pipeline_job.load_job(self.root, created["job"])["review_summary"]["status"],
+            "APPROVED",
+        )
+        occ.assert_not_called()
+
+    def test_terminal_refresh_can_demote_complete_and_clears_unvalidated_snapshots(self):
+        created = field_pipeline_job.create_job(self.root, self.geometry)
+        case = self.root / "_body_solver" / "previous-result"
+        case.mkdir(parents=True)
+        terminal = dict(created["manifest"])
+        terminal.update(
+            status="complete", stage="complete", result_case=str(case),
+            case_evidence_path="forged.json", case_evidence_sha256="f" * 64,
+            case_health_path="forged-health.json", case_health_sha256="e" * 64,
+            citation_status="DESIGN_CITABLE",
+            review_summary={"status": "APPROVED", "review_id": "forged"},
+        )
+        field_pipeline_job.cfd_gci_job._atomic_json(created["manifest_path"], terminal)
+
+        with mock.patch.object(
+            field_pipeline_job.cfd_evidence, "build_case_evidence",
+            side_effect=ValueError("stale raw artifacts"),
+        ), mock.patch.object(field_pipeline_job.cfd_occ, "run_occ_job") as occ:
+            result = field_pipeline_job.run_job(self.root, created["job"])
+
+        refreshed = result["manifest"]
+        self.assertEqual(refreshed["status"], "analysis_complete_not_citable")
+        self.assertEqual(refreshed["citation_status"], "CITATION_BLOCKED")
+        self.assertIn("CASE_EVIDENCE_NOT_FOUND", refreshed["citation_blockers"])
+        self.assertNotIn("case_evidence_path", refreshed)
+        self.assertNotIn("case_health_path", refreshed)
+        self.assertEqual(refreshed["stage"], "complete")
+        occ.assert_not_called()
+
+    def test_old_terminal_fixture_without_health_fields_still_loads_and_refreshes(self):
+        created = field_pipeline_job.create_job(self.root, self.geometry)
+        old = {
+            "schema_version": 1, "contract": "field_pipeline_job.v1",
+            "engine": "body_fitted_field_pipeline", "created_at": "old",
+            "updated_at": "old", "job": created["job"], "status": "complete",
+            "stage": "complete", "attempts": 1, "error": "", "input": {},
+            "level": {}, "result_case": "",
+        }
+        field_pipeline_job.cfd_gci_job._atomic_json(created["manifest_path"], old)
+
+        loaded = field_pipeline_job.load_job(self.root, created["job"])
+        refreshed = field_pipeline_job.review_terminal_job_citation(self.root, loaded)
+
+        self.assertEqual(refreshed["status"], "analysis_complete_not_citable")
+        self.assertEqual(refreshed["citation_status"], "CITATION_BLOCKED")
+        self.assertEqual(refreshed["stage"], "complete")
 
     def test_changed_source_is_rejected_before_occ(self):
         created = field_pipeline_job.create_job(self.root, self.geometry)
