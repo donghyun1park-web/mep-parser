@@ -118,7 +118,7 @@ def _decision(
     return "NOT_EVALUATED", "REVIEW_REQUIRED", []
 
 
-def _atomic_json(path: Path, payload: dict) -> None:
+def _atomic_verified_json(path: Path, payload: dict, refresh) -> dict | None:
     fd, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
     )
@@ -129,7 +129,12 @@ def _atomic_json(path: Path, payload: dict) -> None:
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
+        verified = refresh()
+        if verified != payload:
+            temporary.unlink()
+            return None
         os.replace(temporary, path)
+        return verified
     except BaseException:
         try:
             temporary.unlink()
@@ -148,10 +153,13 @@ def review_summary(evidence_path: Path, *, projects_root: Path) -> dict:
     return summary
 
 
-def build_case_health(evidence_path: Path, *, projects_root: Path) -> dict:
-    """Revalidate Case Evidence, project health, and publish the current snapshot."""
-    schema, validator = _schema()
-    _assert_catalog_contract(schema)
+def _project_case_health(
+    evidence_path: Path,
+    *,
+    projects_root: Path,
+    created_at: str,
+    validator: Draft202012Validator,
+) -> tuple[dict, Path, Path]:
     root, evidence_file, evidence, digest, relative = cfd_review.resolve_evidence_target(
         evidence_path, projects_root=projects_root
     )
@@ -203,7 +211,7 @@ def build_case_health(evidence_path: Path, *, projects_root: Path) -> dict:
     health = {
         "contract": CONTRACT,
         "schema_version": 1,
-        "created_at": _now(),
+        "created_at": created_at,
         "purpose": evidence["purpose"],
         "evidence": {
             "contract": "case_evidence.v1",
@@ -222,8 +230,39 @@ def build_case_health(evidence_path: Path, *, projects_root: Path) -> dict:
     schema_errors = list(validator.iter_errors(health))
     if schema_errors:
         raise RuntimeError(f"CASE_HEALTH_SCHEMA_MISMATCH: {schema_errors[0].message}")
-    output = evidence_file.parent / "case_health.v1.json"
-    if output.exists() and output.is_symlink():
-        raise ValueError("case health output is unsafe")
-    _atomic_json(output, health)
-    return health
+    return health, root, evidence_file
+
+
+def build_case_health(evidence_path: Path, *, projects_root: Path) -> dict:
+    """Revalidate all authority again immediately before atomic health publish."""
+    schema, validator = _schema()
+    _assert_catalog_contract(schema)
+    evidence_path = Path(evidence_path)
+    projects_root = Path(projects_root)
+    for _ in range(4):
+        created_at = _now()
+        health, root, evidence_file = _project_case_health(
+            evidence_path,
+            projects_root=projects_root,
+            created_at=created_at,
+            validator=validator,
+        )
+        output = evidence_file.parent / "case_health.v1.json"
+        if output.exists() and output.is_symlink():
+            raise ValueError("case health output is unsafe")
+
+        def refresh():
+            verified, verified_root, verified_evidence = _project_case_health(
+                evidence_path,
+                projects_root=projects_root,
+                created_at=created_at,
+                validator=validator,
+            )
+            if verified_root != root or verified_evidence != evidence_file:
+                raise RuntimeError("CASE_HEALTH_CHANGED_DURING_PUBLISH")
+            return verified
+
+        published = _atomic_verified_json(output, health, refresh)
+        if published is not None:
+            return published
+    raise RuntimeError("CASE_HEALTH_CHANGED_DURING_PUBLISH")

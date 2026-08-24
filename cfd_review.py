@@ -174,6 +174,16 @@ def _review_validation(
     if target_path is None:
         _error(errors, "REVIEW_TARGET_CHANGED", "review target is unavailable or unsafe")
     else:
+        current_target = _read_json(target_path)
+        if (
+            current_target is None
+            or list(_schema("case_evidence.v1.schema.json").iter_errors(current_target))
+        ):
+            _error(
+                errors,
+                "REVIEW_TARGET_SCHEMA_INVALID",
+                "current review target does not satisfy case_evidence.v1",
+            )
         try:
             current_hash = sha256_file(target_path)
         except OSError:
@@ -363,9 +373,8 @@ def _publish_review(directory: Path, record: dict) -> Path:
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-        if final.exists():
-            raise FileExistsError(final)
-        os.replace(temporary, final)
+        os.link(temporary, final)
+        temporary.unlink()
         _fsync_directory(directory)
         return final
     except BaseException:
@@ -457,6 +466,19 @@ def create_review(
                 record["supersedes_review_ids"] = supersedes
             if list(_schema("case_review.v1.schema.json").iter_errors(record)):
                 raise RuntimeError("CASE_REVIEW_SCHEMA_MISMATCH")
+            try:
+                final_root, final_target, _, final_hash, final_relative = resolve_evidence_target(
+                    target, projects_root=root
+                )
+            except ValueError as exc:
+                raise ValueError("REVIEW_TARGET_CHANGED") from exc
+            if (
+                final_root != root
+                or final_target != target
+                or final_relative != relative
+                or final_hash != expected_target_sha256
+            ):
+                raise ValueError("REVIEW_TARGET_CHANGED")
             try:
                 _publish_review(directory, record)
             except FileExistsError:

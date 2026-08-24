@@ -226,8 +226,13 @@ class FieldPipelineJobTests(unittest.TestCase):
         evidence = {"contract": "case_evidence.v1"}
         health = {
             "contract": "case_health.v1", "citation_status": "DESIGN_CITABLE",
+            "evidence": {
+                "path": evidence_path.relative_to(self.root).as_posix(),
+                "sha256": field_pipeline_job._sha256(evidence_path),
+            },
             "errors": [{"code": "DESIGN_CITABLE"}],
         }
+        health_path.write_text(json.dumps(health) + "\n", encoding="utf-8")
         with mock.patch.object(
             field_pipeline_job.cfd_evidence, "build_case_evidence", return_value=evidence,
         ), mock.patch.object(
@@ -286,6 +291,113 @@ class FieldPipelineJobTests(unittest.TestCase):
         self.assertNotIn("case_health_path", refreshed)
         self.assertEqual(refreshed["stage"], "complete")
         occ.assert_not_called()
+
+    def test_field_snapshot_rejects_health_bound_to_pre_mutation_evidence(self):
+        case = self.root / "_body_solver" / "pair-race"
+        case.mkdir(parents=True)
+        evidence_path = case / "case_evidence.v1.json"
+        health_path = case / "case_health.v1.json"
+        evidence_path.write_text('{"contract":"case_evidence.v1"}\n', encoding="utf-8")
+        old_evidence_hash = field_pipeline_job._sha256(evidence_path)
+
+        def publish_stale_health(*_args, **_kwargs):
+            health = {
+                "contract": "case_health.v1",
+                "citation_status": "DESIGN_CITABLE",
+                "evidence": {"sha256": old_evidence_hash},
+                "errors": [{"code": "DESIGN_CITABLE"}],
+            }
+            health_path.write_text(json.dumps(health) + "\n", encoding="utf-8")
+            evidence_path.write_bytes(evidence_path.read_bytes() + b" ")
+            return health
+
+        with mock.patch.object(
+            field_pipeline_job.cfd_evidence, "build_case_evidence",
+            return_value={"contract": "case_evidence.v1"},
+        ), mock.patch.object(
+            field_pipeline_job.cfd_evidence, "validate_case_evidence", return_value=[],
+        ), mock.patch.object(
+            field_pipeline_job.cfd_case_health, "build_case_health",
+            side_effect=publish_stale_health,
+        ), mock.patch.object(
+            field_pipeline_job.cfd_case_health, "review_summary",
+            return_value={"status": "APPROVED", "review_id": "review-" + "a" * 32},
+        ):
+            snapshot = field_pipeline_job._current_health_snapshot(self.root, case)
+
+        self.assertEqual(snapshot["citation_status"], "CITATION_BLOCKED")
+        self.assertNotIn("case_evidence_path", snapshot)
+        self.assertNotIn("case_health_path", snapshot)
+
+    def test_field_snapshot_rejects_citable_health_when_review_is_now_ambiguous(self):
+        case = self.root / "_body_solver" / "review-race"
+        case.mkdir(parents=True)
+        evidence_path = case / "case_evidence.v1.json"
+        health_path = case / "case_health.v1.json"
+        evidence_path.write_text('{"contract":"case_evidence.v1"}\n', encoding="utf-8")
+        health = {
+            "contract": "case_health.v1",
+            "citation_status": "DESIGN_CITABLE",
+            "evidence": {
+                "path": evidence_path.relative_to(self.root).as_posix(),
+                "sha256": field_pipeline_job._sha256(evidence_path),
+            },
+            "errors": [{"code": "DESIGN_CITABLE"}],
+        }
+        health_path.write_text(json.dumps(health) + "\n", encoding="utf-8")
+
+        with mock.patch.object(
+            field_pipeline_job.cfd_evidence, "build_case_evidence",
+            return_value={"contract": "case_evidence.v1"},
+        ), mock.patch.object(
+            field_pipeline_job.cfd_evidence, "validate_case_evidence", return_value=[],
+        ), mock.patch.object(
+            field_pipeline_job.cfd_case_health, "build_case_health", return_value=health,
+        ), mock.patch.object(
+            field_pipeline_job.cfd_case_health, "review_summary",
+            return_value={"status": "AMBIGUOUS"},
+        ):
+            snapshot = field_pipeline_job._current_health_snapshot(self.root, case)
+
+        self.assertEqual(snapshot["citation_status"], "CITATION_BLOCKED")
+        self.assertNotIn("case_health_path", snapshot)
+
+    def test_field_snapshot_rejects_health_mutation_during_review_summary(self):
+        case = self.root / "_body_solver" / "late-health-race"
+        case.mkdir(parents=True)
+        evidence_path = case / "case_evidence.v1.json"
+        health_path = case / "case_health.v1.json"
+        evidence_path.write_text('{"contract":"case_evidence.v1"}\n', encoding="utf-8")
+        health = {
+            "contract": "case_health.v1",
+            "citation_status": "DESIGN_CITABLE",
+            "evidence": {
+                "path": evidence_path.relative_to(self.root).as_posix(),
+                "sha256": field_pipeline_job._sha256(evidence_path),
+            },
+            "errors": [{"code": "DESIGN_CITABLE"}],
+        }
+        health_path.write_text(json.dumps(health) + "\n", encoding="utf-8")
+
+        def mutate_health_then_approve(*_args, **_kwargs):
+            health_path.write_bytes(health_path.read_bytes() + b" ")
+            return {"status": "APPROVED", "review_id": "review-" + "a" * 32}
+
+        with mock.patch.object(
+            field_pipeline_job.cfd_evidence, "build_case_evidence",
+            return_value={"contract": "case_evidence.v1"},
+        ), mock.patch.object(
+            field_pipeline_job.cfd_evidence, "validate_case_evidence", return_value=[],
+        ), mock.patch.object(
+            field_pipeline_job.cfd_case_health, "build_case_health", return_value=health,
+        ), mock.patch.object(
+            field_pipeline_job.cfd_case_health, "review_summary",
+            side_effect=mutate_health_then_approve,
+        ):
+            snapshot = field_pipeline_job._current_health_snapshot(self.root, case)
+
+        self.assertEqual(snapshot["citation_status"], "CITATION_BLOCKED")
+        self.assertNotIn("case_health_sha256", snapshot)
 
     def test_old_terminal_fixture_without_health_fields_still_loads_and_refreshes(self):
         created = field_pipeline_job.create_job(self.root, self.geometry)

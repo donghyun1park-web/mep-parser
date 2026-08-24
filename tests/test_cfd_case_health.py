@@ -279,3 +279,68 @@ def test_health_rejects_catalog_version_or_table_mismatch(tmp_path):
         cfd_case_health, "CITATION_DECISION_TABLE", drifted
     ), pytest.raises(RuntimeError, match="CITATION_DECISION_TABLE_MISMATCH"):
         _build_future(paths)
+
+
+@pytest.mark.parametrize("mutation", ["evidence", "raw"])
+def test_final_health_revalidation_catches_mutation_after_projection(tmp_path, mutation):
+    paths = make_complete_case(tmp_path)
+    cfd_evidence.build_case_evidence(paths["case"], projects_root=paths["root"])
+    original_decision = cfd_case_health._decision
+    injected = False
+
+    def mutate_after_projection(*args, **kwargs):
+        nonlocal injected
+        result = original_decision(*args, **kwargs)
+        if not injected:
+            injected = True
+            if mutation == "evidence":
+                payload = _read(paths["evidence"])
+                row = next(item for item in payload["checks"] if item["id"] == "mesh_checked")
+                row.update(status="FAIL", reason_codes=["MESH_FAILED_AFTER_PROJECTION"])
+                _write(paths["evidence"], payload)
+            else:
+                paths["source_vtu"].write_bytes(
+                    paths["source_vtu"].read_bytes() + b"race-mutation"
+                )
+        return result
+
+    with mock.patch.object(
+        cfd_case_health, "_decision", side_effect=mutate_after_projection
+    ):
+        health = cfd_case_health.build_case_health(
+            paths["evidence"], projects_root=paths["root"]
+        )
+
+    assert health["citation_status"] == "CITATION_BLOCKED"
+    assert health["errors"][0]["code"] == "CITATION_EVIDENCE_OR_REVIEW_INVALID"
+    assert health["evidence"]["sha256"] == cfd_review.sha256_file(paths["evidence"])
+    if mutation == "evidence":
+        assert health["checks"]["mesh_checked"]["status"] == "FAIL"
+    assert _read(paths["case"] / "case_health.v1.json") == health
+
+
+def test_final_health_projection_rechecks_new_review_fork(tmp_path):
+    paths, _ = _future_evidence(tmp_path)
+    _approve(paths, "APPROVED")
+    original_decision = cfd_case_health._decision
+    injected = False
+
+    def fork_after_approved_projection(*args, **kwargs):
+        nonlocal injected
+        result = original_decision(*args, **kwargs)
+        if not injected:
+            injected = True
+            _approve(paths, "REJECTED")
+        return result
+
+    with mock.patch.object(
+        cfd_case_health.cfd_evidence, "validate_case_evidence", return_value=[]
+    ), mock.patch.object(
+        cfd_case_health, "_decision", side_effect=fork_after_approved_projection
+    ):
+        health = cfd_case_health.build_case_health(
+            paths["evidence"], projects_root=paths["root"]
+        )
+
+    assert health["citation_status"] == "CITATION_BLOCKED"
+    assert "REVIEW_HISTORY_AMBIGUOUS" in _codes(health)

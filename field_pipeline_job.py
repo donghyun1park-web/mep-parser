@@ -74,27 +74,62 @@ def _current_health_snapshot(root, solver_case):
             evidence_path, projects_root=root
         )
         health_path = case / "case_health.v1.json"
-        citation_status = health.get("citation_status")
+        evidence_errors = cfd_evidence.validate_case_evidence(
+            evidence_path, projects_root=root
+        )
+        if evidence_errors:
+            raise ValueError("Case Evidence changed after health publication")
+        evidence_bytes = evidence_path.read_bytes()
+        evidence_hash = hashlib.sha256(evidence_bytes).hexdigest()
+        health_bytes = health_path.read_bytes()
+        health_on_disk = json.loads(health_bytes.decode("utf-8"))
+        health_hash = hashlib.sha256(health_bytes).hexdigest()
+        if health_on_disk != health:
+            raise ValueError("published Case Health differs from returned health")
+        evidence_link = (
+            health_on_disk.get("evidence")
+            if isinstance(health_on_disk.get("evidence"), dict)
+            else {}
+        )
+        if (
+            evidence_link.get("path") != evidence_path.relative_to(root).as_posix()
+            or evidence_link.get("sha256") != evidence_hash
+            or _sha256(evidence_path) != evidence_hash
+        ):
+            raise ValueError("Case Health is not bound to current Case Evidence")
+        citation_status = health_on_disk.get("citation_status")
         if citation_status not in {
             "SCREENING_ONLY", "NOT_EVALUATED", "CITATION_BLOCKED", "DESIGN_CITABLE",
         }:
             raise ValueError("current Case Health has an invalid citation status")
         blockers = [
-            item["code"] for item in health.get("errors") or []
+            item["code"] for item in health_on_disk.get("errors") or []
             if isinstance(item, dict) and isinstance(item.get("code"), str)
         ]
         if citation_status == "DESIGN_CITABLE":
             blockers = []
+        review = cfd_case_health.review_summary(
+            evidence_path, projects_root=root
+        )
+        if citation_status == "DESIGN_CITABLE" and review.get("status") != "APPROVED":
+            raise ValueError("review state changed after health publication")
+        final_evidence_errors = cfd_evidence.validate_case_evidence(
+            evidence_path, projects_root=root
+        )
+        if (
+            final_evidence_errors
+            or evidence_path.read_bytes() != evidence_bytes
+            or health_path.read_bytes() != health_bytes
+        ):
+            raise ValueError("evidence or health changed during snapshot assembly")
         return {
             "citation_status": citation_status,
             "citation_blockers": list(dict.fromkeys(blockers)),
             "case_evidence_path": evidence_path.relative_to(root).as_posix(),
-            "case_evidence_sha256": _sha256(evidence_path),
+            "case_evidence_sha256": evidence_hash,
             "case_health_path": health_path.relative_to(root).as_posix(),
-            "case_health_sha256": _sha256(health_path),
-            "review_summary": cfd_case_health.review_summary(
-                evidence_path, projects_root=root
-            ),
+            "case_health_sha256": health_hash,
+            "review_summary": review,
         }
     except Exception:
         return {

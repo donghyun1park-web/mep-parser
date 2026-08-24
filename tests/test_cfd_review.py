@@ -168,6 +168,28 @@ def test_post_lock_rehash_closes_target_toctou(tmp_path):
     assert not list(reviews.glob("*.case_review.v1.json"))
 
 
+def test_target_mutation_after_locked_history_check_blocks_publish(tmp_path):
+    paths = _future_evidence(tmp_path)
+    real_uuid4 = cfd_review.uuid.uuid4
+    injected = False
+
+    def mutate_when_id_is_minted():
+        nonlocal injected
+        if not injected:
+            injected = True
+            paths["evidence"].write_bytes(paths["evidence"].read_bytes() + b" ")
+        return real_uuid4()
+
+    with mock.patch.object(
+        cfd_review.uuid, "uuid4", side_effect=mutate_when_id_is_minted
+    ), pytest.raises(ValueError, match="REVIEW_TARGET_CHANGED"):
+        _create(paths)
+
+    reviews = paths["evidence"].parent / "_reviews"
+    assert not list(reviews.glob("*.case_review.v1.json"))
+    assert not list(reviews.glob(".*.tmp"))
+
+
 def test_supersession_is_append_only_and_cross_target_is_rejected(tmp_path):
     paths = _future_evidence(tmp_path)
     first = _create(paths)
@@ -289,6 +311,37 @@ def test_concurrent_creation_and_uuid_collision_never_overwrite(tmp_path):
     )
 
 
+def test_atomic_publication_never_overwrites_racing_same_name_record(tmp_path):
+    paths = _future_evidence(tmp_path)
+    first_hex = "3" * 12 + "4" + "3" * 3 + "a" + "3" * 15
+    second_hex = "4" * 12 + "4" + "4" * 3 + "b" + "4" * 15
+    ids = iter([first_hex, second_hex])
+    real_link = os.link
+    injected_path = None
+
+    def race_once(source, destination):
+        nonlocal injected_path
+        destination = Path(destination)
+        if injected_path is None:
+            injected_path = destination
+            destination.write_bytes(b"competitor-record-bytes")
+        return real_link(source, destination)
+
+    with mock.patch.object(
+        cfd_review.uuid, "uuid4",
+        side_effect=lambda: SimpleNamespace(hex=next(ids)),
+    ), mock.patch.object(cfd_review.os, "link", side_effect=race_once) as link:
+        review = _create(paths)
+
+    assert link.call_count == 2
+    assert injected_path is not None
+    assert injected_path.read_bytes() == b"competitor-record-bytes"
+    assert review["review_id"] == f"review-{second_hex}"
+    surviving = paths["evidence"].parent / "_reviews" / f'{review["review_id"]}.case_review.v1.json'
+    assert cfd_review.validate_review(surviving, projects_root=paths["root"]) == []
+    assert not list(surviving.parent.glob(".*.tmp"))
+
+
 def test_publish_fsync_failure_leaves_no_record_or_staging(tmp_path):
     paths = _future_evidence(tmp_path)
 
@@ -299,3 +352,19 @@ def test_publish_fsync_failure_leaves_no_record_or_staging(tmp_path):
     reviews = paths["evidence"].parent / "_reviews"
     assert not list(reviews.glob("*.case_review.v1.json"))
     assert not list(reviews.glob(".*.tmp"))
+
+
+def test_validate_review_rejects_hash_matching_schema_invalid_current_target(tmp_path):
+    paths = _future_evidence(tmp_path)
+    review = _create(paths)
+    review_path = paths["evidence"].parent / "_reviews" / f'{review["review_id"]}.case_review.v1.json'
+    invalid_target = _read(paths["evidence"])
+    invalid_target["contract"] = "not-case-evidence"
+    _write(paths["evidence"], invalid_target)
+    tampered_review = _read(review_path)
+    tampered_review["target"]["sha256"] = cfd_review.sha256_file(paths["evidence"])
+    _write(review_path, tampered_review)
+
+    errors = cfd_review.validate_review(review_path, projects_root=paths["root"])
+
+    assert "REVIEW_TARGET_SCHEMA_INVALID" in {item["code"] for item in errors}
