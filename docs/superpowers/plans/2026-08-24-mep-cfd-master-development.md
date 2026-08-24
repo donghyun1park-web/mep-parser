@@ -1735,3 +1735,12 @@ case_evidence.v1 + case_health.v1 + case_review.v1
 ## 17. Execution Handoff
 
 권장 실행은 Tasks 1~4를 하나의 vertical slice로 처리하는 **Subagent-Driven Development**다. 각 task마다 implementer → spec review → code-quality review를 수행하고 focused/full tests를 통과한 뒤 다음 task로 이동한다. 장시간 solver evidence가 필요한 Tasks 5, 13, 16, 17은 코드 리뷰와 실제 실행 review를 분리한다.
+
+## 18. Execution Status Snapshot — 2026-08-24
+
+- Isolated execution branch: `codex/case-evidence-review-gate`; implementation HEAD: `24d18aa`.
+- Task 0~4 are complete. The reproducible toolchain/baseline, Case Evidence contracts, immutable evidence recomputation, append-only human review, and Studio/API/report/advice citation gates are implemented.
+- Final scoped review verdict: `CLEAN`; controller focused verification: `260 passed`; controller full verification: `808 passed, 14 skipped, 7 warnings`, exit code `0`.
+- M1 is still open. Task 5 must close the actual working-PC validators, one real-DXF GUI E2E evidence chain, and restart-integrity gate before M2 work starts.
+- No FreeCAD/OpenFOAM/solver run or manual browser/print-preview is claimed by this snapshot.
+- Detailed rulings, per-task commits, review findings, and verification evidence are maintained in the [SDD progress ledger](../../../.superpowers/sdd/2026-08-24-mep-cfd-master-development/progress.md).
