@@ -105,3 +105,14 @@ and downstream body-fitted execution remains blocked.
 No Critical or Important technical/privacy finding remains after force-tracking
 only this sanitized report and its brief. Exact source artifacts, fingerprints,
 coordinates, and reviewer worksheets remain ignored under `cfd_projects/`.
+
+## Localhost review import status
+
+After the review screen was ready, an authorized controller-only localhost
+import created an ignored, byte-verified review copy and unconfirmed geometry.
+The import returned successfully and left the original artifacts unchanged.
+The loaded geometry remains fail-closed with the existing 128 review blockers;
+there are zero confirmed geometries, meshes, solver runs, and cases. The
+browser remains in terminal review mode with all confirmation and save actions
+unperformed. This is preparation for human MEP review, not approval or solver
+validation.
