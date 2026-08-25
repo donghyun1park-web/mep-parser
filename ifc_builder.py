@@ -225,6 +225,9 @@ def _build_elements(model, body, sb, sto, data, z_offset=0.0, connect=False,
         if len(cl) < 2:
             stats["skip"] += 1
             continue
+        width = float(w.get("width_detected") or w.get("overrides", {}).get("width", pw))
+        height = float(w.get("overrides", {}).get("height", ph))
+        zb = z_offset + float(w.get("z_base", 0.0))
         # 폐합 벽(closed)은 둘레 벽 여러 장이 아니라 솔리드(기둥형)로 세운다.
         # dxf_parser 가 pairing="closed" 로 표시한 원래 의도이며, boq_export 의
         # 집계(단면적×높이)와도 일치한다. 둘레 분해 시 물량이 어긋난다(교차 대조로 발견).
@@ -249,9 +252,6 @@ def _build_elements(model, body, sb, sto, data, z_offset=0.0, connect=False,
             else:
                 stats["skip"] += 1
             continue
-        width = float(w.get("width_detected") or w.get("overrides", {}).get("width", pw))
-        height = float(w.get("overrides", {}).get("height", ph))
-        zb = z_offset + float(w.get("z_base", 0.0))
         # 다중점 centerline → 세그먼트별 벽
         for k in range(len(cl) - 1):
             p1, p2 = cl[k], cl[k + 1]
