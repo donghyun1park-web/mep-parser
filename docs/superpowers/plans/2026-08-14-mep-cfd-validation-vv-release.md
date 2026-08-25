@@ -714,7 +714,7 @@ $StudyId = Get-ChildItem 'cfd_projects\_body_gci\gci-*\gci_job.json' |
 
 ### Task P7.1: SGI geometry.v2를 GUI에서 실제 확정한다
 
-**Current source:** 최신 SGI geometry는 zone 0, blocker 127, `SPACE_MISSING` 상태다.
+**Current source:** 최신 SGI geometry는 zone 0, blocker 128, `SPACE_MISSING` 상태다.
 
 - [ ] **Step 1: DXF에서 A-ELE04 로비의 단일 closed air zone을 선택·확정한다.**
 - [ ] **Step 2: 높이 10.0m, 15 supply+15 exhaust, 각 444 CMH, 방향/normal을 확인한다.**

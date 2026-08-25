@@ -667,6 +667,12 @@ def validate_review(review_path: Path, *, projects_root: Path) -> list[dict]: ..
 
 **현재 상태(2026-08-24 실측):** 저장소 전체에 `*.confirmed.geometry.json`이 **0건**이며, 최신 SGI geometry는 `review.ready=false`다. 즉 M1은 코드가 아니라 이 입력 확정에 막혀 있다.
 
+**2026-08-26 기술 준비:** 격리 작업공간의 로컬 전용 검토 패키지는
+`READY_FOR_MEP_REVIEW`이며, 최신 입력은 재계산 결과 blocker 128이다.
+MEP 승인과 confirmed geometry는 여전히 0건이므로 Task 4.5, Task 5c,
+M1 Exit는 계속 열려 있다. 공개 브랜치에는 현장 좌표·원본·확정본을
+포함하지 않는다.
+
 - [ ] **Step 1: companion plan P7.1을 그대로 실행한다**
 
   `docs/superpowers/plans/2026-08-14-mep-cfd-validation-vv-release.md`의 Task P7.1 5개 Step을 수행한다: 단일 closed air zone 확정 → 층고·급배기 단말 수·방향 확인 → 총 급기와 총 배기 차이 ≤1% → 발열 kW의 실제 위치·대류분율·근거 확인 → confirmed geometry 저장.
