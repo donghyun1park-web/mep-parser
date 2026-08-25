@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "local_usability_acceptance.v1.schema.json",
+  "title": "MEP CFD Studio single-PC serial environment acceptance",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "contract", "created_at", "run_id", "scope", "status", "blockers",
+    "identities", "sources", "launch_observations", "diagnostic_observations"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "contract": {"const": "local_usability_acceptance.v1"},
+    "created_at": {"$ref": "#/$defs/timestamp"},
+    "run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"},
+    "scope": {"const": "single_pc_serial_current_user"},
+    "status": {"enum": ["PASS", "BLOCKED"]},
+    "blockers": {
+      "type": "array", "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$"}
+    },
+    "identities": {
+      "type": "object", "additionalProperties": false,
+      "required": ["python", "freecad", "openfoam"],
+      "properties": {
+        "python": {"$ref": "#/$defs/python_identity"},
+        "freecad": {"$ref": "#/$defs/freecad_identity"},
+        "openfoam": {"$ref": "#/$defs/openfoam_identity"}
+      }
+    },
+    "sources": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "environment_acceptance", "runtime_capability", "case_input", "mesh_log",
+        "solver_log", "report", "freecad_diagnostics"
+      ],
+      "properties": {
+        "environment_acceptance": {"$ref": "#/$defs/link"},
+        "runtime_capability": {"$ref": "#/$defs/link"},
+        "case_input": {"$ref": "#/$defs/link"},
+        "mesh_log": {"$ref": "#/$defs/link"},
+        "solver_log": {"$ref": "#/$defs/link"},
+        "report": {"$ref": "#/$defs/link"},
+        "freecad_diagnostics": {"$ref": "#/$defs/link"}
+      }
+    },
+    "launch_observations": {
+      "type": "array", "minItems": 3, "maxItems": 3,
+      "uniqueItems": true, "items": {"$ref": "#/$defs/link"}
+    },
+    "diagnostic_observations": {
+      "type": "array", "minItems": 5, "maxItems": 5,
+      "uniqueItems": true, "items": {"$ref": "#/$defs/link"}
+    }
+  },
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$"
+    },
+    "path": {
+      "type": "string",
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^/]+(?:/[^/]+)*$"
+    },
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "link": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"$ref": "#/$defs/path"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "python_identity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["executable", "executable_sha256", "version", "architecture"],
+      "properties": {
+        "executable": {"type": "string", "minLength": 1},
+        "executable_sha256": {"$ref": "#/$defs/sha256"},
+        "version": {"type": "string", "minLength": 1},
+        "architecture": {"type": "string", "minLength": 1}
+      }
+    },
+    "freecad_identity": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "executable", "executable_sha256", "freecad_version", "occ_version",
+        "compatible_profile"
+      ],
+      "properties": {
+        "executable": {"type": "string", "minLength": 1},
+        "executable_sha256": {"$ref": "#/$defs/sha256"},
+        "freecad_version": {"const": "1.1.1"},
+        "occ_version": {"type": "string", "pattern": "^7\\.8\\.1(?:$|[^0-9].*)"},
+        "compatible_profile": {"const": "freecad-1.1.1-occ-7.8.1"}
+      }
+    },
+    "openfoam_identity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["distro", "kernel", "version", "package_version", "compatible_profile"],
+      "properties": {
+        "distro": {"type": "string", "minLength": 1},
+        "kernel": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "pattern": "^v?2606(?:$|[.\\-].*)"},
+        "package_version": {"type": "string", "minLength": 1},
+        "compatible_profile": {"const": "openfoam-v2606"}
+      }
+    }
+  }
+}

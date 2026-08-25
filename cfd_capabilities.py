@@ -6,10 +6,15 @@ free of FreeCAD imports lets the normal application Python inspect the runtime
 without depending on FreeCAD's embedded Python.
 """
 
+from __future__ import annotations
+
 from datetime import datetime, timezone
 import glob
+import hashlib
 import json
+import math
 import os
+from pathlib import Path
 import re
 import shutil
 import subprocess
@@ -20,6 +25,7 @@ FREECAD_EXE_ENV = "MEP_CFD_FREECADCMD"
 SUPPORTED_FREECAD = "1.1.1"
 SUPPORTED_OCC = "7.8.1"
 _PROBE_MARKER = "MEP_CFD_FREECAD_CAPABILITY:"
+_STAGE_MARKER = "MEP_CFD_FREECAD_STAGE:"
 RUNTIME_CAPABILITY_CONTRACT = "runtime_capability.v1"
 MPI_COMMANDS = ("mpirun", "decomposePar", "reconstructPar")
 MPI_SMOKE_IDENTITY_FIELDS = (
@@ -248,6 +254,77 @@ print("MEP_CFD_FREECAD_CAPABILITY:" + json.dumps(result, ensure_ascii=True))
 '''
 
 
+_FREECAD_STAGE_SCRIPTS = {
+    "imports": r'''
+import json
+import sys
+result = {"stage": "imports", "ok": False, "modules": {}}
+try:
+    import FreeCAD as App
+    result["modules"]["FreeCAD"] = True
+    import Part
+    result["modules"]["Part"] = True
+    import Draft
+    result["modules"]["Draft"] = True
+    import Arch
+    result["modules"]["Arch"] = True
+    import Mesh
+    result["modules"]["Mesh"] = True
+    import MeshPart
+    result["modules"]["MeshPart"] = True
+    import BOPTools.SplitAPI
+    result["modules"]["BOPTools.SplitAPI"] = True
+    version = [str(value) for value in App.Version()]
+    result.update({
+        "ok": True,
+        "freecad_version": ".".join(version[:3]),
+        "revision": version[3] if len(version) > 3 else "",
+        "python_version": sys.version.split()[0],
+        "occ_version": str(getattr(Part, "OCC_VERSION", "")),
+    })
+except Exception as exc:
+    result["exception"] = "%s: %s" % (type(exc).__name__, exc)
+print("MEP_CFD_FREECAD_STAGE:" + json.dumps(result, ensure_ascii=True))
+''',
+    "boolean": r'''
+import json
+result = {"stage": "boolean", "ok": False}
+try:
+    import FreeCAD as App
+    import Part
+    room = Part.makeBox(10000.0, 8000.0, 3000.0)
+    column = Part.makeBox(500.0, 500.0, 3000.0, App.Vector(1000.0, 1000.0, 0.0))
+    cut = room.cut(column)
+    solids = list(cut.Solids)
+    solid = solids[0] if len(solids) == 1 else cut
+    expected = 239250000000.0
+    volume = float(solid.Volume)
+    rel_error = abs(volume - expected) / expected
+    result.update({
+        "valid": bool(cut.isValid()), "solid_count": len(solids),
+        "volume_mm3": volume, "relative_volume_error": rel_error,
+    })
+    result["ok"] = bool(result["valid"] and len(solids) == 1 and volume > 0 and rel_error <= 1e-9)
+except Exception as exc:
+    result["exception"] = "%s: %s" % (type(exc).__name__, exc)
+print("MEP_CFD_FREECAD_STAGE:" + json.dumps(result, ensure_ascii=True))
+''',
+    "tessellation": r'''
+import json
+result = {"stage": "tessellation", "ok": False}
+try:
+    import Part
+    shape = Part.makeBox(1000.0, 1000.0, 1000.0)
+    vertices, facets = shape.tessellate(100.0)
+    result.update({"vertices": len(vertices), "facets": len(facets)})
+    result["ok"] = bool(vertices and facets)
+except Exception as exc:
+    result["exception"] = "%s: %s" % (type(exc).__name__, exc)
+print("MEP_CFD_FREECAD_STAGE:" + json.dumps(result, ensure_ascii=True))
+''',
+}
+
+
 def _version_key(path):
     """Sort standard installs by the version embedded in their parent path."""
     parent = os.path.basename(os.path.dirname(os.path.dirname(path)))
@@ -324,6 +401,192 @@ def freecad_headless_command(executable, script_path, job_dir):
         "--log-file", os.path.join(job_dir, "freecad.log"),
         os.path.abspath(script_path),
     ]
+
+
+def _file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _stage_rows():
+    return [
+        {"id": stage, "status": "NOT_RUN", "reason_code": "", "details": {}}
+        for stage in ("discovery", "imports", "boolean", "tessellation")
+    ]
+
+
+def _stage_payload(stdout, expected_stage):
+    payload = None
+    for line in (stdout or "").splitlines():
+        if line.startswith(_STAGE_MARKER):
+            try:
+                candidate = json.loads(line[len(_STAGE_MARKER):])
+            except (TypeError, ValueError):
+                candidate = None
+            if isinstance(candidate, dict):
+                payload = candidate
+    if payload is None or payload.get("stage") != expected_stage:
+        return None
+    return payload
+
+
+def diagnose_freecad_stages(executable: Path, *, per_stage_timeout_s: float) -> dict:
+    """Run bounded FreeCAD discovery/import/Boolean/tessellation diagnostics.
+
+    Each runtime operation uses a fresh, isolated ``FreeCADCmd`` process.  The
+    result names the first failed stage and never promotes an unavailable or
+    unsupported runtime to ready.
+    """
+    try:
+        timeout = float(per_stage_timeout_s)
+    except (TypeError, ValueError):
+        timeout = 0.0
+    if timeout <= 0 or not math.isfinite(timeout):
+        raise ValueError("FREECAD_STAGE_TIMEOUT_INVALID")
+
+    checked_at = datetime.now(timezone.utc).isoformat()
+    stages = _stage_rows()
+    requested = os.fspath(executable) if executable is not None else None
+    path, selection = select_freecadcmd(requested)
+    result = {
+        "schema_version": 1,
+        "contract": "freecad_staged_diagnostics.v1",
+        "checked_at": checked_at,
+        "ok": False,
+        "status": "missing",
+        "failed_stage": "discovery",
+        "summary": "지정한 FreeCADCmd 실행 파일을 찾지 못했습니다.",
+        "fix": (
+            "FreeCAD 1.1.1을 설치하고 MEP_CFD_FREECADCMD에 "
+            "FreeCADCmd.exe 절대경로를 지정하세요."
+        ),
+        "selection": selection,
+        "executable": path,
+        "executable_sha256": "",
+        "freecad_version": "",
+        "revision": "",
+        "python_version": "",
+        "occ_version": "",
+        "compatible_profile": "",
+        "stages": stages,
+    }
+    if not path:
+        stages[0].update(status="BLOCKED", reason_code="FREECAD_EXECUTABLE_MISSING")
+        return result
+
+    try:
+        executable_sha256 = _file_sha256(path)
+    except OSError as exc:
+        stages[0].update(
+            status="BLOCKED", reason_code="FREECAD_EXECUTABLE_UNREADABLE",
+            details={"error": str(exc)},
+        )
+        result.update(
+            status="unreadable", summary="FreeCADCmd 실행 파일을 읽지 못했습니다.",
+            fix="실행 파일 권한과 보안 프로그램 차단 여부를 확인하세요.",
+        )
+        return result
+    stages[0].update(status="PASS", details={"selection": selection})
+    result.update(executable=path, executable_sha256=executable_sha256)
+
+    stage_indexes = {"imports": 1, "boolean": 2, "tessellation": 3}
+    with tempfile.TemporaryDirectory(prefix="mep_cfd_freecad_stages_") as root:
+        for stage_name in ("imports", "boolean", "tessellation"):
+            row = stages[stage_indexes[stage_name]]
+            job_dir = os.path.join(root, stage_name)
+            os.makedirs(job_dir, exist_ok=True)
+            script_path = os.path.join(job_dir, f"{stage_name}.py")
+            with open(script_path, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(_FREECAD_STAGE_SCRIPTS[stage_name])
+            command = freecad_headless_command(path, script_path, job_dir)
+            try:
+                proc = subprocess.run(
+                    command,
+                    cwd=job_dir,
+                    env=dict(os.environ, PYTHONIOENCODING="utf-8"),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=timeout,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except subprocess.TimeoutExpired:
+                code = f"FREECAD_{stage_name.upper()}_TIMEOUT"
+                row.update(status="BLOCKED", reason_code=code)
+                result.update(
+                    status="timeout", failed_stage=stage_name,
+                    summary=f"FreeCAD {stage_name} 진단이 제한시간을 초과했습니다.",
+                    fix="FreeCAD 프로세스를 종료한 뒤 해당 단계 진단을 다시 실행하세요.",
+                )
+                return result
+            except OSError as exc:
+                row.update(
+                    status="BLOCKED", reason_code="FREECAD_STAGE_LAUNCH_FAILED",
+                    details={"error": str(exc)},
+                )
+                result.update(
+                    status="launch_failed", failed_stage=stage_name,
+                    summary=f"FreeCAD {stage_name} 진단을 실행하지 못했습니다.",
+                    fix="실행 파일 권한과 보안 프로그램 차단 여부를 확인하세요.",
+                )
+                return result
+
+            payload = _stage_payload(proc.stdout, stage_name)
+            if proc.returncode != 0 or payload is None or payload.get("ok") is not True:
+                row.update(
+                    status="BLOCKED", reason_code=f"FREECAD_{stage_name.upper()}_FAILED",
+                    details={
+                        "returncode": proc.returncode,
+                        "exception": str((payload or {}).get("exception") or ""),
+                    },
+                )
+                result.update(
+                    status="stage_failed", failed_stage=stage_name,
+                    summary=f"FreeCAD {stage_name} 진단이 실패했습니다.",
+                    fix="FreeCAD 1.1.1 설치를 복구하고 해당 단계 진단을 다시 실행하세요.",
+                )
+                return result
+
+            if stage_name == "imports":
+                required = (
+                    "FreeCAD", "Part", "Draft", "Arch", "Mesh", "MeshPart",
+                    "BOPTools.SplitAPI",
+                )
+                modules = payload.get("modules") if isinstance(payload.get("modules"), dict) else {}
+                supported = (
+                    payload.get("freecad_version") == SUPPORTED_FREECAD
+                    and str(payload.get("occ_version") or "").startswith(SUPPORTED_OCC)
+                    and all(modules.get(name) is True for name in required)
+                )
+                result.update(
+                    freecad_version=str(payload.get("freecad_version") or ""),
+                    revision=str(payload.get("revision") or ""),
+                    python_version=str(payload.get("python_version") or ""),
+                    occ_version=str(payload.get("occ_version") or ""),
+                )
+                if not supported:
+                    row.update(status="BLOCKED", reason_code="FREECAD_UNSUPPORTED_PROFILE", details=payload)
+                    result.update(
+                        status="unsupported_version", failed_stage="imports",
+                        summary="FreeCAD 또는 OCC 버전/필수 모듈이 검증 프로필과 다릅니다.",
+                        fix=(
+                            f"FreeCAD {SUPPORTED_FREECAD} / OCC {SUPPORTED_OCC} 설치를 "
+                            "사용하고 다시 검사하세요."
+                        ),
+                    )
+                    return result
+            row.update(status="PASS", details=payload)
+
+    result.update(
+        ok=True, status="ready", failed_stage=None,
+        summary="FreeCAD 단계별 형상 환경이 준비되었습니다.", fix="",
+        compatible_profile="freecad-1.1.1-occ-7.8.1",
+    )
+    return result
 
 
 def _error_detail(proc, log_path):
