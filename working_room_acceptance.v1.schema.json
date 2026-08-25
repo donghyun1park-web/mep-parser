@@ -39,13 +39,21 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "geometry", "surface", "mesh", "thermal_input", "thermal_progress", "run", "result",
+        "geometry", "surface", "mesh_input", "mesh", "thermal_input",
+        "control_dict", "fv_schemes", "fv_solution", "turbulence_properties", "allrun",
+        "thermal_progress", "run", "result",
         "check_mesh_log", "solver_log", "field_t", "field_u", "field_phi", "field_v", "vtu",
         "summary", "slice_x", "slice_y", "slice_z", "report"
       ],
       "properties": {
         "geometry": {"$ref": "#/$defs/link"}, "surface": {"$ref": "#/$defs/link"},
+        "mesh_input": {"$ref": "#/$defs/link"},
         "mesh": {"$ref": "#/$defs/link"}, "thermal_input": {"$ref": "#/$defs/link"},
+        "control_dict": {"$ref": "#/$defs/link"},
+        "fv_schemes": {"$ref": "#/$defs/link"},
+        "fv_solution": {"$ref": "#/$defs/link"},
+        "turbulence_properties": {"$ref": "#/$defs/link"},
+        "allrun": {"$ref": "#/$defs/link"},
         "thermal_progress": {"$ref": "#/$defs/link"}, "run": {"$ref": "#/$defs/link"},
         "result": {"$ref": "#/$defs/link"}, "check_mesh_log": {"$ref": "#/$defs/link"},
         "solver_log": {"$ref": "#/$defs/link"}, "field_t": {"$ref": "#/$defs/link"},

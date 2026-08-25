@@ -16,6 +16,12 @@ def _sha256(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _canonical_json_sha256(value):
+    return hashlib.sha256(json.dumps(
+        value, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    ).encode("utf-8")).hexdigest()
+
+
 def _write(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
@@ -94,6 +100,11 @@ def _case(root, name, *, temperature=303.15, speed=0.2, closure=1.0, execution_i
         "topology": {"open_edges": 0, "non_manifold_edges": 0, "duplicate_triangles": 0, "watertight": True},
         "outputs": {}, "surface_hash": "c" * 64,
     })
+    mesh_input = _write_json(case / "mesh_input.json", {
+        "schema_version": 1, "contract": "mesh_input.v1", "engine": "body_fitted_airflow",
+        "surface_manifest_sha256": _sha256(surface), "surface_stl_sha256": "3" * 64,
+        "estimate": {"settings": {"preset": "detailed", "background_cell_m": 0.125}},
+    })
     mesh = _write_json(case / "mesh_manifest.json", {
         "schema_version": 1, "contract": "mesh_manifest.v1", "engine": "body_fitted_airflow",
         "created_at": "2026-08-25T00:00:00Z", "status": "PASS", "errors": [], "warnings": [], "profile": "detailed",
@@ -106,19 +117,44 @@ def _case(root, name, *, temperature=303.15, speed=0.2, closure=1.0, execution_i
                   "added_cells": 1, "patches": [], "expected_patches": []},
         "y_plus": {"status": "PASS", "target_min": 30, "target_max": 300, "measured_wall_area_ratio": 1.0},
         "patches": [], "default_faces": 0, "occ_volume_m3": 8.0, "mesh_volume_error_ratio": 0.0,
-        "input": {"surface_manifest_sha256": _sha256(surface)}, "tools": {},
+        "input": {"surface_manifest_sha256": _sha256(surface),
+                  "mesh_input_sha256": _sha256(mesh_input)}, "tools": {},
     })
+    effective_settings = {
+        "supply_temperature_k": 293.15, "initial_temperature_k": 293.15,
+        "air_density_kg_m3": 1.0, "air_specific_heat_j_kg_k": 1000.0,
+        "thermal_duration_s": 240.0, "thermal_delta_t_s": 0.02,
+        "thermal_adjust_time_step": False,
+        "thermal_numerics_profile": "design_limited_second_order_v1",
+        "thermal_parallel_processes": 1,
+    }
+    effective_numerics = {
+        "profile": "design_limited_second_order_v1", "convection_order": 2,
+    }
     thermal = _write_json(case / "thermal_input.json", {
         "contract": "thermal_input.v1", "engine": "body_fitted_buoyant_urans",
         "mesh_manifest_sha256": _sha256(mesh),
-        "settings": {"supply_temperature_k": 293.15, "initial_temperature_k": 293.15,
-                     "air_density_kg_m3": 1.0, "air_specific_heat_j_kg_k": 1000.0,
-                     "thermal_duration_s": 240.0, "thermal_delta_t_s": 0.02, "thermal_adjust_time_step": False},
-        "numerics": {"profile": "design_limited_second_order_v1", "convection_order": 2},
+        "settings": effective_settings,
+        "numerics": effective_numerics,
         "terminals": [{"mesh_patch_name": "supply", "role": "supply", "flow_rate_m3_s": 0.1},
                       {"mesh_patch_name": "exhaust", "role": "exhaust", "flow_rate_m3_s": 0.1}],
         "heat": {"applied_convective_power_w": 1000.0},
     })
+    control_dict = _write(case / "system" / "controlDict", """application buoyantBoussinesqPimpleFoam;
+startFrom startTime;
+startTime 0;
+stopAt endTime;
+endTime 240;
+deltaT 0.02;
+adjustTimeStep no;
+""")
+    fv_schemes = _write(case / "system" / "fvSchemes", "div(phi,U) bounded Gauss linearUpwind grad(U);\n")
+    fv_solution = _write(case / "system" / "fvSolution", "PIMPLE { nOuterCorrectors 2; }\n")
+    turbulence_properties = _write(
+        case / "constant" / "turbulenceProperties",
+        "simulationType RAS;\nRAS { RASModel kOmegaSST; turbulence on; }\n",
+    )
+    allrun = _write(case / "Allrun", "#!/bin/sh\nbuoyantBoussinesqPimpleFoam > log.buoyantBoussinesqPimpleFoam 2>&1\n")
     progress_value = {
         "schema_version": 1, "contract": "thermal_progress.v1", "latest_time_s": 240.0,
         "completed_duration_s": 240.0, "required_duration_s": 240.0, "remaining_duration_s": 0.0,
@@ -144,16 +180,19 @@ def _case(root, name, *, temperature=303.15, speed=0.2, closure=1.0, execution_i
         "y_plus": {"available": True, "time": 240.0, "area_ratio_in_target": 1.0,
                    "wall_treatment_acceptable_area_ratio": 1.0, "minimum": 30.0, "maximum": 100.0,
                    "area_weighted_average": 60.0, "patches": []},
-        "effective_settings": {}, "effective_numerics": {},
+        "effective_settings": effective_settings, "effective_numerics": effective_numerics,
         "numerical_quality": {"contract": "numerical_quality.v1", "status": "SCREENING_ONLY",
                               "design_ready": False, "profile": "design_limited_second_order_v1",
                               "convection_order": 2, "blockers": ["SCREENING_ONLY"]},
         "input": {"thermal_input_sha256": _sha256(thermal), "numerical_provenance": {
             "contract": "thermal_numerics_provenance.v1", "source": "thermal_initial_input",
             "thermal_input_sha256": _sha256(thermal), "thermal_restart_input_sha256": None,
-            "effective_settings_sha256": "d" * 64, "effective_numerics_sha256": "e" * 64,
-            "expected_system": {"controlDict": "f" * 64, "fvSchemes": "1" * 64, "fvSolution": "2" * 64},
-            "system": {"controlDict": "f" * 64, "fvSchemes": "1" * 64, "fvSolution": "2" * 64}}},
+            "effective_settings_sha256": _canonical_json_sha256(effective_settings),
+            "effective_numerics_sha256": _canonical_json_sha256(effective_numerics),
+            "expected_system": {"controlDict": _sha256(control_dict), "fvSchemes": _sha256(fv_schemes),
+                                "fvSolution": _sha256(fv_solution)},
+            "system": {"controlDict": _sha256(control_dict), "fvSchemes": _sha256(fv_schemes),
+                       "fvSolution": _sha256(fv_solution)}}},
         "thermal_progress": progress_value,
     })
     check_mesh = _write(case / "log.checkMesh", "Mesh OK.\nNumber of illegal cells: 0\n")
@@ -198,7 +237,10 @@ End
         "thermal_input_sha256": _sha256(thermal),
     })
     paths = {
-        "geometry": geometry, "surface": surface, "mesh": mesh, "thermal_input": thermal,
+        "geometry": geometry, "surface": surface, "mesh_input": mesh_input, "mesh": mesh,
+        "thermal_input": thermal, "control_dict": control_dict,
+        "fv_schemes": fv_schemes, "fv_solution": fv_solution,
+        "turbulence_properties": turbulence_properties, "allrun": allrun,
         "thermal_progress": progress, "run": run, "result": result, "check_mesh_log": check_mesh,
         "solver_log": solver_log, "field_t": field_t, "field_u": field_u, "field_phi": field_phi,
         "field_v": field_v, "vtu": vtu, "summary": summary, "slice_x": slices["x"],
@@ -232,8 +274,19 @@ def _room_bundle(root):
     return manifest, {"anchor": (anchor, anchor_paths), "repeat": (repeat, repeat_paths)}
 
 
+def _rehash_case_record(manifest, label, case, paths):
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload[label]["artifacts"] = {
+        key: {"path": path.relative_to(manifest.parents[2]).as_posix(), "sha256": _sha256(path)}
+        for key, path in paths.items()
+    }
+    payload[label]["case_tree_sha256"] = _canonical_tree_sha256(case)
+    manifest.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+
 def test_build_working_room_geometry_is_schema_valid_and_canonical():
     from cfd_working_room import build_working_room_geometry
+    from geometry_v2 import validate_for_body_fitted
 
     geometry = build_working_room_geometry()
     schema = json.loads((REPO / "geometry.v2.schema.json").read_text(encoding="utf-8"))
@@ -243,14 +296,31 @@ def test_build_working_room_geometry_is_schema_valid_and_canonical():
     assert geometry["review"]["ready"] is True
     assert geometry["review"]["blocking"] is False
     assert geometry["review"]["blocker_count"] == 0
-    assert len(geometry["elements"]["spaces"]) == 1
+    assert validate_for_body_fitted(geometry) == []
+    assert set(geometry["elements"]) == {
+        "wall", "column", "slab", "zone", "opening",
+        "pipe", "duct", "tray", "equipment",
+    }
+    assert len(geometry["elements"]["zone"]) == 1
+    zone = geometry["elements"]["zone"][0]
+    assert zone["points"] == [[0.0, 0.0], [2000.0, 0.0], [2000.0, 2000.0], [0.0, 2000.0]]
+    assert zone["semantic"]["ceiling_height_mm"] == 2000.0
 
-    terminals = geometry["elements"]["equipment"]
+    terminals = [
+        row for row in geometry["elements"]["equipment"]
+        if row["semantic"]["kind"] == "air_terminal"
+    ]
     assert [(row["semantic"]["role"], row["semantic"]["airflow_cmh"]) for row in terminals] == [
         ("supply", 360.0),
         ("exhaust", 360.0),
     ]
-    heat = geometry["elements"]["heat_sources"]
+    assert all(row["semantic"]["host_surface"] for row in terminals)
+    assert all(row["semantic"]["center_z_mm"] > 0 for row in terminals)
+    assert all(row["semantic"]["normal"] for row in terminals)
+    heat = [
+        row for row in geometry["elements"]["equipment"]
+        if row["semantic"]["role"] == "heat_source"
+    ]
     assert len(heat) == 1
     assert heat[0]["semantic"]["convective_power_w"] == 1000.0
 
@@ -307,6 +377,109 @@ def test_working_room_missing_manifest_is_blocked_not_an_exception(tmp_path):
     assert result["evidence_sha256"] == {}
 
 
+def test_working_room_recomputes_the_canonical_two_metre_geometry(tmp_path):
+    from cfd_working_room import validate_working_room
+
+    manifest, cases = _room_bundle(tmp_path)
+    case, paths = cases["anchor"]
+    geometry = json.loads(paths["geometry"].read_text(encoding="utf-8"))
+    geometry["elements"]["zone"][0]["semantic"]["ceiling_height_mm"] = 1999.0
+    paths["geometry"].write_text(json.dumps(geometry, sort_keys=True), encoding="utf-8")
+    _rehash_case_record(manifest, "anchor", case, paths)
+
+    assert "ANCHOR_CANONICAL_GEOMETRY_INVALID" in validate_working_room(manifest, tmp_path)["blockers"]
+
+
+@pytest.mark.parametrize(("target", "value"), (
+    (("equipment", 0, "airflow_cmh"), 359.0),
+    (("equipment", 2, "input_power_w"), 999.0),
+))
+def test_working_room_recomputes_terminal_flow_and_heat(target, value, tmp_path):
+    from cfd_working_room import validate_working_room
+
+    manifest, cases = _room_bundle(tmp_path)
+    case, paths = cases["anchor"]
+    geometry = json.loads(paths["geometry"].read_text(encoding="utf-8"))
+    group, index, field = target
+    geometry["elements"][group][index]["semantic"][field] = value
+    paths["geometry"].write_text(json.dumps(geometry, sort_keys=True), encoding="utf-8")
+    _rehash_case_record(manifest, "anchor", case, paths)
+
+    assert "ANCHOR_CANONICAL_GEOMETRY_INVALID" in validate_working_room(manifest, tmp_path)["blockers"]
+
+
+def test_working_room_recomputes_required_mesh_and_numerics(tmp_path):
+    from cfd_working_room import validate_working_room
+
+    manifest, cases = _room_bundle(tmp_path)
+    case, paths = cases["repeat"]
+    thermal = json.loads(paths["thermal_input"].read_text(encoding="utf-8"))
+    thermal["numerics"].update(profile="first_order_v1", convection_order=1)
+    paths["thermal_input"].write_text(json.dumps(thermal, sort_keys=True), encoding="utf-8")
+    _rehash_case_record(manifest, "repeat", case, paths)
+
+    blockers = validate_working_room(manifest, tmp_path)["blockers"]
+    assert "REPEAT_NUMERICS_INVALID" in blockers
+    assert "WORKING_ROOM_INPUT_FINGERPRINT_MISMATCH" in blockers
+
+
+def test_working_room_input_fingerprint_includes_all_solver_configuration_files(tmp_path):
+    from cfd_working_room import validate_working_room
+
+    manifest, cases = _room_bundle(tmp_path)
+    case, paths = cases["repeat"]
+    turbulence = paths["turbulence_properties"]
+    turbulence.write_text(
+        turbulence.read_text(encoding="utf-8") + "// repeat-only drift\n",
+        encoding="utf-8",
+    )
+    _rehash_case_record(manifest, "repeat", case, paths)
+
+    assert "WORKING_ROOM_INPUT_FINGERPRINT_MISMATCH" in validate_working_room(
+        manifest, tmp_path,
+    )["blockers"]
+
+
+@pytest.mark.parametrize("artifact, mutate", (
+    ("surface", lambda value: value["tessellation"].update(repeat_only_tolerance=0.123)),
+    ("mesh_input", lambda value: value.update(repeat_only_refinement={"level": 9})),
+    ("thermal_input", lambda value: value.update(wall_patches=["repeat-only-wall"])),
+))
+def test_working_room_input_fingerprint_covers_complete_normalized_inputs(
+        tmp_path, artifact, mutate):
+    from cfd_working_room import validate_working_room
+
+    manifest, cases = _room_bundle(tmp_path)
+    case, paths = cases["repeat"]
+    path = paths[artifact]
+    value = json.loads(path.read_text(encoding="utf-8"))
+    mutate(value)
+    path.write_text(json.dumps(value, sort_keys=True), encoding="utf-8")
+    _rehash_case_record(manifest, "repeat", case, paths)
+
+    assert "WORKING_ROOM_INPUT_FINGERPRINT_MISMATCH" in validate_working_room(
+        manifest, tmp_path,
+    )["blockers"]
+
+
+def test_working_room_energy_closure_uses_only_the_hash_pinned_time(tmp_path):
+    from cfd_working_room import validate_working_room
+
+    manifest, cases = _room_bundle(tmp_path)
+    case, paths = cases["anchor"]
+    original_t = paths["field_t"].read_text(encoding="utf-8")
+    original_phi = paths["field_phi"].read_text(encoding="utf-8")
+    _write(case / "999" / "T", original_t)
+    _write(case / "999" / "phi", original_phi)
+    paths["field_t"].write_text(
+        _scalar([293.15], supply=[293.15], exhaust=[100.0]), encoding="utf-8",
+    )
+    _rehash_case_record(manifest, "anchor", case, paths)
+
+    blockers = validate_working_room(manifest, tmp_path)["blockers"]
+    assert "ANCHOR_ENERGY_CLOSURE_INVALID" in blockers
+
+
 def test_working_room_rejects_tampered_hash_and_altered_solver_log(tmp_path):
     from cfd_working_room import validate_working_room
 
@@ -347,7 +520,7 @@ def test_working_room_rejects_latest_outside_and_output_alias_refs(tmp_path):
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     payload["anchor"]["artifacts"]["field_t"]["path"] = "latest/T"
     manifest.write_text(json.dumps(payload), encoding="utf-8")
-    assert "ANCHOR_ARTIFACT_REF_INVALID:field_t" in validate_working_room(manifest, tmp_path)["blockers"]
+    assert "WORKING_ROOM_MANIFEST_SCHEMA_INVALID" in validate_working_room(manifest, tmp_path)["blockers"]
 
     manifest, cases = _room_bundle(tmp_path / "outside")
     result = validate_working_room(manifest, tmp_path / "outside", evaluator_output_path=manifest)
@@ -360,7 +533,9 @@ def test_working_room_rejects_latest_outside_and_output_alias_refs(tmp_path):
 
 
 @pytest.mark.parametrize("artifact", (
-    "geometry", "surface", "mesh", "thermal_input", "thermal_progress", "run", "result",
+    "geometry", "surface", "mesh_input", "mesh", "thermal_input", "control_dict",
+    "fv_schemes", "fv_solution", "turbulence_properties", "allrun",
+    "thermal_progress", "run", "result",
     "check_mesh_log", "solver_log", "field_t", "field_u", "field_phi", "field_v", "vtu",
     "summary", "slice_x", "slice_y", "slice_z", "report",
 ))
@@ -376,7 +551,9 @@ def test_every_working_room_artifact_hash_is_enforced(tmp_path, artifact):
 
 
 @pytest.mark.parametrize("artifact", (
-    "geometry", "surface", "mesh", "thermal_input", "thermal_progress", "run", "result",
+    "geometry", "surface", "mesh_input", "mesh", "thermal_input", "control_dict",
+    "fv_schemes", "fv_solution", "turbulence_properties", "allrun",
+    "thermal_progress", "run", "result",
     "check_mesh_log", "solver_log", "field_t", "field_u", "field_phi", "field_v", "vtu",
     "summary", "slice_x", "slice_y", "slice_z", "report",
 ))
@@ -388,7 +565,7 @@ def test_every_working_room_artifact_ref_rejects_unsafe_latest(tmp_path, artifac
     payload["anchor"]["artifacts"][artifact]["path"] = f"latest/{artifact}"
     manifest.write_text(json.dumps(payload), encoding="utf-8")
 
-    assert f"ANCHOR_ARTIFACT_REF_INVALID:{artifact}" in validate_working_room(manifest, tmp_path)["blockers"]
+    assert "WORKING_ROOM_MANIFEST_SCHEMA_INVALID" in validate_working_room(manifest, tmp_path)["blockers"]
 
 
 @pytest.mark.parametrize("limit", (
@@ -417,7 +594,7 @@ def test_working_room_rejects_escape_backslash_absolute_and_generated_refs(tmp_p
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     payload["anchor"]["artifacts"]["field_t"]["path"] = unsafe_ref
     manifest.write_text(json.dumps(payload), encoding="utf-8")
-    assert "ANCHOR_ARTIFACT_REF_INVALID:field_t" in validate_working_room(manifest, tmp_path)["blockers"]
+    assert "WORKING_ROOM_MANIFEST_SCHEMA_INVALID" in validate_working_room(manifest, tmp_path)["blockers"]
 
 
 def test_working_room_rejects_reparse_component(monkeypatch, tmp_path):
@@ -447,3 +624,123 @@ def test_working_room_detects_post_load_mutation(monkeypatch, tmp_path):
     monkeypatch.setattr(cfd_working_room, "_case_metrics", mutate_after_repeat)
     result = cfd_working_room.validate_working_room(manifest, tmp_path)
     assert any(code.startswith("POST_LOAD_MUTATION:") for code in result["blockers"])
+
+
+def test_working_room_rejects_duplicate_json_keys(tmp_path):
+    from cfd_working_room import validate_working_room
+
+    manifest, _ = _room_bundle(tmp_path)
+    text = manifest.read_text(encoding="utf-8")
+    manifest.write_text(text.replace(
+        '"schema_version": 1', '"schema_version": 1, "schema_version": 1', 1,
+    ), encoding="utf-8")
+
+    result = validate_working_room(manifest, tmp_path)
+    assert result["blockers"] == ["WORKING_ROOM_MANIFEST_MALFORMED"]
+
+
+def test_working_room_stops_after_manifest_structure_error(tmp_path):
+    from cfd_working_room import validate_working_room
+
+    manifest, _ = _room_bundle(tmp_path)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["anchor"] = "not-an-object"
+    manifest.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+    result = validate_working_room(manifest, tmp_path)
+    assert result["blockers"] == ["WORKING_ROOM_MANIFEST_SCHEMA_INVALID"]
+
+
+def test_working_room_rejects_output_anywhere_inside_authoritative_case(tmp_path):
+    from cfd_working_room import validate_working_room
+
+    manifest, cases = _room_bundle(tmp_path)
+    output = cases["anchor"][0] / "new-evaluator-output.json"
+    result = validate_working_room(manifest, tmp_path, evaluator_output_path=output)
+
+    assert "EVALUATOR_OUTPUT_ALIASES_INPUT" in result["blockers"]
+
+
+def test_working_room_detects_post_load_case_file_addition(monkeypatch, tmp_path):
+    import cfd_working_room
+
+    manifest, cases = _room_bundle(tmp_path)
+    original = cfd_working_room._case_metrics
+
+    def add_file_after_anchor(label, record, root, evidence, blockers):
+        result = original(label, record, root, evidence, blockers)
+        if label == "anchor":
+            room_fixture_path = cases["anchor"][0] / "added-after-enumeration.txt"
+            room_fixture_path.write_text("late", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(cfd_working_room, "_case_metrics", add_file_after_anchor)
+    result = cfd_working_room.validate_working_room(manifest, tmp_path)
+    assert "POST_LOAD_CASE_TREE_CHANGED:anchor" in result["blockers"]
+
+
+def test_working_room_malformed_thermal_rows_are_blocked_without_crashing(tmp_path):
+    from cfd_working_room import validate_working_room
+
+    manifest, cases = _room_bundle(tmp_path)
+    case, paths = cases["anchor"]
+    thermal = json.loads(paths["thermal_input"].read_text(encoding="utf-8"))
+    thermal["terminals"] = ["not-a-terminal"]
+    paths["thermal_input"].write_text(json.dumps(thermal, sort_keys=True), encoding="utf-8")
+    _rehash_case_record(manifest, "anchor", case, paths)
+
+    result = validate_working_room(manifest, tmp_path)
+    assert result["status"] == "BLOCKED"
+    assert "ANCHOR_THERMAL_INPUT_INVALID" in result["blockers"]
+
+
+def test_working_room_missing_terminal_role_is_blocked_without_sort_crash(tmp_path):
+    from cfd_working_room import validate_working_room
+
+    manifest, cases = _room_bundle(tmp_path)
+    case, paths = cases["anchor"]
+    thermal = json.loads(paths["thermal_input"].read_text(encoding="utf-8"))
+    thermal["terminals"][0].pop("role")
+    paths["thermal_input"].write_text(json.dumps(thermal, sort_keys=True), encoding="utf-8")
+    _rehash_case_record(manifest, "anchor", case, paths)
+
+    result = validate_working_room(manifest, tmp_path)
+    assert result["status"] == "BLOCKED"
+    assert "ANCHOR_THERMAL_INPUT_INVALID" in result["blockers"]
+
+
+@pytest.mark.parametrize("malformation, expected_blocker", (
+    ("summary", "ANCHOR_SUMMARY_INVALID"),
+    ("slice", "ANCHOR_SLICE_INVALID:x"),
+))
+def test_working_room_malformed_result_types_are_blocked_without_crashing(
+        tmp_path, malformation, expected_blocker):
+    from cfd_working_room import validate_working_room
+
+    manifest, cases = _room_bundle(tmp_path)
+    case, paths = cases["anchor"]
+    path = paths["summary"] if malformation == "summary" else paths["slice_x"]
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if malformation == "summary":
+        value["temperature"] = "not-an-object"
+    else:
+        value["sample_count"] = [1]
+    path.write_text(json.dumps(value, sort_keys=True), encoding="utf-8")
+    _rehash_case_record(manifest, "anchor", case, paths)
+
+    result = validate_working_room(manifest, tmp_path)
+    assert result["status"] == "BLOCKED"
+    assert expected_blocker in result["blockers"]
+
+
+def test_working_room_rejects_non_json_numeric_constants(tmp_path):
+    from cfd_working_room import validate_working_room
+
+    manifest, _ = _room_bundle(tmp_path)
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace('"schema_version": 1', '"schema_version": NaN', 1),
+        encoding="utf-8",
+    )
+
+    result = validate_working_room(manifest, tmp_path)
+    assert result["blockers"] == ["WORKING_ROOM_MANIFEST_MALFORMED"]
