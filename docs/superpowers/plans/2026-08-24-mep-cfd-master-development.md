@@ -78,7 +78,7 @@
 
 그러나 일반 배포나 설계 인용을 완료로 볼 수 없는 이유는 다음과 같다.
 
-- 현재 branch `codex/cfd-studio-improvements`는 다수 dirty/untracked 경로를 가진 clean RC가 아니다.
+- 원본 checkout의 `codex/cfd-studio-improvements`는 다수 dirty/untracked 경로를 가진 clean RC가 아니며 그대로 보존한다. 개발 기준선은 격리된 public branch `codex/case-evidence-review-gate`로 분리됐고 Windows CI가 green이지만, 이 사실은 frozen RC나 일반 배포 준비를 의미하지 않는다.
 - `working_validation.v1`의 `serial_environment` 이후 여섯 validator는 아직 code-owned recomputation으로 닫히지 않았다.
 - 실제 현장 DXF 3건, TAB/sensor holdout, 기계설비 사용자 UAT 3명의 current frozen-RC evidence가 없다.
 - G2 또는 대체 production-like GCI는 threshold를 낮추지 않고 통과해야 한다.
@@ -281,11 +281,11 @@ M8-B surrogate: M3/L3 eligible run inventory와 site/design holdout이 선행
 - Consumes: current git HEAD, dirty path hashes, Python executable, package/schema/benchmark hashes.
 - Produces: immutable baseline ID used by every later plan task.
 
-- [ ] **Step 1: 변경 소유권 gate를 통과한다**
+- [x] **Step 1: 변경 소유권 gate를 통과한다**
 
   `git status --short`에서 `cfd_studio.py`, `cfd_run.py`, `cfd_report.py`, `cfd_physics.py`와 신규 schema/test의 소유권을 확인한다. 사용자 승인 없이 기존 dirty 파일 전체를 stage하거나 정리하지 않는다. 승인된 baseline commit 또는 승인된 파일 목록이 없으면 이 계획의 코드 작업을 시작하지 않는다.
 
-- [ ] **Step 2: 기준선 tests를 실행한다**
+- [x] **Step 2: 기준선 tests를 실행한다**
 
   Run:
 
@@ -296,7 +296,7 @@ M8-B surrogate: M3/L3 eligible run inventory와 site/design holdout이 선행
 
   Expected: failed 0. Runtime-dependent skip은 이유와 해제 조건이 문자열로 기록된다.
 
-- [ ] **Step 3: 전체 test baseline을 JUnit으로 기록한다**
+- [x] **Step 3: 전체 test baseline을 JUnit으로 기록한다**
 
   Run:
 
@@ -306,15 +306,15 @@ M8-B surrogate: M3/L3 eligible run inventory와 site/design holdout이 선행
 
   Expected: failed 0. 실패가 있으면 새 기능을 시작하지 않고 기존 실패의 원인과 소유권을 먼저 분리한다.
 
-- [ ] **Step 4: baseline evidence를 생성하고 자체 검증한다**
+- [x] **Step 4: baseline evidence를 생성하고 자체 검증한다**
 
   Run the exact P0.0~P0.2 steps in `docs/superpowers/plans/2026-08-14-mep-cfd-validation-vv-release.md`, including ACL/I/O acceptance and authoritative inventory exclusion of generated reports.
 
-- [ ] **Step 5: 계획 전용 branch/worktree를 만든다**
+- [x] **Step 5: 계획 전용 branch/worktree를 만든다**
 
   기준선 commit이 승인된 후 `codex/case-evidence-review-gate`처럼 작업 단위별 branch를 만든다. dirty working tree 자체에서 large refactor를 시작하지 않는다.
 
-- [ ] **Step 6: 승인된 baseline을 원격에 반영한다**
+- [x] **Step 6: 승인된 baseline을 원격에 반영한다**
 
   로컬 commit만으로는 baseline이 보존되지 않는다. 2026-08-24 감사에서 39,046줄과 test 전량이 단일 디스크에만 존재하는 상태가 확인됐다. 승인 후 다음을 수행한다.
 
@@ -338,7 +338,9 @@ M8-B surrogate: M3/L3 eligible run inventory와 site/design holdout이 선행
 
   **2026-08-25 공개 진행 결정:** 사용자(저장소 공개 범위 결정권자)는 `origin`을 public으로 유지하고 이 branch를 공개 push하도록 명시적으로 승인했다. 안전 점검에서 신규 secret, 추적된 `cfd_projects/`, 신규 현장 artifact는 발견되지 않았지만, public `feature/cfd`에 이미 존재하는 `debug_tools/temp_geometry.json`, `temp_export*.dxf`, 관련 screenshot은 실제 도면 파생 가능성이 있어 “clean”으로 표현하지 않는다. 이번 branch가 해당 blob을 새로 추가·변경하지 않는다는 비교 결과와 사용자의 알려진 위험 수용을 예외 근거로 보존한다. 이후 실제 현장 입력·solver 결과는 계속 저장소 밖에 둔다.
 
-- [ ] **Step 7: 역할별 담당자와 가용성을 확인한다**
+  **완료 근거:** public `origin/codex/case-evidence-review-gate`가 생성됐고 Task 0 구현 HEAD `113a2e7b6b20f25f2700408d6a3c11709c48869b`까지 반영됐다. 해당 push 직후 로컬 미푸시 커밋 수는 0이었다.
+
+- [x] **Step 7: 역할별 담당자와 가용성을 확인한다**
 
   §11 RACI의 8개 역할 각각에 대해 실제 담당자 ID와 가용 시점을 기록한다. 확보되지 않은 역할은 다음과 같이 처리한다.
 
@@ -348,13 +350,19 @@ M8-B surrogate: M3/L3 eligible run inventory와 site/design holdout이 선행
 
   특히 M3(현장 TAB·독립 CFD 검토자)와 M7(기계설비 사용자 3명·관찰자)은 외부 인력 없이는 착수 자체가 불가능하다. 없는 인력을 전제한 일정을 유일한 기준으로 사용하지 않는다.
 
-- [ ] **Step 8: 최소 CI를 구성한다**
+  **완료 근거:** `docs/governance/mep-cfd-raci-availability-2026-08-25.md`에 8개 decision의 역할·owner ID·가용성을 기록했다. 현재 확인된 것은 `codex-agent`의 제한된 개발 capability뿐이며, 모든 사람/외부 결정 역할은 `UNASSIGNED/BLOCKED_NO_OWNER`로 기록하고 해당 외부 Task를 active critical path에서 제외했다.
+
+- [x] **Step 8: 최소 CI를 구성한다**
 
   `.github/workflows/windows-ci.yml`에서 `toolchain.lock.json`이 고정한 Python(현재 3.12.10)으로 전체 test를 실행한다. 다른 patch version에서는 bootstrap 검증 test가 정상적으로 실패하므로 CI runtime을 lock에 맞춘다.
 
   Expected: push마다 `pytest` failed 0. CI 없이는 test 결과가 개발 PC 한 대에서만 의미를 갖는다.
 
+  **완료 근거:** `.github/workflows/windows-ci.yml`은 잠금 Python 3.12.10, lock identity, 전체 `pytest`, JUnit upload를 실행한다. public [Windows CI run 32800246154](https://github.com/donghyun1park-web/mep-parser/actions/runs/32800246154)의 HEAD `113a2e7`에서 job `97659530263`가 green이며, JUnit은 851 tests = 837 passed + 14 skipped, failures/errors 0, 103.521초다. artifact `9546275605` digest는 `sha256:9e0b2d7d6d4a8129b075b488b173d666afc5269f79e8a2fac561dc7a96932874`다.
+
 **Gate M0:** tests failed 0, baseline artifact PASS, path ownership 승인, target branch, **원격 반영 완료**, **역할 가용성 기록**, **CI 최초 green**이 없으면 NO-GO.
+
+**2026-08-25 판정:** M0 COMPLETE. 일반 배포는 계속 NO-GO이며, active code critical path만 Task 5a로 이동한다. Task 4.5/5b/5c와 M1 Exit는 confirmed geometry와 사람 역할/실행 증거가 없어 계속 차단된다.
 
 ### Task 1: 상태 catalog와 Case Evidence schemas를 고정한다
 
@@ -680,21 +688,37 @@ def validate_review(review_path: Path, *, projects_root: Path) -> list[dict]: ..
 - Modify: `working_validation.py`
 - Preserve: `working_validation.v1.schema.json`; the fixed eight-check contract and scientific labels do not change in this milestone.
 - Modify: `cfd_capabilities.py`.
+- Modify: `cfd_physics.py` only for explicit fail-closed validation scopes; ordinary Studio/field physics remains unchanged.
 - Create: `scripts/local_usability_acceptance.py`, `cfd_working_room.py`, `cfd_verification.py`, `cfd_numerical_spotcheck.py` according to the fixed contracts in the companion plan.
-- Test: `tests/test_working_validation.py`, `tests/test_cfd_capabilities.py`, `tests/test_local_usability_acceptance.py`, `tests/test_cfd_working_room.py`, `tests/test_cfd_verification.py`, `tests/test_cfd_numerical_spotcheck.py`.
+- Create schemas: `local_usability_acceptance.v1.schema.json`, `working_room_acceptance.v1.schema.json`, `sgi_screening_acceptance.v1.schema.json`, `verification_manifest.v1.schema.json`, `numerical_spotcheck.v1.schema.json`.
+- Test: `tests/test_working_validation.py`, `tests/test_cfd_capabilities.py`, `tests/test_cfd_physics.py`, `tests/test_local_usability_acceptance.py`, `tests/test_cfd_working_room.py`, `tests/test_sgi_screening_acceptance.py`, `tests/test_cfd_verification.py`, `tests/test_cfd_numerical_spotcheck.py`.
+- Read-only reuse in 5a: `cfd_run.py`, `cfd_post.py`; do not change `cfd_studio.py` merely to make synthetic validators pass.
 
 **Interfaces:**
 
 - `evaluate_working_validation(projects_root: Path) -> dict` remains the public evaluator.
 - Each fixed check gets a code-owned validator; `_future_not_implemented()` is no longer used for completed checks.
+- Fixed authoritative manifests under the evaluated `projects_root` are:
 
-- [ ] **Step 1: exact companion plan의 코드 부분을 실행한다**
+  | Check | Fixed source manifest | Raw authority |
+  |---|---|---|
+  | `serial_environment` | `_working_validation/local_usability_acceptance.json` | `_system/environment_acceptance/` and `_working_validation/runtime_capability.v1.json` |
+  | `working_room_e2e` | `_working_validation/working-room-v1/working_room_acceptance.json` | hash-pinned `anchor/` and `repeat/` children |
+  | `real_dxf_screening`, `restart_integrity` | `_working_validation/sgi-screening-v1/sgi_screening_acceptance.json` | hash-bound actual `_field_jobs/...` and `_body_*` case |
+  | `exact_heat_verification` | `_working_validation/heat-box-v1/verification_manifest.json` | hash-pinned heat-box case |
+  | `limited_numerical_spotchecks` | `_working_validation/numerical-spotcheck-v1/numerical_spotcheck.json` | hash-pinned anchor plus exactly three named children |
 
-  Execute Tasks 2~5 in `docs/superpowers/plans/2026-08-14-mep-cfd-single-pc-working-validation.md` without changing its scientific labels. `WORKING_SINGLE_PC` and `NUMERICAL_SPOTCHECK_PASS_SINGLE_PC` remain non-citable and non-release states.
+- Every manifest uses relative paths and hashes. Validators reject `latest`, cache/temp paths, sibling escapes, self-output, and post-load hash drift, and add every consumed raw file to `evidence_sha256`.
+- Task 5a creates schemas, pure validators, explicit validation-scope guards, and synthetic immutable-tree/tamper tests only. It runs no solver, FreeCAD, Studio, browser, GUI DXF, or generated-evidence acceptance.
+- Task 5b owns real serial/working-room/heat-box/numerical evidence producers. Task 5c owns confirmed-DXF GUI, shutdown/resume, SGI/restart manifest production, and usability observation.
+
+- [ ] **Step 1: exact companion plan의 코드 부분만 실행한다**
+
+  Execute the code-owned validator portions of Tasks 2~5 in `docs/superpowers/plans/2026-08-14-mep-cfd-single-pc-working-validation.md` without changing its scientific labels. Real runtime evidence belongs to 5b/5c. Without genuine artifacts the evaluator must remain `BLOCKED`; `WORKING_SINGLE_PC` and `NUMERICAL_SPOTCHECK_PASS_SINGLE_PC` remain non-citable and non-release states.
 
 - [ ] **Step 2: focused tests를 통과시킨다**
 
-  Run: `& $Python -B -m pytest -q tests/test_working_validation.py tests/test_cfd_capabilities.py tests/test_local_usability_acceptance.py tests/test_cfd_working_room.py tests/test_cfd_verification.py tests/test_cfd_numerical_spotcheck.py`
+  Run: `& $Python -B -m pytest -q tests/test_working_validation.py tests/test_cfd_capabilities.py tests/test_cfd_physics.py tests/test_local_usability_acceptance.py tests/test_cfd_working_room.py tests/test_sgi_screening_acceptance.py tests/test_cfd_verification.py tests/test_cfd_numerical_spotcheck.py`
 
   Expected: PASS. 실제 solver 실행이 없는 상태에서도 validator는 `BLOCKED`를 정확히 보고해야 한다.
 
@@ -1821,11 +1845,11 @@ Reviewer identity는 개인 이름을 코드에 hard-code하지 않고 조직의
 
 ### M0 — Baseline
 
-- [ ] Tests failed 0 and baseline artifact PASS.
-- [ ] Approved baseline pushed to origin; unpushed commit count is 0.
-- [ ] Pre-push safety scan clean, 또는 이미 공개된 선행 blob의 알려진 위험을 저장소 공개 범위 결정권자가 명시적으로 수용하고 이번 branch에 신규 민감 artifact가 없음을 기록.
-- [ ] RACI roles have named owners or are marked `BLOCKED_NO_OWNER` and excluded from the critical path.
-- [ ] CI runs the full suite on the locked Python and is green.
+- [x] Tests failed 0 and baseline artifact PASS.
+- [x] Approved baseline pushed to origin; unpushed commit count is 0.
+- [x] Pre-push safety scan clean, 또는 이미 공개된 선행 blob의 알려진 위험을 저장소 공개 범위 결정권자가 명시적으로 수용하고 이번 branch에 신규 민감 artifact가 없음을 기록.
+- [x] RACI roles have named owners or are marked `BLOCKED_NO_OWNER` and excluded from the critical path.
+- [x] CI runs the full suite on the locked Python and is green.
 
 ### M1 — Trust Core
 

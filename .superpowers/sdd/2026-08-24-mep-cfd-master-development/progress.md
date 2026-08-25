@@ -7,6 +7,7 @@
 - Execution branch: `codex/case-evidence-review-gate`, start commit `bd7d1aaba7a0c083b4931b3f72cdf297e3342780`.
 - Selected baseline snapshot: 117 code, schema, benchmark, test, and planning files copied from the approved current checkout; SHA-256 mismatches: 0.
 - Excluded from baseline: `.codex-temp`, `.claude`, `.superpowers`, PPTX/render artifacts, `cfd_projects`, generated reports, and the bundled Python installer.
+- Task 0 implementation candidate verified and published at `113a2e7b6b20f25f2700408d6a3c11709c48869b`; public first-green run `32800246154` is bound to that exact SHA.
 
 ## Rulings
 
@@ -51,6 +52,10 @@
 - Ruling Task4-E: HTML first-page watermark means a top-of-document banner plus print styling; only authoritative `DESIGN_CITABLE` is green and design-review wording is forbidden for every other state — otherwise presentation could overclaim despite correct JSON.
 - Ruling Task4-F: Advice keeps legacy fields/ordering and adds catalog-driven evidence/input/model/field groups; legacy `trust.citable` cannot unseal design actions — otherwise old callers break or stale trust bypasses health.
 - Ruling Task4-G: Task 1 owns actionable copy for the five missing/review lifecycle codes, and Task 4 must consume it — otherwise UI/report would create a second status authority.
+- Ruling Task5a-A: Preserve `working_validation.v1.schema.json` exactly: ordered eight checks, existing state labels and derivations, fixed scope/limitations, `design_citable=false`, and `release_ready=false`; producer-specific science belongs in separate schemas — otherwise code-only preparation could silently change the public evaluator contract.
+- Ruling Task5a-B: The fixed manifest registry is `_working_validation/local_usability_acceptance.json`, `_working_validation/working-room-v1/working_room_acceptance.json`, `_working_validation/sgi-screening-v1/sgi_screening_acceptance.json`, `_working_validation/heat-box-v1/verification_manifest.json`, and `_working_validation/numerical-spotcheck-v1/numerical_spotcheck.json`; each manifest uses relative paths/hashes and every raw dependency enters `evidence_sha256` — otherwise `latest`, cache, or caller-selected evidence could become authoritative.
+- Ruling Task5a-C: 5a implements schemas, pure revalidators, validation-scope guards, and synthetic immutable-tree/tamper tests only. It runs no solver, FreeCAD, Studio, browser, real DXF, or acceptance evidence; genuine runtime producers belong to 5b and confirmed-DXF GUI/restart/usability to 5c — otherwise a synthetic PASS could be mistaken for single-PC evidence.
+- Ruling Task5a-D: Modify `working_validation.py`, `cfd_capabilities.py`, and only explicit fail-closed validation scopes in `cfd_physics.py`; create five producer schemas and four validator modules. Reuse `cfd_run.py` and `cfd_post.py` read-only and do not modify `cfd_studio.py` for test convenience — otherwise Task 5a would absorb runtime/UI behavior beyond its gate.
 
 ## Mandatory pre-flight consistency scan
 
@@ -161,15 +166,17 @@ Full read-only report: `preflight-scan.md`. The following ledger tables preserve
 
 ## Task status
 
-- Task 0: original code/baseline slice complete — commits `eef978e`, `8bb9c5e`; review round 2 clean; controller focused verification `38 passed`; working-copy plan revision adds Steps 6–8, which remain pending.
+- Task 0: COMPLETE through Steps 1–8 — baseline commits `eef978e`, `8bb9c5e`; public decision `4170958`; Windows CI `83e7cda`, parse repair `af4de6b`; Windows path-identity repairs `65c4da3`, `97323ec`, `113a2e7`; final independent verdict `CLEAN`; public first-green run `32800246154` at exact HEAD `113a2e7`.
 - Task 1: complete — commits `7669d35`, `c0c3c59`; review fix round 1 clean; controller focused verification `45 passed`; controller full verification `675 passed, 14 skipped`.
 - Task 2: complete — commits `77c0cc8`, `b533118`, `f24358c`, `2e9282e`, `458b66f`; final reviewer verdict `CLEAN`; controller focused verification `96 passed`; controller full verification `733 passed, 14 skipped`.
 - Task 3: complete — commits `367ae7b`, `bcd9f11`, `18dfc2f`, `64ead34`; final reviewer verdict `CLEAN`; controller focused verification `148 passed`; controller full verification `785 passed, 14 skipped`.
 - Task 4: complete — commits `fd0bcee`, `24d18aa`; final reviewer verdict `CLEAN`; controller focused verification `260 passed`; controller full verification `808 passed, 14 skipped`.
-- Task 0 Step 6: authorized, push pending — `origin` is public, the feature branch is absent remotely, and the mandatory safety scan found likely real-derived architectural geometry already present in remote `feature/cfd`; on 2026-08-25 the user explicitly accepted that known pre-existing risk and authorized a public branch push. This is not recorded as a clean scan.
-- Task 0 Steps 7–8: pending — RACI owner availability and first-green Windows CI have not been recorded.
+- Task 0 Step 6: complete — public `origin/codex/case-evidence-review-gate` exists and implementation HEAD `113a2e7` was pushed with zero unpushed commits immediately afterward. The user accepted the disclosed, pre-existing likely real-derived geometry risk; this remains a known-risk exception, not a clean scan.
+- Task 0 Step 7: complete — `docs/governance/mep-cfd-raci-availability-2026-08-25.md` records all eight decision rows. Only `codex-agent` development capability is `AVAILABLE_NOW`; every human/external role is `UNASSIGNED/BLOCKED_NO_OWNER` and its dependent Task is excluded from the active critical path.
+- Task 0 Step 8: complete — locked Windows CI first green at run `32800246154`, job `97659530263`; 851 tests = 837 passed + 14 skipped, failures/errors 0, 103.521 seconds; JUnit artifact `9546275605`, digest `sha256:9e0b2d7d6d4a8129b075b488b173d666afc5269f79e8a2fac561dc7a96932874`.
 - Task 4.5: pending — confirmed real-DXF geometry and an accountable MEP reviewer are not available.
-- Task 5a–5c: pending — revised plan forbids code work before Task 0 Steps 6–8 and keeps runtime/GUI evidence behind geometry and environment gates.
+- Task 5a: READY/next active code task — controller rulings Task5a-A through Task5a-D fix its manifest registry, schemas, code-only boundary, and allowed producer seams.
+- Task 5b–5c: pending/gated — 5b owns real solver evidence; 5c owns confirmed-DXF GUI/restart/usability. Task 4.5 and named human roles remain unavailable.
 - Task 1 pre-dispatch contract audit: `TASK1_BRIEF_READY`.
 - Task 2 pre-dispatch authority audit: `TASK2_BRIEF_READY`.
 - Task 3 pre-dispatch health/review audit: `TASK3_BRIEF_READY`.
@@ -202,3 +209,8 @@ Full read-only report: `preflight-scan.md`. The following ledger tables preserve
 - 2026-08-25 GitHub/next-gate audit at local HEAD `1342a94`: remote `origin` is public with default branch `master`; remote heads do not include `codex/case-evidence-review-gate`; 22 local commits are not in cached remote refs; GitHub CLI authentication is expired.
 - 2026-08-25 pre-push safety audit: no high-confidence secret/private-key/token signatures; `cfd_projects/` has zero tracked paths; four root sample DXFs are generator-backed synthetic fixtures. `debug_tools/temp_geometry.json`, associated `temp_export*.dxf`, and reviewed screenshots contain detailed likely real-derived B4 architectural geometry/source context. These blobs are byte-identical to public remote `feature/cfd` commit `f951120`, so the risk predates this branch but fails the revised plan's clean public-push gate.
 - 2026-08-25 publication ruling: proceed with public branch backup because the user explicitly selected public continuation after the likely real-derived, already-public geometry risk was disclosed. The branch adds no new sensitive artifact according to the scoped comparison, but acceptance does not convert the safety scan into `clean`; if wrong, the pre-existing public exposure continues and must be remediated separately.
+- 2026-08-25 Task 0 CI round 1: public run `32792611981` rejected workflow YAML before job creation because a plain `run:` scalar began with PowerShell `&`; commit `af4de6b` changed only that command to a YAML block scalar after independent review.
+- 2026-08-25 Task 0 CI round 2: public run `32793134455`, job `97638744731`, created the locked environment and ran the suite but ended `804 passed, 4 failed, 14 skipped`. Three report failures and one FreeCAD capability failure shared the hosted `RUNNER~1` versus `runneradmin` path-identity defect; JUnit artifact `9543877200`, digest `sha256:a4a4ad55c537b8d648e724d1cdf64bf71457f7277a783ad796f69f2cd94670d3`.
+- 2026-08-25 Windows path-identity repair: commits `65c4da3`, `97323ec`, and `113a2e7` added identity-aware alias handling while preserving canonical containment, full lexical reparse inspection, raw-dot rejection, existing-parent-only publication, source path/hardlink protection, review locks, and FreeCAD precedence. Three review loops closed P1/P2 findings; final verdict `CLEAN`.
+- Controller verification at `113a2e7`: locked Python 3.12.10 focused groups `88 passed, 7 warnings` and `154 passed, 7 warnings`; full authenticated suite `837 passed, 14 skipped, 7 warnings in 565.61s`; JUnit `.superpowers/sdd/2026-08-24-mep-cfd-master-development/ci-windows-path-alias-controller-release-junit.xml`; exit code 0.
+- 2026-08-25 Task 0 first green: public run `32800246154`, job `97659530263`, exact HEAD `113a2e7`; checkout, locked Python, lock verification, authenticated environment, environment identity, full pytest, and JUnit upload all succeeded. JUnit artifact `9546275605` reports 851 tests = 837 passed + 14 skipped, failures/errors 0, 103.521 seconds; digest `sha256:9e0b2d7d6d4a8129b075b488b173d666afc5269f79e8a2fac561dc7a96932874`. M0 is complete; general release remains NO-GO and M1 remains blocked by Task 4.5/5b/5c evidence.
