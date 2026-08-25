@@ -230,6 +230,46 @@ def export_boq_xlsx(data, path, title=None):
     return path
 
 
+# ── 단가 연결용 CSV (ifc5d Bill of Quantities 형식) ──────────────────
+# ifc5d 는 CSV → IfcCostSchedule 임포트를 지원한다(csv2ifc). 여기서는 집계 결과를
+# 그 형식으로 내보내 단가(Rate)만 채우면 금액이 계산되는 내역서 뼈대를 만든다.
+# Query 는 IfcOpenShell 셀렉터 — 해당 코스트 항목에 묶일 IFC 요소를 지정한다.
+BOQ_CSV_HEADERS = ["Index", "Identification", "Name", "Unit", "Quantity",
+                   "Property", "Query", "Rate"]
+
+
+def export_boq_csv(data, path):
+    """집계 → ifc5d BoQ CSV(단가 열 비움). 반환 (경로, 행 수)."""
+    import csv
+    secs = aggregate(data)
+    rows = []
+    idx = 0
+
+    def add(ident, name, unit, qty, prop, query):
+        nonlocal idx
+        idx += 1
+        rows.append([idx, ident, name, unit, qty, prop, query, ""])
+
+    for key, cnt, ln, h, area, vol in secs["벽"][1]:
+        q = f'IfcWall, type="WALL-{key[1:]}"' if key.startswith("T") else "IfcWall"
+        add(f"W-{key}", f"벽 {key}", "m3", vol, "GrossVolume", q)
+    for key, cnt, h, vol in secs["기둥"][1]:
+        add(f"C-{key}", f"기둥 {key}", "m3", vol, "GrossVolume", "IfcColumn")
+    for no, layer, area, thk, vol in secs["슬래브"][1]:
+        add(f"S-{no}", f"슬래브 {no} ({layer})", "m3", vol, "GrossVolume", "IfcSlab")
+    for kind, size, cnt in secs["창호"][1]:
+        add(f"O-{size}", f"{kind} {size}", "EA", cnt, "COUNT",
+            "IfcDoor" if kind == "문" else "IfcWindow")
+    for kind, size, cnt, ln in secs["MEP"][1]:
+        add(f"M-{kind}-{size}", f"{kind} {size}", "m", ln, "Length", "IfcFlowSegment")
+
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(BOQ_CSV_HEADERS)
+        w.writerows(rows)
+    return path, len(rows)
+
+
 def main():
     for _s in (sys.stdout, sys.stderr):   # cp949 콘솔 한글 깨짐 방지
         try:
@@ -240,6 +280,8 @@ def main():
     ap.add_argument("geometry", help="geometry.json 경로")
     ap.add_argument("out", nargs="?", default=None,
                     help="출력 .xlsx (기본 <입력>_물량.xlsx)")
+    ap.add_argument("--csv", action="store_true",
+                    help="단가 연결용 BoQ CSV(ifc5d 형식)도 함께 출력")
     args = ap.parse_args()
     with open(args.geometry, encoding="utf-8") as f:
         data = json.load(f)
@@ -255,6 +297,9 @@ def main():
         if rows:
             parts.append(f"{name} {tot[1] if isinstance(tot[1], int) else len(rows)}")
     print(f"[OK] 물량집계 -> {out}  ({', '.join(parts)})")
+    if args.csv:
+        cpath, n = export_boq_csv(data, os.path.splitext(out)[0] + "_boq.csv")
+        print(f"[OK] 단가연결 CSV -> {cpath}  ({n}행 — Rate 열에 단가 입력)")
 
 
 if __name__ == "__main__":

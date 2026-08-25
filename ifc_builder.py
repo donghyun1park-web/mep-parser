@@ -35,6 +35,7 @@ try:
     import ifcopenshell.api.aggregate
     import ifcopenshell.api.material
     import ifcopenshell.api.type
+    import ifcopenshell.api.pset
     import ifcopenshell.util.shape_builder
 except ImportError as e:
     print(f"[ERROR] 의존성 필요: pip install ifcopenshell numpy  ({e})", file=sys.stderr)
@@ -161,6 +162,20 @@ def _connect_walls(model, made, log=None):
     return n_conn, n_regen
 
 
+# ── [표준 물량] buildingSMART Qto_* 기입 ──────────────────────────────
+# 우리 자체 집계(boq_export)와 별개로, IFC 안에 표준 물량셋을 심어 두면 Revit·
+# ArchiCAD·ifc5d 등 외부 도구가 우리 물량을 그대로 읽는다. 값은 도면에서 계산한
+# 결정론 값(형상 재계산 아님) — 단위는 파일 단위계(METRE) 기준.
+def _add_qto(model, product, name, props):
+    """Qto_*BaseQuantities 기입. 실패해도 빌드는 계속(부가 데이터)."""
+    try:
+        qto = ifcopenshell.api.pset.add_qto(model, product=product, name=name)
+        ifcopenshell.api.pset.edit_qto(model, qto=qto, properties=props)
+        return True
+    except Exception:
+        return False
+
+
 def _add_storey(model, bld, name, z_mm=0.0):
     sto = ifcopenshell.api.root.create_entity(
         model, ifc_class="IfcBuildingStorey", name=name)
@@ -172,8 +187,21 @@ def _add_storey(model, bld, name, z_mm=0.0):
     return sto
 
 
+def _poly_area(coords):
+    """닫힌 폴리곤 면적(신발끈, mm²). Qto 단면적/바닥면적용."""
+    n = len(coords)
+    if n < 3:
+        return 0.0
+    s = 0.0
+    for i in range(n):
+        x1, y1 = coords[i][0], coords[i][1]
+        x2, y2 = coords[(i + 1) % n][0], coords[(i + 1) % n][1]
+        s += x1 * y2 - x2 * y1
+    return abs(s) / 2.0
+
+
 def _build_elements(model, body, sb, sto, data, z_offset=0.0, connect=False,
-                    type_cache=None):
+                    type_cache=None, qto=True):
     """한 층의 geometry dict → IFC 요소 생성. z_offset(mm)=층 바닥 레벨.
     요소별 z = z_offset + 레코드 z_base (레코드 값은 층 '내' 오프셋)."""
     params = data.get("params", {})
@@ -182,7 +210,7 @@ def _build_elements(model, body, sb, sto, data, z_offset=0.0, connect=False,
     ph = float(params.get("wall", {}).get("height", 2800.0))
     pcol_h = float(params.get("column", {}).get("height", 3000.0))
     pslab_t = float(params.get("slab", {}).get("thickness", 200.0))
-    stats = {"wall": 0, "column": 0, "slab": 0, "skip": 0}
+    stats = {"wall": 0, "column": 0, "slab": 0, "skip": 0, "qto": 0}
     made = []                       # 접합 모드에서 생성된 벽 목록
     if type_cache is None:
         type_cache = {}
@@ -196,6 +224,30 @@ def _build_elements(model, body, sb, sto, data, z_offset=0.0, connect=False,
         cl = w.get("centerline") or w.get("points") or []
         if len(cl) < 2:
             stats["skip"] += 1
+            continue
+        # 폐합 벽(closed)은 둘레 벽 여러 장이 아니라 솔리드(기둥형)로 세운다.
+        # dxf_parser 가 pairing="closed" 로 표시한 원래 의도이며, boq_export 의
+        # 집계(단면적×높이)와도 일치한다. 둘레 분해 시 물량이 어긋난다(교차 대조로 발견).
+        if w.get("closed") and len(cl) >= 3:
+            pts = [(p[0], p[1]) for p in cl]
+            if len(pts) > 2 and pts[0] == pts[-1]:
+                pts = pts[:-1]
+            solid = _extrude_polygon(model, body, sb, pts, height, zb,
+                                     "IfcWall", f"Wall_{i}")
+            if solid:
+                container(solid)
+                if qto:
+                    area = _poly_area(pts)
+                    _add_qto(model, solid, "Qto_WallBaseQuantities", {
+                        "Height": height / MM,
+                        "GrossFootprintArea": area / MM ** 2,
+                        "GrossVolume": (area * height) / MM ** 3,
+                        "NetVolume": (area * height) / MM ** 3,
+                    })
+                    stats["qto"] += 1
+                stats["wall"] += 1
+            else:
+                stats["skip"] += 1
             continue
         width = float(w.get("width_detected") or w.get("overrides", {}).get("width", pw))
         height = float(w.get("overrides", {}).get("height", ph))
@@ -234,6 +286,16 @@ def _build_elements(model, body, sb, sto, data, z_offset=0.0, connect=False,
                 ifcopenshell.api.geometry.assign_representation(
                     model, product=wall, representation=rep)
             container(wall)
+            if qto:
+                _add_qto(model, wall, "Qto_WallBaseQuantities", {
+                    "Length": L / MM, "Width": width / MM, "Height": height / MM,
+                    "GrossSideArea": (L * height) / MM ** 2,
+                    "NetSideArea": (L * height) / MM ** 2,
+                    "GrossFootprintArea": (L * width) / MM ** 2,
+                    "GrossVolume": (L * height * width) / MM ** 3,
+                    "NetVolume": (L * height * width) / MM ** 3,
+                })
+                stats["qto"] += 1
             stats["wall"] += 1
 
     # ── 기둥 ─────────────────────────────────────────────────────────
@@ -253,6 +315,15 @@ def _build_elements(model, body, sb, sto, data, z_offset=0.0, connect=False,
         col = _extrude_polygon(model, body, sb, coords, h, zb, "IfcColumn", f"Col_{i}")
         if col:
             container(col)
+            if qto:
+                area = _poly_area(coords)
+                _add_qto(model, col, "Qto_ColumnBaseQuantities", {
+                    "Length": h / MM,
+                    "CrossSectionArea": area / MM ** 2,
+                    "GrossVolume": (area * h) / MM ** 3,
+                    "NetVolume": (area * h) / MM ** 3,
+                })
+                stats["qto"] += 1
             stats["column"] += 1
 
     # ── 슬래브 ───────────────────────────────────────────────────────
@@ -269,6 +340,18 @@ def _build_elements(model, body, sb, sto, data, z_offset=0.0, connect=False,
         slab = _extrude_polygon(model, body, sb, coords, thk, zb - thk, "IfcSlab", f"Slab_{i}")
         if slab:
             container(slab)
+            if qto:
+                area = _poly_area(coords)
+                peri = sum(math.hypot(coords[(j + 1) % len(coords)][0] - coords[j][0],
+                                      coords[(j + 1) % len(coords)][1] - coords[j][1])
+                           for j in range(len(coords)))
+                _add_qto(model, slab, "Qto_SlabBaseQuantities", {
+                    "Depth": thk / MM, "Perimeter": peri / MM,
+                    "GrossArea": area / MM ** 2, "NetArea": area / MM ** 2,
+                    "GrossVolume": (area * thk) / MM ** 3,
+                    "NetVolume": (area * thk) / MM ** 3,
+                })
+                stats["qto"] += 1
             stats["slab"] += 1
 
     # ── 표준 접합: 맞닿는 벽 연결 후 코너 형상 재생성 ────────────────
@@ -279,7 +362,8 @@ def _build_elements(model, body, sb, sto, data, z_offset=0.0, connect=False,
     return stats
 
 
-def build(geom_path, ifc_path, storey="Level", z_base=0.0, connect=False):
+def build(geom_path, ifc_path, storey="Level", z_base=0.0, connect=False,
+          qto=True):
     """단일 층 geometry.json → IFC. (기존 API 호환)
     connect=True 면 맞닿는 벽을 IFC 표준으로 연결해 코너를 마이터 처리."""
     with open(geom_path, encoding="utf-8") as f:
@@ -291,12 +375,12 @@ def build(geom_path, ifc_path, storey="Level", z_base=0.0, connect=False):
     sto = _add_storey(model, bld, storey, z_base)
     sb = ifcopenshell.util.shape_builder.ShapeBuilder(model)
     stats = _build_elements(model, body, sb, sto, data, z_offset=z_base,
-                            connect=connect)
+                            connect=connect, qto=qto)
     model.write(ifc_path)
     return stats
 
 
-def build_multi(floors, ifc_path, connect=False):
+def build_multi(floors, ifc_path, connect=False, qto=True):
     """다층 스태킹: floors=[{"geometry": path, "storey": 이름, "z": 바닥레벨mm}, ...]
     → 층별 IfcBuildingStorey 를 가진 단일 IFC. 반환: 층별 stats 리스트.
 
@@ -317,7 +401,7 @@ def build_multi(floors, ifc_path, connect=False):
         z = float(fl["z"]) if fl.get("z") is not None else z_auto
         sto = _add_storey(model, bld, name, z)
         stats = _build_elements(model, body, sb, sto, data, z_offset=z,
-                                connect=connect, type_cache=type_cache)
+                                connect=connect, type_cache=type_cache, qto=qto)
         stats["storey"] = name
         stats["z"] = z
         all_stats.append(stats)
@@ -366,6 +450,8 @@ def main():
                          "(z 생략 시 벽 높이로 자동 누적)")
     ap.add_argument("--connect", action="store_true",
                     help="맞닿는 벽을 IFC 표준으로 연결 → 코너 마이터 자동 생성")
+    ap.add_argument("--no-qto", action="store_true",
+                    help="표준 물량셋(Qto_*BaseQuantities) 기입 생략")
     args = ap.parse_args()
     for _s in (sys.stdout, sys.stderr):   # cp949 콘솔 한글 깨짐 방지
         try:
@@ -376,6 +462,8 @@ def main():
     def _line(st):
         s = (f"walls={st['wall']} columns={st['column']} slabs={st['slab']} "
              f"skipped={st['skip']}")
+        if st.get("qto"):
+            s += f" qto={st['qto']}"
         if "connected" in st:
             s += f" connected={st['connected']} regenerated={st['regenerated']}"
         return s
@@ -385,7 +473,8 @@ def main():
             floors = json.load(f)
         out = args.out or args.geometry or \
             (os.path.splitext(args.project)[0] + ".ifc")
-        all_stats = build_multi(floors, out, connect=args.connect)
+        all_stats = build_multi(floors, out, connect=args.connect,
+                                qto=not args.no_qto)
         print(f"[OK] 다층 IFC 빌드 -> {out}  ({len(all_stats)}개 층)")
         for st in all_stats:
             print(f"  [{st['storey']}] z={st['z']:.0f}mm  " + _line(st))
@@ -395,7 +484,7 @@ def main():
         ap.error("geometry.json 경로 또는 --project 를 지정하세요")
     out = args.out or (os.path.splitext(args.geometry)[0] + ".ifc")
     stats = build(args.geometry, out, storey=args.storey, z_base=args.z,
-                  connect=args.connect)
+                  connect=args.connect, qto=not args.no_qto)
     print(f"[OK] IFC 빌드 -> {out}")
     print("  " + _line(stats))
 
