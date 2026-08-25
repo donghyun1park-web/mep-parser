@@ -284,6 +284,7 @@ class App:
         self.v_block = tk.StringVar(value=user_csv("block_map.csv"))
         self.v_llm = tk.BooleanVar(value=bool(os.environ.get("ANTHROPIC_API_KEY")))
         self.v_vision = tk.BooleanVar(value=False)  # Vision 폴백(실험적, 기본 OFF)
+        self.v_connect = tk.BooleanVar(value=True)  # IFC 표준 벽 접합(코너 마이터)
         self.v_schedule = tk.StringVar()  # 외부 창호일람 Excel 경로(선택)
 
         self._build_file_row()
@@ -331,6 +332,8 @@ class App:
                    command=self._do_schedule_pick).pack(side="left", padx=4)
         ttk.Button(f, text="DWG->DXF checklist",
                    command=self._show_checklist).pack(side="right", padx=4)
+        ttk.Checkbutton(f, text="벽 접합(코너)",
+                        variable=self.v_connect).pack(side="right", padx=2)
         ttk.Checkbutton(f, text="Vision fallback",
                         variable=self.v_vision).pack(side="right", padx=2)
         ttk.Checkbutton(f, text="AI auto-classify",
@@ -703,10 +706,14 @@ class App:
         self.btn_ifc.state(["disabled"])
         self._log(f"IFC 빌드 시작 (FreeCAD 불필요) → {out}")
 
+        connect = bool(self.v_connect.get())
+        if connect:
+            self._log("  [표준 접합] 맞닿는 벽 연결 → 코너 마이터 자동 생성")
+
         def run():
             try:
                 import ifc_builder as IB
-                stats = IB.build(self.geom_path, out, storey="Level")
+                stats = IB.build(self.geom_path, out, storey="Level", connect=connect)
                 self.root.after(0, lambda: self._ifc_done(out, stats))
             except Exception as e:
                 msg = str(e)

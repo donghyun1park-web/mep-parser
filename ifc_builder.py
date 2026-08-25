@@ -33,6 +33,8 @@ try:
     import ifcopenshell.api.geometry
     import ifcopenshell.api.spatial
     import ifcopenshell.api.aggregate
+    import ifcopenshell.api.material
+    import ifcopenshell.api.type
     import ifcopenshell.util.shape_builder
 except ImportError as e:
     print(f"[ERROR] 의존성 필요: pip install ifcopenshell numpy  ({e})", file=sys.stderr)
@@ -75,6 +77,90 @@ def _setup_project(model):
     return body, bld
 
 
+# ── [표준 접합] 벽 타입 / 접합 ────────────────────────────────────────
+# IFC 는 재료 레이어셋(두께+우선순위)을 가진 벽끼리 IfcRelConnectsPathElements 로
+# 연결하면, regenerate_wall_representation 이 코너의 마이터·버트·노치를 자동 생성한다.
+# 우리가 직접 계산하던 코너 처리를 표준에 넘기고, Revit/ArchiCAD 가 읽는 "연결된 벽"
+# 의미론까지 함께 얻는다. 전제: 재료 레이어셋 + Plan/Axis/GRAPH_VIEW 컨텍스트.
+JOIN_TOL_MM = 60.0   # 끝점 이 거리 이내면 접합(dxf_parser.CORNER_SNAP_TOL_MM=50 + 여유)
+
+
+def _axis_context(model):
+    """Plan/Axis/GRAPH_VIEW 컨텍스트(없으면 생성) — regenerate 가 요구."""
+    for c in model.by_type("IfcGeometricRepresentationSubContext"):
+        if c.ContextType == "Plan" and c.ContextIdentifier == "Axis":
+            return c
+    parent = None
+    for c in model.by_type("IfcGeometricRepresentationContext"):
+        if c.ContextType == "Plan" and not c.is_a("IfcGeometricRepresentationSubContext"):
+            parent = c
+            break
+    if parent is None:
+        parent = ifcopenshell.api.context.add_context(model, context_type="Plan")
+    return ifcopenshell.api.context.add_context(
+        model, context_type="Plan", context_identifier="Axis",
+        target_view="GRAPH_VIEW", parent=parent)
+
+
+def _wall_type(model, thickness_mm, cache):
+    """두께별 IfcWallType(+ IfcMaterialLayerSet). 같은 두께는 캐시 재사용."""
+    key = round(float(thickness_mm), 1)
+    if key in cache:
+        return cache[key]
+    if not cache:  # 재료는 프로젝트 1개 공유
+        cache["_mat"] = ifcopenshell.api.material.add_material(model, name="Concrete")
+    mat = cache["_mat"]
+    lset = ifcopenshell.api.material.add_material_set(
+        model, name=f"W{key:g}", set_type="IfcMaterialLayerSet")
+    layer = ifcopenshell.api.material.add_layer(model, layer_set=lset, material=mat)
+    ifcopenshell.api.material.edit_layer(
+        model, layer=layer,
+        attributes={"LayerThickness": key / MM, "Priority": 1})
+    wt = ifcopenshell.api.root.create_entity(
+        model, ifc_class="IfcWallType", name=f"WALL-{key:g}")
+    ifcopenshell.api.material.assign_material(model, products=[wt], material=lset)
+    cache[key] = wt
+    return wt
+
+
+def _connect_walls(model, made, log=None):
+    """끝점이 맞닿는 벽쌍을 IfcRelConnectsPathElements 로 연결한 뒤 형상 재생성.
+    made: [(wall, p1_mm, p2_mm, length_mm, height_mm), ...]
+    한 벽의 한쪽 끝은 접합 1개만 가질 수 있으므로(ATSTART/ATEND) 노드마다 짝지어 연결.
+    반환 (연결 수, 재생성 성공 수)."""
+    q = JOIN_TOL_MM
+    nodes = {}   # 격자 키 → [(wall_idx, 'p1'|'p2')]
+    for idx, (_w, p1, p2, _L, _h) in enumerate(made):
+        for tag, p in (("p1", p1), ("p2", p2)):
+            nodes.setdefault((round(p[0] / q), round(p[1] / q)), []).append((idx, tag))
+
+    used = set()      # (wall_idx, tag) — 이미 접합에 쓰인 끝
+    n_conn = 0
+    for key in sorted(nodes):
+        ends = [e for e in nodes[key] if e not in used]
+        for a, b in zip(ends[0::2], ends[1::2]):
+            if made[a[0]][0] is made[b[0]][0]:
+                continue
+            try:
+                if ifcopenshell.api.geometry.connect_wall(
+                        model, wall1=made[a[0]][0], wall2=made[b[0]][0]):
+                    used.add(a); used.add(b)
+                    n_conn += 1
+            except Exception:
+                continue
+
+    n_regen = 0
+    for wall, _p1, _p2, L, h in made:
+        try:
+            ifcopenshell.api.geometry.regenerate_wall_representation(
+                model, wall=wall, length=L / MM, height=h / MM)
+            n_regen += 1
+        except Exception as e:
+            if log:
+                log(f"[warn] regenerate 실패: {e}")
+    return n_conn, n_regen
+
+
 def _add_storey(model, bld, name, z_mm=0.0):
     sto = ifcopenshell.api.root.create_entity(
         model, ifc_class="IfcBuildingStorey", name=name)
@@ -86,7 +172,8 @@ def _add_storey(model, bld, name, z_mm=0.0):
     return sto
 
 
-def _build_elements(model, body, sb, sto, data, z_offset=0.0):
+def _build_elements(model, body, sb, sto, data, z_offset=0.0, connect=False,
+                    type_cache=None):
     """한 층의 geometry dict → IFC 요소 생성. z_offset(mm)=층 바닥 레벨.
     요소별 z = z_offset + 레코드 z_base (레코드 값은 층 '내' 오프셋)."""
     params = data.get("params", {})
@@ -96,6 +183,9 @@ def _build_elements(model, body, sb, sto, data, z_offset=0.0):
     pcol_h = float(params.get("column", {}).get("height", 3000.0))
     pslab_t = float(params.get("slab", {}).get("thickness", 200.0))
     stats = {"wall": 0, "column": 0, "slab": 0, "skip": 0}
+    made = []                       # 접합 모드에서 생성된 벽 목록
+    if type_cache is None:
+        type_cache = {}
 
     def container(prod):
         ifcopenshell.api.spatial.assign_container(
@@ -118,13 +208,31 @@ def _build_elements(model, body, sb, sto, data, z_offset=0.0):
                 continue
             wall = ifcopenshell.api.root.create_entity(
                 model, ifc_class="IfcWall", name=f"Wall_{i}_{k}")
-            ifcopenshell.api.geometry.edit_object_placement(
-                model, product=wall, matrix=_placement_matrix(p1, p2, zb))
-            rep = ifcopenshell.api.geometry.add_wall_representation(
-                model, context=body, length=L / MM,
-                height=height / MM, thickness=width / MM)
-            ifcopenshell.api.geometry.assign_representation(
-                model, product=wall, representation=rep)
+            placed = False
+            if connect:
+                # 표준 경로: 벽타입(재료 레이어셋) + 2점 벽 → 이후 connect/regenerate
+                try:
+                    ifcopenshell.api.type.assign_type(
+                        model, related_objects=[wall],
+                        relating_type=_wall_type(model, width, type_cache))
+                    ifcopenshell.api.geometry.create_2pt_wall(
+                        model, element=wall, context=body,
+                        p1=(p1[0] / MM, p1[1] / MM), p2=(p2[0] / MM, p2[1] / MM),
+                        elevation=zb / MM, height=height / MM,
+                        thickness=width / MM)
+                    made.append((wall, p1, p2, L, height))
+                    placed = True
+                except Exception as e:
+                    print(f"[warn] 표준 벽 생성 실패 → 기본 경로 폴백: {e}", file=sys.stderr)
+            if not placed:
+                # 기본(폴백) 경로: 배치행렬 + 단순 블록 표현
+                ifcopenshell.api.geometry.edit_object_placement(
+                    model, product=wall, matrix=_placement_matrix(p1, p2, zb))
+                rep = ifcopenshell.api.geometry.add_wall_representation(
+                    model, context=body, length=L / MM,
+                    height=height / MM, thickness=width / MM)
+                ifcopenshell.api.geometry.assign_representation(
+                    model, product=wall, representation=rep)
             container(wall)
             stats["wall"] += 1
 
@@ -162,30 +270,43 @@ def _build_elements(model, body, sb, sto, data, z_offset=0.0):
         if slab:
             container(slab)
             stats["slab"] += 1
+
+    # ── 표준 접합: 맞닿는 벽 연결 후 코너 형상 재생성 ────────────────
+    if connect and made:
+        n_conn, n_regen = _connect_walls(model, made)
+        stats["connected"] = n_conn
+        stats["regenerated"] = n_regen
     return stats
 
 
-def build(geom_path, ifc_path, storey="Level", z_base=0.0):
-    """단일 층 geometry.json → IFC. (기존 API 호환)"""
+def build(geom_path, ifc_path, storey="Level", z_base=0.0, connect=False):
+    """단일 층 geometry.json → IFC. (기존 API 호환)
+    connect=True 면 맞닿는 벽을 IFC 표준으로 연결해 코너를 마이터 처리."""
     with open(geom_path, encoding="utf-8") as f:
         data = json.load(f)
     model = ifcopenshell.api.project.create_file()  # IFC4
     body, bld = _setup_project(model)
+    if connect:
+        _axis_context(model)
     sto = _add_storey(model, bld, storey, z_base)
     sb = ifcopenshell.util.shape_builder.ShapeBuilder(model)
-    stats = _build_elements(model, body, sb, sto, data, z_offset=z_base)
+    stats = _build_elements(model, body, sb, sto, data, z_offset=z_base,
+                            connect=connect)
     model.write(ifc_path)
     return stats
 
 
-def build_multi(floors, ifc_path):
+def build_multi(floors, ifc_path, connect=False):
     """다층 스태킹: floors=[{"geometry": path, "storey": 이름, "z": 바닥레벨mm}, ...]
     → 층별 IfcBuildingStorey 를 가진 단일 IFC. 반환: 층별 stats 리스트.
 
     z 를 생략하면 이전 층 z + 이전 층 벽 param 높이로 자동 누적."""
     model = ifcopenshell.api.project.create_file()
     body, bld = _setup_project(model)
+    if connect:
+        _axis_context(model)
     sb = ifcopenshell.util.shape_builder.ShapeBuilder(model)
+    type_cache = {}                 # 층 간 벽타입 공유(중복 생성 방지)
     all_stats = []
     z_auto = 0.0
     for i, fl in enumerate(floors):
@@ -195,7 +316,8 @@ def build_multi(floors, ifc_path):
         name = fl.get("storey") or f"Level_{i + 1}"
         z = float(fl["z"]) if fl.get("z") is not None else z_auto
         sto = _add_storey(model, bld, name, z)
-        stats = _build_elements(model, body, sb, sto, data, z_offset=z)
+        stats = _build_elements(model, body, sb, sto, data, z_offset=z,
+                                connect=connect, type_cache=type_cache)
         stats["storey"] = name
         stats["z"] = z
         all_stats.append(stats)
@@ -242,27 +364,40 @@ def main():
                     help="다층 스태킹: floors.json 경로 — "
                          '[{"geometry": "b3.json", "storey": "B3", "z": 0}, ...] '
                          "(z 생략 시 벽 높이로 자동 누적)")
+    ap.add_argument("--connect", action="store_true",
+                    help="맞닿는 벽을 IFC 표준으로 연결 → 코너 마이터 자동 생성")
     args = ap.parse_args()
+    for _s in (sys.stdout, sys.stderr):   # cp949 콘솔 한글 깨짐 방지
+        try:
+            _s.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
+    def _line(st):
+        s = (f"walls={st['wall']} columns={st['column']} slabs={st['slab']} "
+             f"skipped={st['skip']}")
+        if "connected" in st:
+            s += f" connected={st['connected']} regenerated={st['regenerated']}"
+        return s
 
     if args.project:
         with open(args.project, encoding="utf-8") as f:
             floors = json.load(f)
         out = args.out or args.geometry or \
             (os.path.splitext(args.project)[0] + ".ifc")
-        all_stats = build_multi(floors, out)
+        all_stats = build_multi(floors, out, connect=args.connect)
         print(f"[OK] 다층 IFC 빌드 -> {out}  ({len(all_stats)}개 층)")
         for st in all_stats:
-            print(f"  [{st['storey']}] z={st['z']:.0f}mm  walls={st['wall']} "
-                  f"columns={st['column']} slabs={st['slab']} skipped={st['skip']}")
+            print(f"  [{st['storey']}] z={st['z']:.0f}mm  " + _line(st))
         return
 
     if not args.geometry:
         ap.error("geometry.json 경로 또는 --project 를 지정하세요")
     out = args.out or (os.path.splitext(args.geometry)[0] + ".ifc")
-    stats = build(args.geometry, out, storey=args.storey, z_base=args.z)
+    stats = build(args.geometry, out, storey=args.storey, z_base=args.z,
+                  connect=args.connect)
     print(f"[OK] IFC 빌드 -> {out}")
-    print(f"  walls={stats['wall']} columns={stats['column']} slabs={stats['slab']} "
-          f"skipped={stats['skip']}")
+    print("  " + _line(stats))
 
 
 if __name__ == "__main__":
