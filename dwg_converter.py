@@ -1,18 +1,26 @@
 """
-dwg_converter.py  —  DWG → DXF 자동 변환 (ODA File Converter 래퍼)
+dwg_converter.py  —  DWG → DXF 자동 변환 (LibreDWG 우선 / ODA 폴백)
 
-DWG 는 비공개 포맷이라 직접 파싱하지 않는다. 무료 ODA File Converter 를
-subprocess 로 호출해 DXF 로 변환한 뒤 기존 결정론 파이프라인(ezdxf)에 태운다.
+DWG 는 비공개 포맷이라 직접 파싱하지 않는다. 외부 변환기를 subprocess 로 호출해
+DXF 로 바꾼 뒤 기존 결정론 파이프라인(ezdxf)에 태운다.
 
-ODA File Converter (무료):
-    https://www.opendesign.com/guestfiles/oda_file_converter
-설치만 하면 자동 탐지된다. CLI 규약:
-    ODAFileConverter <in_dir> <out_dir> <version> <type> <recurse> <audit> [filter]
+백엔드 우선순위
+  1) GNU LibreDWG `dwg2dxf` — win64 zip 압축 해제만으로 동작(설치·가입 없음, 약 11.5MB).
+     https://github.com/LibreDWG/libredwg/releases → %LOCALAPPDATA%\\libredwg
+  2) ODA File Converter — 설치·가입 필요. CLI:
+     ODAFileConverter <in_dir> <out_dir> <version> <type> <recurse> <audit> [filter]
+
+실측(지하3층 건축평면도.dwg, LibreDWG 0.14):
+  변환 1.2초. 엔티티 1696개·타입 분포·LINE 좌표가 CAD 직접 내보낸 DXF 와 100% 일치.
+  단, 5개 엔티티(INSERT 3 포함)의 레이어 배정이 달라 하위 분류가 갈린다
+  (A-CON → 상부골조/A-DA). 그래서 CAD 가 내보낸 DXF 가 옆에 있으면 그쪽을 우선 쓴다
+  (ensure_dxf 의 캐시 규칙). 강제 재변환은 force=True.
 
 사용:
     from dwg_converter import ensure_dxf
     dxf_path = ensure_dxf("plan.dwg")     # .dxf 는 그대로 통과, .dwg 는 변환
     python dwg_converter.py plan.dwg      # CLI 단독 변환
+    python dwg_converter.py --which       # 탐지된 백엔드 확인
 """
 import glob
 import os
@@ -127,7 +135,7 @@ def _convert_oda(exe, src_dir, name, out_dir, out_dxf, timeout, log):
     return out_dxf
 
 
-def ensure_dxf(path, out_dir=None, timeout=300, log=print):
+def ensure_dxf(path, out_dir=None, timeout=300, log=print, force=False):
     """.dxf 는 그대로 반환. .dwg 는 ODA 로 변환해 생성된 .dxf 경로 반환.
 
     - 변환 결과는 기본적으로 DWG 옆에 <이름>.dxf 로 저장(재사용 캐시:
@@ -147,11 +155,13 @@ def ensure_dxf(path, out_dir=None, timeout=300, log=print):
     name = os.path.basename(path)
     stem = os.path.splitext(name)[0]
 
-    # 캐시: DWG 옆 최신 DXF 재사용
-    cached = os.path.join(src_dir, stem + ".dxf")
-    if os.path.exists(cached) and os.path.getmtime(cached) >= os.path.getmtime(path):
-        log(f"[DWG] 기존 변환본 재사용: {cached}")
-        return cached
+    # 캐시: DWG 옆 최신 DXF 재사용. out_dir 을 명시했거나 force 면 건너뛴다
+    # (명시한 출력 위치를 캐시가 선점하면 호출자가 기대한 파일이 생기지 않는다).
+    if not force and out_dir is None:
+        cached = os.path.join(src_dir, stem + ".dxf")
+        if os.path.exists(cached) and os.path.getmtime(cached) >= os.path.getmtime(path):
+            log(f"[DWG] 기존 변환본 재사용: {cached}")
+            return cached
 
     kind, exe = find_converter()
     if not exe:
@@ -188,6 +198,8 @@ def main():
     ap.add_argument("out_dir", nargs="?", default=None, help="출력 폴더(기본 DWG 옆)")
     ap.add_argument("--which", action="store_true",
                     help="탐지된 변환기 출력 후 종료")
+    ap.add_argument("-f", "--force", action="store_true",
+                    help="기존 변환본이 있어도 다시 변환")
     args = ap.parse_args()
     if args.which:
         kind, exe = find_converter()
@@ -196,7 +208,7 @@ def main():
     if not args.dwg:
         ap.error("DWG 경로를 지정하세요 (또는 --which)")
     try:
-        out = ensure_dxf(args.dwg, out_dir=args.out_dir)
+        out = ensure_dxf(args.dwg, out_dir=args.out_dir, force=args.force)
         print(f"[OK] {out}")
     except RuntimeError as e:
         print(f"[ERROR] {e}", file=sys.stderr)
