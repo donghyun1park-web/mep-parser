@@ -70,8 +70,19 @@ def _contained(path: Path, root: Path) -> bool:
         return False
 
 
+def _has_raw_dot_segment(value: Any) -> bool:
+    try:
+        raw = os.fsdecode(os.fspath(value))
+    except (TypeError, ValueError):
+        return False
+    return any(part in {".", ".."} for part in raw.replace("\\", "/").split("/"))
+
+
 def _path_roots(path: Path, root: Path) -> tuple[Path, Path] | None:
     """Return the lexical root spelling and its canonical identity."""
+    # A Path has already discarded benign "." spelling, but retains "..".
+    if any(part in {".", ".."} for part in (*path.parts, *root.parts)):
+        return None
     try:
         lexical = path.absolute()
         root_input = root.absolute()
@@ -133,6 +144,8 @@ def _safe_existing(path: Path, root: Path, *, directory: bool = False) -> Path |
 
 
 def _projects_root(projects_root: Path) -> Path:
+    if _has_raw_dot_segment(projects_root):
+        raise ValueError("projects_root must be a real directory")
     raw = Path(projects_root).expanduser()
     try:
         root = raw.resolve(strict=True)
@@ -147,6 +160,8 @@ def resolve_evidence_target(
     target_path: Path, *, projects_root: Path
 ) -> tuple[Path, Path, dict, str, str]:
     """Resolve one schema-valid Case Evidence target beneath the project root."""
+    if _has_raw_dot_segment(target_path):
+        raise ValueError("review target must be a safe project file")
     root = _projects_root(projects_root)
     raw = Path(target_path).expanduser()
     if not raw.is_absolute():
@@ -182,6 +197,8 @@ def _review_validation(
     review_path: Path, root: Path
 ) -> tuple[dict | None, list[dict[str, str]]]:
     errors: list[dict[str, str]] = []
+    if _has_raw_dot_segment(review_path):
+        return None, [{"code": "REVIEW_RECORD_INVALID", "detail": "review path is unsafe"}]
     safe = _safe_existing(Path(review_path), root)
     if safe is None:
         return None, [{"code": "REVIEW_RECORD_INVALID", "detail": "review path is unsafe"}]
@@ -226,8 +243,10 @@ def _review_validation(
 
 def validate_review(review_path: Path, *, projects_root: Path) -> list[dict]:
     """Validate a closed review record and rehash its current target."""
+    if _has_raw_dot_segment(review_path):
+        return [{"code": "REVIEW_RECORD_INVALID", "detail": "review path is unsafe"}]
     root = _projects_root(projects_root)
-    _, errors = _review_validation(Path(review_path), root)
+    _, errors = _review_validation(review_path, root)
     return errors
 
 
@@ -236,6 +255,8 @@ def _canonical_review_directory(
 ) -> Path:
     canonical = target.parent / "_reviews"
     if output_dir is not None:
+        if _has_raw_dot_segment(output_dir):
+            raise ValueError("output_dir must be the canonical evidence _reviews directory")
         raw = Path(output_dir).expanduser()
         if not raw.is_absolute():
             raw = root / raw
@@ -253,6 +274,8 @@ def _canonical_review_directory(
 
 def safe_project_directory(path: Path, *, projects_root: Path) -> Path | None:
     """Resolve an existing non-reparse directory physically beneath the root."""
+    if _has_raw_dot_segment(path):
+        return None
     root = _projects_root(projects_root)
     raw = Path(path).expanduser()
     if not raw.is_absolute():
@@ -361,6 +384,8 @@ def _review_directory_lock(directory: Path):
 @contextmanager
 def review_state_lock(evidence_path: Path, *, projects_root: Path):
     """Hold the canonical review-directory lock, reentrantly on one thread."""
+    if _has_raw_dot_segment(evidence_path):
+        raise ValueError("evidence path must be beneath projects_root")
     root = _projects_root(projects_root)
     raw = Path(evidence_path).expanduser()
     if not raw.is_absolute():

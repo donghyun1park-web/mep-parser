@@ -13,7 +13,11 @@ import pytest
 import cfd_case_health
 import cfd_evidence
 import cfd_review
-from test_cfd_evidence import _install_path_alias, make_complete_case
+from test_cfd_evidence import (
+    _install_path_alias,
+    _mark_lexical_reparse,
+    make_complete_case,
+)
 
 
 def _read(path: Path) -> dict:
@@ -112,6 +116,125 @@ def test_review_lock_accepts_short_alias_for_not_yet_created_evidence(
     ) as directory:
         assert directory == canonical_parent / "_reviews"
         assert directory.is_dir()
+
+
+def test_review_target_rejects_alias_reparse_component_erased_by_dotdot(
+    tmp_path, monkeypatch
+):
+    paths = _future_evidence(tmp_path / "runneradmin")
+    (paths["root"] / "link").mkdir()
+    lexical_root = tmp_path / "RUNNER~1" / "projects"
+    lexical_link = lexical_root / "link"
+    traversal_target = (
+        lexical_link / ".." / paths["evidence"].relative_to(paths["root"])
+    )
+    _install_path_alias(monkeypatch, lexical_root, paths["root"])
+    _mark_lexical_reparse(monkeypatch, cfd_review, lexical_link)
+
+    with pytest.raises(ValueError, match="safe project file"):
+        cfd_review.resolve_evidence_target(
+            traversal_target, projects_root=paths["root"]
+        )
+
+
+def test_review_lock_rejects_alias_reparse_component_erased_by_dotdot(
+    tmp_path, monkeypatch
+):
+    paths = _future_evidence(tmp_path / "runneradmin")
+    (paths["root"] / "link").mkdir()
+    lexical_root = tmp_path / "RUNNER~1" / "projects"
+    lexical_link = lexical_root / "link"
+    traversal_target = (
+        lexical_link
+        / ".."
+        / paths["case"].relative_to(paths["root"])
+        / "future-evidence.json"
+    )
+    reviews = paths["case"] / "_reviews"
+    _install_path_alias(monkeypatch, lexical_root, paths["root"])
+    _mark_lexical_reparse(monkeypatch, cfd_review, lexical_link)
+
+    with pytest.raises(ValueError, match="beneath projects_root"):
+        with cfd_review.review_state_lock(
+            traversal_target, projects_root=paths["root"]
+        ):
+            pass
+
+    assert not reviews.exists()
+
+
+def test_create_review_accepts_short_alias_and_publishes_canonical_record(
+    tmp_path, monkeypatch
+):
+    paths = _future_evidence(tmp_path / "runneradmin")
+    lexical_root = tmp_path / "RUNNER~1" / "projects"
+    lexical_target = lexical_root / paths["evidence"].relative_to(paths["root"])
+    _install_path_alias(monkeypatch, lexical_root, paths["root"])
+
+    review = cfd_review.create_review(
+        lexical_target,
+        projects_root=paths["root"],
+        expected_target_sha256=cfd_review.sha256_file(paths["evidence"]),
+        reviewer_id="reviewer-1",
+        decision="APPROVED",
+        reason="reviewed through a trusted short alias",
+    )
+
+    review_path = (
+        paths["evidence"].parent
+        / "_reviews"
+        / f'{review["review_id"]}.case_review.v1.json'
+    )
+    assert review["target"]["path"] == paths["evidence"].relative_to(
+        paths["root"]
+    ).as_posix()
+    assert review_path.is_file()
+    assert cfd_review.validate_review(review_path, projects_root=paths["root"]) == []
+
+
+def test_review_rejects_explicit_dot_segment_before_path_normalization(tmp_path):
+    paths = _future_evidence(tmp_path)
+    raw_target = os.path.join(
+        str(paths["evidence"].parent), ".", paths["evidence"].name
+    )
+
+    with pytest.raises(ValueError, match="safe project file"):
+        cfd_review.resolve_evidence_target(raw_target, projects_root=paths["root"])
+
+
+def test_resolve_target_rejects_dot_before_projects_root_resolution(tmp_path):
+    raw_target = os.path.join(str(tmp_path), ".", "evidence.json")
+
+    with pytest.raises(ValueError, match="safe project file"):
+        cfd_review.resolve_evidence_target(
+            raw_target, projects_root=tmp_path / "missing-root"
+        )
+
+
+def test_safe_directory_rejects_dot_before_projects_root_resolution(tmp_path):
+    raw_directory = os.path.join(str(tmp_path), ".", "case")
+
+    assert cfd_review.safe_project_directory(
+        raw_directory, projects_root=tmp_path / "missing-root"
+    ) is None
+
+
+def test_review_lock_rejects_dot_before_projects_root_resolution(tmp_path):
+    raw_target = os.path.join(str(tmp_path), ".", "future-evidence.json")
+
+    with pytest.raises(ValueError, match="evidence path"):
+        with cfd_review.review_state_lock(
+            raw_target, projects_root=tmp_path / "missing-root"
+        ):
+            pass
+
+
+def test_validate_review_rejects_dot_before_projects_root_resolution(tmp_path):
+    raw_review = os.path.join(str(tmp_path), ".", "review.json")
+
+    assert cfd_review.validate_review(
+        raw_review, projects_root=tmp_path / "missing-root"
+    ) == [{"code": "REVIEW_RECORD_INVALID", "detail": "review path is unsafe"}]
 
 
 @pytest.mark.parametrize(

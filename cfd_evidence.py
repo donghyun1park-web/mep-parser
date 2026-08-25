@@ -100,8 +100,19 @@ def _contained(path: Path, root: Path) -> bool:
         return False
 
 
+def _has_raw_dot_segment(value: Any) -> bool:
+    try:
+        raw = os.fsdecode(os.fspath(value))
+    except (TypeError, ValueError):
+        return False
+    return any(part in {".", ".."} for part in raw.replace("\\", "/").split("/"))
+
+
 def _path_roots(path: Path, root: Path) -> tuple[Path, Path] | None:
     """Return the lexical root spelling and its canonical identity."""
+    # A Path has already discarded benign "." spelling, but retains "..".
+    if any(part in {".", ".."} for part in (*path.parts, *root.parts)):
+        return None
     try:
         lexical = path.absolute()
         root_input = root.absolute()
@@ -167,7 +178,12 @@ def _stored_path(path: Path, root: Path) -> str:
 
 
 def _lexical_ref(value: Any) -> PurePosixPath | None:
-    if not isinstance(value, str) or not value or "\\" in value:
+    if (
+        not isinstance(value, str)
+        or not value
+        or "\\" in value
+        or _has_raw_dot_segment(value)
+    ):
         return None
     if value.startswith("/") or (len(value) >= 2 and value[1] == ":"):
         return None
@@ -186,13 +202,15 @@ def _resolve_ref(value: Any, root: Path) -> Path | None:
 
 def _resolve_field_record_for_tracking(value: Any, root: Path) -> Path | None:
     """Mirror legacy field path spelling only to protect contained read sources."""
+    if _has_raw_dot_segment(value):
+        return None
     raw = Path(str(value or ""))
     candidate = raw if raw.is_absolute() else root / raw
     return _safe_existing(candidate, root)
 
 
 def _resolve_raw(value: Any, root: Path, *, directory: bool = False) -> Path | None:
-    if not isinstance(value, str) or not value:
+    if not isinstance(value, str) or not value or _has_raw_dot_segment(value):
         return None
     raw = Path(value)
     if raw.is_absolute():
@@ -850,6 +868,10 @@ def _compute(case_dir: Path, *, projects_root: Path, gci_root: Path | None,
 
 
 def _prepare_context(case_dir: Path, projects_root: Path) -> tuple[Path, Path]:
+    if _has_raw_dot_segment(projects_root):
+        raise ValueError("projects_root must be a real directory")
+    if _has_raw_dot_segment(case_dir):
+        raise ValueError("case_dir must be strictly beneath projects_root/_body_solver")
     root_input = Path(projects_root).expanduser()
     root = root_input.resolve(strict=True)
     if not root.is_dir() or _is_reparse(root_input):
@@ -869,6 +891,8 @@ def _prepare_context(case_dir: Path, projects_root: Path) -> tuple[Path, Path]:
 def _safe_optional(path: Path | None, root: Path) -> Path | None:
     if path is None:
         return None
+    if _has_raw_dot_segment(path):
+        raise ValueError("optional path cannot contain dot traversal")
     raw = Path(path).expanduser()
     if not raw.is_absolute():
         raw = root / raw
@@ -893,7 +917,10 @@ def _canonical_gci_root(path: Path | None, root: Path) -> Path | None:
 
 
 def _validate_output(path: Path, root: Path, source_paths: set[Path]) -> Path:
-    raw = path if path.is_absolute() else root / path
+    if _has_raw_dot_segment(path):
+        raise ValueError("output_path must be beneath projects_root")
+    supplied = Path(path)
+    raw = supplied if supplied.is_absolute() else root / supplied
     roots = _path_roots(raw, root)
     if roots is None:
         raise ValueError("output_path must be beneath projects_root")
@@ -978,7 +1005,7 @@ def build_case_evidence(
     output_path: Path | None = None,
 ) -> dict:
     """Recompute current raw evidence and atomically publish one screening record."""
-    root, case = _prepare_context(Path(case_dir), Path(projects_root))
+    root, case = _prepare_context(case_dir, projects_root)
     gci_arg = _canonical_gci_root(gci_root, root)
     field_arg = _safe_optional(field_evidence_path, root)
     source_paths: set[Path] = set()
@@ -992,7 +1019,7 @@ def build_case_evidence(
         if path:
             source_paths.add(path)
     output = _validate_output(
-        Path(output_path) if output_path is not None else case / "case_evidence.v1.json",
+        output_path if output_path is not None else case / "case_evidence.v1.json",
         root, source_paths,
     )
     _atomic_json(output, evidence)
@@ -1012,6 +1039,10 @@ def validate_case_evidence(
 ) -> list[dict[str, str]]:
     """Reopen stored evidence, rehash its refs, and repeat raw recomputation."""
     errors: list[dict[str, str]] = []
+    if _has_raw_dot_segment(projects_root):
+        return [{"code": "ARTIFACT_REF_INVALID", "detail": "projects_root is invalid"}]
+    if _has_raw_dot_segment(evidence_path):
+        return [{"code": "ARTIFACT_REF_INVALID", "detail": "evidence path is unsafe"}]
     try:
         root = Path(projects_root).expanduser().resolve(strict=True)
     except (OSError, RuntimeError):

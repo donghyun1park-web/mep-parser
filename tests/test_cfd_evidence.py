@@ -90,6 +90,16 @@ def _install_path_alias(
     monkeypatch.setattr(os.path, "samefile", alias_samefile)
 
 
+def _mark_lexical_reparse(monkeypatch, module, path: Path) -> None:
+    original_is_reparse = module._is_reparse
+    marked = path.absolute()
+
+    def is_reparse(candidate):
+        return Path(candidate).absolute() == marked or original_is_reparse(candidate)
+
+    monkeypatch.setattr(module, "_is_reparse", is_reparse)
+
+
 def _geometry() -> dict:
     return {
         "schema_version": 2,
@@ -1211,6 +1221,61 @@ def test_short_alias_case_resolving_outside_solver_tree_stays_rejected(
 
     with pytest.raises(ValueError, match="strictly beneath"):
         cfd_evidence._prepare_context(lexical_case, lexical_root)
+
+
+def test_build_rejects_alias_reparse_component_erased_by_dotdot(tmp_path, monkeypatch):
+    paths = make_complete_case(tmp_path / "runneradmin")
+    (paths["root"] / "link").mkdir()
+    lexical_root = tmp_path / "RUNNER~1" / "projects"
+    lexical_link = lexical_root / "link"
+    traversal_case = (
+        lexical_link / ".." / paths["case"].relative_to(paths["root"])
+    )
+    unexpected = paths["case"] / "unexpected-evidence.json"
+    _install_path_alias(monkeypatch, lexical_root, paths["root"])
+    _mark_lexical_reparse(monkeypatch, cfd_evidence, lexical_link)
+
+    with pytest.raises(ValueError, match="strictly beneath"):
+        cfd_evidence.build_case_evidence(
+            traversal_case,
+            projects_root=paths["root"],
+            output_path=unexpected,
+        )
+
+    assert not unexpected.exists()
+
+
+def test_output_rejects_alias_reparse_component_erased_by_dotdot(tmp_path, monkeypatch):
+    paths = make_complete_case(tmp_path / "runneradmin")
+    (paths["root"] / "link").mkdir()
+    lexical_root = tmp_path / "RUNNER~1" / "projects"
+    lexical_link = lexical_root / "link"
+    traversal_output = (
+        lexical_link
+        / ".."
+        / paths["case"].relative_to(paths["root"])
+        / "unexpected-evidence.json"
+    )
+    canonical_output = paths["case"] / "unexpected-evidence.json"
+    _install_path_alias(monkeypatch, lexical_root, paths["root"])
+    _mark_lexical_reparse(monkeypatch, cfd_evidence, lexical_link)
+
+    with pytest.raises(ValueError, match="output_path"):
+        cfd_evidence.build_case_evidence(
+            paths["case"],
+            projects_root=paths["root"],
+            output_path=traversal_output,
+        )
+
+    assert not canonical_output.exists()
+
+
+def test_build_rejects_explicit_dot_segment_before_path_normalization(tmp_path):
+    paths = make_complete_case(tmp_path)
+    raw_case = os.path.join(str(paths["case"].parent), ".", paths["case"].name)
+
+    with pytest.raises(ValueError, match="strictly beneath"):
+        cfd_evidence.build_case_evidence(raw_case, projects_root=paths["root"])
 
 
 def test_short_alias_output_builds_missing_leaf_below_canonical_parent(
