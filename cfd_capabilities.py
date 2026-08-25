@@ -83,13 +83,19 @@ def _mpi_smoke_identity_complete(identity):
 
 
 def build_runtime_capability(openfoam, baseline=None, *, created_at=None,
-                             mpi_smoke=None):
+                             mpi_smoke=None, run_id=None):
     """Build an honest WSL/OpenFOAM runtime capability evidence payload.
 
     A serial runtime can be ready even if MPI is not installed. MPI command
     discovery is distinct from an actual MPI execution smoke test, which starts
     as NOT_RUN until a controlled benchmark records it.
     """
+    if run_id is None:
+        run_id = uuid.uuid4().hex
+    elif not isinstance(run_id, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", run_id
+    ):
+        raise ValueError("RUNTIME_CAPABILITY_RUN_ID_INVALID")
     openfoam = dict(openfoam or {})
     commands = dict(openfoam.get("commands") or {})
     mpi_tools = {name: str(commands.get(name) or "") for name in MPI_COMMANDS}
@@ -128,6 +134,7 @@ def build_runtime_capability(openfoam, baseline=None, *, created_at=None,
         "schema_version": 1,
         "contract": RUNTIME_CAPABILITY_CONTRACT,
         "created_at": created_at or datetime.now(timezone.utc).isoformat(),
+        "run_id": run_id,
         "serial_runtime_ready": bool(openfoam.get("ok")),
         "parallel_runtime_ready": bool(
             static_parallel_ready and smoke_proof_complete

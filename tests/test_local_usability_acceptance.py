@@ -44,11 +44,30 @@ def _stamp(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _expected_case_input_sha256(case_root: Path) -> str:
+    digest = hashlib.sha256()
+    for relative in ("cfd_case_meta.json", "Allrun", "system/controlDict"):
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update((case_root / relative).read_bytes())
+    return digest.hexdigest()
+
+
 def _build_bundle(root: Path) -> tuple[Path, dict]:
     now = datetime.now(timezone.utc).replace(microsecond=0)
     evidence_time = now - timedelta(seconds=10)
     raw_root = root / RAW_ROOT
-    case_input = _write(
+    case_meta = _write(
+        root,
+        RAW_ROOT / "cfd_case_meta.json",
+        {"contract": "environment_acceptance_case.v1", "cells": 64},
+    )
+    allrun = _write(
+        root,
+        RAW_ROOT / "Allrun",
+        "#!/bin/sh\nbuoyantBoussinesqPimpleFoam\n",
+    )
+    control_dict = _write(
         root,
         RAW_ROOT / "system/controlDict",
         "application buoyantBoussinesqPimpleFoam;\nendTime 1;\n",
@@ -147,7 +166,7 @@ def _build_bundle(root: Path) -> tuple[Path, dict]:
             "runner_wall_seconds": 2.0,
             "solver_clock_seconds": 1.0,
             "peak_rss_kib": 2048,
-            "case_input_sha256": _sha256(case_input),
+            "case_input_sha256": _expected_case_input_sha256(raw_root),
             "solver_log_sha256": _sha256(solver_log),
         },
     })
@@ -160,7 +179,10 @@ def _build_bundle(root: Path) -> tuple[Path, dict]:
         "cells": 64,
         "latest_time": 1.0,
         "openfoam_profile": "openfoam-v2606",
-        "case_input": _link(root, case_input),
+        "case_meta": _link(root, case_meta),
+        "allrun": _link(root, allrun),
+        "control_dict": _link(root, control_dict),
+        "case_input_sha256": _expected_case_input_sha256(raw_root),
         "mesh_log": _link(root, mesh_log),
         "solver_log": _link(root, solver_log),
         "report": _link(root, report),
@@ -231,7 +253,9 @@ def _build_bundle(root: Path) -> tuple[Path, dict]:
         "sources": {
             "environment_acceptance": _link(root, environment_acceptance),
             "runtime_capability": _link(root, runtime_capability),
-            "case_input": _link(root, case_input),
+            "case_meta": _link(root, case_meta),
+            "allrun": _link(root, allrun),
+            "control_dict": _link(root, control_dict),
             "mesh_log": _link(root, mesh_log),
             "solver_log": _link(root, solver_log),
             "report": _link(root, report),
@@ -305,19 +329,21 @@ def _relink_solver_log_everywhere(
     _rewrite_manifest(manifest_path, manifest)
 
 
-def _relink_case_input_everywhere(
+def _relink_control_dict_everywhere(
     root: Path, manifest_path: Path, manifest: dict
 ) -> None:
-    case_path = root / manifest["sources"]["case_input"]["path"]
-    manifest["sources"]["case_input"] = _link(root, case_path)
+    control_path = root / manifest["sources"]["control_dict"]["path"]
+    manifest["sources"]["control_dict"] = _link(root, control_path)
     runtime_path = root / manifest["sources"]["runtime_capability"]["path"]
     runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
-    runtime["serial_baseline"]["case_input_sha256"] = _sha256(case_path)
+    aggregate = _expected_case_input_sha256(root / RAW_ROOT)
+    runtime["serial_baseline"]["case_input_sha256"] = aggregate
     _write(root, runtime_path.relative_to(root), runtime)
     manifest["sources"]["runtime_capability"] = _link(root, runtime_path)
     environment_path = root / manifest["sources"]["environment_acceptance"]["path"]
     environment = json.loads(environment_path.read_text(encoding="utf-8"))
-    environment["case_input"] = manifest["sources"]["case_input"]
+    environment["control_dict"] = manifest["sources"]["control_dict"]
+    environment["case_input_sha256"] = aggregate
     environment["runtime_capability"] = manifest["sources"]["runtime_capability"]
     _write(root, environment_path.relative_to(root), environment)
     manifest["sources"]["environment_acceptance"] = _link(root, environment_path)
@@ -340,6 +366,16 @@ def test_schema_accepts_closed_complete_manifest_and_rejects_bad_refs(tmp_path):
     with_backslash = json.loads(json.dumps(manifest))
     with_backslash["sources"]["mesh_log"]["path"] = r"_system\environment_acceptance\log.checkMesh"
     assert list(validator.iter_errors(with_backslash))
+
+    with_legacy_case_input = json.loads(json.dumps(manifest))
+    with_legacy_case_input["sources"]["case_input"] = with_legacy_case_input[
+        "sources"
+    ]["control_dict"]
+    assert list(validator.iter_errors(with_legacy_case_input))
+    for required_case_source in ("case_meta", "allrun", "control_dict"):
+        missing_case_source = json.loads(json.dumps(manifest))
+        missing_case_source["sources"].pop(required_case_source)
+        assert list(validator.iter_errors(missing_case_source))
     assert manifest_path.is_file()
 
 
@@ -373,6 +409,78 @@ def test_validator_recomputes_complete_raw_tree_and_returns_every_consumed_hash(
     assert result["blockers"] == []
     assert set(result["evidence_sha256"]) == expected
     assert all(len(value) == 64 for value in result["evidence_sha256"].values())
+
+
+def test_case_input_fingerprint_matches_current_cfd_run_aggregate_contract(tmp_path):
+    import cfd_run
+    from scripts.local_usability_acceptance import validate_local_usability_acceptance
+
+    manifest_path, manifest = _build_bundle(tmp_path)
+    runtime_path = tmp_path / manifest["sources"]["runtime_capability"]["path"]
+    runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+
+    assert runtime["serial_baseline"]["case_input_sha256"] == (
+        cfd_run._case_input_sha256(tmp_path / RAW_ROOT)
+    )
+    result = validate_local_usability_acceptance(manifest_path, tmp_path)
+    assert result["status"] == "PASS"
+
+
+def test_case_input_aggregate_is_recomputed_in_fixed_order_with_path_labels(tmp_path):
+    from scripts.local_usability_acceptance import validate_local_usability_acceptance
+
+    manifest_path, manifest = _build_bundle(tmp_path)
+    runtime_path = tmp_path / manifest["sources"]["runtime_capability"]["path"]
+    runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+    runtime["serial_baseline"]["case_input_sha256"] = hashlib.sha256(
+        b"".join(
+            (tmp_path / RAW_ROOT / relative).read_bytes()
+            for relative in ("system/controlDict", "Allrun", "cfd_case_meta.json")
+        )
+    ).hexdigest()
+    _write(tmp_path, runtime_path.relative_to(tmp_path), runtime)
+    _relink_environment_source(
+        tmp_path, manifest_path, manifest, "runtime_capability"
+    )
+
+    result = validate_local_usability_acceptance(manifest_path, tmp_path)
+
+    assert result["status"] == "BLOCKED"
+    assert "CASE_INPUT_RUNTIME_HASH_MISMATCH" in result["blockers"]
+
+
+@pytest.mark.parametrize(
+    ("source_name", "wrong_relative"),
+    [
+        ("case_meta", RAW_ROOT / "renamed-case-meta.json"),
+        ("allrun", RAW_ROOT / "run/Allrun"),
+        ("control_dict", RAW_ROOT / "system/controlDict.copy"),
+    ],
+)
+def test_case_input_source_locations_are_fixed(
+    tmp_path, source_name, wrong_relative
+):
+    from scripts.local_usability_acceptance import validate_local_usability_acceptance
+
+    manifest_path, manifest = _build_bundle(tmp_path)
+    original = tmp_path / manifest["sources"][source_name]["path"]
+    wrong = tmp_path / wrong_relative
+    wrong.parent.mkdir(parents=True, exist_ok=True)
+    wrong.write_bytes(original.read_bytes())
+    manifest["sources"][source_name] = _link(tmp_path, wrong)
+    environment_path = tmp_path / manifest["sources"]["environment_acceptance"]["path"]
+    environment = json.loads(environment_path.read_text(encoding="utf-8"))
+    environment[source_name] = manifest["sources"][source_name]
+    _write(tmp_path, environment_path.relative_to(tmp_path), environment)
+    manifest["sources"]["environment_acceptance"] = _link(
+        tmp_path, environment_path
+    )
+    _rewrite_manifest(manifest_path, manifest)
+
+    result = validate_local_usability_acceptance(manifest_path, tmp_path)
+
+    assert result["status"] == "BLOCKED"
+    assert "CASE_INPUT_SOURCE_LOCATION_INVALID" in result["blockers"]
 
 
 def test_forged_pass_with_missing_raw_source_is_blocked(tmp_path):
@@ -437,9 +545,9 @@ def test_hash_bound_control_dict_application_is_parsed_not_caller_claimed(tmp_pa
     from scripts.local_usability_acceptance import validate_local_usability_acceptance
 
     manifest_path, manifest = _build_bundle(tmp_path)
-    control_dict = tmp_path / manifest["sources"]["case_input"]["path"]
+    control_dict = tmp_path / manifest["sources"]["control_dict"]["path"]
     control_dict.write_text("application simpleFoam;\nendTime 1;\n", encoding="utf-8")
-    _relink_case_input_everywhere(tmp_path, manifest_path, manifest)
+    _relink_control_dict_everywhere(tmp_path, manifest_path, manifest)
 
     result = validate_local_usability_acceptance(manifest_path, tmp_path)
 
@@ -447,11 +555,36 @@ def test_hash_bound_control_dict_application_is_parsed_not_caller_claimed(tmp_pa
     assert "CONTROL_DICT_APPLICATION_INVALID" in result["blockers"]
 
 
+def test_control_dict_preprocessing_cannot_introduce_unhashed_application_override(
+    tmp_path,
+):
+    from scripts.local_usability_acceptance import validate_local_usability_acceptance
+
+    manifest_path, manifest = _build_bundle(tmp_path)
+    control_dict = tmp_path / manifest["sources"]["control_dict"]["path"]
+    override = control_dict.with_name("applicationOverride")
+    override.write_text("application simpleFoam;\n", encoding="utf-8")
+    control_dict.write_text(
+        "application buoyantBoussinesqPimpleFoam;\n"
+        '#include "applicationOverride"\n'
+        "endTime 1;\n",
+        encoding="utf-8",
+    )
+    _relink_control_dict_everywhere(tmp_path, manifest_path, manifest)
+
+    result = validate_local_usability_acceptance(manifest_path, tmp_path)
+
+    assert result["status"] == "BLOCKED"
+    assert "CONTROL_DICT_PREPROCESSING_FORBIDDEN" in result["blockers"]
+    assert override.relative_to(tmp_path).as_posix() not in result["evidence_sha256"]
+
+
 @pytest.mark.parametrize(
     ("mutation", "blocker"),
     [
         ("missing_status", "OPENFOAM_RUNTIME_NOT_READY"),
         ("missing_solver", "OPENFOAM_SOLVER_EXECUTABLE_MISSING"),
+        ("wrong_solver_path", "OPENFOAM_SOLVER_EXECUTABLE_INVALID"),
     ],
 )
 def test_runtime_openfoam_must_be_ready_with_exact_solver_executable(
@@ -464,8 +597,12 @@ def test_runtime_openfoam_must_be_ready_with_exact_solver_executable(
     runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
     if mutation == "missing_status":
         runtime["openfoam"].pop("status")
-    else:
+    elif mutation == "missing_solver":
         runtime["openfoam"].pop("solvers")
+    else:
+        runtime["openfoam"]["solvers"]["buoyantBoussinesqPimpleFoam"] = (
+            "/usr/bin/simpleFoam"
+        )
     _write(tmp_path, runtime_path.relative_to(tmp_path), runtime)
     _relink_environment_source(tmp_path, manifest_path, manifest, "runtime_capability")
 
@@ -965,6 +1102,87 @@ def test_same_content_file_replacement_changes_authoritative_identity(tmp_path, 
     assert "SOURCE_FILE_IDENTITY_CHANGED" in result["blockers"]
 
 
+@pytest.mark.parametrize("source_name", ["case_meta", "allrun", "control_dict"])
+def test_case_input_same_content_replacement_changes_authoritative_identity(
+    tmp_path, monkeypatch, source_name
+):
+    import os
+    import scripts.local_usability_acceptance as acceptance
+
+    manifest_path, manifest = _build_bundle(tmp_path)
+    source = (tmp_path / manifest["sources"][source_name]["path"]).resolve()
+    original_sha256 = acceptance._sha256_file
+    replaced = False
+
+    def replace_after_hash(path):
+        nonlocal replaced
+        digest = original_sha256(path)
+        if Path(path).resolve() == source and not replaced:
+            replacement = source.with_name(source.name + ".replacement")
+            replacement.write_bytes(source.read_bytes())
+            os.replace(replacement, source)
+            replaced = True
+        return digest
+
+    monkeypatch.setattr(acceptance, "_sha256_file", replace_after_hash)
+    result = acceptance.validate_local_usability_acceptance(manifest_path, tmp_path)
+
+    assert replaced
+    assert result["status"] == "BLOCKED"
+    assert "SOURCE_FILE_IDENTITY_CHANGED" in result["blockers"]
+
+
+@pytest.mark.parametrize("source_name", ["case_meta", "allrun", "control_dict"])
+def test_case_input_source_is_rehashed_after_semantic_validation(
+    tmp_path, monkeypatch, source_name
+):
+    import scripts.local_usability_acceptance as acceptance
+
+    manifest_path, manifest = _build_bundle(tmp_path)
+    source = (tmp_path / manifest["sources"][source_name]["path"]).resolve()
+    original_sha256 = acceptance._sha256_file
+    calls = 0
+
+    def drift_on_final_hash(path):
+        nonlocal calls
+        if Path(path).resolve() == source:
+            calls += 1
+            if calls >= 2:
+                return "f" * 64
+        return original_sha256(path)
+
+    monkeypatch.setattr(acceptance, "_sha256_file", drift_on_final_hash)
+    result = acceptance.validate_local_usability_acceptance(manifest_path, tmp_path)
+
+    assert calls >= 2
+    assert result["status"] == "BLOCKED"
+    assert "SOURCE_POST_LOAD_HASH_DRIFT" in result["blockers"]
+
+
+def test_second_solver_log_introduced_after_initial_inventory_is_blocked(
+    tmp_path, monkeypatch
+):
+    import scripts.local_usability_acceptance as acceptance
+
+    manifest_path, _manifest = _build_bundle(tmp_path)
+    extra_solver_log = tmp_path / RAW_ROOT / "log.simpleFoam"
+    original = acceptance._validate_runtime_semantics
+
+    def add_log_after_initial_inventory(*args, **kwargs):
+        original(*args, **kwargs)
+        extra_solver_log.write_text("Time = 1\nEnd\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        acceptance, "_validate_runtime_semantics", add_log_after_initial_inventory
+    )
+
+    result = acceptance.validate_local_usability_acceptance(manifest_path, tmp_path)
+
+    assert extra_solver_log.is_file()
+    assert result["status"] == "BLOCKED"
+    assert "RAW_INVENTORY_POST_LOAD_DRIFT" in result["blockers"]
+
+
 def test_source_becoming_reparse_after_load_is_blocked(tmp_path, monkeypatch):
     import scripts.local_usability_acceptance as acceptance
 
@@ -1341,3 +1559,40 @@ def test_selected_artifact_must_equal_sole_raw_candidate(
 
     assert result["status"] == "BLOCKED"
     assert blocker in result["blockers"]
+
+
+def test_solver_log_name_must_match_control_dict_application(tmp_path):
+    from scripts.local_usability_acceptance import validate_local_usability_acceptance
+
+    manifest_path, manifest = _build_bundle(tmp_path)
+    original = tmp_path / manifest["sources"]["solver_log"]["path"]
+    wrong_solver_log = original.with_name("log.simpleFoam")
+    original.rename(wrong_solver_log)
+    manifest["sources"]["solver_log"]["path"] = wrong_solver_log.relative_to(
+        tmp_path
+    ).as_posix()
+    _relink_solver_log_everywhere(tmp_path, manifest_path, manifest)
+
+    result = validate_local_usability_acceptance(manifest_path, tmp_path)
+
+    assert result["status"] == "BLOCKED"
+    assert "SOLVER_LOG_IDENTITY_INVALID" in result["blockers"]
+
+
+def test_solver_log_must_be_at_canonical_raw_root_path(tmp_path):
+    from scripts.local_usability_acceptance import validate_local_usability_acceptance
+
+    manifest_path, manifest = _build_bundle(tmp_path)
+    original = tmp_path / manifest["sources"]["solver_log"]["path"]
+    nested = original.parent / "nested" / original.name
+    nested.parent.mkdir()
+    original.rename(nested)
+    manifest["sources"]["solver_log"]["path"] = nested.relative_to(
+        tmp_path
+    ).as_posix()
+    _relink_solver_log_everywhere(tmp_path, manifest_path, manifest)
+
+    result = validate_local_usability_acceptance(manifest_path, tmp_path)
+
+    assert result["status"] == "BLOCKED"
+    assert "SOLVER_LOG_IDENTITY_INVALID" in result["blockers"]

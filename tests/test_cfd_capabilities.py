@@ -128,6 +128,24 @@ class RuntimeCapabilityTests(unittest.TestCase):
             saved = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(saved, payload)
 
+    def test_runtime_capability_generates_schema_valid_run_id_by_default(self):
+        payload = cfd_capabilities.build_runtime_capability({})
+
+        self.assertRegex(payload["run_id"], r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+
+    def test_runtime_capability_preserves_explicit_run_id(self):
+        payload = cfd_capabilities.build_runtime_capability(
+            {}, run_id="serial-run-001"
+        )
+
+        self.assertEqual(payload["run_id"], "serial-run-001")
+
+    def test_runtime_capability_rejects_empty_explicit_run_id(self):
+        with self.assertRaisesRegex(
+            ValueError, "RUNTIME_CAPABILITY_RUN_ID_INVALID"
+        ):
+            cfd_capabilities.build_runtime_capability({}, run_id="")
+
     def test_invalid_wsl_cpu_is_not_replaced_with_host_cpu(self):
         openfoam = {
             "ok": True,

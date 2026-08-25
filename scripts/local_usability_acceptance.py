@@ -35,6 +35,13 @@ MAX_ACCEPTANCE_AGE = timedelta(minutes=15)
 MAX_FUTURE_SKEW = timedelta(seconds=30)
 MAX_SAME_RUN_SKEW = timedelta(minutes=5)
 EXPECTED_SERIAL_SOLVER = "buoyantBoussinesqPimpleFoam"
+EXPECTED_SOLVER_LOG = f"log.{EXPECTED_SERIAL_SOLVER}"
+EXPECTED_SOLVER_LOG_PATH = (RAW_ROOT / EXPECTED_SOLVER_LOG).as_posix()
+CASE_INPUT_PARTS = (
+    ("case_meta", "cfd_case_meta.json"),
+    ("allrun", "Allrun"),
+    ("control_dict", "system/controlDict"),
+)
 STUDIO_FIRST_PAGE_MARKER = "MEP CFD Studio"
 DIAGNOSTIC_CODES = {
     "WSL_UNAVAILABLE",
@@ -306,8 +313,49 @@ def _timestamp_is_current(
 
 def _control_dict_application(text: str) -> str | None:
     without_comments = _LINE_COMMENT.sub("", _BLOCK_COMMENT.sub("", text))
+    if "#" in without_comments:
+        return None
     matches = _CONTROL_APPLICATION.findall(without_comments)
     return matches[0] if len(matches) == 1 else None
+
+
+def _control_dict_has_preprocessing(text: str) -> bool:
+    without_comments = _LINE_COMMENT.sub("", _BLOCK_COMMENT.sub("", text))
+    return "#" in without_comments
+
+
+def _solver_executable_is_canonical(value: object) -> bool:
+    if not isinstance(value, str) or not value or "\\" in value or ":" in value:
+        return False
+    pure = PurePosixPath(value)
+    return bool(
+        pure.is_absolute()
+        and not value.startswith("//")
+        and pure.as_posix() == value
+        and not any(part in {"", ".", ".."} for part in pure.parts)
+        and pure.name == EXPECTED_SERIAL_SOLVER
+    )
+
+
+def _case_input_sha256(
+    manifest: dict[str, Any], source_paths: dict[str, Path]
+) -> str | None:
+    digest = hashlib.sha256()
+    sources = manifest["sources"]
+    for source_name, aggregate_label in CASE_INPUT_PARTS:
+        link = sources[source_name]
+        source = source_paths.get(link["path"])
+        if source is None:
+            return None
+        digest.update(aggregate_label.encode("utf-8"))
+        digest.update(b"\0")
+        try:
+            with source.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        except OSError:
+            return None
+    return digest.hexdigest()
 
 
 def _same_link(raw: object, expected: dict[str, str]) -> bool:
@@ -402,6 +450,7 @@ def _freecad_executable_identity_valid(
 def _validate_runtime_semantics(
     manifest: dict[str, Any], loaded: dict[str, dict[str, Any]], blockers: list[str],
     *, now: datetime, control_application: str | None,
+    case_input_sha256: str | None,
 ) -> None:
     sources = manifest["sources"]
     environment = loaded.get(sources["environment_acceptance"]["path"])
@@ -440,10 +489,15 @@ def _validate_runtime_semantics(
         now=now,
     ):
         blockers.append("FREECAD_DIAGNOSTICS_STALE")
-    for key in ("case_input", "mesh_log", "solver_log", "report", "runtime_capability"):
+    for key in (
+        "case_meta", "allrun", "control_dict", "mesh_log", "solver_log",
+        "report", "runtime_capability",
+    ):
         if not _same_link(environment.get(key), sources[key]):
             blockers.append("ENVIRONMENT_ACCEPTANCE_LINK_MISMATCH")
             break
+    if environment.get("case_input_sha256") != case_input_sha256:
+        blockers.append("ENVIRONMENT_CASE_INPUT_HASH_MISMATCH")
     if environment.get("status") != "PASS" or environment.get("mesh_ok") is not True:
         blockers.append("ENVIRONMENT_ACCEPTANCE_NOT_PASS")
     if runtime is None or runtime.get("contract") != "runtime_capability.v1":
@@ -458,7 +512,7 @@ def _validate_runtime_semantics(
             or not _finite_number(baseline.get("peak_rss_kib"), positive=True)
         ):
             blockers.append("SERIAL_RUNTIME_METRICS_INVALID")
-        if baseline.get("case_input_sha256") != sources["case_input"]["sha256"]:
+        if case_input_sha256 is None or baseline.get("case_input_sha256") != case_input_sha256:
             blockers.append("CASE_INPUT_RUNTIME_HASH_MISMATCH")
         if baseline.get("solver_log_sha256") != sources["solver_log"]["sha256"]:
             blockers.append("SOLVER_LOG_RUNTIME_HASH_MISMATCH")
@@ -471,6 +525,8 @@ def _validate_runtime_semantics(
         )
         if not isinstance(solver_executable, str) or not solver_executable.strip():
             blockers.append("OPENFOAM_SOLVER_EXECUTABLE_MISSING")
+        elif not _solver_executable_is_canonical(solver_executable):
+            blockers.append("OPENFOAM_SOLVER_EXECUTABLE_INVALID")
         if control_application != EXPECTED_SERIAL_SOLVER:
             blockers.append("CONTROL_DICT_APPLICATION_INVALID")
 
@@ -702,6 +758,7 @@ def validate_local_usability_acceptance(
     loaded: dict[str, dict[str, Any]] = {}
     source_paths: dict[str, Path] = {}
     source_identities: dict[str, tuple[int, int] | None] = {}
+    raw_inventory: set[str] | None = None
     now = _utc_now()
     output_safe = output is not None
 
@@ -802,6 +859,14 @@ def validate_local_usability_acceptance(
         runtime_link = sources.get("runtime_capability") if isinstance(sources.get("runtime_capability"), dict) else {}
         if runtime_link.get("path") != RUNTIME_CAPABILITY.as_posix():
             blockers.append("RUNTIME_CAPABILITY_LOCATION_NOT_FIXED")
+        for source_name, expected_relative in CASE_INPUT_PARTS:
+            link = sources.get(source_name) if isinstance(sources.get(source_name), dict) else {}
+            expected_path = (RAW_ROOT / expected_relative).as_posix()
+            if link.get("path") != expected_path:
+                blockers.append("CASE_INPUT_SOURCE_LOCATION_INVALID")
+        solver_link = sources.get("solver_log") if isinstance(sources.get("solver_log"), dict) else {}
+        if solver_link.get("path") != EXPECTED_SOLVER_LOG_PATH:
+            blockers.append("SOLVER_LOG_IDENTITY_INVALID")
         raw_prefix = RAW_ROOT.as_posix() + "/"
         for name, link in sources.items():
             if name == "runtime_capability" or not isinstance(link, dict):
@@ -816,6 +881,9 @@ def validate_local_usability_acceptance(
         raw_root_path = root.joinpath(*RAW_ROOT.parts)
         if raw_root_path.is_dir():
             raw_files = [path for path in raw_root_path.rglob("*") if path.is_file()]
+            raw_inventory = {
+                path.relative_to(root).as_posix() for path in raw_files
+            }
             mesh_candidates = [path for path in raw_files if path.name.startswith("log.checkMesh")]
             solver_candidates = [
                 path for path in raw_files if re.fullmatch(r"log\..*Foam(?:\..*)?", path.name)
@@ -825,6 +893,8 @@ def validate_local_usability_acceptance(
                 blockers.append("MESH_LOG_AMBIGUOUS" if mesh_candidates else "MESH_LOG_MISSING")
             if len(solver_candidates) != 1:
                 blockers.append("SOLVER_LOG_AMBIGUOUS" if solver_candidates else "SOLVER_LOG_MISSING")
+            elif solver_candidates[0].name != EXPECTED_SOLVER_LOG:
+                blockers.append("SOLVER_LOG_IDENTITY_INVALID")
             if len(report_candidates) != 1:
                 blockers.append("REPORT_AMBIGUOUS" if report_candidates else "REPORT_MISSING")
             selections = (
@@ -844,7 +914,7 @@ def validate_local_usability_acceptance(
         control_application: str | None = None
         try:
             case_text = root.joinpath(
-                *PurePosixPath(sources["case_input"]["path"]).parts
+                *PurePosixPath(sources["control_dict"]["path"]).parts
             ).read_text(encoding="utf-8", errors="replace")
             mesh_text = root.joinpath(*PurePosixPath(sources["mesh_log"]["path"]).parts).read_text(
                 encoding="utf-8", errors="replace"
@@ -859,6 +929,8 @@ def validate_local_usability_acceptance(
             blockers.append("RAW_ACCEPTANCE_ARTIFACT_UNREADABLE")
         else:
             control_application = _control_dict_application(case_text)
+            if _control_dict_has_preprocessing(case_text):
+                blockers.append("CONTROL_DICT_PREPROCESSING_FORBIDDEN")
             cells = [int(value) for value in _CELL_COUNT.findall(mesh_text)]
             times = [float(value) for value in _TIME_VALUE.findall(solver_text)]
             solver_lines = [line.strip() for line in solver_text.splitlines() if line.strip()]
@@ -880,12 +952,14 @@ def validate_local_usability_acceptance(
                 blockers.append("REPORT_EVIDENCE_INVALID")
             if environment.get("cells") != 64:
                 blockers.append("ENVIRONMENT_CELL_CLAIM_INVALID")
+        case_input_sha256 = _case_input_sha256(manifest, source_paths)
         _validate_runtime_semantics(
             manifest,
             loaded,
             blockers,
             now=now,
             control_application=control_application,
+            case_input_sha256=case_input_sha256,
         )
         _validate_raw_observations(
             manifest, loaded, blockers, root, manifest_lexical, output,
@@ -924,6 +998,20 @@ def validate_local_usability_acceptance(
         else:
             if current_manifest_hash != manifest_snapshot_hash:
                 blockers.append("MANIFEST_POST_LOAD_HASH_DRIFT")
+
+    if raw_inventory is not None:
+        raw_root_path = root.joinpath(*RAW_ROOT.parts)
+        try:
+            current_raw_inventory = {
+                path.relative_to(root).as_posix()
+                for path in raw_root_path.rglob("*")
+                if path.is_file()
+            }
+        except OSError:
+            blockers.append("RAW_INVENTORY_POST_LOAD_UNREADABLE")
+        else:
+            if current_raw_inventory != raw_inventory:
+                blockers.append("RAW_INVENTORY_POST_LOAD_DRIFT")
 
     result = {
         "contract": "local_usability_acceptance_evaluation.v1",

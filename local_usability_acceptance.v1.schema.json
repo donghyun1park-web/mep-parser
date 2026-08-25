@@ -31,13 +31,15 @@
     "sources": {
       "type": "object", "additionalProperties": false,
       "required": [
-        "environment_acceptance", "runtime_capability", "case_input", "mesh_log",
-        "solver_log", "report", "freecad_diagnostics"
+        "environment_acceptance", "runtime_capability", "case_meta", "allrun",
+        "control_dict", "mesh_log", "solver_log", "report", "freecad_diagnostics"
       ],
       "properties": {
         "environment_acceptance": {"$ref": "#/$defs/link"},
         "runtime_capability": {"$ref": "#/$defs/link"},
-        "case_input": {"$ref": "#/$defs/link"},
+        "case_meta": {"$ref": "#/$defs/link"},
+        "allrun": {"$ref": "#/$defs/link"},
+        "control_dict": {"$ref": "#/$defs/link"},
         "mesh_log": {"$ref": "#/$defs/link"},
         "solver_log": {"$ref": "#/$defs/link"},
         "report": {"$ref": "#/$defs/link"},
