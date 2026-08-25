@@ -18,7 +18,9 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
+import uuid
 
 
 FREECAD_EXE_ENV = "MEP_CFD_FREECADCMD"
@@ -433,6 +435,44 @@ def _stage_payload(stdout, expected_stage):
     return payload
 
 
+def _stage_payload_invariants(stage_name, payload):
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
+        return False
+    if stage_name == "imports":
+        return True
+    if stage_name == "boolean":
+        volume = payload.get("volume_mm3")
+        declared_error = payload.get("relative_volume_error")
+        if (
+            payload.get("valid") is not True
+            or payload.get("solid_count") != 1
+            or isinstance(volume, bool)
+            or not isinstance(volume, (int, float))
+            or not math.isfinite(float(volume))
+            or float(volume) <= 0
+            or isinstance(declared_error, bool)
+            or not isinstance(declared_error, (int, float))
+            or not math.isfinite(float(declared_error))
+        ):
+            return False
+        expected = 239250000000.0
+        recomputed_error = abs(float(volume) - expected) / expected
+        return bool(
+            math.isclose(
+                float(declared_error), recomputed_error, rel_tol=0.0, abs_tol=1e-15
+            )
+            and recomputed_error <= 1e-9
+        )
+    if stage_name == "tessellation":
+        vertices = payload.get("vertices")
+        facets = payload.get("facets")
+        return bool(
+            isinstance(vertices, int) and not isinstance(vertices, bool) and vertices > 0
+            and isinstance(facets, int) and not isinstance(facets, bool) and facets > 0
+        )
+    return False
+
+
 def diagnose_freecad_stages(executable: Path, *, per_stage_timeout_s: float) -> dict:
     """Run bounded FreeCAD discovery/import/Boolean/tessellation diagnostics.
 
@@ -447,14 +487,22 @@ def diagnose_freecad_stages(executable: Path, *, per_stage_timeout_s: float) -> 
     if timeout <= 0 or not math.isfinite(timeout):
         raise ValueError("FREECAD_STAGE_TIMEOUT_INVALID")
 
-    checked_at = datetime.now(timezone.utc).isoformat()
+    checked_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     stages = _stage_rows()
     requested = os.fspath(executable) if executable is not None else None
-    path, selection = select_freecadcmd(requested)
+    requested_path = (
+        os.path.abspath(os.path.expandvars(os.path.expanduser(requested)))
+        if requested else ""
+    )
+    if requested_path and os.path.isfile(requested_path):
+        path, selection = os.path.realpath(requested_path), "explicit"
+    else:
+        path, selection = "", "explicit_missing"
     result = {
         "schema_version": 1,
         "contract": "freecad_staged_diagnostics.v1",
         "checked_at": checked_at,
+        "run_id": uuid.uuid4().hex,
         "ok": False,
         "status": "missing",
         "failed_stage": "discovery",
@@ -475,6 +523,21 @@ def diagnose_freecad_stages(executable: Path, *, per_stage_timeout_s: float) -> 
     }
     if not path:
         stages[0].update(status="BLOCKED", reason_code="FREECAD_EXECUTABLE_MISSING")
+        return result
+
+    try:
+        is_python = os.path.samefile(path, sys.executable)
+    except OSError:
+        is_python = False
+    if Path(path).name.casefold() not in {"freecadcmd", "freecadcmd.exe"} or is_python:
+        stages[0].update(
+            status="BLOCKED", reason_code="FREECAD_EXECUTABLE_IDENTITY_INVALID"
+        )
+        result.update(
+            status="identity_invalid",
+            summary="지정한 실행 파일이 정규 FreeCADCmd 실행 파일이 아닙니다.",
+            fix="FreeCAD 설치의 bin/FreeCADCmd.exe 절대경로를 지정하세요.",
+        )
         return result
 
     try:
@@ -536,7 +599,7 @@ def diagnose_freecad_stages(executable: Path, *, per_stage_timeout_s: float) -> 
                 return result
 
             payload = _stage_payload(proc.stdout, stage_name)
-            if proc.returncode != 0 or payload is None or payload.get("ok") is not True:
+            if proc.returncode != 0 or not _stage_payload_invariants(stage_name, payload):
                 row.update(
                     status="BLOCKED", reason_code=f"FREECAD_{stage_name.upper()}_FAILED",
                     details={

@@ -9,7 +9,7 @@ runs FreeCAD, OpenFOAM, Studio, or a browser.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import math
@@ -29,6 +29,10 @@ CONTRACT = "local_usability_acceptance.v1"
 FIXED_MANIFEST = PurePosixPath("_working_validation/local_usability_acceptance.json")
 RUNTIME_CAPABILITY = PurePosixPath("_working_validation/runtime_capability.v1.json")
 RAW_ROOT = PurePosixPath("_system/environment_acceptance")
+WORKING_OUTPUT_ROOT = PurePosixPath("_working_validation/evaluations")
+MAX_ACCEPTANCE_AGE = timedelta(minutes=15)
+MAX_FUTURE_SKEW = timedelta(seconds=30)
+MAX_SAME_RUN_SKEW = timedelta(minutes=5)
 DIAGNOSTIC_CODES = {
     "WSL_UNAVAILABLE",
     "FREECAD_UNAVAILABLE",
@@ -39,7 +43,16 @@ DIAGNOSTIC_CODES = {
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _CELL_COUNT = re.compile(r"(?im)^\s*cells\s*:\s*(\d+)\s*$")
 _TIME_VALUE = re.compile(r"(?m)^Time\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*$")
+_SOLVER_FATAL = re.compile(
+    r"FOAM\s+FATAL|FATAL\s+ERROR|SEGMENTATION\s+FAULT|FLOATING\s+POINT\s+EXCEPTION"
+    r"|NO\s+SPACE\s+LEFT\s+ON\s+DEVICE|^\s*KILLED\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
 _CACHE_PARTS = {".cache", "cache", ".pytest_cache", "__pycache__", "tmp", "temp", ".tmp"}
+_FREECAD_MODULES = (
+    "FreeCAD", "Part", "Draft", "Arch", "Mesh", "MeshPart", "BOPTools.SplitAPI",
+)
+_FREECAD_BOOLEAN_VOLUME_MM3 = 239_250_000_000.0
 
 
 def _sha256_file(path: Path) -> str:
@@ -82,6 +95,18 @@ def _schema_errors(payload: object) -> list[str]:
     return blockers
 
 
+def _freecad_schema_valid(payload: object) -> bool:
+    schema = _read_json(_schema_path())
+    if schema is None:
+        return False
+    validator_schema = {
+        "$schema": schema.get("$schema"),
+        "$defs": schema.get("$defs", {}),
+        "$ref": "#/$defs/freecad_ready_diagnostics",
+    }
+    return not any(Draft202012Validator(validator_schema).iter_errors(payload))
+
+
 def _link_rows(manifest: dict[str, Any]) -> list[dict[str, str]]:
     sources = manifest.get("sources") if isinstance(manifest.get("sources"), dict) else {}
     rows = [value for value in sources.values() if isinstance(value, dict)]
@@ -97,7 +122,11 @@ def _path_reference_blocker(relative: object) -> str | None:
         return "SOURCE_PATH_BACKSLASH_FORBIDDEN"
     if relative.startswith("/") or re.match(r"^[A-Za-z]:", relative):
         return "SOURCE_PATH_ABSOLUTE_FORBIDDEN"
+    if ":" in relative:
+        return "SOURCE_PATH_COLON_FORBIDDEN"
     pure = PurePosixPath(relative)
+    if pure.as_posix() != relative:
+        return "SOURCE_PATH_NON_CANONICAL"
     if any(part in {"", ".", ".."} for part in pure.parts):
         return "SOURCE_PATH_TRAVERSAL"
     folded = [part.casefold() for part in pure.parts]
@@ -106,6 +135,68 @@ def _path_reference_blocker(relative: object) -> str | None:
     if any(part in _CACHE_PARTS or part.endswith(".tmp") for part in folded):
         return "SOURCE_CACHE_OR_TEMP_FORBIDDEN"
     return None
+
+
+def _path_case_is_exact(root: Path, relative: str) -> bool:
+    """Reject case-only aliases while allowing a genuinely missing component."""
+    current = root
+    for part in PurePosixPath(relative).parts:
+        try:
+            names = [entry.name for entry in os.scandir(current)]
+        except OSError:
+            return False
+        if part in names:
+            current = current / part
+            continue
+        if any(name.casefold() == part.casefold() for name in names):
+            return False
+        return not (current / part).exists()
+    return True
+
+
+def _file_identity(path: Path) -> tuple[int, int] | None:
+    try:
+        metadata = path.stat()
+    except OSError:
+        return None
+    return metadata.st_dev, metadata.st_ino
+
+
+def _has_multiple_hardlinks(path: Path) -> bool:
+    try:
+        return path.stat().st_nlink != 1
+    except OSError:
+        return False
+
+
+def _same_file(left: Path, right: Path) -> bool:
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return False
+
+
+def _output_path_blockers(root: Path, output: Path) -> list[str]:
+    blockers: list[str] = []
+    working_root = root.joinpath(*WORKING_OUTPUT_ROOT.parts)
+    try:
+        relative = output.relative_to(working_root)
+        if not relative.parts:
+            raise ValueError
+    except ValueError:
+        blockers.append("EVALUATOR_OUTPUT_LOCATION_FORBIDDEN")
+        return blockers
+    if _path_has_link_or_reparse(root, output):
+        blockers.append("EVALUATOR_OUTPUT_REPARSE_FORBIDDEN")
+    if not _path_case_is_exact(root, output.relative_to(root).as_posix()):
+        blockers.append("EVALUATOR_OUTPUT_PATH_CASE_MISMATCH")
+    try:
+        metadata = output.lstat()
+    except OSError:
+        return blockers
+    if not stat.S_ISREG(metadata.st_mode):
+        blockers.append("EVALUATOR_OUTPUT_INVALID")
+    return blockers
 
 
 def _path_has_link_or_reparse(root: Path, path: Path) -> bool:
@@ -155,6 +246,22 @@ def _parse_utc(value: object) -> datetime | None:
     return parsed if offset is not None and offset.total_seconds() == 0 else None
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _timestamp_is_current(
+    value: object, *, manifest_stamp: datetime | None, now: datetime
+) -> bool:
+    stamp = _parse_utc(value)
+    if stamp is None or manifest_stamp is None:
+        return False
+    return bool(
+        now - MAX_ACCEPTANCE_AGE <= stamp <= now + MAX_FUTURE_SKEW
+        and abs(stamp - manifest_stamp) <= MAX_SAME_RUN_SKEW
+    )
+
+
 def _same_link(raw: object, expected: dict[str, str]) -> bool:
     return isinstance(raw, dict) and raw == expected
 
@@ -166,8 +273,87 @@ def _finite_number(value: object, *, positive: bool = False) -> bool:
     return math.isfinite(number) and (number > 0 if positive else number >= 0)
 
 
+def _freecad_stage_invariants_ok(freecad: dict[str, Any]) -> bool:
+    stages = freecad.get("stages")
+    if not isinstance(stages, list) or len(stages) != 4:
+        return False
+    discovery, imports, boolean, tessellation = stages
+    if discovery.get("details") != {"selection": "explicit"}:
+        return False
+    imports_details = imports.get("details")
+    if not isinstance(imports_details, dict) or imports_details.get("ok") is not True:
+        return False
+    modules = imports_details.get("modules")
+    if not isinstance(modules, dict) or set(modules) != set(_FREECAD_MODULES):
+        return False
+    if any(modules.get(name) is not True for name in _FREECAD_MODULES):
+        return False
+    for key in ("freecad_version", "revision", "python_version", "occ_version"):
+        if imports_details.get(key) != freecad.get(key):
+            return False
+    boolean_details = boolean.get("details")
+    if not isinstance(boolean_details, dict):
+        return False
+    volume = boolean_details.get("volume_mm3")
+    declared_error = boolean_details.get("relative_volume_error")
+    if (
+        boolean_details.get("ok") is not True
+        or boolean_details.get("valid") is not True
+        or boolean_details.get("solid_count") != 1
+        or not _finite_number(volume, positive=True)
+        or not _finite_number(declared_error)
+    ):
+        return False
+    recomputed_error = abs(float(volume) - _FREECAD_BOOLEAN_VOLUME_MM3) / _FREECAD_BOOLEAN_VOLUME_MM3
+    if not math.isclose(float(declared_error), recomputed_error, rel_tol=0.0, abs_tol=1e-15):
+        return False
+    if recomputed_error > 1e-9:
+        return False
+    tessellation_details = tessellation.get("details")
+    return bool(
+        isinstance(tessellation_details, dict)
+        and tessellation_details.get("ok") is True
+        and isinstance(tessellation_details.get("vertices"), int)
+        and not isinstance(tessellation_details.get("vertices"), bool)
+        and tessellation_details["vertices"] > 0
+        and isinstance(tessellation_details.get("facets"), int)
+        and not isinstance(tessellation_details.get("facets"), bool)
+        and tessellation_details["facets"] > 0
+    )
+
+
+def _freecad_executable_identity_valid(
+    freecad_identity: dict[str, Any], freecad: dict[str, Any] | None
+) -> bool:
+    raw_executable = freecad_identity.get("executable")
+    if not isinstance(raw_executable, str) or not raw_executable:
+        return False
+    try:
+        executable = Path(raw_executable).resolve(strict=True)
+        current_python = Path(sys.executable).resolve(strict=True)
+        if str(executable) != raw_executable:
+            return False
+        if executable.name.casefold() not in {"freecadcmd", "freecadcmd.exe"}:
+            return False
+        if os.path.samefile(executable, current_python):
+            return False
+        digest = _sha256_file(executable)
+    except OSError:
+        return False
+    if digest != freecad_identity.get("executable_sha256"):
+        return False
+    if not isinstance(freecad, dict):
+        return False
+    return (
+        freecad.get("executable") == raw_executable
+        and freecad.get("executable_sha256") == digest
+        and freecad.get("selection") == "explicit"
+    )
+
+
 def _validate_runtime_semantics(
-    manifest: dict[str, Any], loaded: dict[str, dict[str, Any]], blockers: list[str]
+    manifest: dict[str, Any], loaded: dict[str, dict[str, Any]], blockers: list[str],
+    *, now: datetime,
 ) -> None:
     sources = manifest["sources"]
     environment = loaded.get(sources["environment_acceptance"]["path"])
@@ -177,21 +363,35 @@ def _validate_runtime_semantics(
         blockers.append("ENVIRONMENT_ACCEPTANCE_INVALID")
         return
     run_id = manifest.get("run_id")
-    if environment.get("run_id") != run_id or not isinstance(runtime, dict) or runtime.get("run_id") != run_id:
+    if (
+        environment.get("run_id") != run_id
+        or not isinstance(runtime, dict)
+        or runtime.get("run_id") != run_id
+        or not isinstance(freecad, dict)
+        or freecad.get("run_id") != run_id
+    ):
         blockers.append("RUN_ID_MISMATCH")
     manifest_stamp = _parse_utc(manifest.get("created_at"))
     environment_stamp = _parse_utc(environment.get("created_at"))
     runtime_stamp = _parse_utc(runtime.get("created_at")) if isinstance(runtime, dict) else None
     if (
         manifest_stamp is None or environment_stamp is None
-        or abs((manifest_stamp - environment_stamp).total_seconds()) > 300
+        or abs(manifest_stamp - environment_stamp) > MAX_SAME_RUN_SKEW
+        or not _timestamp_is_current(environment.get("created_at"), manifest_stamp=manifest_stamp, now=now)
     ):
         blockers.append("ENVIRONMENT_ACCEPTANCE_STALE")
     if (
         manifest_stamp is None or runtime_stamp is None
-        or abs((manifest_stamp - runtime_stamp).total_seconds()) > 300
+        or abs(manifest_stamp - runtime_stamp) > MAX_SAME_RUN_SKEW
+        or not _timestamp_is_current(runtime.get("created_at"), manifest_stamp=manifest_stamp, now=now)
     ):
         blockers.append("RUNTIME_CAPABILITY_STALE")
+    if not _timestamp_is_current(
+        freecad.get("checked_at") if isinstance(freecad, dict) else None,
+        manifest_stamp=manifest_stamp,
+        now=now,
+    ):
+        blockers.append("FREECAD_DIAGNOSTICS_STALE")
     for key in ("case_input", "mesh_log", "solver_log", "report", "runtime_capability"):
         if not _same_link(environment.get(key), sources[key]):
             blockers.append("ENVIRONMENT_ACCEPTANCE_LINK_MISMATCH")
@@ -227,13 +427,12 @@ def _validate_runtime_semantics(
         blockers.append("PYTHON_IDENTITY_MISMATCH")
 
     freecad_identity = identities["freecad"]
-    freecad_executable = Path(freecad_identity["executable"])
-    try:
-        freecad_hash = _sha256_file(freecad_executable.resolve())
-    except OSError:
-        freecad_hash = ""
-    if freecad_hash != freecad_identity["executable_sha256"]:
-        blockers.append("FREECAD_EXECUTABLE_IDENTITY_MISMATCH")
+    if not _freecad_executable_identity_valid(freecad_identity, freecad):
+        blockers.append("FREECAD_EXECUTABLE_IDENTITY_INVALID")
+    if not _freecad_schema_valid(freecad):
+        blockers.append("FREECAD_DIAGNOSTICS_SCHEMA_INVALID")
+    elif not _freecad_stage_invariants_ok(freecad):
+        blockers.append("FREECAD_DIAGNOSTICS_INVARIANT_INVALID")
     if (
         freecad is None
         or freecad.get("contract") != "freecad_staged_diagnostics.v1"
@@ -275,7 +474,12 @@ def _validate_raw_observations(
     output: Path | None,
     evidence: dict[str, str],
     source_paths: dict[str, Path],
+    source_identities: dict[str, tuple[int, int] | None],
+    *,
+    now: datetime,
 ) -> None:
+    manifest_stamp = _parse_utc(manifest.get("created_at"))
+    run_id = manifest.get("run_id")
     attempts: set[int] = set()
     for link in manifest["launch_observations"]:
         observation = loaded.get(link["path"])
@@ -286,6 +490,17 @@ def _validate_raw_observations(
         http = _parse_utc(observation.get("http_ready_at"))
         dom = _parse_utc(observation.get("dom_ready_at"))
         attempt = observation.get("attempt")
+        if observation.get("run_id") != run_id:
+            blockers.append("RUN_ID_MISMATCH")
+        if not all(
+            _timestamp_is_current(value, manifest_stamp=manifest_stamp, now=now)
+            for value in (
+                observation.get("process_started_at"),
+                observation.get("http_ready_at"),
+                observation.get("dom_ready_at"),
+            )
+        ):
+            blockers.append("LAUNCH_OBSERVATION_STALE")
         if (
             not isinstance(attempt, int) or attempt < 1 or attempt in attempts
             or start is None or http is None or dom is None
@@ -305,6 +520,12 @@ def _validate_raw_observations(
             blockers.append("DIAGNOSTIC_OBSERVATION_INVALID")
             continue
         code = observation.get("code")
+        if observation.get("run_id") != run_id:
+            blockers.append("RUN_ID_MISMATCH")
+        if not _timestamp_is_current(
+            observation.get("observed_at"), manifest_stamp=manifest_stamp, now=now
+        ):
+            blockers.append("DIAGNOSTIC_OBSERVATION_STALE")
         korean_fields = [
             observation.get("cause_ko"), observation.get("impact_ko"),
             observation.get("next_action_ko"),
@@ -336,11 +557,21 @@ def _validate_raw_observations(
                     source = _resolve_source(root, relative)
                     if source is None:
                         blockers.append("DIAGNOSTIC_LOG_PATH_INVALID")
-                    elif source == manifest_path or (output is not None and source == output):
+                    elif _same_file(source, manifest_path) or (
+                        output is not None and _same_file(source, output)
+                    ):
                         blockers.append("SOURCE_SELF_OUTPUT_FORBIDDEN")
                     elif not source.is_file():
                         blockers.append("DIAGNOSTIC_LOG_MISSING")
                     else:
+                        if not _path_case_is_exact(root, relative):
+                            blockers.append("SOURCE_PATH_CASE_MISMATCH")
+                        identity = _file_identity(source)
+                        if _has_multiple_hardlinks(source):
+                            blockers.append("SOURCE_HARDLINK_FORBIDDEN")
+                        if identity is not None and identity in source_identities.values():
+                            blockers.append("SOURCE_DUPLICATE")
+                        source_identities[relative] = identity
                         try:
                             digest = _sha256_file(source)
                         except OSError:
@@ -350,6 +581,25 @@ def _validate_raw_observations(
                             source_paths[relative] = source
                             if digest != log_link.get("sha256"):
                                 blockers.append("DIAGNOSTIC_LOG_HASH_MISMATCH")
+                            try:
+                                diagnostic_text = source.read_text(
+                                    encoding="utf-8", errors="replace"
+                                )
+                            except OSError:
+                                blockers.append("DIAGNOSTIC_LOG_UNREADABLE")
+                            else:
+                                if not diagnostic_text.strip():
+                                    blockers.append("DIAGNOSTIC_LOG_EMPTY")
+                                elif isinstance(code, str) and not re.search(
+                                    rf"(?m)^\s*{re.escape(code)}\s*$",
+                                    diagnostic_text,
+                                ):
+                                    blockers.append("DIAGNOSTIC_LOG_CODE_MISMATCH")
+                                if re.search(
+                                    r"(?m)^Traceback \(most recent call last\):\s*$",
+                                    diagnostic_text,
+                                ):
+                                    blockers.append("DIAGNOSTIC_LOG_TRACEBACK_PRESENT")
         if isinstance(code, str):
             codes.add(code)
     if codes != DIAGNOSTIC_CODES:
@@ -368,30 +618,63 @@ def validate_local_usability_acceptance(
             below ``projects_root``; no discovery or glob selection is performed.
         projects_root: Authority root for every POSIX relative source reference.
         evaluator_output: Optional path for an atomically written evaluator result;
-            it may not alias the manifest or any consumed source.
+            it must be below ``_working_validation/evaluations`` and may not
+            alias the manifest or any consumed source.
 
     Returns:
         ``{"status", "blockers", "evidence_sha256"}``, where the evidence
         mapping contains every consumed raw source path and recomputed SHA-256.
     """
     root = Path(projects_root).resolve()
-    manifest_path = Path(manifest_path).resolve()
-    output = Path(evaluator_output).resolve() if evaluator_output is not None else None
+    manifest_argument = Path(manifest_path)
+    manifest_lexical = (
+        manifest_argument if manifest_argument.is_absolute()
+        else Path.cwd() / manifest_argument
+    )
+    output = (
+        Path(os.path.abspath(os.fspath(evaluator_output)))
+        if evaluator_output is not None else None
+    )
     blockers: list[str] = []
     evidence: dict[str, str] = {}
     loaded: dict[str, dict[str, Any]] = {}
     source_paths: dict[str, Path] = {}
+    source_identities: dict[str, tuple[int, int] | None] = {}
+    now = _utc_now()
+    output_safe = output is not None
 
-    expected_manifest = root.joinpath(*FIXED_MANIFEST.parts).resolve()
-    if manifest_path != expected_manifest:
+    expected_manifest = root.joinpath(*FIXED_MANIFEST.parts)
+    if str(manifest_lexical) != str(expected_manifest):
+        blockers.append("MANIFEST_PATH_NON_CANONICAL")
+    if _path_has_link_or_reparse(root, manifest_lexical):
+        blockers.append("MANIFEST_LINK_OR_REPARSE_FORBIDDEN")
+    try:
+        resolved_manifest = manifest_lexical.resolve(strict=False)
+    except OSError:
+        resolved_manifest = manifest_lexical
+    if resolved_manifest != expected_manifest.resolve(strict=False):
         blockers.append("MANIFEST_LOCATION_NOT_FIXED")
-    if output is not None and output == manifest_path:
+    manifest_identity = _file_identity(manifest_lexical)
+    if _has_multiple_hardlinks(manifest_lexical):
+        blockers.append("MANIFEST_HARDLINK_FORBIDDEN")
+    if output is not None:
+        output_blockers = _output_path_blockers(root, output)
+        blockers.extend(output_blockers)
+        output_safe = not output_blockers
+    if output is not None and _same_file(output, manifest_lexical):
         blockers.append("EVALUATOR_OUTPUT_ALIASES_MANIFEST")
-    manifest = _read_json(manifest_path)
+        output_safe = False
+    manifest = _read_json(manifest_lexical)
     if manifest is None:
         blockers.append("MANIFEST_MISSING_OR_MALFORMED")
     else:
         blockers.extend(_schema_errors(manifest))
+        manifest_stamp = _parse_utc(manifest.get("created_at"))
+        if manifest_stamp is not None:
+            if manifest_stamp < now - MAX_ACCEPTANCE_AGE:
+                blockers.append("ACCEPTANCE_WINDOW_EXPIRED")
+            if manifest_stamp > now + MAX_FUTURE_SKEW:
+                blockers.append("ACCEPTANCE_TIMESTAMP_IN_FUTURE")
         for link in _link_rows(manifest):
             path_blocker = _path_reference_blocker(link.get("path"))
             if path_blocker:
@@ -419,12 +702,23 @@ def validate_local_usability_acceptance(
             if source is None:
                 blockers.append("SOURCE_PATH_INVALID")
                 continue
-            if source == manifest_path or (output is not None and source == output):
+            if _same_file(source, manifest_lexical):
                 blockers.append("SOURCE_SELF_OUTPUT_FORBIDDEN")
                 continue
+            if output is not None and _same_file(source, output):
+                blockers.append("SOURCE_SELF_OUTPUT_FORBIDDEN")
+                output_safe = False
             if not source.is_file():
                 blockers.append("SOURCE_MISSING")
                 continue
+            if not _path_case_is_exact(root, relative):
+                blockers.append("SOURCE_PATH_CASE_MISMATCH")
+            identity = _file_identity(source)
+            if _has_multiple_hardlinks(source):
+                blockers.append("SOURCE_HARDLINK_FORBIDDEN")
+            if identity is not None and identity in source_identities.values():
+                blockers.append("SOURCE_DUPLICATE")
+            source_identities[relative] = identity
             try:
                 digest = _sha256_file(source)
             except OSError:
@@ -500,22 +794,41 @@ def validate_local_usability_acceptance(
         else:
             cells = [int(value) for value in _CELL_COUNT.findall(mesh_text)]
             times = [float(value) for value in _TIME_VALUE.findall(solver_text)]
+            solver_lines = [line.strip() for line in solver_text.splitlines() if line.strip()]
             environment = loaded[sources["environment_acceptance"]["path"]]
             if cells != [64] or "Mesh OK" not in mesh_text:
                 blockers.append("MESH_64_CELL_EVIDENCE_INVALID")
-            if not times or max(times) <= 0 or environment.get("latest_time") != max(times):
+            if (
+                not times
+                or max(times) <= 0
+                or times[-1] != max(times)
+                or environment.get("latest_time") != times[-1]
+            ):
                 blockers.append("SOLVER_TIME_EVIDENCE_INVALID")
+            if not solver_lines or solver_lines[-1] != "End":
+                blockers.append("SOLVER_LOG_INCOMPLETE")
+            if _SOLVER_FATAL.search(solver_text):
+                blockers.append("SOLVER_LOG_FATAL")
             if not report_text.strip():
                 blockers.append("REPORT_EVIDENCE_INVALID")
             if environment.get("cells") != 64:
                 blockers.append("ENVIRONMENT_CELL_CLAIM_INVALID")
-        _validate_runtime_semantics(manifest, loaded, blockers)
+        _validate_runtime_semantics(manifest, loaded, blockers, now=now)
         _validate_raw_observations(
-            manifest, loaded, blockers, root, manifest_path, output,
-            evidence, source_paths,
+            manifest, loaded, blockers, root, manifest_lexical, output,
+            evidence, source_paths, source_identities, now=now,
         )
+        if "SOURCE_SELF_OUTPUT_FORBIDDEN" in blockers:
+            output_safe = False
 
     for relative, source in source_paths.items():
+        unresolved = root.joinpath(*PurePosixPath(relative).parts)
+        if _path_has_link_or_reparse(root, unresolved):
+            blockers.append("SOURCE_POST_LOAD_LINK_OR_REPARSE")
+        if _file_identity(source) != source_identities.get(relative):
+            blockers.append("SOURCE_FILE_IDENTITY_CHANGED")
+        if _has_multiple_hardlinks(source):
+            blockers.append("SOURCE_HARDLINK_FORBIDDEN")
         try:
             current_digest = _sha256_file(source)
         except OSError:
@@ -524,6 +837,13 @@ def validate_local_usability_acceptance(
         if evidence.get(relative) != current_digest:
             blockers.append("SOURCE_POST_LOAD_HASH_DRIFT")
 
+    if _path_has_link_or_reparse(root, manifest_lexical):
+        blockers.append("MANIFEST_POST_LOAD_LINK_OR_REPARSE")
+    if _file_identity(manifest_lexical) != manifest_identity:
+        blockers.append("MANIFEST_POST_LOAD_IDENTITY_CHANGED")
+    if _has_multiple_hardlinks(manifest_lexical):
+        blockers.append("MANIFEST_HARDLINK_FORBIDDEN")
+
     result = {
         "contract": "local_usability_acceptance_evaluation.v1",
         "check_id": "serial_environment",
@@ -531,19 +851,30 @@ def validate_local_usability_acceptance(
         "blockers": sorted(set(blockers)),
         "evidence_sha256": dict(sorted(evidence.items())),
     }
-    output_alias = bool(
-        output is not None
-        and (
-            output == manifest_path
-            or output in source_paths.values()
-            or "SOURCE_SELF_OUTPUT_FORBIDDEN" in blockers
-        )
-    )
-    if output is not None and not output_alias:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        temporary = output.with_name(f".{output.name}.{uuid.uuid4().hex}.tmp")
-        temporary.write_text(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        os.replace(temporary, output)
+    if output is not None and output_safe:
+        temporary: Path | None = None
+        try:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            if _path_has_link_or_reparse(root, output):
+                blockers.append("EVALUATOR_OUTPUT_REPARSE_FORBIDDEN")
+                result["status"] = "BLOCKED"
+                result["blockers"] = sorted(set(blockers))
+            else:
+                temporary = output.with_name(f".{output.name}.{uuid.uuid4().hex}.tmp")
+                temporary.write_text(
+                    json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                os.replace(temporary, output)
+        except OSError:
+            blockers.append("EVALUATOR_OUTPUT_UNWRITABLE")
+            result["status"] = "BLOCKED"
+            result["blockers"] = sorted(set(blockers))
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
     return result
 
 

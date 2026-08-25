@@ -105,6 +105,125 @@
         "package_version": {"type": "string", "minLength": 1},
         "compatible_profile": {"const": "openfoam-v2606"}
       }
+    },
+    "freecad_ready_diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "contract", "checked_at", "run_id", "ok", "status",
+        "failed_stage", "summary", "fix", "selection", "executable",
+        "executable_sha256", "freecad_version", "revision", "python_version",
+        "occ_version", "compatible_profile", "stages"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "contract": {"const": "freecad_staged_diagnostics.v1"},
+        "checked_at": {"$ref": "#/$defs/timestamp"},
+        "run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"},
+        "ok": {"const": true},
+        "status": {"const": "ready"},
+        "failed_stage": {"type": "null"},
+        "summary": {"type": "string", "minLength": 1},
+        "fix": {"const": ""},
+        "selection": {"const": "explicit"},
+        "executable": {"type": "string", "minLength": 1},
+        "executable_sha256": {"$ref": "#/$defs/sha256"},
+        "freecad_version": {"const": "1.1.1"},
+        "revision": {"type": "string", "minLength": 1},
+        "python_version": {"type": "string", "minLength": 1},
+        "occ_version": {"type": "string", "pattern": "^7\\.8\\.1(?:$|[^0-9].*)"},
+        "compatible_profile": {"const": "freecad-1.1.1-occ-7.8.1"},
+        "stages": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "prefixItems": [
+            {"$ref": "#/$defs/freecad_discovery_stage"},
+            {"$ref": "#/$defs/freecad_imports_stage"},
+            {"$ref": "#/$defs/freecad_boolean_stage"},
+            {"$ref": "#/$defs/freecad_tessellation_stage"}
+          ],
+          "items": false
+        }
+      }
+    },
+    "freecad_discovery_stage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "status", "reason_code", "details"],
+      "properties": {
+        "id": {"const": "discovery"}, "status": {"const": "PASS"},
+        "reason_code": {"const": ""},
+        "details": {
+          "type": "object", "additionalProperties": false,
+          "required": ["selection"],
+          "properties": {"selection": {"const": "explicit"}}
+        }
+      }
+    },
+    "freecad_imports_stage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "status", "reason_code", "details"],
+      "properties": {
+        "id": {"const": "imports"}, "status": {"const": "PASS"},
+        "reason_code": {"const": ""},
+        "details": {
+          "type": "object", "additionalProperties": false,
+          "required": [
+            "stage", "ok", "freecad_version", "revision", "python_version",
+            "occ_version", "modules"
+          ],
+          "properties": {
+            "stage": {"const": "imports"}, "ok": {"type": "boolean"},
+            "freecad_version": {"type": "string", "minLength": 1},
+            "revision": {"type": "string", "minLength": 1},
+            "python_version": {"type": "string", "minLength": 1},
+            "occ_version": {"type": "string", "minLength": 1},
+            "modules": {
+              "type": "object", "additionalProperties": false,
+              "required": ["FreeCAD", "Part", "Draft", "Arch", "Mesh", "MeshPart", "BOPTools.SplitAPI"],
+              "properties": {
+                "FreeCAD": {"type": "boolean"}, "Part": {"type": "boolean"},
+                "Draft": {"type": "boolean"}, "Arch": {"type": "boolean"},
+                "Mesh": {"type": "boolean"}, "MeshPart": {"type": "boolean"},
+                "BOPTools.SplitAPI": {"type": "boolean"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "freecad_boolean_stage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "status", "reason_code", "details"],
+      "properties": {
+        "id": {"const": "boolean"}, "status": {"const": "PASS"},
+        "reason_code": {"const": ""},
+        "details": {
+          "type": "object", "additionalProperties": false,
+          "required": ["stage", "ok", "valid", "solid_count", "volume_mm3", "relative_volume_error"],
+          "properties": {
+            "stage": {"const": "boolean"}, "ok": {"type": "boolean"},
+            "valid": {"type": "boolean"}, "solid_count": {"type": "integer"},
+            "volume_mm3": {"type": "number"}, "relative_volume_error": {"type": "number"}
+          }
+        }
+      }
+    },
+    "freecad_tessellation_stage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "status", "reason_code", "details"],
+      "properties": {
+        "id": {"const": "tessellation"}, "status": {"const": "PASS"},
+        "reason_code": {"const": ""},
+        "details": {
+          "type": "object", "additionalProperties": false,
+          "required": ["stage", "ok", "vertices", "facets"],
+          "properties": {
+            "stage": {"const": "tessellation"}, "ok": {"type": "boolean"},
+            "vertices": {"type": "integer"}, "facets": {"type": "integer"}
+          }
+        }
+      }
     }
   }
 }

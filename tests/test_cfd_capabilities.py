@@ -1,6 +1,7 @@
 import json
 import hashlib
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -279,9 +280,7 @@ class StagedFreeCADCapabilityTests(unittest.TestCase):
                 select.assert_not_called()
 
     def test_missing_runtime_blocks_at_discovery_without_launching(self):
-        with mock.patch.object(
-            cfd_capabilities, "select_freecadcmd", return_value=("", "explicit_missing")
-        ), mock.patch.object(cfd_capabilities.subprocess, "run") as run:
+        with mock.patch.object(cfd_capabilities.subprocess, "run") as run:
             result = cfd_capabilities.diagnose_freecad_stages(
                 Path(r"C:\missing\FreeCADCmd.exe"), per_stage_timeout_s=0.25
             )
@@ -294,6 +293,19 @@ class StagedFreeCADCapabilityTests(unittest.TestCase):
             "BLOCKED", "NOT_RUN", "NOT_RUN", "NOT_RUN",
         ])
         run.assert_not_called()
+
+    def test_explicit_staged_probe_never_calls_potentially_stalled_auto_selector(self):
+        with mock.patch.object(
+            cfd_capabilities, "select_freecadcmd",
+            side_effect=TimeoutError("auto discovery stalled"),
+        ) as select:
+            result = cfd_capabilities.diagnose_freecad_stages(
+                Path(r"C:\missing\FreeCADCmd.exe"), per_stage_timeout_s=0.25
+            )
+
+        self.assertEqual(result["status"], "missing")
+        self.assertEqual(result["failed_stage"], "discovery")
+        select.assert_not_called()
 
     def test_each_runtime_stage_is_bounded_and_ready_result_binds_executable(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -330,9 +342,6 @@ class StagedFreeCADCapabilityTests(unittest.TestCase):
                 for payload in payloads
             ]
             with mock.patch.object(
-                cfd_capabilities, "select_freecadcmd",
-                return_value=(str(executable.resolve()), "explicit"),
-            ), mock.patch.object(
                 cfd_capabilities.subprocess, "run", side_effect=completed
             ) as run:
                 result = cfd_capabilities.diagnose_freecad_stages(
@@ -357,9 +366,6 @@ class StagedFreeCADCapabilityTests(unittest.TestCase):
             executable = Path(tmp) / "FreeCADCmd.exe"
             executable.write_bytes(b"freecad-binary")
             with mock.patch.object(
-                cfd_capabilities, "select_freecadcmd",
-                return_value=(str(executable.resolve()), "explicit"),
-            ), mock.patch.object(
                 cfd_capabilities.subprocess, "run",
                 side_effect=subprocess.TimeoutExpired([str(executable)], 0.5),
             ) as run:
@@ -375,6 +381,70 @@ class StagedFreeCADCapabilityTests(unittest.TestCase):
             "PASS", "BLOCKED", "NOT_RUN", "NOT_RUN",
         ])
         self.assertEqual(run.call_count, 1)
+
+    def test_non_freecad_executable_identity_is_rejected_without_launch(self):
+        with mock.patch.object(cfd_capabilities.subprocess, "run") as run:
+            result = cfd_capabilities.diagnose_freecad_stages(
+                Path(sys.executable), per_stage_timeout_s=0.5
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["failed_stage"], "discovery")
+        self.assertEqual(
+            result["stages"][0]["reason_code"],
+            "FREECAD_EXECUTABLE_IDENTITY_INVALID",
+        )
+        run.assert_not_called()
+
+    def test_boolean_and_tessellation_pass_claims_are_recomputed(self):
+        imports = {
+            "stage": "imports", "ok": True,
+            "freecad_version": "1.1.1", "occ_version": "7.8.1",
+            "revision": "20260414", "python_version": "3.11.14",
+            "modules": {
+                name: True for name in (
+                    "FreeCAD", "Part", "Draft", "Arch", "Mesh", "MeshPart",
+                    "BOPTools.SplitAPI",
+                )
+            },
+        }
+        valid_boolean = {
+            "stage": "boolean", "ok": True, "valid": True,
+            "solid_count": 1, "volume_mm3": 239250000000.0,
+            "relative_volume_error": 0.0,
+        }
+        valid_tessellation = {
+            "stage": "tessellation", "ok": True, "vertices": 8, "facets": 12,
+        }
+        cases = [
+            (
+                "boolean",
+                dict(valid_boolean, volume_mm3=1.0, relative_volume_error=0.0),
+                valid_tessellation,
+            ),
+            ("tessellation", valid_boolean, dict(valid_tessellation, facets=0)),
+        ]
+        marker = "MEP_CFD_FREECAD_STAGE:"
+        for failed_stage, boolean, tessellation in cases:
+            with self.subTest(failed_stage=failed_stage), tempfile.TemporaryDirectory() as tmp:
+                executable = Path(tmp) / "FreeCADCmd.exe"
+                executable.write_bytes(b"freecad-binary")
+                completed = [
+                    subprocess.CompletedProcess(
+                        [str(executable)], 0,
+                        stdout=marker + json.dumps(payload) + "\n", stderr="",
+                    )
+                    for payload in (imports, boolean, tessellation)
+                ]
+                with mock.patch.object(
+                    cfd_capabilities.subprocess, "run", side_effect=completed
+                ):
+                    result = cfd_capabilities.diagnose_freecad_stages(
+                        executable, per_stage_timeout_s=0.5
+                    )
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["failed_stage"], failed_stage)
 
 
 if __name__ == "__main__":
