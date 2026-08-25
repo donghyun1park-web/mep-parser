@@ -32,8 +32,9 @@ d5940b6 fix: bind serial runtime and manifest evidence
 596358d feat: validate heat and numerical evidence
 ```
 
-The final aggregate commit adds output/evidence boundary hardening, the public
-eight-check dispatch, plan/progress updates, and this report.
+The final aggregate commit `f3b7109386195ae665bd216cb689c686f23dea99`
+adds output/evidence boundary hardening, the public eight-check dispatch,
+plan/progress updates, and this report.
 
 ## Aggregate fail-closed closure
 
@@ -98,6 +99,22 @@ Both failures are the same toolchain-authentication precondition in
 not the pinned Python 3.12.10 executable SHA-256. This is intentionally **not**
 reported as a green full suite. The public Windows CI uses the pinned 3.12.10
 bootstrap and is the authoritative full-suite gate for the published commit.
+
+That exact published code commit passed public Windows CI [run
+32822053903](https://github.com/donghyun1park-web/mep-parser/actions/runs/32822053903),
+job `97722069826`. Direct inspection of uploaded JUnit artifact `9553586783`
+reported:
+
+```text
+1193 tests = 1179 passed + 14 skipped
+0 failures, 0 errors
+217.691 seconds
+```
+
+The artifact digest is
+`sha256:1be289869b9ff4a78944997c7f1755361d6be334551045b5607ff5ae678d64d9`.
+This closes the code-only full-suite gate; it is not solver or GUI runtime
+evidence.
 
 ## Remaining boundary
 

@@ -727,7 +727,7 @@ def validate_review(review_path: Path, *, projects_root: Path) -> list[dict]: ..
 
   Stage exact producer/schema/test paths. 사용자 DXF, solver case, generated evidence는 source commit에 넣지 않는다.
 
-**Gate 5a:** COMPLETE (code-only). validator 코드가 모두 존재하고 `_future_not_implemented()`가 완료 check에서 제거됐다. 최종 focused 분할 검증은 `421 passed, 7 skipped, 9 subtests passed`이고 독립 재검토는 `CLEAN`이다. 로컬 전체 suite는 호출 가능한 Python 3.14.3에서 `1177 passed, 2 failed, 14 skipped`였으며, 두 실패는 실행 Python SHA가 고정 Python 3.12.10 SHA와 다른 동일한 toolchain-authentication precondition이므로 green으로 기록하지 않는다. 공개 Windows CI의 고정 3.12.10 실행을 최종 full-suite 판정으로 사용한다. 이 gate는 solver/FreeCAD/Studio/browser/real-DXF 실행 또는 runtime evidence PASS를 뜻하지 않는다.
+**Gate 5a:** COMPLETE (code-only). validator 코드가 모두 존재하고 `_future_not_implemented()`가 완료 check에서 제거됐다. 최종 focused 분할 검증은 `421 passed, 7 skipped, 9 subtests passed`이고 독립 재검토는 `CLEAN`이다. 로컬 전체 suite는 호출 가능한 Python 3.14.3에서 `1177 passed, 2 failed, 14 skipped`였으며, 두 실패는 실행 Python SHA가 고정 Python 3.12.10 SHA와 다른 동일한 toolchain-authentication precondition이므로 green으로 기록하지 않는다. Exact code commit `f3b7109386195ae665bd216cb689c686f23dea99`의 공개 Windows CI [run 32822053903](https://github.com/donghyun1park-web/mep-parser/actions/runs/32822053903)는 고정 Python 3.12.10 환경에서 성공했다. JUnit artifact `9553586783`은 1,193 tests = 1,179 passed + 14 skipped, failures/errors 0, 217.691 seconds이며 digest는 `sha256:1be289869b9ff4a78944997c7f1755361d6be334551045b5607ff5ae678d64d9`다. 이 gate는 solver/FreeCAD/Studio/browser/real-DXF 실행 또는 runtime evidence PASS를 뜻하지 않는다.
 
 ### Task 5b: 실제 solver 증거를 수집한다 — 증거 시계
 
@@ -1938,10 +1938,10 @@ Task 0 Step 6은 어떤 코드 Task보다 먼저 수행한다. 현재 Tasks 1~4�
 
 ## 18. Execution Status Snapshot — 2026-08-25
 
-- Isolated public execution branch: `codex/case-evidence-review-gate`; Task 5a module HEAD before the final aggregate commit: `596358d`.
+- Isolated public execution branch: `codex/case-evidence-review-gate`; Task 5a aggregate code commit: `f3b7109386195ae665bd216cb689c686f23dea99`.
 - Task 0~4 and Task 5a's code-only gate are complete. The reproducible toolchain/baseline, Case Evidence contracts, immutable evidence recomputation, append-only human review, Studio/API/report/advice citation gates, and six concrete WORKING_SINGLE_PC revalidators are implemented.
 - Task 5a final scoped review verdict: `CLEAN`; focused split total: `421 passed, 7 skipped, 9 subtests passed`.
-- The local Python 3.14.3 full suite is not green: `1177 passed, 2 failed, 14 skipped, 7 warnings, 115 subtests passed`. Both failures require the pinned Python 3.12.10 executable identity. The public pinned Windows CI remains the authoritative full-suite decision.
+- The local Python 3.14.3 full suite is not green: `1177 passed, 2 failed, 14 skipped, 7 warnings, 115 subtests passed`. Both failures require the pinned Python 3.12.10 executable identity. The authoritative public pinned Windows CI [run 32822053903](https://github.com/donghyun1park-web/mep-parser/actions/runs/32822053903) is green at the exact Task 5a code commit: 1,193 tests, 0 failures/errors, 14 skipped.
 - M0 remains complete. M1 and general release remain `NO-GO`: Task 4.5 confirmed geometry, Task 5b genuine solver evidence, Task 5c real-DXF GUI/restart/usability evidence, and named human roles remain unavailable.
 - No FreeCAD/OpenFOAM/solver run, Studio/browser execution, real-DXF run, or manual print-preview is claimed by this snapshot.
 - Detailed rulings, per-task commits, review findings, and verification evidence are maintained in the [SDD progress ledger](../../../.superpowers/sdd/2026-08-24-mep-cfd-master-development/progress.md) and [Task 5a report](../../../.superpowers/sdd/2026-08-24-mep-cfd-master-development/task-5a-report.md).
