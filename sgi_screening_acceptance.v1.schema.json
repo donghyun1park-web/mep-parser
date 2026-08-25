@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "sgi_screening_acceptance.v1.schema.json",
+  "title": "MEP CFD Studio SGI field screening and restart pointer",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "contract", "field_job", "source_dxf", "reviewed_geometry", "solver_case", "limits"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "contract": {"const": "sgi_screening_acceptance.v1"},
+    "field_job": {"$ref": "#/$defs/link"},
+    "source_dxf": {"$ref": "#/$defs/link"},
+    "reviewed_geometry": {"$ref": "#/$defs/link"},
+    "solver_case": {"$ref": "#/$defs/case"},
+    "limits": {
+      "const": {
+        "required_supply_terminals": 15,
+        "required_exhaust_terminals": 15,
+        "required_airflow_per_terminal_cmh": 444.0,
+        "maximum_supply_exhaust_difference_ratio": 0.01,
+        "minimum_flow_through_fraction": 3.0,
+        "maximum_peak_courant": 1.0,
+        "maximum_global_continuity": 0.000001,
+        "maximum_terminal_phi_imbalance_ratio": 0.001,
+        "maximum_opening_area_error_ratio": 0.03,
+        "maximum_supply_flow_error_ratio": 0.01,
+        "minimum_energy_closure_ratio": 0.95,
+        "maximum_energy_closure_ratio": 1.05,
+        "maximum_peak_rss_fraction": 0.8,
+        "minimum_restart_attempts": 2
+      }
+    }
+  },
+  "$defs": {
+    "path": {
+      "type": "string",
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*(?:^|/)(?:latest|cache|caches|tmp|temp|generated)(?:/|$))[^/]+(?:/[^/]+)*$"
+    },
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "link": {
+      "type": "object", "additionalProperties": false, "required": ["path", "sha256"],
+      "properties": {"path": {"$ref": "#/$defs/path"}, "sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "artifacts": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "geometry", "surface", "mesh", "thermal_input", "thermal_progress", "run", "result",
+        "check_mesh_log", "solver_log", "field_t", "field_u", "field_phi", "field_v", "vtu",
+        "summary", "slice_x", "slice_y", "slice_z", "report"
+      ],
+      "properties": {
+        "geometry": {"$ref": "#/$defs/link"}, "surface": {"$ref": "#/$defs/link"},
+        "mesh": {"$ref": "#/$defs/link"}, "thermal_input": {"$ref": "#/$defs/link"},
+        "thermal_progress": {"$ref": "#/$defs/link"}, "run": {"$ref": "#/$defs/link"},
+        "result": {"$ref": "#/$defs/link"}, "check_mesh_log": {"$ref": "#/$defs/link"},
+        "solver_log": {"$ref": "#/$defs/link"}, "field_t": {"$ref": "#/$defs/link"},
+        "field_u": {"$ref": "#/$defs/link"}, "field_phi": {"$ref": "#/$defs/link"},
+        "field_v": {"$ref": "#/$defs/link"}, "vtu": {"$ref": "#/$defs/link"},
+        "summary": {"$ref": "#/$defs/link"}, "slice_x": {"$ref": "#/$defs/link"},
+        "slice_y": {"$ref": "#/$defs/link"}, "slice_z": {"$ref": "#/$defs/link"},
+        "report": {"$ref": "#/$defs/link"}
+      }
+    },
+    "case": {
+      "type": "object", "additionalProperties": false,
+      "required": ["case_path", "case_tree_sha256", "artifacts"],
+      "properties": {
+        "case_path": {"$ref": "#/$defs/path"}, "case_tree_sha256": {"$ref": "#/$defs/sha256"},
+        "artifacts": {"$ref": "#/$defs/artifacts"}
+      }
+    }
+  }
+}

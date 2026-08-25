@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "working_room_acceptance.v1.schema.json",
+  "title": "MEP CFD Studio immutable working-room acceptance pointer",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "contract", "anchor", "repeat", "limits"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "contract": {"const": "working_room_acceptance.v1"},
+    "anchor": {"$ref": "#/$defs/case"},
+    "repeat": {"$ref": "#/$defs/case"},
+    "limits": {
+      "const": {
+        "minimum_physical_time_s": 240.0,
+        "maximum_peak_courant": 1.0,
+        "maximum_terminal_phi_imbalance_ratio": 0.001,
+        "minimum_energy_closure_ratio": 0.95,
+        "maximum_energy_closure_ratio": 1.05,
+        "maximum_mean_temperature_delta_k": 0.02,
+        "maximum_mean_speed_delta_m_s": 0.005,
+        "maximum_energy_closure_delta_percentage_points": 0.5
+      }
+    }
+  },
+  "$defs": {
+    "path": {
+      "type": "string",
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*(?:^|/)(?:latest|cache|caches|tmp|temp|generated)(?:/|$))[^/]+(?:/[^/]+)*$"
+    },
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "link": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {"path": {"$ref": "#/$defs/path"}, "sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "geometry", "surface", "mesh", "thermal_input", "thermal_progress", "run", "result",
+        "check_mesh_log", "solver_log", "field_t", "field_u", "field_phi", "field_v", "vtu",
+        "summary", "slice_x", "slice_y", "slice_z", "report"
+      ],
+      "properties": {
+        "geometry": {"$ref": "#/$defs/link"}, "surface": {"$ref": "#/$defs/link"},
+        "mesh": {"$ref": "#/$defs/link"}, "thermal_input": {"$ref": "#/$defs/link"},
+        "thermal_progress": {"$ref": "#/$defs/link"}, "run": {"$ref": "#/$defs/link"},
+        "result": {"$ref": "#/$defs/link"}, "check_mesh_log": {"$ref": "#/$defs/link"},
+        "solver_log": {"$ref": "#/$defs/link"}, "field_t": {"$ref": "#/$defs/link"},
+        "field_u": {"$ref": "#/$defs/link"}, "field_phi": {"$ref": "#/$defs/link"},
+        "field_v": {"$ref": "#/$defs/link"}, "vtu": {"$ref": "#/$defs/link"},
+        "summary": {"$ref": "#/$defs/link"}, "slice_x": {"$ref": "#/$defs/link"},
+        "slice_y": {"$ref": "#/$defs/link"}, "slice_z": {"$ref": "#/$defs/link"},
+        "report": {"$ref": "#/$defs/link"}
+      }
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["case_path", "case_tree_sha256", "artifacts"],
+      "properties": {
+        "case_path": {"$ref": "#/$defs/path"},
+        "case_tree_sha256": {"$ref": "#/$defs/sha256"},
+        "artifacts": {"$ref": "#/$defs/artifacts"}
+      }
+    }
+  }
+}
