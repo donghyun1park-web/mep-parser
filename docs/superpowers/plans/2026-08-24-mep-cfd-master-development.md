@@ -711,22 +711,23 @@ def validate_review(review_path: Path, *, projects_root: Path) -> list[dict]: ..
 - Every manifest uses relative paths and hashes. Validators reject `latest`, cache/temp paths, sibling escapes, self-output, and post-load hash drift, and add every consumed raw file to `evidence_sha256`.
 - Task 5a creates schemas, pure validators, explicit validation-scope guards, and synthetic immutable-tree/tamper tests only. It runs no solver, FreeCAD, Studio, browser, GUI DXF, or generated-evidence acceptance.
 - Task 5b owns real serial/working-room/heat-box/numerical evidence producers. Task 5c owns confirmed-DXF GUI, shutdown/resume, SGI/restart manifest production, and usability observation.
+- `NUMERICAL_SPOTCHECK_COPIED_RESULT`의 6-decimal fingerprint는 미세 nonce를 제거하는 bounded near-copy heuristic일 뿐 독립 solver 실행 증명이 아니다. Task 5b가 각 case의 raw `T/U/phi/yPlus` provenance와 실행 증거를 hash-bind하고 현재 파일에서 재계산하기 전에는 “anchor evidence가 복사되지 않았다”는 무제한 주장을 금지한다.
 
-- [ ] **Step 1: exact companion plan의 코드 부분만 실행한다**
+- [x] **Step 1: exact companion plan의 코드 부분만 실행한다**
 
   Execute the code-owned validator portions of Tasks 2~5 in `docs/superpowers/plans/2026-08-14-mep-cfd-single-pc-working-validation.md` without changing its scientific labels. Real runtime evidence belongs to 5b/5c. Without genuine artifacts the evaluator must remain `BLOCKED`; `WORKING_SINGLE_PC` and `NUMERICAL_SPOTCHECK_PASS_SINGLE_PC` remain non-citable and non-release states.
 
-- [ ] **Step 2: focused tests를 통과시킨다**
+- [x] **Step 2: focused tests를 통과시킨다**
 
   Run: `& $Python -B -m pytest -q tests/test_working_validation.py tests/test_cfd_capabilities.py tests/test_cfd_physics.py tests/test_local_usability_acceptance.py tests/test_cfd_working_room.py tests/test_sgi_screening_acceptance.py tests/test_cfd_verification.py tests/test_cfd_numerical_spotcheck.py`
 
   Expected: PASS. 실제 solver 실행이 없는 상태에서도 validator는 `BLOCKED`를 정확히 보고해야 한다.
 
-- [ ] **Step 3: commit code only**
+- [x] **Step 3: commit code only**
 
   Stage exact producer/schema/test paths. 사용자 DXF, solver case, generated evidence는 source commit에 넣지 않는다.
 
-**Gate 5a:** validator 코드가 모두 존재하고 `_future_not_implemented()`가 완료 check에서 제거됐다.
+**Gate 5a:** COMPLETE (code-only). validator 코드가 모두 존재하고 `_future_not_implemented()`가 완료 check에서 제거됐다. 최종 focused 분할 검증은 `421 passed, 7 skipped, 9 subtests passed`이고 독립 재검토는 `CLEAN`이다. 로컬 전체 suite는 호출 가능한 Python 3.14.3에서 `1177 passed, 2 failed, 14 skipped`였으며, 두 실패는 실행 Python SHA가 고정 Python 3.12.10 SHA와 다른 동일한 toolchain-authentication precondition이므로 green으로 기록하지 않는다. 공개 Windows CI의 고정 3.12.10 실행을 최종 full-suite 판정으로 사용한다. 이 gate는 solver/FreeCAD/Studio/browser/real-DXF 실행 또는 runtime evidence PASS를 뜻하지 않는다.
 
 ### Task 5b: 실제 solver 증거를 수집한다 — 증거 시계
 
@@ -1935,14 +1936,15 @@ Task 0 Step 6은 어떤 코드 Task보다 먼저 수행한다. 현재 Tasks 1~4�
 
 권장 실행은 Tasks 1~4를 하나의 vertical slice로 처리하는 **Subagent-Driven Development**다. 각 task마다 implementer → spec review → code-quality review를 수행하고 focused/full tests를 통과한 뒤 다음 task로 이동한다. 장시간 solver evidence가 필요한 Tasks 5, 13, 16, 17은 코드 리뷰와 실제 실행 review를 분리한다.
 
-## 18. Execution Status Snapshot — 2026-08-24
+## 18. Execution Status Snapshot — 2026-08-25
 
-- Isolated execution branch: `codex/case-evidence-review-gate`; implementation HEAD: `24d18aa`.
-- Task 0~4 are complete. The reproducible toolchain/baseline, Case Evidence contracts, immutable evidence recomputation, append-only human review, and Studio/API/report/advice citation gates are implemented.
-- Final scoped review verdict: `CLEAN`; controller focused verification: `260 passed`; controller full verification: `808 passed, 14 skipped, 7 warnings`, exit code `0`.
-- M1 is still open. Task 5 must close the actual working-PC validators, one real-DXF GUI E2E evidence chain, and restart-integrity gate before M2 work starts.
-- No FreeCAD/OpenFOAM/solver run or manual browser/print-preview is claimed by this snapshot.
-- Detailed rulings, per-task commits, review findings, and verification evidence are maintained in the [SDD progress ledger](../../../.superpowers/sdd/2026-08-24-mep-cfd-master-development/progress.md).
+- Isolated public execution branch: `codex/case-evidence-review-gate`; Task 5a module HEAD before the final aggregate commit: `596358d`.
+- Task 0~4 and Task 5a's code-only gate are complete. The reproducible toolchain/baseline, Case Evidence contracts, immutable evidence recomputation, append-only human review, Studio/API/report/advice citation gates, and six concrete WORKING_SINGLE_PC revalidators are implemented.
+- Task 5a final scoped review verdict: `CLEAN`; focused split total: `421 passed, 7 skipped, 9 subtests passed`.
+- The local Python 3.14.3 full suite is not green: `1177 passed, 2 failed, 14 skipped, 7 warnings, 115 subtests passed`. Both failures require the pinned Python 3.12.10 executable identity. The public pinned Windows CI remains the authoritative full-suite decision.
+- M0 remains complete. M1 and general release remain `NO-GO`: Task 4.5 confirmed geometry, Task 5b genuine solver evidence, Task 5c real-DXF GUI/restart/usability evidence, and named human roles remain unavailable.
+- No FreeCAD/OpenFOAM/solver run, Studio/browser execution, real-DXF run, or manual print-preview is claimed by this snapshot.
+- Detailed rulings, per-task commits, review findings, and verification evidence are maintained in the [SDD progress ledger](../../../.superpowers/sdd/2026-08-24-mep-cfd-master-development/progress.md) and [Task 5a report](../../../.superpowers/sdd/2026-08-24-mep-cfd-master-development/task-5a-report.md).
 
 ## 19. 계획 개정 기록 — 2026-08-24 (검토 반영)
 

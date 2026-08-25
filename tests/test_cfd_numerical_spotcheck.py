@@ -845,6 +845,14 @@ def test_numerical_spotcheck_rejects_post_load_hash_drift(tmp_path, monkeypatch)
     )
     assert "OUTPUT_ALIAS" in result["blockers"]
 
+    root, manifest_path = _study_tree(tmp_path / "nested-output")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    nested_output = root / manifest["anchor"]["case_path"] / "new-output.json"
+    result = cfd_numerical_spotcheck.validate_numerical_spotcheck_manifest(
+        manifest_path, root, evaluator_output_path=nested_output
+    )
+    assert "OUTPUT_ALIAS" in result["blockers"]
+
     root, manifest_path = _study_tree(tmp_path / "reparse")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     geometry = root / manifest["common_artifacts"]["geometry"]["path"]

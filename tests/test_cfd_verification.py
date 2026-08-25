@@ -464,6 +464,14 @@ def test_heat_box_rejects_traversal_reparse_and_output_alias(tmp_path, monkeypat
     )
     assert "OUTPUT_ALIAS" in result["blockers"]
 
+    root, manifest_path = _heat_tree(tmp_path / "nested-output")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    nested_output = root / manifest["case_path"] / "new-evaluator-output.json"
+    result = cfd_verification.validate_heat_box_manifest(
+        manifest_path, root, evaluator_output_path=nested_output
+    )
+    assert "OUTPUT_ALIAS" in result["blockers"]
+
     root, manifest_path = _heat_tree(tmp_path / "reparse")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     geometry = root / manifest["artifacts"]["geometry"]["path"]

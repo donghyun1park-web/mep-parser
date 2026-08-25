@@ -531,6 +531,10 @@ selector SHA-256 + geometry SHA-256 + zone SHA-256 tuple exactly matches the fro
 
 This is a two-level engineering spot check, not Richardson uncertainty or formal GCI. The report must say so.
 
+Task 5a의 6-decimal sample fingerprint는 exact/near-copy와 미세 float nonce를 막는 bounded heuristic이다. 이것만으로 독립 solver 실행을 증명하지 않으며, Task 5b producer가 case-local raw `T/U/phi/yPlus`와 실행 provenance를 hash-bind하고 evaluator가 현재 파일에서 재계산해야 위 표의 “anchor evidence is never copied” 운영 요건을 충족한 것으로 판정한다.
+
+**2026-08-25 code-only status:** Master Task 5a의 여섯 code-owned validator, producer schema, 고정 manifest dispatch, 최종 evidence rehash, output-authority guard, synthetic/tamper tests는 구현 및 독립 `CLEAN` 검토를 마쳤다. Focused 분할 결과는 `421 passed, 7 skipped, 9 subtests passed`다. 아래 actual solve/GUI/SGI 실행 checkbox는 이 코드 완료로 닫지 않는다. 로컬 전체 suite의 Python 3.14 실행은 pinned 3.12.10 executable SHA 불일치 때문에 `1177 passed, 2 failed, 14 skipped`로 green이 아니며, public pinned Windows CI를 최종 full-suite gate로 사용한다. 따라서 현재 상태는 Task 5a code-complete일 뿐 `WORKING_SINGLE_PC`, `NUMERICAL_SPOTCHECK_PASS_SINGLE_PC`, design-citable 또는 release-ready 증거가 아니다.
+
 - [ ] **Step 7: focused tests를 통과시킨다.**
 
 Run: `& $Python -B -m pytest -q tests/test_cfd_verification.py tests/test_cfd_numerical_spotcheck.py tests/test_cfd_post.py tests/test_cfd_energy_balance.py tests/test_cfd_numerics.py`

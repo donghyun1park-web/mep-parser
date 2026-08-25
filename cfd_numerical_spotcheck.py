@@ -1656,7 +1656,7 @@ def validate_numerical_spotcheck_manifest(
     ):
         return _blocked("NUMERICAL_SPOTCHECK_ARTIFACT_PATH_INVALID")
     output_error = path_security._output_blocker(
-        evaluator_output_path, root, sources
+        evaluator_output_path, root, [*sources, *directory_hashes]
     )
     if output_error:
         return _blocked(output_error)

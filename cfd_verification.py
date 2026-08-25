@@ -222,7 +222,12 @@ def _output_blocker(
         return "OUTPUT_PATH_INVALID"
     for source in sources:
         try:
-            if resolved == source.resolve(strict=False):
+            source_resolved = source.resolve(strict=False)
+            if (
+                resolved == source_resolved
+                or resolved in source_resolved.parents
+                or source_resolved in resolved.parents
+            ):
                 return "OUTPUT_ALIAS"
             if lexical.exists() and os.path.samefile(lexical, source):
                 return "OUTPUT_ALIAS"
@@ -664,7 +669,11 @@ def validate_heat_box_manifest(
         or len(set(source_identities.values())) != len(source_identities)
     ):
         return _blocked("HEAT_BOX_ARTIFACT_PATH_INVALID")
-    output_error = _output_blocker(evaluator_output_path, root, sources)
+    output_error = _output_blocker(
+        evaluator_output_path,
+        root,
+        [*sources, root.joinpath(*case_ref.parts)],
+    )
     if output_error:
         return _blocked(output_error)
 
