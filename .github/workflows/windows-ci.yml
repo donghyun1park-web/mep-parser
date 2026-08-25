@@ -60,7 +60,8 @@ jobs:
 
       - name: Run full test suite
         shell: pwsh
-        run: & .\.venv-ci\Scripts\python.exe -B -m pytest -q tests --junitxml=windows-ci-junit.xml
+        run: |
+          & .\.venv-ci\Scripts\python.exe -B -m pytest -q tests --junitxml=windows-ci-junit.xml
 
       - name: Upload Windows CI JUnit result
         if: ${{ always() }}
