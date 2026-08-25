@@ -189,34 +189,78 @@ def _tag_sig(rec):
     return rec
 
 
+def _ocs_to_wcs_fn(e):
+    """엔티티가 비표준 OCS(기울거나 뒤집힌 평면)를 쓰면 (x,y,z)→WCS 변환 함수, 아니면 None.
+
+    ezdxf 는 OCS 를 자동 변환하지 않는다(raw DXF 접근). 미러링된 블록은 extrusion 이
+    (0,0,-1) 이 되어 저장 좌표의 X 부호가 뒤집혀 있으므로, 변환 없이 쓰면 요소가
+    반대편에 생성된다. OCS 대상: LWPOLYLINE / POLYLINE(2D) / CIRCLE / ARC / INSERT /
+    TEXT / SOLID / HATCH. LINE·SPLINE 은 WCS 저장이라 대상이 아니다.
+    virtual_entities() 결과에도 동일하게 적용된다(블록 내부 형상이 자체 OCS 를 가짐)."""
+    try:
+        ex = e.dxf.extrusion
+    except Exception:
+        return None
+    if ex is None:
+        return None
+    try:
+        if abs(ex[0]) < 1e-9 and abs(ex[1]) < 1e-9 and ex[2] > 0:
+            return None                      # 표준 방향 — 변환 불필요(대다수)
+        ocs = e.ocs()
+    except Exception:
+        return None
+
+    def xf(x, y, z=0.0):
+        p = ocs.to_wcs((x, y, z))
+        return p[0], p[1]
+    return xf
+
+
 def entity_to_record(e, scale):
     """DXF 엔티티 → 정규화 레코드 (polyline/circle). 미지원이면 None.
-    반환 레코드는 raw_entity_sig 기반 _sigs(EID 산정용 시그니처 목록)를 포함한다."""
+    반환 레코드는 raw_entity_sig 기반 _sigs(EID 산정용 시그니처 목록)를 포함한다.
+    OCS 엔티티는 _ocs_to_wcs_fn 으로 WCS 정합 후 좌표화(미러 블록 대응)."""
     t = e.dxftype()
     layer = getattr(e.dxf, "layer", "")
-    if t == "LINE":
+    xf = _ocs_to_wcs_fn(e)
+
+    def P(x, y, z=0.0):
+        """OCS 좌표 → WCS → mm 스케일 적용."""
+        if xf is not None:
+            x, y = xf(x, y, z)
+        return [x * scale, y * scale]
+
+    if t == "LINE":  # WCS 저장 — 변환 불필요
         s, d = e.dxf.start, e.dxf.end
         return _tag_sig({"kind": "polyline", "closed": False, "layer": layer,
                 "points": [[s.x * scale, s.y * scale], [d.x * scale, d.y * scale]]})
     if t == "LWPOLYLINE":
         pts, closed = lwpolyline_points(e)
+        elev = float(getattr(e.dxf, "elevation", 0.0) or 0.0)
         return _tag_sig({"kind": "polyline", "closed": closed, "layer": layer,
-                "points": [[p[0] * scale, p[1] * scale] for p in pts]})
+                "points": [P(p[0], p[1], elev) for p in pts]})
     if t == "POLYLINE":
-        pts = [[v.dxf.location.x * scale, v.dxf.location.y * scale] for v in e.vertices]
+        # 3D 폴리라인 정점은 WCS, 2D 폴리라인은 OCS
+        is3d = bool(getattr(e, "is_3d_polyline", False))
+        pts = []
+        for v in e.vertices:
+            loc = v.dxf.location
+            pts.append([loc.x * scale, loc.y * scale] if is3d
+                       else P(loc.x, loc.y, loc.z))
         return _tag_sig({"kind": "polyline", "closed": e.is_closed, "layer": layer, "points": pts})
     if t == "CIRCLE":
         c = e.dxf.center
-        return _tag_sig({"kind": "circle", "center": [c.x * scale, c.y * scale],
+        return _tag_sig({"kind": "circle", "center": P(c.x, c.y, c.z),
                 "radius": e.dxf.radius * scale, "layer": layer})
     if t == "ARC":
         c = e.dxf.center
+        # 호는 OCS 평면 안에서 샘플링한 뒤 각 점을 WCS 로 변환(뒤집힌 평면도 정확)
         pts = arc_to_points(c.x, c.y, e.dxf.radius, e.dxf.start_angle, e.dxf.end_angle)
         # arc 식별자 보존: 문 스윙 호 판별(classify_geometry)에 사용
         return _tag_sig({"kind": "polyline", "closed": False, "layer": layer, "from_arc": True,
                 "arc_radius": e.dxf.radius * scale,
-                "points": [[p[0] * scale, p[1] * scale] for p in pts]})
-    if t == "SPLINE":
+                "points": [P(p[0], p[1], c.z) for p in pts]})
+    if t == "SPLINE":  # 제어점은 WCS
         pts = [[p[0] * scale, p[1] * scale] for p in e.control_points]
         return (_tag_sig({"kind": "polyline", "closed": e.closed, "layer": layer,
                  "points": pts}) if pts else None)
@@ -282,15 +326,29 @@ def insert_to_records(insert, scale, category, attrs):
        기타: explode 레코드 그대로."""
     exploded = []
     try:
-        for ve in insert.virtual_entities():
-            r = entity_to_record(ve, scale)
-            if r:
-                exploded.append(r)
+        # MINSERT(격자 배열 참조)는 mcount>1 — multi_insert() 로 개별 INSERT 전개해야
+        # 두 번째 이후 사본이 누락되지 않는다.
+        srcs = [insert]
+        if int(getattr(insert, "mcount", 1) or 1) > 1:
+            try:
+                srcs = list(insert.multi_insert())
+            except Exception:
+                srcs = [insert]
+        for src in srcs:
+            for ve in src.virtual_entities():
+                r = entity_to_record(ve, scale)
+                if r:
+                    exploded.append(r)
     except Exception:
         pass
 
     c = insert.dxf.insert
-    cx, cy = c.x * scale, c.y * scale
+    _ixf = _ocs_to_wcs_fn(insert)          # 미러/기울어진 블록의 삽입점 정합
+    if _ixf is not None:
+        _wx, _wy = _ixf(c.x, c.y, getattr(c, "z", 0.0))
+        cx, cy = _wx * scale, _wy * scale
+    else:
+        cx, cy = c.x * scale, c.y * scale
     rot = float(insert.dxf.get("rotation", 0.0) or 0.0)
     size = attrs.get("width")  # 평면 크기(정사각 근사). None이면 기본값.
 
