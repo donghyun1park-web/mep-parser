@@ -60,9 +60,21 @@ def _install_path_alias(
 ) -> None:
     """Simulate a filesystem alias without requiring Windows 8.3 names."""
     original_resolve = Path.resolve
+    original_lstat = Path.lstat
     original_samefile = os.path.samefile
     lexical_root = lexical_root.absolute()
     canonical_root = original_resolve(canonical_root, strict=True)
+    lexical_parts = lexical_root.parts
+    canonical_parts = canonical_root.parts
+    shared = 0
+    while (
+        shared < min(len(lexical_parts), len(canonical_parts))
+        and os.path.normcase(lexical_parts[shared])
+        == os.path.normcase(canonical_parts[shared])
+    ):
+        shared += 1
+    lexical_alias_base = Path(*lexical_parts[: shared + 1])
+    canonical_alias_base = Path(*canonical_parts[: shared + 1])
     mapped = {
         key.absolute(): original_resolve(value, strict=True)
         for key, value in (redirects or {}).items()
@@ -75,18 +87,22 @@ def _install_path_alias(
         if candidate in mapped:
             return mapped[candidate]
         try:
-            relative = candidate.relative_to(lexical_root)
+            relative = candidate.relative_to(lexical_alias_base)
         except ValueError:
             return candidate
-        return canonical_root.joinpath(*relative.parts)
+        return canonical_alias_base.joinpath(*relative.parts)
 
     def alias_resolve(path, strict=False):
         return original_resolve(translate(path), strict=strict)
+
+    def alias_lstat(path):
+        return original_lstat(translate(path))
 
     def alias_samefile(first, second):
         return original_samefile(translate(first), translate(second))
 
     monkeypatch.setattr(Path, "resolve", alias_resolve)
+    monkeypatch.setattr(Path, "lstat", alias_lstat)
     monkeypatch.setattr(os.path, "samefile", alias_samefile)
 
 
@@ -1203,6 +1219,55 @@ def test_short_alias_case_is_accepted_only_inside_same_canonical_solver_tree(
     assert case == canonical_case.resolve()
 
 
+def test_projects_root_rejects_reparse_ancestor(tmp_path, monkeypatch):
+    paths = make_complete_case(tmp_path / "root-owner")
+    unexpected = paths["case"] / "unexpected-evidence.json"
+    _mark_lexical_reparse(
+        monkeypatch, cfd_evidence, paths["root"].parent
+    )
+
+    with pytest.raises(ValueError, match="projects_root must be a real directory"):
+        cfd_evidence.build_case_evidence(
+            paths["case"],
+            projects_root=paths["root"],
+            output_path=unexpected,
+        )
+
+    assert not unexpected.exists()
+
+
+def test_alias_case_rejects_reparse_ancestor_before_root_identity(
+    tmp_path, monkeypatch
+):
+    paths = make_complete_case(tmp_path / "runneradmin")
+    lexical_root = tmp_path / "RUNNER~1" / "projects"
+    lexical_case = lexical_root / paths["case"].relative_to(paths["root"])
+    unexpected = paths["case"] / "unexpected-evidence.json"
+    _install_path_alias(monkeypatch, lexical_root, paths["root"])
+    _mark_lexical_reparse(monkeypatch, cfd_evidence, lexical_root.parent)
+
+    with pytest.raises(ValueError, match="strictly beneath"):
+        cfd_evidence.build_case_evidence(
+            lexical_case,
+            projects_root=paths["root"],
+            output_path=unexpected,
+        )
+
+    assert not unexpected.exists()
+
+
+def test_alias_authoritative_input_rejects_reparse_ancestor(
+    tmp_path, monkeypatch
+):
+    paths = make_complete_case(tmp_path / "runneradmin")
+    lexical_root = tmp_path / "RUNNER~1" / "projects"
+    lexical_input = lexical_root / paths["geometry"].relative_to(paths["root"])
+    _install_path_alias(monkeypatch, lexical_root, paths["root"])
+    _mark_lexical_reparse(monkeypatch, cfd_evidence, lexical_root.parent)
+
+    assert cfd_evidence._safe_existing(lexical_input, paths["root"]) is None
+
+
 def test_short_alias_case_resolving_outside_solver_tree_stays_rejected(
     tmp_path, monkeypatch
 ):
@@ -1283,7 +1348,8 @@ def test_short_alias_output_builds_missing_leaf_below_canonical_parent(
 ):
     canonical_root = tmp_path / "runneradmin" / "projects"
     canonical_parent = canonical_root / "_body_solver" / "case-a"
-    canonical_parent.mkdir(parents=True)
+    canonical_output_parent = canonical_parent / "new" / "reports"
+    canonical_output_parent.mkdir(parents=True)
     lexical_root = tmp_path / "RUNNER~1" / "projects"
     lexical_parent = lexical_root / "_body_solver" / "case-a"
     output = lexical_parent / "new" / "reports" / "case_evidence.v1.json"
@@ -1293,6 +1359,66 @@ def test_short_alias_output_builds_missing_leaf_below_canonical_parent(
 
     assert trusted == canonical_parent / "new" / "reports" / "case_evidence.v1.json"
     assert trusted.parent.is_dir()
+
+
+def test_output_rejects_reparse_ancestor_of_identity_matched_alias(
+    tmp_path, monkeypatch
+):
+    paths = make_complete_case(tmp_path / "runneradmin")
+    lexical_root = tmp_path / "RUNNER~1" / "projects"
+    lexical_output = (
+        lexical_root
+        / paths["case"].relative_to(paths["root"])
+        / "unexpected-evidence.json"
+    )
+    canonical_output = paths["case"] / "unexpected-evidence.json"
+    _install_path_alias(monkeypatch, lexical_root, paths["root"])
+    _mark_lexical_reparse(monkeypatch, cfd_evidence, lexical_root.parent)
+
+    with pytest.raises(ValueError, match="output_path"):
+        cfd_evidence.build_case_evidence(
+            paths["case"],
+            projects_root=paths["root"],
+            output_path=lexical_output,
+        )
+
+    assert not canonical_output.exists()
+
+
+def test_output_rejects_missing_parent_chain_without_creating_it(tmp_path):
+    root = tmp_path / "projects"
+    root.mkdir()
+    missing_parent = root / "new" / "reports"
+
+    with pytest.raises(ValueError, match="unsafe parent"):
+        cfd_evidence._validate_output(
+            missing_parent / "case_evidence.v1.json", root, set()
+        )
+
+    assert not (root / "new").exists()
+
+
+def test_deleted_authoritative_source_cannot_be_recreated_as_evidence(
+    tmp_path, monkeypatch
+):
+    paths = make_complete_case(tmp_path)
+    original_compute = cfd_evidence._compute
+
+    def compute_then_delete(*args, **kwargs):
+        evidence = original_compute(*args, **kwargs)
+        paths["geometry"].unlink()
+        return evidence
+
+    monkeypatch.setattr(cfd_evidence, "_compute", compute_then_delete)
+
+    with pytest.raises(ValueError, match="source artifact"):
+        cfd_evidence.build_case_evidence(
+            paths["case"],
+            projects_root=paths["root"],
+            output_path=paths["geometry"],
+        )
+
+    assert not paths["geometry"].exists()
 
 
 def test_output_rejects_existing_file_identity_alias_of_authoritative_source(

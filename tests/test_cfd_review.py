@@ -101,6 +101,33 @@ def test_review_resolves_short_alias_target_to_canonical_evidence(tmp_path, monk
     assert relative == paths["evidence"].relative_to(paths["root"]).as_posix()
 
 
+def test_review_projects_root_rejects_reparse_ancestor(tmp_path, monkeypatch):
+    paths = _future_evidence(tmp_path / "root-owner")
+    _mark_lexical_reparse(
+        monkeypatch, cfd_review, paths["root"].parent
+    )
+
+    with pytest.raises(ValueError, match="projects_root must be a real directory"):
+        cfd_review.resolve_evidence_target(
+            paths["evidence"], projects_root=paths["root"]
+        )
+
+
+def test_review_alias_target_rejects_reparse_ancestor_before_root_identity(
+    tmp_path, monkeypatch
+):
+    paths = _future_evidence(tmp_path / "runneradmin")
+    lexical_root = tmp_path / "RUNNER~1" / "projects"
+    lexical_target = lexical_root / paths["evidence"].relative_to(paths["root"])
+    _install_path_alias(monkeypatch, lexical_root, paths["root"])
+    _mark_lexical_reparse(monkeypatch, cfd_review, lexical_root.parent)
+
+    with pytest.raises(ValueError, match="safe project file"):
+        cfd_review.resolve_evidence_target(
+            lexical_target, projects_root=paths["root"]
+        )
+
+
 def test_review_lock_accepts_short_alias_for_not_yet_created_evidence(
     tmp_path, monkeypatch
 ):
@@ -116,6 +143,29 @@ def test_review_lock_accepts_short_alias_for_not_yet_created_evidence(
     ) as directory:
         assert directory == canonical_parent / "_reviews"
         assert directory.is_dir()
+
+
+def test_review_alias_lock_rejects_reparse_ancestor_before_root_identity(
+    tmp_path, monkeypatch
+):
+    paths = _future_evidence(tmp_path / "runneradmin")
+    lexical_root = tmp_path / "RUNNER~1" / "projects"
+    lexical_target = (
+        lexical_root
+        / paths["case"].relative_to(paths["root"])
+        / "future-evidence.json"
+    )
+    reviews = paths["case"] / "_reviews"
+    _install_path_alias(monkeypatch, lexical_root, paths["root"])
+    _mark_lexical_reparse(monkeypatch, cfd_review, lexical_root.parent)
+
+    with pytest.raises(ValueError, match="beneath projects_root"):
+        with cfd_review.review_state_lock(
+            lexical_target, projects_root=paths["root"]
+        ):
+            pass
+
+    assert not reviews.exists()
 
 
 def test_review_target_rejects_alias_reparse_component_erased_by_dotdot(

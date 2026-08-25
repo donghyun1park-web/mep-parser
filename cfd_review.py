@@ -78,6 +78,28 @@ def _has_raw_dot_segment(value: Any) -> bool:
     return any(part in {".", ".."} for part in raw.replace("\\", "/").split("/"))
 
 
+def _lexical_chain_safe(path: Path) -> bool:
+    """Require every spelling component from the filesystem anchor to exist."""
+    try:
+        lexical = path.absolute()
+        if not lexical.anchor:
+            return False
+        current = Path(lexical.anchor)
+        relative = lexical.relative_to(current)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    for part in (None, *relative.parts):
+        if part is not None:
+            current = current / part
+        try:
+            current.lstat()
+        except OSError:
+            return False
+        if _is_reparse(current):
+            return False
+    return True
+
+
 def _path_roots(path: Path, root: Path) -> tuple[Path, Path] | None:
     """Return the lexical root spelling and its canonical identity."""
     # A Path has already discarded benign "." spelling, but retains "..".
@@ -86,6 +108,8 @@ def _path_roots(path: Path, root: Path) -> tuple[Path, Path] | None:
     try:
         lexical = path.absolute()
         root_input = root.absolute()
+        if not _lexical_chain_safe(root_input):
+            return None
         canonical_root = root_input.resolve(strict=True)
     except (OSError, RuntimeError):
         return None
@@ -100,6 +124,8 @@ def _path_roots(path: Path, root: Path) -> tuple[Path, Path] | None:
             relative = lexical.relative_to(candidate)
             if any(part in {".", ".."} for part in relative.parts):
                 return None
+            if not _lexical_chain_safe(candidate):
+                continue
             if os.path.samefile(candidate, canonical_root):
                 return candidate, canonical_root
         except (OSError, ValueError):
@@ -109,17 +135,10 @@ def _path_roots(path: Path, root: Path) -> tuple[Path, Path] | None:
 
 def _no_reparse_chain(path: Path, root: Path) -> bool:
     try:
-        relative = path.absolute().relative_to(root.absolute())
+        path.absolute().relative_to(root.absolute())
     except ValueError:
         return False
-    current = root
-    if _is_reparse(current):
-        return False
-    for part in relative.parts:
-        current = current / part
-        if current.exists() and _is_reparse(current):
-            return False
-    return True
+    return _lexical_chain_safe(path)
 
 
 def _safe_existing(path: Path, root: Path, *, directory: bool = False) -> Path | None:
@@ -147,11 +166,13 @@ def _projects_root(projects_root: Path) -> Path:
     if _has_raw_dot_segment(projects_root):
         raise ValueError("projects_root must be a real directory")
     raw = Path(projects_root).expanduser()
+    if not _lexical_chain_safe(raw):
+        raise ValueError("projects_root must be a real directory")
     try:
         root = raw.resolve(strict=True)
     except (OSError, RuntimeError) as exc:
         raise ValueError("projects_root must be a real directory") from exc
-    if not root.is_dir() or _is_reparse(raw):
+    if not root.is_dir():
         raise ValueError("projects_root must be a real directory")
     return root
 

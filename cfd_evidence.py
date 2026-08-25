@@ -108,6 +108,28 @@ def _has_raw_dot_segment(value: Any) -> bool:
     return any(part in {".", ".."} for part in raw.replace("\\", "/").split("/"))
 
 
+def _lexical_chain_safe(path: Path) -> bool:
+    """Require every spelling component from the filesystem anchor to exist."""
+    try:
+        lexical = path.absolute()
+        if not lexical.anchor:
+            return False
+        current = Path(lexical.anchor)
+        relative = lexical.relative_to(current)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    for part in (None, *relative.parts):
+        if part is not None:
+            current = current / part
+        try:
+            current.lstat()
+        except OSError:
+            return False
+        if _is_reparse(current):
+            return False
+    return True
+
+
 def _path_roots(path: Path, root: Path) -> tuple[Path, Path] | None:
     """Return the lexical root spelling and its canonical identity."""
     # A Path has already discarded benign "." spelling, but retains "..".
@@ -116,6 +138,8 @@ def _path_roots(path: Path, root: Path) -> tuple[Path, Path] | None:
     try:
         lexical = path.absolute()
         root_input = root.absolute()
+        if not _lexical_chain_safe(root_input):
+            return None
         canonical_root = root_input.resolve(strict=True)
     except (OSError, RuntimeError):
         return None
@@ -130,6 +154,8 @@ def _path_roots(path: Path, root: Path) -> tuple[Path, Path] | None:
             relative = lexical.relative_to(candidate)
             if any(part in {".", ".."} for part in relative.parts):
                 return None
+            if not _lexical_chain_safe(candidate):
+                continue
             if os.path.samefile(candidate, canonical_root):
                 return candidate, canonical_root
         except (OSError, ValueError):
@@ -139,17 +165,10 @@ def _path_roots(path: Path, root: Path) -> tuple[Path, Path] | None:
 
 def _no_reparse_chain(path: Path, root: Path) -> bool:
     try:
-        relative = path.absolute().relative_to(root.absolute())
+        path.absolute().relative_to(root.absolute())
     except ValueError:
         return False
-    current = root
-    if _is_reparse(current):
-        return False
-    for part in relative.parts:
-        current = current / part
-        if current.exists() and _is_reparse(current):
-            return False
-    return True
+    return _lexical_chain_safe(path)
 
 
 def _safe_existing(path: Path, root: Path, *, directory: bool = False) -> Path | None:
@@ -873,8 +892,10 @@ def _prepare_context(case_dir: Path, projects_root: Path) -> tuple[Path, Path]:
     if _has_raw_dot_segment(case_dir):
         raise ValueError("case_dir must be strictly beneath projects_root/_body_solver")
     root_input = Path(projects_root).expanduser()
+    if not _lexical_chain_safe(root_input):
+        raise ValueError("projects_root must be a real directory")
     root = root_input.resolve(strict=True)
-    if not root.is_dir() or _is_reparse(root_input):
+    if not root.is_dir():
         raise ValueError("projects_root must be a real directory")
     case_input = Path(case_dir).expanduser()
     if not case_input.is_absolute():
@@ -940,38 +961,26 @@ def _validate_output(path: Path, root: Path, source_paths: set[Path]) -> Path:
     if existing_output is not None:
         output = existing_output
     else:
-        parent = raw.parent
-        missing: list[str] = []
-        while True:
-            try:
-                parent.resolve(strict=True)
-            except FileNotFoundError:
-                if parent == lexical_root or parent == parent.parent:
-                    raise ValueError("output_path has an unsafe parent")
-                missing.insert(0, parent.name)
-                parent = parent.parent
-                continue
-            except (OSError, RuntimeError):
-                raise ValueError("output_path has an unsafe parent")
-            safe_parent = _safe_existing(parent, lexical_root, directory=True)
-            if safe_parent is None:
-                raise ValueError("output_path has an unsafe parent")
-            break
-        safe_parent = safe_parent.joinpath(*missing)
-        safe_parent.mkdir(parents=True, exist_ok=True)
-        safe_parent = _safe_existing(safe_parent, canonical_root, directory=True)
+        safe_parent = _safe_existing(raw.parent, lexical_root, directory=True)
         if safe_parent is None:
             raise ValueError("output_path has an unsafe parent")
         output = (safe_parent / raw.name).resolve()
         if not _contained(output, canonical_root):
             raise ValueError("output_path must be beneath projects_root")
+    try:
+        canonical_output = output.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError("output_path cannot overwrite a source artifact") from exc
     for source in source_paths:
         try:
-            if os.path.samefile(output, source):
+            source_path = Path(source)
+            canonical_source = source_path.resolve(strict=False)
+            if canonical_output == canonical_source:
                 raise ValueError("output_path cannot overwrite a source artifact")
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
+            source_path.resolve(strict=True)
+            if existing_output is not None and os.path.samefile(output, source_path):
+                raise ValueError("output_path cannot overwrite a source artifact")
+        except (OSError, RuntimeError) as exc:
             raise ValueError("output_path cannot overwrite a source artifact") from exc
     return output
 
@@ -1043,8 +1052,11 @@ def validate_case_evidence(
         return [{"code": "ARTIFACT_REF_INVALID", "detail": "projects_root is invalid"}]
     if _has_raw_dot_segment(evidence_path):
         return [{"code": "ARTIFACT_REF_INVALID", "detail": "evidence path is unsafe"}]
+    root_input = Path(projects_root).expanduser()
+    if not _lexical_chain_safe(root_input):
+        return [{"code": "ARTIFACT_REF_INVALID", "detail": "projects_root is invalid"}]
     try:
-        root = Path(projects_root).expanduser().resolve(strict=True)
+        root = root_input.resolve(strict=True)
     except (OSError, RuntimeError):
         return [{"code": "ARTIFACT_REF_INVALID", "detail": "projects_root is invalid"}]
     raw = Path(evidence_path).expanduser()
