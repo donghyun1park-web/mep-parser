@@ -290,18 +290,20 @@ def select_freecadcmd(explicit=None):
     for candidate, selection, missing_selection in requested:
         path = os.path.abspath(os.path.expandvars(os.path.expanduser(candidate)))
         if os.path.isfile(path):
-            return path, selection
+            return os.path.realpath(path), selection
         return "", missing_selection
 
     seen = set()
     for candidate, selection in _candidate_paths():
         path = os.path.abspath(os.path.expandvars(os.path.expanduser(candidate)))
+        if not os.path.isfile(path):
+            continue
+        path = os.path.realpath(path)
         key = os.path.normcase(path)
         if key in seen:
             continue
         seen.add(key)
-        if os.path.isfile(path):
-            return path, selection
+        return path, selection
     return "", "missing"
 
 

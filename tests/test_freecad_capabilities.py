@@ -25,6 +25,26 @@ class FreeCADCapabilityTests(unittest.TestCase):
         self.assertEqual(path, str(executable.resolve()))
         self.assertEqual(selection, "standard")
 
+    def test_selection_returns_canonical_path_for_short_alias_candidate(self):
+        short = r"C:\Users\RUNNER~1\FreeCAD\bin\FreeCADCmd.exe"
+        canonical = r"C:\Users\runneradmin\FreeCAD\bin\FreeCADCmd.exe"
+        candidates = [(r"C:\missing\FreeCADCmd.exe", "path"), (short, "standard")]
+        with mock.patch.object(
+            cfd_capabilities, "_candidate_paths", return_value=iter(candidates)
+        ), mock.patch.object(
+            cfd_capabilities.os.path,
+            "isfile",
+            side_effect=lambda path: path == os.path.abspath(short),
+        ), mock.patch.object(
+            cfd_capabilities.os.path,
+            "realpath",
+            side_effect=lambda path: canonical if path == os.path.abspath(short) else path,
+        ):
+            path, selection = cfd_capabilities.select_freecadcmd()
+
+        self.assertEqual(path, canonical)
+        self.assertEqual(selection, "standard")
+
     def test_missing_runtime_has_actionable_status(self):
         with mock.patch.object(
             cfd_capabilities, "select_freecadcmd", return_value=("", "missing")

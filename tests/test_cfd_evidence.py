@@ -51,6 +51,45 @@ def _directory_symlink(target: Path, link: Path) -> None:
         pytest.skip(f"directory symlink creation unavailable: {exc}")
 
 
+def _install_path_alias(
+    monkeypatch,
+    lexical_root: Path,
+    canonical_root: Path,
+    *,
+    redirects: dict[Path, Path] | None = None,
+) -> None:
+    """Simulate a filesystem alias without requiring Windows 8.3 names."""
+    original_resolve = Path.resolve
+    original_samefile = os.path.samefile
+    lexical_root = lexical_root.absolute()
+    canonical_root = original_resolve(canonical_root, strict=True)
+    mapped = {
+        key.absolute(): original_resolve(value, strict=True)
+        for key, value in (redirects or {}).items()
+    }
+
+    def translate(value):
+        if not isinstance(value, (str, os.PathLike)):
+            return value
+        candidate = Path(value).absolute()
+        if candidate in mapped:
+            return mapped[candidate]
+        try:
+            relative = candidate.relative_to(lexical_root)
+        except ValueError:
+            return candidate
+        return canonical_root.joinpath(*relative.parts)
+
+    def alias_resolve(path, strict=False):
+        return original_resolve(translate(path), strict=strict)
+
+    def alias_samefile(first, second):
+        return original_samefile(translate(first), translate(second))
+
+    monkeypatch.setattr(Path, "resolve", alias_resolve)
+    monkeypatch.setattr(os.path, "samefile", alias_samefile)
+
+
 def _geometry() -> dict:
     return {
         "schema_version": 2,
@@ -1136,6 +1175,91 @@ def test_output_must_be_safe_and_cannot_overwrite_a_source(tmp_path):
             paths["case"], projects_root=paths["root"],
             output_path=tmp_path / "outside.json",
         )
+
+
+def test_short_alias_case_is_accepted_only_inside_same_canonical_solver_tree(
+    tmp_path, monkeypatch
+):
+    canonical_root = tmp_path / "runneradmin" / "projects"
+    canonical_case = canonical_root / "_body_solver" / "case-a"
+    canonical_case.mkdir(parents=True)
+    lexical_root = tmp_path / "RUNNER~1" / "projects"
+    lexical_case = lexical_root / "_body_solver" / "case-a"
+    _install_path_alias(monkeypatch, lexical_root, canonical_root)
+
+    root, case = cfd_evidence._prepare_context(lexical_case, lexical_root)
+
+    assert root == canonical_root.resolve()
+    assert case == canonical_case.resolve()
+
+
+def test_short_alias_case_resolving_outside_solver_tree_stays_rejected(
+    tmp_path, monkeypatch
+):
+    canonical_root = tmp_path / "runneradmin" / "projects"
+    (canonical_root / "_body_solver").mkdir(parents=True)
+    outside = tmp_path / "outside" / "case-a"
+    outside.mkdir(parents=True)
+    lexical_root = tmp_path / "RUNNER~1" / "projects"
+    lexical_case = lexical_root / "_body_solver" / "case-a"
+    _install_path_alias(
+        monkeypatch,
+        lexical_root,
+        canonical_root,
+        redirects={lexical_case: outside},
+    )
+
+    with pytest.raises(ValueError, match="strictly beneath"):
+        cfd_evidence._prepare_context(lexical_case, lexical_root)
+
+
+def test_short_alias_output_builds_missing_leaf_below_canonical_parent(
+    tmp_path, monkeypatch
+):
+    canonical_root = tmp_path / "runneradmin" / "projects"
+    canonical_parent = canonical_root / "_body_solver" / "case-a"
+    canonical_parent.mkdir(parents=True)
+    lexical_root = tmp_path / "RUNNER~1" / "projects"
+    lexical_parent = lexical_root / "_body_solver" / "case-a"
+    output = lexical_parent / "new" / "reports" / "case_evidence.v1.json"
+    _install_path_alias(monkeypatch, lexical_root, canonical_root)
+
+    trusted = cfd_evidence._validate_output(output, canonical_root, set())
+
+    assert trusted == canonical_parent / "new" / "reports" / "case_evidence.v1.json"
+    assert trusted.parent.is_dir()
+
+
+def test_output_rejects_existing_file_identity_alias_of_authoritative_source(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "projects"
+    root.mkdir()
+    source = root / "authoritative.json"
+    source.write_text("source", encoding="utf-8")
+    output = root / "identity-alias.json"
+    output.write_text("alias", encoding="utf-8")
+    original_samefile = os.path.samefile
+
+    def samefile(first, second):
+        pair = {Path(first), Path(second)}
+        if pair == {source, output}:
+            return True
+        return original_samefile(first, second)
+
+    monkeypatch.setattr(os.path, "samefile", samefile)
+
+    with pytest.raises(ValueError, match="source artifact"):
+        cfd_evidence._validate_output(output, root, {source})
+
+
+def test_output_rejects_existing_directory_leaf(tmp_path):
+    root = tmp_path / "projects"
+    output = root / "not-a-file.json"
+    output.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="unsafe parent"):
+        cfd_evidence._validate_output(output, root, set())
 
 
 @pytest.mark.parametrize(

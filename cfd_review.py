@@ -70,6 +70,32 @@ def _contained(path: Path, root: Path) -> bool:
         return False
 
 
+def _path_roots(path: Path, root: Path) -> tuple[Path, Path] | None:
+    """Return the lexical root spelling and its canonical identity."""
+    try:
+        lexical = path.absolute()
+        root_input = root.absolute()
+        canonical_root = root_input.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    candidates: list[Path] = []
+    try:
+        lexical.relative_to(root_input)
+        candidates.append(root_input)
+    except ValueError:
+        candidates.extend((lexical, *lexical.parents))
+    for candidate in candidates:
+        try:
+            relative = lexical.relative_to(candidate)
+            if any(part in {".", ".."} for part in relative.parts):
+                return None
+            if os.path.samefile(candidate, canonical_root):
+                return candidate, canonical_root
+        except (OSError, ValueError):
+            continue
+    return None
+
+
 def _no_reparse_chain(path: Path, root: Path) -> bool:
     try:
         relative = path.absolute().relative_to(root.absolute())
@@ -88,10 +114,14 @@ def _no_reparse_chain(path: Path, root: Path) -> bool:
 def _safe_existing(path: Path, root: Path, *, directory: bool = False) -> Path | None:
     try:
         lexical = path.absolute()
-        if not _no_reparse_chain(lexical, root):
+        roots = _path_roots(lexical, root)
+        if roots is None:
+            return None
+        lexical_root, canonical_root = roots
+        if not _no_reparse_chain(lexical, lexical_root):
             return None
         resolved = lexical.resolve(strict=True)
-        if not _contained(resolved, root):
+        if not _contained(resolved, canonical_root):
             return None
         if directory and not resolved.is_dir():
             return None
@@ -335,16 +365,24 @@ def review_state_lock(evidence_path: Path, *, projects_root: Path):
     raw = Path(evidence_path).expanduser()
     if not raw.is_absolute():
         raw = root / raw
-    try:
-        relative = raw.absolute().relative_to(root.absolute())
-    except ValueError as exc:
-        raise ValueError("evidence path must be beneath projects_root") from exc
-    if any(part in {".", ".."} for part in relative.parts):
+    roots = _path_roots(raw, root)
+    if roots is None:
         raise ValueError("evidence path must be beneath projects_root")
-    parent = _safe_existing(raw.parent, root, directory=True)
-    if parent is None or _is_reparse(raw):
+    lexical_root, canonical_root = roots
+    if _is_reparse(raw):
         raise ValueError("evidence path has an unsafe parent")
-    directory = _canonical_review_directory(parent / raw.name, root, None)
+    try:
+        raw.resolve(strict=True)
+    except FileNotFoundError:
+        parent = _safe_existing(raw.parent, lexical_root, directory=True)
+        target = (parent / raw.name).resolve() if parent is not None else None
+    except (OSError, RuntimeError):
+        target = None
+    else:
+        target = _safe_existing(raw, lexical_root)
+    if target is None or not _contained(target, canonical_root):
+        raise ValueError("evidence path has an unsafe parent")
+    directory = _canonical_review_directory(target, canonical_root, None)
     with _review_directory_lock(directory):
         yield directory
 

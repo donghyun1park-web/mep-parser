@@ -100,6 +100,32 @@ def _contained(path: Path, root: Path) -> bool:
         return False
 
 
+def _path_roots(path: Path, root: Path) -> tuple[Path, Path] | None:
+    """Return the lexical root spelling and its canonical identity."""
+    try:
+        lexical = path.absolute()
+        root_input = root.absolute()
+        canonical_root = root_input.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    candidates: list[Path] = []
+    try:
+        lexical.relative_to(root_input)
+        candidates.append(root_input)
+    except ValueError:
+        candidates.extend((lexical, *lexical.parents))
+    for candidate in candidates:
+        try:
+            relative = lexical.relative_to(candidate)
+            if any(part in {".", ".."} for part in relative.parts):
+                return None
+            if os.path.samefile(candidate, canonical_root):
+                return candidate, canonical_root
+        except (OSError, ValueError):
+            continue
+    return None
+
+
 def _no_reparse_chain(path: Path, root: Path) -> bool:
     try:
         relative = path.absolute().relative_to(root.absolute())
@@ -118,10 +144,14 @@ def _no_reparse_chain(path: Path, root: Path) -> bool:
 def _safe_existing(path: Path, root: Path, *, directory: bool = False) -> Path | None:
     try:
         lexical = path.absolute()
-        if not _no_reparse_chain(lexical, root):
+        roots = _path_roots(lexical, root)
+        if roots is None:
+            return None
+        lexical_root, canonical_root = roots
+        if not _no_reparse_chain(lexical, lexical_root):
             return None
         resolved = lexical.resolve(strict=True)
-        if not _contained(resolved, root):
+        if not _contained(resolved, canonical_root):
             return None
         if directory and not resolved.is_dir():
             return None
@@ -826,9 +856,11 @@ def _prepare_context(case_dir: Path, projects_root: Path) -> tuple[Path, Path]:
         raise ValueError("projects_root must be a real directory")
     case_input = Path(case_dir).expanduser()
     if not case_input.is_absolute():
-        case_input = root / case_input
-    case = _safe_existing(case_input, root, directory=True)
-    solver_root = _safe_existing(root / "_body_solver", root, directory=True)
+        case_input = root_input / case_input
+    case = _safe_existing(case_input, root_input, directory=True)
+    solver_root = _safe_existing(
+        root_input / "_body_solver", root_input, directory=True
+    )
     if case is None or solver_root is None or case == solver_root or not _contained(case, solver_root):
         raise ValueError("case_dir must be strictly beneath projects_root/_body_solver")
     return root, case
@@ -862,18 +894,58 @@ def _canonical_gci_root(path: Path | None, root: Path) -> Path | None:
 
 def _validate_output(path: Path, root: Path, source_paths: set[Path]) -> Path:
     raw = path if path.is_absolute() else root / path
-    try:
-        raw.absolute().relative_to(root.absolute())
-    except ValueError as exc:
-        raise ValueError("output_path must be beneath projects_root") from exc
-    parent = raw.parent
-    parent.mkdir(parents=True, exist_ok=True)
-    safe_parent = _safe_existing(parent, root, directory=True)
-    if safe_parent is None or _is_reparse(raw):
+    roots = _path_roots(raw, root)
+    if roots is None:
+        raise ValueError("output_path must be beneath projects_root")
+    lexical_root, canonical_root = roots
+    if _is_reparse(raw):
         raise ValueError("output_path has an unsafe parent")
-    output = safe_parent / raw.name
-    if output.resolve() in {item.resolve() for item in source_paths}:
-        raise ValueError("output_path cannot overwrite a source artifact")
+    try:
+        raw.resolve(strict=True)
+    except FileNotFoundError:
+        existing_output = None
+    except (OSError, RuntimeError) as exc:
+        raise ValueError("output_path has an unsafe parent") from exc
+    else:
+        existing_output = _safe_existing(raw, lexical_root)
+        if existing_output is None:
+            raise ValueError("output_path has an unsafe parent")
+    if existing_output is not None:
+        output = existing_output
+    else:
+        parent = raw.parent
+        missing: list[str] = []
+        while True:
+            try:
+                parent.resolve(strict=True)
+            except FileNotFoundError:
+                if parent == lexical_root or parent == parent.parent:
+                    raise ValueError("output_path has an unsafe parent")
+                missing.insert(0, parent.name)
+                parent = parent.parent
+                continue
+            except (OSError, RuntimeError):
+                raise ValueError("output_path has an unsafe parent")
+            safe_parent = _safe_existing(parent, lexical_root, directory=True)
+            if safe_parent is None:
+                raise ValueError("output_path has an unsafe parent")
+            break
+        safe_parent = safe_parent.joinpath(*missing)
+        safe_parent.mkdir(parents=True, exist_ok=True)
+        safe_parent = _safe_existing(safe_parent, canonical_root, directory=True)
+        if safe_parent is None:
+            raise ValueError("output_path has an unsafe parent")
+        output = (safe_parent / raw.name).resolve()
+        if not _contained(output, canonical_root):
+            raise ValueError("output_path must be beneath projects_root")
+    for source in source_paths:
+        try:
+            if os.path.samefile(output, source):
+                raise ValueError("output_path cannot overwrite a source artifact")
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ValueError("output_path cannot overwrite a source artifact") from exc
     return output
 
 

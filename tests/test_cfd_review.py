@@ -13,7 +13,7 @@ import pytest
 import cfd_case_health
 import cfd_evidence
 import cfd_review
-from test_cfd_evidence import make_complete_case
+from test_cfd_evidence import _install_path_alias, make_complete_case
 
 
 def _read(path: Path) -> dict:
@@ -78,6 +78,40 @@ def test_create_review_binds_canonical_target_hash_and_uuid4_id(tmp_path):
     assert cfd_review.validate_review(review_path, projects_root=paths["root"]) == []
     schema = _read(Path(cfd_review.__file__).with_name("case_review.v1.schema.json"))
     Draft202012Validator(schema).validate(review)
+
+
+def test_review_resolves_short_alias_target_to_canonical_evidence(tmp_path, monkeypatch):
+    paths = _future_evidence(tmp_path / "runneradmin")
+    lexical_root = tmp_path / "RUNNER~1" / "projects"
+    lexical_target = lexical_root / paths["evidence"].relative_to(paths["root"])
+    _install_path_alias(monkeypatch, lexical_root, paths["root"])
+
+    root, target, payload, digest, relative = cfd_review.resolve_evidence_target(
+        lexical_target, projects_root=lexical_root
+    )
+
+    assert root == paths["root"].resolve()
+    assert target == paths["evidence"].resolve()
+    assert payload["contract"] == "case_evidence.v1"
+    assert digest == cfd_review.sha256_file(paths["evidence"])
+    assert relative == paths["evidence"].relative_to(paths["root"]).as_posix()
+
+
+def test_review_lock_accepts_short_alias_for_not_yet_created_evidence(
+    tmp_path, monkeypatch
+):
+    paths = _future_evidence(tmp_path / "runneradmin")
+    canonical_parent = paths["case"]
+    lexical_root = tmp_path / "RUNNER~1" / "projects"
+    lexical_parent = lexical_root / canonical_parent.relative_to(paths["root"])
+    lexical_target = lexical_parent / "future-evidence.json"
+    _install_path_alias(monkeypatch, lexical_root, paths["root"])
+
+    with cfd_review.review_state_lock(
+        lexical_target, projects_root=lexical_root
+    ) as directory:
+        assert directory == canonical_parent / "_reviews"
+        assert directory.is_dir()
 
 
 @pytest.mark.parametrize(
