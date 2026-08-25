@@ -231,6 +231,11 @@ def export_boq_xlsx(data, path, title=None):
 
 
 def main():
+    for _s in (sys.stdout, sys.stderr):   # cp949 콘솔 한글 깨짐 방지
+        try:
+            _s.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
     ap = argparse.ArgumentParser(description="geometry.json → 물량집계 Excel")
     ap.add_argument("geometry", help="geometry.json 경로")
     ap.add_argument("out", nargs="?", default=None,

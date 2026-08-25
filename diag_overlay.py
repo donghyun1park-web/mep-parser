@@ -180,6 +180,11 @@ def build_overlay(geom_path, out_png=None, dxf_path=None, backdrop=True,
 
 
 def main():
+    for _s in (sys.stdout, sys.stderr):   # cp949 콘솔 한글 깨짐 방지
+        try:
+            _s.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
     ap = argparse.ArgumentParser(description="벽 누락 진단 오버레이 PNG")
     ap.add_argument("geometry", help="geometry.json 경로 (qa 포함)")
     ap.add_argument("out", nargs="?", default=None, help="출력 PNG (기본 <입력>_diag.png)")
