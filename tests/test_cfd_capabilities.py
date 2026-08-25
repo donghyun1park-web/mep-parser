@@ -307,6 +307,47 @@ class StagedFreeCADCapabilityTests(unittest.TestCase):
         self.assertEqual(result["failed_stage"], "discovery")
         select.assert_not_called()
 
+    def test_unc_staged_probe_is_rejected_before_any_network_filesystem_lookup(self):
+        unc = Path(r"\\untrusted-server\share\FreeCADCmd.exe")
+        with mock.patch.object(
+            cfd_capabilities.os.path, "isfile", return_value=False
+        ) as isfile, mock.patch.object(cfd_capabilities.subprocess, "run") as run:
+            result = cfd_capabilities.diagnose_freecad_stages(
+                unc, per_stage_timeout_s=0.25
+            )
+
+        self.assertEqual(result["status"], "identity_invalid")
+        self.assertEqual(
+            result["stages"][0]["reason_code"],
+            "FREECAD_EXECUTABLE_IDENTITY_INVALID",
+        )
+        isfile.assert_not_called()
+        run.assert_not_called()
+
+    def test_local_alias_resolving_to_unc_is_rejected_before_hashing(self):
+        local_alias = Path(r"C:\FreeCAD\FreeCADCmd.exe")
+        unc_target = r"\\untrusted-server\share\FreeCADCmd.exe"
+        with mock.patch.object(
+            cfd_capabilities.os.path, "isfile", return_value=True
+        ), mock.patch.object(
+            cfd_capabilities.os.path, "realpath", return_value=unc_target
+        ), mock.patch.object(
+            cfd_capabilities, "_file_sha256", return_value="0" * 64
+        ) as file_sha256, mock.patch.object(
+            cfd_capabilities.subprocess, "run"
+        ) as run:
+            result = cfd_capabilities.diagnose_freecad_stages(
+                local_alias, per_stage_timeout_s=0.25
+            )
+
+        self.assertEqual(result["status"], "identity_invalid")
+        self.assertEqual(
+            result["stages"][0]["reason_code"],
+            "FREECAD_EXECUTABLE_IDENTITY_INVALID",
+        )
+        file_sha256.assert_not_called()
+        run.assert_not_called()
+
     def test_each_runtime_stage_is_bounded_and_ready_result_binds_executable(self):
         with tempfile.TemporaryDirectory() as tmp:
             executable = Path(tmp) / "FreeCADCmd.exe"

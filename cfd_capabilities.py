@@ -9,6 +9,7 @@ without depending on FreeCAD's embedded Python.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import ctypes
 import glob
 import hashlib
 import json
@@ -473,6 +474,25 @@ def _stage_payload_invariants(stage_name, payload):
     return False
 
 
+def _is_strict_local_executable_path(raw_path):
+    if not isinstance(raw_path, str) or not raw_path:
+        return False
+    if raw_path.startswith(("\\\\", "//")):
+        return False
+    if not os.path.isabs(raw_path):
+        return False
+    if os.name != "nt":
+        return True
+    drive, _tail = os.path.splitdrive(raw_path)
+    if not re.fullmatch(r"[A-Za-z]:", drive):
+        return False
+    try:
+        drive_type = ctypes.windll.kernel32.GetDriveTypeW(f"{drive}\\")
+    except (AttributeError, OSError):
+        return False
+    return drive_type == 3
+
+
 def diagnose_freecad_stages(executable: Path, *, per_stage_timeout_s: float) -> dict:
     """Run bounded FreeCAD discovery/import/Boolean/tessellation diagnostics.
 
@@ -490,12 +510,21 @@ def diagnose_freecad_stages(executable: Path, *, per_stage_timeout_s: float) -> 
     checked_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     stages = _stage_rows()
     requested = os.fspath(executable) if executable is not None else None
-    requested_path = (
-        os.path.abspath(os.path.expandvars(os.path.expanduser(requested)))
-        if requested else ""
-    )
+    invalid_identity = bool(requested and not _is_strict_local_executable_path(requested))
+    requested_path = ""
+    if requested and not invalid_identity:
+        requested_path = os.path.abspath(
+            os.path.expandvars(os.path.expanduser(requested))
+        )
     if requested_path and os.path.isfile(requested_path):
-        path, selection = os.path.realpath(requested_path), "explicit"
+        resolved_path = os.path.realpath(requested_path)
+        if _is_strict_local_executable_path(resolved_path):
+            path, selection = resolved_path, "explicit"
+        else:
+            invalid_identity = True
+            path, selection = "", "explicit_nonlocal"
+    elif invalid_identity:
+        path, selection = "", "explicit_nonlocal"
     else:
         path, selection = "", "explicit_missing"
     result = {
@@ -522,7 +551,17 @@ def diagnose_freecad_stages(executable: Path, *, per_stage_timeout_s: float) -> 
         "stages": stages,
     }
     if not path:
-        stages[0].update(status="BLOCKED", reason_code="FREECAD_EXECUTABLE_MISSING")
+        reason_code = (
+            "FREECAD_EXECUTABLE_IDENTITY_INVALID"
+            if invalid_identity else "FREECAD_EXECUTABLE_MISSING"
+        )
+        stages[0].update(status="BLOCKED", reason_code=reason_code)
+        if invalid_identity:
+            result.update(
+                status="identity_invalid",
+                summary="네트워크 또는 비로컬 FreeCADCmd 경로는 사용할 수 없습니다.",
+                fix="로컬 고정 드라이브의 FreeCAD bin/FreeCADCmd.exe를 지정하세요.",
+            )
         return result
 
     try:

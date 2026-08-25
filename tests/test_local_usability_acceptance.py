@@ -48,7 +48,11 @@ def _build_bundle(root: Path) -> tuple[Path, dict]:
     now = datetime.now(timezone.utc).replace(microsecond=0)
     evidence_time = now - timedelta(seconds=10)
     raw_root = root / RAW_ROOT
-    case_input = _write(root, RAW_ROOT / "system/controlDict", "endTime 1;\n")
+    case_input = _write(
+        root,
+        RAW_ROOT / "system/controlDict",
+        "application buoyantBoussinesqPimpleFoam;\nendTime 1;\n",
+    )
     mesh_log = _write(
         root, RAW_ROOT / "log.checkMesh",
         "Mesh stats\n    cells: 64\nMesh OK.\n",
@@ -301,6 +305,25 @@ def _relink_solver_log_everywhere(
     _rewrite_manifest(manifest_path, manifest)
 
 
+def _relink_case_input_everywhere(
+    root: Path, manifest_path: Path, manifest: dict
+) -> None:
+    case_path = root / manifest["sources"]["case_input"]["path"]
+    manifest["sources"]["case_input"] = _link(root, case_path)
+    runtime_path = root / manifest["sources"]["runtime_capability"]["path"]
+    runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+    runtime["serial_baseline"]["case_input_sha256"] = _sha256(case_path)
+    _write(root, runtime_path.relative_to(root), runtime)
+    manifest["sources"]["runtime_capability"] = _link(root, runtime_path)
+    environment_path = root / manifest["sources"]["environment_acceptance"]["path"]
+    environment = json.loads(environment_path.read_text(encoding="utf-8"))
+    environment["case_input"] = manifest["sources"]["case_input"]
+    environment["runtime_capability"] = manifest["sources"]["runtime_capability"]
+    _write(root, environment_path.relative_to(root), environment)
+    manifest["sources"]["environment_acceptance"] = _link(root, environment_path)
+    _rewrite_manifest(manifest_path, manifest)
+
+
 def test_schema_accepts_closed_complete_manifest_and_rejects_bad_refs(tmp_path):
     manifest_path, manifest = _build_bundle(tmp_path)
     schema = json.loads(
@@ -408,6 +431,48 @@ def test_current_openfoam_identity_mismatch_is_blocked_even_with_relinked_wrappe
 
     assert result["status"] == "BLOCKED"
     assert "OPENFOAM_IDENTITY_MISMATCH" in result["blockers"]
+
+
+def test_hash_bound_control_dict_application_is_parsed_not_caller_claimed(tmp_path):
+    from scripts.local_usability_acceptance import validate_local_usability_acceptance
+
+    manifest_path, manifest = _build_bundle(tmp_path)
+    control_dict = tmp_path / manifest["sources"]["case_input"]["path"]
+    control_dict.write_text("application simpleFoam;\nendTime 1;\n", encoding="utf-8")
+    _relink_case_input_everywhere(tmp_path, manifest_path, manifest)
+
+    result = validate_local_usability_acceptance(manifest_path, tmp_path)
+
+    assert result["status"] == "BLOCKED"
+    assert "CONTROL_DICT_APPLICATION_INVALID" in result["blockers"]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "blocker"),
+    [
+        ("missing_status", "OPENFOAM_RUNTIME_NOT_READY"),
+        ("missing_solver", "OPENFOAM_SOLVER_EXECUTABLE_MISSING"),
+    ],
+)
+def test_runtime_openfoam_must_be_ready_with_exact_solver_executable(
+    tmp_path, mutation, blocker
+):
+    from scripts.local_usability_acceptance import validate_local_usability_acceptance
+
+    manifest_path, manifest = _build_bundle(tmp_path)
+    runtime_path = tmp_path / manifest["sources"]["runtime_capability"]["path"]
+    runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+    if mutation == "missing_status":
+        runtime["openfoam"].pop("status")
+    else:
+        runtime["openfoam"].pop("solvers")
+    _write(tmp_path, runtime_path.relative_to(tmp_path), runtime)
+    _relink_environment_source(tmp_path, manifest_path, manifest, "runtime_capability")
+
+    result = validate_local_usability_acceptance(manifest_path, tmp_path)
+
+    assert result["status"] == "BLOCKED"
+    assert blocker in result["blockers"]
 
 
 def test_claimed_64_cells_without_independent_log_parse_is_blocked(tmp_path):
@@ -534,6 +599,34 @@ def test_observation_cardinality_has_stable_blocker(tmp_path, collection, blocke
 
     assert result["status"] == "BLOCKED"
     assert blocker in result["blockers"]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "value"),
+    [
+        ("attempt", True),
+        ("required_dom_marker", "MEP CFD Studio clone"),
+        ("caller_asserted_pass", True),
+    ],
+)
+def test_launch_observation_is_closed_and_uses_fixed_first_page_marker(
+    tmp_path, mutation, value
+):
+    from scripts.local_usability_acceptance import validate_local_usability_acceptance
+
+    manifest_path, manifest = _build_bundle(tmp_path)
+    link = manifest["launch_observations"][0]
+    observation_path = tmp_path / link["path"]
+    observation = json.loads(observation_path.read_text(encoding="utf-8"))
+    observation[mutation] = value
+    _write(tmp_path, observation_path.relative_to(tmp_path), observation)
+    manifest["launch_observations"][0] = _link(tmp_path, observation_path)
+    _rewrite_manifest(manifest_path, manifest)
+
+    result = validate_local_usability_acceptance(manifest_path, tmp_path)
+
+    assert result["status"] == "BLOCKED"
+    assert "LAUNCH_OBSERVATION_INVALID" in result["blockers"]
 
 
 @pytest.mark.parametrize(
@@ -919,6 +1012,31 @@ def test_fixed_manifest_becoming_reparse_after_load_is_blocked(tmp_path, monkeyp
     assert "MANIFEST_POST_LOAD_LINK_OR_REPARSE" in result["blockers"]
 
 
+def test_in_place_manifest_drift_after_exact_parse_snapshot_is_blocked(
+    tmp_path, monkeypatch
+):
+    import scripts.local_usability_acceptance as acceptance
+
+    manifest_path, _manifest = _build_bundle(tmp_path)
+
+    def snapshot_then_drift(path):
+        raw = Path(path).read_bytes()
+        payload = json.loads(raw.decode("utf-8"))
+        drifted = raw.replace(b"serial-run-001", b"serial-run-002", 1)
+        assert drifted != raw
+        Path(path).write_bytes(drifted)
+        return payload, hashlib.sha256(raw).hexdigest()
+
+    monkeypatch.setattr(
+        acceptance, "_read_manifest_snapshot", snapshot_then_drift, raising=False
+    )
+    result = acceptance.validate_local_usability_acceptance(manifest_path, tmp_path)
+
+    assert result["status"] == "BLOCKED"
+    assert "MANIFEST_POST_LOAD_HASH_DRIFT" in result["blockers"]
+    assert "MANIFEST_POST_LOAD_IDENTITY_CHANGED" not in result["blockers"]
+
+
 def test_relinked_runtime_from_another_run_is_blocked(tmp_path):
     from scripts.local_usability_acceptance import validate_local_usability_acceptance
 
@@ -1145,6 +1263,35 @@ def test_python_executable_cannot_masquerade_as_freecadcmd(tmp_path):
 
     assert result["status"] == "BLOCKED"
     assert "FREECAD_EXECUTABLE_IDENTITY_INVALID" in result["blockers"]
+
+
+def test_nonlocal_freecad_executable_is_rejected_before_hashing(tmp_path, monkeypatch):
+    import scripts.local_usability_acceptance as acceptance
+
+    manifest_path, manifest = _build_bundle(tmp_path)
+    freecad_executable = Path(manifest["identities"]["freecad"]["executable"])
+    original_sha256 = acceptance._sha256_file
+    freecad_hash_calls = 0
+
+    def tracked_sha256(path):
+        nonlocal freecad_hash_calls
+        if Path(path) == freecad_executable:
+            freecad_hash_calls += 1
+        return original_sha256(path)
+
+    monkeypatch.setattr(
+        acceptance,
+        "_is_strict_local_executable_path",
+        lambda _path: False,
+        raising=False,
+    )
+    monkeypatch.setattr(acceptance, "_sha256_file", tracked_sha256)
+
+    result = acceptance.validate_local_usability_acceptance(manifest_path, tmp_path)
+
+    assert result["status"] == "BLOCKED"
+    assert "FREECAD_EXECUTABLE_IDENTITY_INVALID" in result["blockers"]
+    assert freecad_hash_calls == 0
 
 
 def test_runtime_pass_claim_without_required_metrics_is_blocked(tmp_path):

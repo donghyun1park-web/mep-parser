@@ -9,6 +9,7 @@ runs FreeCAD, OpenFOAM, Studio, or a browser.
 from __future__ import annotations
 
 import argparse
+import ctypes
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -33,6 +34,8 @@ WORKING_OUTPUT_ROOT = PurePosixPath("_working_validation/evaluations")
 MAX_ACCEPTANCE_AGE = timedelta(minutes=15)
 MAX_FUTURE_SKEW = timedelta(seconds=30)
 MAX_SAME_RUN_SKEW = timedelta(minutes=5)
+EXPECTED_SERIAL_SOLVER = "buoyantBoussinesqPimpleFoam"
+STUDIO_FIRST_PAGE_MARKER = "MEP CFD Studio"
 DIAGNOSTIC_CODES = {
     "WSL_UNAVAILABLE",
     "FREECAD_UNAVAILABLE",
@@ -43,6 +46,11 @@ DIAGNOSTIC_CODES = {
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _CELL_COUNT = re.compile(r"(?im)^\s*cells\s*:\s*(\d+)\s*$")
 _TIME_VALUE = re.compile(r"(?m)^Time\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*$")
+_CONTROL_APPLICATION = re.compile(
+    r"(?m)^\s*application\s+([A-Za-z][A-Za-z0-9_]*)\s*;"
+)
+_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+_LINE_COMMENT = re.compile(r"//[^\r\n]*")
 _SOLVER_FATAL = re.compile(
     r"FOAM\s+FATAL|FATAL\s+ERROR|SEGMENTATION\s+FAULT|FLOATING\s+POINT\s+EXCEPTION"
     r"|NO\s+SPACE\s+LEFT\s+ON\s+DEVICE|^\s*KILLED\s*$",
@@ -53,6 +61,10 @@ _FREECAD_MODULES = (
     "FreeCAD", "Part", "Draft", "Arch", "Mesh", "MeshPart", "BOPTools.SplitAPI",
 )
 _FREECAD_BOOLEAN_VOLUME_MM3 = 239_250_000_000.0
+_LAUNCH_OBSERVATION_FIELDS = {
+    "contract", "run_id", "attempt", "process_started_at", "http_ready_at",
+    "dom_ready_at", "required_dom_marker", "status",
+}
 
 
 def _sha256_file(path: Path) -> str:
@@ -69,6 +81,17 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError, UnicodeError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _read_manifest_snapshot(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        raw = path.read_bytes()
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return None, None
+    if not isinstance(payload, dict):
+        return None, None
+    return payload, hashlib.sha256(raw).hexdigest()
 
 
 def _schema_path() -> Path:
@@ -176,6 +199,25 @@ def _same_file(left: Path, right: Path) -> bool:
         return False
 
 
+def _is_strict_local_executable_path(raw_path: object) -> bool:
+    if not isinstance(raw_path, str) or not raw_path:
+        return False
+    if raw_path.startswith(("\\\\", "//")):
+        return False
+    if not os.path.isabs(raw_path):
+        return False
+    if os.name != "nt":
+        return True
+    drive, _tail = os.path.splitdrive(raw_path)
+    if not re.fullmatch(r"[A-Za-z]:", drive):
+        return False
+    try:
+        drive_type = ctypes.windll.kernel32.GetDriveTypeW(f"{drive}\\")
+    except (AttributeError, OSError):
+        return False
+    return drive_type == 3
+
+
 def _output_path_blockers(root: Path, output: Path) -> list[str]:
     blockers: list[str] = []
     working_root = root.joinpath(*WORKING_OUTPUT_ROOT.parts)
@@ -262,6 +304,12 @@ def _timestamp_is_current(
     )
 
 
+def _control_dict_application(text: str) -> str | None:
+    without_comments = _LINE_COMMENT.sub("", _BLOCK_COMMENT.sub("", text))
+    matches = _CONTROL_APPLICATION.findall(without_comments)
+    return matches[0] if len(matches) == 1 else None
+
+
 def _same_link(raw: object, expected: dict[str, str]) -> bool:
     return isinstance(raw, dict) and raw == expected
 
@@ -326,7 +374,7 @@ def _freecad_executable_identity_valid(
     freecad_identity: dict[str, Any], freecad: dict[str, Any] | None
 ) -> bool:
     raw_executable = freecad_identity.get("executable")
-    if not isinstance(raw_executable, str) or not raw_executable:
+    if not _is_strict_local_executable_path(raw_executable):
         return False
     try:
         executable = Path(raw_executable).resolve(strict=True)
@@ -353,7 +401,7 @@ def _freecad_executable_identity_valid(
 
 def _validate_runtime_semantics(
     manifest: dict[str, Any], loaded: dict[str, dict[str, Any]], blockers: list[str],
-    *, now: datetime,
+    *, now: datetime, control_application: str | None,
 ) -> None:
     sources = manifest["sources"]
     environment = loaded.get(sources["environment_acceptance"]["path"])
@@ -414,6 +462,17 @@ def _validate_runtime_semantics(
             blockers.append("CASE_INPUT_RUNTIME_HASH_MISMATCH")
         if baseline.get("solver_log_sha256") != sources["solver_log"]["sha256"]:
             blockers.append("SOLVER_LOG_RUNTIME_HASH_MISMATCH")
+        openfoam = runtime.get("openfoam")
+        if not isinstance(openfoam, dict) or openfoam.get("status") != "ready":
+            blockers.append("OPENFOAM_RUNTIME_NOT_READY")
+        solvers = openfoam.get("solvers") if isinstance(openfoam, dict) else None
+        solver_executable = (
+            solvers.get(EXPECTED_SERIAL_SOLVER) if isinstance(solvers, dict) else None
+        )
+        if not isinstance(solver_executable, str) or not solver_executable.strip():
+            blockers.append("OPENFOAM_SOLVER_EXECUTABLE_MISSING")
+        if control_application != EXPECTED_SERIAL_SOLVER:
+            blockers.append("CONTROL_DICT_APPLICATION_INVALID")
 
     identities = manifest["identities"]
     python_identity = identities["python"]
@@ -502,14 +561,17 @@ def _validate_raw_observations(
         ):
             blockers.append("LAUNCH_OBSERVATION_STALE")
         if (
-            not isinstance(attempt, int) or attempt < 1 or attempt in attempts
+            set(observation) != _LAUNCH_OBSERVATION_FIELDS
+            or not isinstance(attempt, int) or isinstance(attempt, bool)
+            or attempt < 1 or attempt in attempts
             or start is None or http is None or dom is None
             or not (start <= http <= dom) or (dom - start).total_seconds() > 10
-            or not observation.get("required_dom_marker")
+            or observation.get("required_dom_marker") != STUDIO_FIRST_PAGE_MARKER
             or observation.get("status") != "PASS"
         ):
             blockers.append("LAUNCH_OBSERVATION_INVALID")
-        attempts.add(attempt) if isinstance(attempt, int) else None
+        if isinstance(attempt, int) and not isinstance(attempt, bool):
+            attempts.add(attempt)
     if attempts != {1, 2, 3}:
         blockers.append("LAUNCH_OBSERVATION_CARDINALITY_INVALID")
 
@@ -664,7 +726,7 @@ def validate_local_usability_acceptance(
     if output is not None and _same_file(output, manifest_lexical):
         blockers.append("EVALUATOR_OUTPUT_ALIASES_MANIFEST")
         output_safe = False
-    manifest = _read_json(manifest_lexical)
+    manifest, manifest_snapshot_hash = _read_manifest_snapshot(manifest_lexical)
     if manifest is None:
         blockers.append("MANIFEST_MISSING_OR_MALFORMED")
     else:
@@ -779,7 +841,11 @@ def validate_local_usability_acceptance(
 
     if manifest is not None and not blockers:
         sources = manifest["sources"]
+        control_application: str | None = None
         try:
+            case_text = root.joinpath(
+                *PurePosixPath(sources["case_input"]["path"]).parts
+            ).read_text(encoding="utf-8", errors="replace")
             mesh_text = root.joinpath(*PurePosixPath(sources["mesh_log"]["path"]).parts).read_text(
                 encoding="utf-8", errors="replace"
             )
@@ -792,6 +858,7 @@ def validate_local_usability_acceptance(
         except OSError:
             blockers.append("RAW_ACCEPTANCE_ARTIFACT_UNREADABLE")
         else:
+            control_application = _control_dict_application(case_text)
             cells = [int(value) for value in _CELL_COUNT.findall(mesh_text)]
             times = [float(value) for value in _TIME_VALUE.findall(solver_text)]
             solver_lines = [line.strip() for line in solver_text.splitlines() if line.strip()]
@@ -813,7 +880,13 @@ def validate_local_usability_acceptance(
                 blockers.append("REPORT_EVIDENCE_INVALID")
             if environment.get("cells") != 64:
                 blockers.append("ENVIRONMENT_CELL_CLAIM_INVALID")
-        _validate_runtime_semantics(manifest, loaded, blockers, now=now)
+        _validate_runtime_semantics(
+            manifest,
+            loaded,
+            blockers,
+            now=now,
+            control_application=control_application,
+        )
         _validate_raw_observations(
             manifest, loaded, blockers, root, manifest_lexical, output,
             evidence, source_paths, source_identities, now=now,
@@ -843,6 +916,14 @@ def validate_local_usability_acceptance(
         blockers.append("MANIFEST_POST_LOAD_IDENTITY_CHANGED")
     if _has_multiple_hardlinks(manifest_lexical):
         blockers.append("MANIFEST_HARDLINK_FORBIDDEN")
+    if manifest_snapshot_hash is not None:
+        try:
+            current_manifest_hash = _sha256_file(manifest_lexical)
+        except OSError:
+            blockers.append("MANIFEST_POST_LOAD_UNREADABLE")
+        else:
+            if current_manifest_hash != manifest_snapshot_hash:
+                blockers.append("MANIFEST_POST_LOAD_HASH_DRIFT")
 
     result = {
         "contract": "local_usability_acceptance_evaluation.v1",
