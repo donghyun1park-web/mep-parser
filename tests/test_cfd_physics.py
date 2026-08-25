@@ -69,6 +69,88 @@ class PhysicsBuildTests(unittest.TestCase):
         (case / "mesh_input.json").write_text("{}", encoding="utf-8")
         return case
 
+    def _closed_heat_mesh_case(self, root):
+        case = self._mesh_case(root, with_heat=True)
+        surface_path = case / "surface_manifest.json"
+        mesh_path = case / "mesh_manifest.json"
+        surface = json.loads(surface_path.read_text(encoding="utf-8"))
+        mesh = json.loads(mesh_path.read_text(encoding="utf-8"))
+        terminal_names = {
+            row["name"] for row in surface["regions"]
+            if row.get("role") in {"supply", "exhaust"}
+        }
+        surface["regions"] = [
+            row for row in surface["regions"]
+            if row.get("role") not in {"supply", "exhaust"}
+        ]
+        mesh["patches"] = [
+            row for row in mesh["patches"] if row.get("name") not in terminal_names
+        ]
+        surface_path.write_text(json.dumps(surface), encoding="utf-8")
+        mesh_path.write_text(json.dumps(mesh), encoding="utf-8")
+        return case
+
+    def test_ordinary_buoyant_case_cannot_enable_reserved_validation_scope(self):
+        with tempfile.TemporaryDirectory(prefix=".test-validation-scope-", dir=self.repo) as tmp:
+            root = Path(tmp)
+            result = cfd_physics.build_buoyant_case(
+                self._mesh_case(root, with_heat=True),
+                root / "thermal",
+                {"validation_scope": "single_pc_numerical_spotcheck"},
+            )
+        self.assertFalse(result["ok"])
+        self.assertIn("validation_scope", result["error"])
+
+    def test_numerical_spotcheck_wrapper_is_fixed_dt_but_ordinary_case_is_adaptive(self):
+        with tempfile.TemporaryDirectory(prefix=".test-fixed-dt-scope-", dir=self.repo) as tmp:
+            root = Path(tmp)
+            mesh = self._mesh_case(root, with_heat=True)
+            ordinary = cfd_physics.build_buoyant_case(mesh, root / "ordinary")
+            scoped = cfd_physics.build_single_pc_numerical_spotcheck_case(
+                mesh,
+                root / "spotcheck",
+                {"thermal_initial_delta_t_s": 0.02},
+            )
+            ordinary_control = (root / "ordinary" / "system" / "controlDict").read_text(
+                encoding="utf-8"
+            )
+            scoped_control = (root / "spotcheck" / "system" / "controlDict").read_text(
+                encoding="utf-8"
+            )
+        self.assertTrue(ordinary["ok"], ordinary)
+        self.assertTrue(scoped["ok"], scoped)
+        self.assertIn("adjustTimeStep yes;", ordinary_control)
+        self.assertIn("adjustTimeStep no;", scoped_control)
+        self.assertIn("deltaT 0.02;", scoped_control)
+        self.assertEqual(
+            scoped["thermal_input"]["validation_scope"],
+            "single_pc_numerical_spotcheck",
+        )
+
+    def test_adiabatic_heat_box_wrapper_is_only_no_terminal_scope_and_has_pressure_reference(self):
+        with tempfile.TemporaryDirectory(prefix=".test-closed-heat-scope-", dir=self.repo) as tmp:
+            root = Path(tmp)
+            mesh = self._closed_heat_mesh_case(root)
+            ordinary = cfd_physics.build_buoyant_case(mesh, root / "ordinary")
+            scoped = cfd_physics.build_single_pc_adiabatic_heat_box_case(
+                mesh,
+                root / "heat-box",
+                {"thermal_initial_delta_t_s": 0.02},
+            )
+            control = (root / "heat-box" / "system" / "controlDict").read_text(
+                encoding="utf-8"
+            )
+            solution = (root / "heat-box" / "system" / "fvSolution").read_text(
+                encoding="utf-8"
+            )
+        self.assertFalse(ordinary["ok"])
+        self.assertTrue(scoped["ok"], scoped)
+        self.assertEqual(scoped["thermal_input"]["terminals"], [])
+        self.assertEqual(scoped["thermal_input"]["airflow"]["supply_cmh"], 0.0)
+        self.assertIn("adjustTimeStep no;", control)
+        self.assertIn("pRefCell 0;", solution)
+        self.assertIn("pRefValue 0;", solution)
+
     def test_isothermal_case_uses_cmh_and_wall_functions(self):
         with tempfile.TemporaryDirectory(prefix=".test-physics-build-", dir=self.repo) as tmp:
             root = Path(tmp)

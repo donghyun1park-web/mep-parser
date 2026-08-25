@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mep-cfd-studio.local/schemas/verification_manifest.v1.schema.json",
+  "title": "MEP CFD Studio adiabatic heat-box verification manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "status",
+    "validation_scope",
+    "case_id",
+    "case_path",
+    "artifacts",
+    "claimed_metrics",
+    "limitations"
+  ],
+  "properties": {
+    "contract": {"const": "verification_manifest.v1"},
+    "status": {"enum": ["PASS", "FAIL", "BLOCKED"]},
+    "validation_scope": {"const": "single_pc_adiabatic_heat_box"},
+    "case_id": {"const": "heat-box-v1"},
+    "case_path": {"$ref": "#/$defs/relativePath"},
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "geometry",
+        "surface_manifest",
+        "mesh_manifest",
+        "mesh_input",
+        "thermal_input",
+        "thermal_physical_input",
+        "control_dict",
+        "fv_schemes",
+        "fv_solution",
+        "fv_options",
+        "topo_set_dict",
+        "u_field",
+        "t_field",
+        "p_rgh_field",
+        "solver_identity",
+        "solver_log",
+        "run_manifest",
+        "result_manifest",
+        "cell_data"
+      ],
+      "properties": {
+        "geometry": {"$ref": "#/$defs/artifactRef"},
+        "surface_manifest": {"$ref": "#/$defs/artifactRef"},
+        "mesh_manifest": {"$ref": "#/$defs/artifactRef"},
+        "mesh_input": {"$ref": "#/$defs/artifactRef"},
+        "thermal_input": {"$ref": "#/$defs/artifactRef"},
+        "thermal_physical_input": {"$ref": "#/$defs/artifactRef"},
+        "control_dict": {"$ref": "#/$defs/artifactRef"},
+        "fv_schemes": {"$ref": "#/$defs/artifactRef"},
+        "fv_solution": {"$ref": "#/$defs/artifactRef"},
+        "fv_options": {"$ref": "#/$defs/artifactRef"},
+        "topo_set_dict": {"$ref": "#/$defs/artifactRef"},
+        "u_field": {"$ref": "#/$defs/artifactRef"},
+        "t_field": {"$ref": "#/$defs/artifactRef"},
+        "p_rgh_field": {"$ref": "#/$defs/artifactRef"},
+        "solver_identity": {"$ref": "#/$defs/artifactRef"},
+        "solver_log": {"$ref": "#/$defs/artifactRef"},
+        "run_manifest": {"$ref": "#/$defs/artifactRef"},
+        "result_manifest": {"$ref": "#/$defs/artifactRef"},
+        "cell_data": {"$ref": "#/$defs/artifactRef"}
+      }
+    },
+    "claimed_metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "analytic_delta_temperature_k",
+        "simulated_delta_temperature_k",
+        "mean_temperature_relative_error",
+        "storage_energy_closure_ratio",
+        "peak_courant",
+        "max_global_continuity",
+        "net_boundary_volume_flux_m3_s",
+        "boussinesq_beta_delta"
+      ],
+      "properties": {
+        "analytic_delta_temperature_k": {"type": "number"},
+        "simulated_delta_temperature_k": {"type": "number"},
+        "mean_temperature_relative_error": {"type": "number"},
+        "storage_energy_closure_ratio": {"type": "number"},
+        "peak_courant": {"type": "number"},
+        "max_global_continuity": {"type": "number"},
+        "net_boundary_volume_flux_m3_s": {"type": "number"},
+        "boussinesq_beta_delta": {"type": "number"}
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "minItems": 2,
+      "uniqueItems": true,
+      "items": {"enum": ["not_design_citable", "not_release_ready"]},
+      "allOf": [
+        {"contains": {"const": "not_design_citable"}},
+        {"contains": {"const": "not_release_ready"}}
+      ]
+    }
+  },
+  "$defs": {
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^\\r\\n]+$"
+    },
+    "artifactRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"$ref": "#/$defs/relativePath"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    }
+  }
+}

@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mep-cfd-studio.local/schemas/numerical_spotcheck.v1.schema.json",
+  "title": "MEP CFD Studio bounded numerical spot-check manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "status",
+    "verification_scope",
+    "common_artifacts",
+    "anchor",
+    "children",
+    "claimed_comparisons",
+    "limitations"
+  ],
+  "properties": {
+    "contract": {"const": "numerical_spotcheck.v1"},
+    "status": {"enum": ["PASS", "FAIL", "BLOCKED"]},
+    "verification_scope": {"const": "two_level_scheme_time_mesh_spotchecks"},
+    "common_artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "working_room_acceptance",
+        "geometry",
+        "terminal_contract",
+        "heat_contract",
+        "initial_fields",
+        "selector",
+        "zone"
+      ],
+      "properties": {
+        "working_room_acceptance": {"$ref": "#/$defs/artifactRef"},
+        "geometry": {"$ref": "#/$defs/artifactRef"},
+        "terminal_contract": {"$ref": "#/$defs/artifactRef"},
+        "heat_contract": {"$ref": "#/$defs/artifactRef"},
+        "initial_fields": {"$ref": "#/$defs/artifactRef"},
+        "selector": {"$ref": "#/$defs/artifactRef"},
+        "zone": {"$ref": "#/$defs/artifactRef"}
+      }
+    },
+    "anchor": {"$ref": "#/$defs/caseRecord"},
+    "children": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scheme_first_order", "time_dt_0_01", "mesh_coarse"],
+      "properties": {
+        "scheme_first_order": {"$ref": "#/$defs/caseRecord"},
+        "time_dt_0_01": {"$ref": "#/$defs/caseRecord"},
+        "mesh_coarse": {"$ref": "#/$defs/caseRecord"}
+      }
+    },
+    "claimed_comparisons": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["variation", "passed"],
+        "properties": {
+          "variation": {"enum": ["scheme_first_order", "time_dt_0_01", "mesh_coarse"]},
+          "passed": {"type": "boolean"}
+        }
+      },
+      "allOf": [
+        {"contains": {"properties": {"variation": {"const": "scheme_first_order"}}, "required": ["variation"]}},
+        {"contains": {"properties": {"variation": {"const": "time_dt_0_01"}}, "required": ["variation"]}},
+        {"contains": {"properties": {"variation": {"const": "mesh_coarse"}}, "required": ["variation"]}}
+      ]
+    },
+    "limitations": {
+      "type": "array",
+      "minItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "two_level_engineering_spotcheck_not_gci",
+          "not_design_citable",
+          "not_release_ready"
+        ]
+      },
+      "allOf": [
+        {"contains": {"const": "two_level_engineering_spotcheck_not_gci"}},
+        {"contains": {"const": "not_design_citable"}},
+        {"contains": {"const": "not_release_ready"}}
+      ]
+    }
+  },
+  "$defs": {
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^\\r\\n]+$"
+    },
+    "artifactRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"$ref": "#/$defs/relativePath"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "caseRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "case_id",
+        "variation",
+        "case_path",
+        "case_seed_sha256",
+        "mesh_cell_size_m",
+        "scheme",
+        "delta_t_s",
+        "claimed_status",
+        "physical_tree",
+        "artifacts"
+      ],
+      "properties": {
+        "case_id": {"type": "string", "minLength": 1},
+        "variation": {"enum": ["anchor", "scheme", "time", "mesh"]},
+        "case_path": {"$ref": "#/$defs/relativePath"},
+        "case_seed_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "mesh_cell_size_m": {"type": "number", "exclusiveMinimum": 0},
+        "scheme": {"enum": ["first_order", "second_order"]},
+        "delta_t_s": {"type": "number", "exclusiveMinimum": 0},
+        "claimed_status": {"enum": ["PASS", "FAIL", "BLOCKED"]},
+        "physical_tree": {"$ref": "#/$defs/physicalTree"},
+        "artifacts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mesh_manifest",
+            "thermal_input",
+            "control_dict",
+            "fv_schemes",
+            "fv_solution",
+            "solver_log",
+            "run_manifest",
+            "result_manifest",
+            "sample_data"
+          ],
+          "properties": {
+            "mesh_manifest": {"$ref": "#/$defs/artifactRef"},
+            "thermal_input": {"$ref": "#/$defs/artifactRef"},
+            "control_dict": {"$ref": "#/$defs/artifactRef"},
+            "fv_schemes": {"$ref": "#/$defs/artifactRef"},
+            "fv_solution": {"$ref": "#/$defs/artifactRef"},
+            "solver_log": {"$ref": "#/$defs/artifactRef"},
+            "run_manifest": {"$ref": "#/$defs/artifactRef"},
+            "result_manifest": {"$ref": "#/$defs/artifactRef"},
+            "sample_data": {"$ref": "#/$defs/artifactRef"}
+          }
+        }
+      }
+    },
+    "physicalTree": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tree_sha256", "entries"],
+      "properties": {
+        "tree_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "entries": {
+          "type": "array",
+          "minItems": 25,
+          "maxItems": 25,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "sha256", "immutable"],
+            "properties": {
+              "path": {"$ref": "#/$defs/relativePath"},
+              "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "immutable": {"const": true}
+            }
+          }
+        }
+      }
+    }
+  }
+}

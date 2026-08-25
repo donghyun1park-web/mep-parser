@@ -128,6 +128,13 @@ DEFAULT_SETTINGS = {
     "radiation_modelled": False,
 }
 
+_SINGLE_PC_NUMERICAL_SPOTCHECK = "single_pc_numerical_spotcheck"
+_SINGLE_PC_ADIABATIC_HEAT_BOX = "single_pc_adiabatic_heat_box"
+_VALIDATION_SCOPES = frozenset({
+    _SINGLE_PC_NUMERICAL_SPOTCHECK,
+    _SINGLE_PC_ADIABATIC_HEAT_BOX,
+})
+
 
 def _now():
     return datetime.now(timezone.utc).isoformat()
@@ -464,6 +471,22 @@ def _terminal_contract(surface_manifest, mesh_manifest, settings):
     return terminals, {
         "supply_cmh": supply_total, "exhaust_cmh": exhaust_total,
         "design_imbalance_ratio": imbalance,
+    }
+
+
+def _closed_heat_box_terminal_contract(surface_manifest):
+    terminals = [
+        row for row in surface_manifest.get("regions") or []
+        if row.get("role") in {"supply", "exhaust"}
+    ]
+    if terminals:
+        raise ValueError(
+            "single_pc_adiabatic_heat_box scope에는 급기·배기 말단을 둘 수 없습니다."
+        )
+    return [], {
+        "supply_cmh": 0.0,
+        "exhaust_cmh": 0.0,
+        "design_imbalance_ratio": 0.0,
     }
 
 
@@ -971,14 +994,14 @@ def _thermal_fixed_velocity_inlets(field_text, terminals, flow_scale=1.0,
     return output
 
 
-def _thermal_control_dict(settings):
+def _thermal_control_dict(settings, validation_scope=None):
     extrema = ""
-    runtime_modifiable = (
-        "false"
-        if settings.get("thermal_numerics_profile")
+    fixed_delta_t = validation_scope in _VALIDATION_SCOPES
+    runtime_modifiable = "false" if (
+        fixed_delta_t
+        or settings.get("thermal_numerics_profile")
         == cfd_numerics.DESIGN_LIMITED_SECOND_ORDER
-        else "true"
-    )
+    ) else "true"
     if settings.get("thermal_log_field_extrema", False):
         extrema = (
             "functions\n{\n"
@@ -1000,7 +1023,7 @@ def _thermal_control_dict(settings):
             "startFrom startTime;\nstartTime 0;\nstopAt endTime;\n"
             f"endTime {float(settings['thermal_duration_s']):.12g};\n"
             f"deltaT {float(settings['thermal_initial_delta_t_s']):.12g};\n"
-            "adjustTimeStep yes;\n"
+            f"adjustTimeStep {'no' if fixed_delta_t else 'yes'};\n"
             f"maxCo {float(settings['thermal_max_co']):.12g};\n"
             f"maxDeltaT {float(settings['thermal_max_delta_t_s']):.12g};\n"
             "writeControl adjustableRunTime;\n"
@@ -1365,9 +1388,32 @@ def _thermal_fv_options(heat_sources, settings):
 
 
 def build_buoyant_case(mesh_case_dir, solver_case_dir, settings=None,
-                       initial_case_dir=None):
+                       initial_case_dir=None, *, _validation_scope=None):
     """Build the first body-fitted heat and buoyancy transient contract."""
+    if not isinstance(settings, (dict, type(None))):
+        return {"ok": False, "error": "settings는 JSON object여야 합니다."}
+    if settings and any(
+            key in settings for key in ("validation_scope", "_validation_scope")):
+        return {
+            "ok": False,
+            "error": (
+                "validation_scope는 일반 프로젝트 settings로 활성화할 수 없습니다. "
+                "전용 단일-PC 검증 builder를 사용하세요."
+            ),
+        }
+    if _validation_scope is not None and _validation_scope not in _VALIDATION_SCOPES:
+        return {"ok": False, "error": "지원하지 않는 내부 validation_scope입니다."}
     cfg = dict(DEFAULT_SETTINGS, **(settings or {}))
+    if _validation_scope in _VALIDATION_SCOPES:
+        try:
+            fixed_delta_t = float(cfg["thermal_initial_delta_t_s"])
+        except (KeyError, TypeError, ValueError):
+            return {"ok": False, "error": "검증용 고정 deltaT가 올바르지 않습니다."}
+        if not math.isfinite(fixed_delta_t) or fixed_delta_t <= 0:
+            return {"ok": False, "error": "검증용 고정 deltaT는 0보다 커야 합니다."}
+        cfg["thermal_max_delta_t_s"] = fixed_delta_t
+        cfg["thermal_max_co"] = 1.0
+        cfg["thermal_max_courant_gate"] = 1.0
     if bool(cfg.get("radiation_modelled", False)):
         return {
             "ok": False,
@@ -1388,7 +1434,10 @@ def build_buoyant_case(mesh_case_dir, solver_case_dir, settings=None,
         return {"ok": False, "error": "검증된 constant/polyMesh가 없습니다."}
     try:
         numerics = cfd_numerics.thermal_numerics_contract(mesh_manifest, cfg)
-        terminals, airflow = _terminal_contract(surface_manifest, mesh_manifest, cfg)
+        if _validation_scope == _SINGLE_PC_ADIABATIC_HEAT_BOX:
+            terminals, airflow = _closed_heat_box_terminal_contract(surface_manifest)
+        else:
+            terminals, airflow = _terminal_contract(surface_manifest, mesh_manifest, cfg)
         walls = _wall_patches(surface_manifest, mesh_manifest)
         heat_sources, heat = _heat_source_contract(
             surface_manifest, mesh_manifest, cfg
@@ -1498,7 +1547,10 @@ def build_buoyant_case(mesh_case_dir, solver_case_dir, settings=None,
         _write(staging / "constant" / "fvOptions", _thermal_fv_options(
             heat_sources, cfg
         ))
-        _write(staging / "system" / "controlDict", _thermal_control_dict(cfg))
+        _write(
+            staging / "system" / "controlDict",
+            _thermal_control_dict(cfg, validation_scope=_validation_scope),
+        )
         _write(staging / "system" / "fvSchemes", _thermal_fv_schemes(numerics))
         _write(staging / "system" / "fvSolution", _thermal_fv_solution(cfg, numerics))
         shutil.copy2(staging / "system" / "controlDict",
@@ -1553,6 +1605,8 @@ def build_buoyant_case(mesh_case_dir, solver_case_dir, settings=None,
                 ),
             },
         }
+        if _validation_scope is not None:
+            contract["validation_scope"] = _validation_scope
         contract["condition_matrix"] = {
             "flow_scale": float(cfg["thermal_flow_scale"]),
             "gravity_scale": float(cfg["thermal_gravity_scale"]),
@@ -1570,6 +1624,34 @@ def build_buoyant_case(mesh_case_dir, solver_case_dir, settings=None,
         shutil.rmtree(staging, ignore_errors=True)
         raise
     return {"ok": True, "case": str(target), "thermal_input": contract}
+
+
+def build_single_pc_numerical_spotcheck_case(
+        mesh_case_dir, solver_case_dir, settings=None, initial_case_dir=None):
+    """Build the fixed-deltaT working-room case for bounded single-PC checks.
+
+    This explicit entry point is intentionally separate from ordinary project
+    settings so a field case cannot silently opt into relaxed validation-only
+    behaviour.
+    """
+    return build_buoyant_case(
+        mesh_case_dir,
+        solver_case_dir,
+        settings,
+        initial_case_dir=initial_case_dir,
+        _validation_scope=_SINGLE_PC_NUMERICAL_SPOTCHECK,
+    )
+
+
+def build_single_pc_adiabatic_heat_box_case(
+        mesh_case_dir, solver_case_dir, settings=None):
+    """Build the closed/no-terminal fixed-deltaT energy-accounting case."""
+    return build_buoyant_case(
+        mesh_case_dir,
+        solver_case_dir,
+        settings,
+        _validation_scope=_SINGLE_PC_ADIABATIC_HEAT_BOX,
+    )
 
 
 _NUMBER = r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"
