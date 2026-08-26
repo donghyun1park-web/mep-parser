@@ -116,3 +116,16 @@ there are zero confirmed geometries, meshes, solver runs, and cases. The
 browser remains in terminal review mode with all confirmation and save actions
 unperformed. This is preparation for human MEP review, not approval or solver
 validation.
+
+## 2026-08-27 partial user input registration
+
+The user stated mm units, closed-boundary intent, a 10 m height, 30 terminals
+at 444 CMH each, and a 15.5 kW approximate transient-occupant/lobby-flow heat
+estimate. This is recorded as `PARTIAL_USER_INPUT_RECORDED`, not accountable
+MEP approval. Unit, boundary, and height require evidence; terminal
+supply/exhaust roles, hosts, and directions remain unassigned; and the heat
+estimate remains `SCREENING_ONLY` pending spatial distribution, people count/
+schedule or calculation basis, convective fraction, and evidence. Reviewer
+identity, evidence, all row decisions, and final authorization remain blank or
+pending, so Task 4.5 remains `OPEN` and no confirmed geometry, case, mesh, or
+solver artifact is authorized.
