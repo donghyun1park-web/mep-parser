@@ -129,3 +129,35 @@ schedule or calculation basis, convective fraction, and evidence. Reviewer
 identity, evidence, all row decisions, and final authorization remain blank or
 pending, so Task 4.5 remains `OPEN` and no confirmed geometry, case, mesh, or
 solver artifact is authorized.
+
+## 2026-08-27 second user confirmation and fail-closed attempt
+
+The user accepted the candidate terminal configuration: 15 supply and 15
+exhaust terminals, 444 CMH each, ceiling installation, supply down, and exhaust
+up. This is `SECOND_USER_CONFIRMATION_RECORDED_NOT_ACCOUNTABLE_APPROVAL`; it
+does not replace row-level accountable review, reviewer identity/role/authority,
+or evidence. The user supplied `NONE_PROVIDED` heat basis. The 15.5 kW estimate
+therefore remains `SCREENING_ONLY` and cannot be allocated to detected equipment
+or a uniform source. Separate-copy authorization is conditional on the existing
+technical confirmation contract.
+
+One authorized real-data confirmation call used the ignored unconfirmed geometry,
+the candidate 10 m/bounding-zone/30-terminal configuration, actual terminal
+identities, and zero heat-source obstacles. It returned `ok=false` with the
+heat-source-required error. No confirmed geometry, case, mesh, solver, GCI, or
+field job was created. Source and runtime input hashes were unchanged before and
+after, and the confirmed-geometry count remained zero.
+
+Before that call, an implementer-added blank CSV row caused a pre-call payload
+construction error. It was recorded as attempt 0, removed without altering the
+30 candidate rows or their user-input fields, and is not treated as the product
+confirmation attempt. The actual function call was attempt 1 and was not retried.
+
+Task status: `CONFIRMATION_AUTHORIZED_BUT_BLOCKED_HEAT_INPUT`. Task 4.5 is not
+complete; Task 5c and M1 Exit remain blocked.
+
+The original partial-input receipt remains preserved as the first registration.
+The latest second-confirmation receipt references it as history; the local audit
+and review package point to that latest receipt. This preserves the distinction
+between the original unapproved parser candidates and the later user-accepted
+terminal configuration.
