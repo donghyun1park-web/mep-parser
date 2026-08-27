@@ -1966,6 +1966,7 @@ Task 0 Step 6은 어떤 코드 Task보다 먼저 수행한다. 현재 Tasks 1~4�
 - Task 5b Steps 2–3, Task 4.5, Task 5c, M1, design citation, and release remain open or blocked. MPI execution smoke remains `NOT_RUN`.
 - Task 5b Step 2 implementation now uses the approved terminal level 1 and fixed `deltaT=0.01 s` contract. The 240 s anchor/repeat evidence has not yet been rerun, so Step 2 remains open while code-clock Task 6 proceeds by explicit user direction.
 - Task 6 is complete in code: closed `design.v1`, `scenario.v1`, and `case_identity.v1` contracts, immutable canonical-JSON-derived revisions, atomic publication, path containment, Design/Scenario variation classification, and current-reference tamper validation are implemented. Focused Task 6 plus geometry/working-room/GCI regression completed with `142 passed`; this is code-contract evidence and does not close Task 5b runtime or M1.
+- Task 6 public verification is green at exact code/docs commit `923e4f438c35e390ca0c35600400626cace02393`: locked Windows CI run `33031962459`, job `98386275226`, completed `1208 passed, 14 skipped, 7 warnings` with zero failures/errors. The 14 skips remain runtime-gated and this CI does not assert a completed 240 s solver acceptance.
 
 ## 19. 계획 개정 기록 — 2026-08-24 (검토 반영)
 
