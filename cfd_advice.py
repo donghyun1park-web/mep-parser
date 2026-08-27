@@ -608,3 +608,39 @@ def digest_payload(meta, metrics, parsed=None, trust=None, forecast=None,
             if authoritative_valid else "NOT_EVALUATED"
         )
     return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def comparison_recommendations(comparison):
+    """Return scope-safe actions for a Scenario comparison.
+
+    This helper deliberately does not turn a lower temperature or speed into a
+    design recommendation.  A blocked or screening-only comparison can only
+    receive evidence/remediation guidance.
+    """
+    if not isinstance(comparison, dict) or comparison.get("contract") != "scenario_comparison.v1":
+        return [{
+            "priority": "BLOCKER", "category": "comparison evidence",
+            "finding": "비교 계약을 확인할 수 없습니다.",
+            "action": "scenario_comparison.v1을 다시 생성하세요.",
+        }]
+    if not comparison.get("eligible"):
+        return [{
+            "priority": "BLOCKER", "category": "comparison evidence",
+            "finding": str(row.get("code") or "COMPARISON_BLOCKED"),
+            "action": str(row.get("message") or "비교 증적을 보완하세요."),
+        } for row in comparison.get("blockers") or []]
+    statuses = {
+        str((row.get("case_health") or {}).get("citation_status") or "NOT_EVALUATED")
+        for row in comparison.get("runs") or []
+    }
+    if statuses != {"DESIGN_CITABLE"}:
+        return [{
+            "priority": "REVIEW", "category": "citation scope",
+            "finding": "KPI 비교는 가능하지만 모든 Run이 DESIGN_CITABLE은 아닙니다.",
+            "action": "입력·KPI·case health를 초기안 비교로만 검토하고 설계 결론은 보류하세요.",
+        }]
+    return [{
+        "priority": "REVIEW", "category": "engineering decision",
+        "finding": "동일 Design revision과 동일 occupied-volume selector의 KPI입니다.",
+        "action": "입력 diff, KPI, hotspot, case health를 함께 검토해 승인 기록을 남기세요.",
+    }]

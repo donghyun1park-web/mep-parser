@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "scenario_comparison.v1.schema.json",
+  "title": "Fail-closed Scenario Run comparison",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "contract", "created_at", "eligible", "blockers",
+    "design_revision_sha256", "qoi_selector_sha256", "evidence_scope",
+    "scenario_diff", "runs"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "contract": {"const": "scenario_comparison.v1"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "eligible": {"type": "boolean"},
+    "blockers": {"type": "array", "items": {"$ref": "#/$defs/issue"}},
+    "design_revision_sha256": {
+      "oneOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}]
+    },
+    "qoi_selector_sha256": {
+      "oneOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}]
+    },
+    "evidence_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["common", "differences"],
+      "properties": {
+        "common": {"type": "array", "items": {"type": "string"}},
+        "differences": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "scenario_diff": {"type": "array", "items": {"$ref": "#/$defs/diff"}},
+    "report_url": {"type": "string", "pattern": "^/scenario-compare-report/compare-[0-9a-f]{16}$"},
+    "comparison_path": {"type": "string", "minLength": 1},
+    "report": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ok", "report_path", "report_mode"],
+      "properties": {
+        "ok": {"const": true}, "report_path": {"type": "string", "minLength": 1},
+        "report_mode": {"const": "field-comparison"}
+      }
+    },
+    "runs": {"type": "array", "minItems": 2, "maxItems": 4,
+      "items": {"$ref": "#/$defs/run"}}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "artifactRef": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "diff": {
+      "type": "object", "additionalProperties": false,
+      "required": ["candidate_run_id", "path", "baseline", "candidate", "unit", "engineering_effect", "requires_review"],
+      "properties": {
+        "candidate_run_id": {"type": "string", "pattern": "^run-[0-9a-f]{24}$"},
+        "path": {"type": "string", "minLength": 1},
+        "baseline": {}, "candidate": {}, "unit": {"type": ["string", "null"]},
+        "engineering_effect": {"type": "string", "minLength": 1},
+        "requires_review": {"type": "boolean"}
+      }
+    },
+    "issue": {
+      "type": "object", "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {"type": "string", "minLength": 1},
+        "message": {"type": "string", "minLength": 1},
+        "run_id": {"type": "string", "minLength": 1}
+      }
+    },
+    "run": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "run_id", "scenario_id", "scenario_name", "solver_profile",
+        "case_path", "identity_status", "case_health", "kpis", "artifacts"
+      ],
+      "properties": {
+        "run_id": {"type": "string", "pattern": "^run-[0-9a-f]{24}$"},
+        "scenario_id": {"type": "string", "pattern": "^scenario-[0-9a-f]{24}$"},
+        "scenario_name": {"type": "string", "minLength": 1},
+        "solver_profile": {"type": "string", "minLength": 1},
+        "case_path": {"type": ["string", "null"]},
+        "identity_status": {"type": "string", "minLength": 1},
+        "case_health": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object", "required": ["contract", "status", "citation_status", "evidence"],
+              "properties": {
+                "contract": {"const": "case_health.v1"},
+                "status": {"enum": ["PASS", "FAIL", "BLOCKED", "NOT_EVALUATED"]},
+                "citation_status": {"enum": ["SCREENING_ONLY", "NOT_EVALUATED", "CITATION_BLOCKED", "DESIGN_CITABLE"]},
+                "evidence": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["contract", "path", "sha256"],
+                  "properties": {
+                    "contract": {"const": "case_evidence.v1"},
+                    "path": {"type": "string", "minLength": 1},
+                    "sha256": {"$ref": "#/$defs/sha256"}
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "kpis": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["temperature", "velocity", "airflow", "energy", "hotspot", "selector_sha256"],
+              "properties": {
+                "temperature": {"type": "object", "additionalProperties": false, "required": ["volume_weighted_mean_k", "volume_weighted_p95_k"], "properties": {"volume_weighted_mean_k": {"type": ["number", "null"]}, "volume_weighted_p95_k": {"type": ["number", "null"]}}},
+                "velocity": {"type": "object", "additionalProperties": false, "required": ["occupied_p95_speed_m_s"], "properties": {"occupied_p95_speed_m_s": {"type": ["number", "null"]}}},
+                "airflow": {"type": "object", "additionalProperties": false, "required": ["actual_supply_cmh", "actual_exhaust_cmh", "basis"], "properties": {"actual_supply_cmh": {"type": ["number", "null"]}, "actual_exhaust_cmh": {"type": ["number", "null"]}, "basis": {"type": "string", "minLength": 1}}},
+                "energy": {"type": "object", "additionalProperties": false, "required": ["transient_closure_ratio"], "properties": {"transient_closure_ratio": {"type": ["number", "null"]}}},
+                "hotspot": {"type": "object", "additionalProperties": false, "required": ["temperature_k", "centre_m"], "properties": {"temperature_k": {"type": ["number", "null"]}, "centre_m": {"oneOf": [{"type": "null"}, {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "number"}}]}}},
+                "selector_sha256": {"$ref": "#/$defs/sha256"}
+              }
+            }
+          ]
+        },
+        "artifacts": {
+          "type": "object", "minProperties": 2,
+          "required": ["run_identity", "scenario_revision"],
+          "additionalProperties": {"$ref": "#/$defs/artifactRef"},
+          "properties": {
+            "run_identity": {"$ref": "#/$defs/artifactRef"},
+            "scenario_revision": {"$ref": "#/$defs/artifactRef"}
+          }
+        }
+      }
+    }
+  }
+}

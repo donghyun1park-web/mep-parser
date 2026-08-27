@@ -62,6 +62,19 @@ def _percentile(values, fraction):
     return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
 
 
+def _weighted_percentile(values, weights, fraction):
+    """Return the empirical weighted quantile without inventing interpolation."""
+    pairs = sorted(zip(values, weights), key=lambda item: item[0])
+    total = sum(weight for _, weight in pairs)
+    threshold = total * fraction
+    cumulative = 0.0
+    for value, weight in pairs:
+        cumulative += weight
+        if cumulative >= threshold:
+            return value
+    return pairs[-1][0]
+
+
 def _sha256(path):
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
@@ -315,6 +328,25 @@ def build_result_artifacts(case_dir):
             })
         summary_path = results / "body_fitted_summary.json"
         _atomic_json(summary_path, summary)
+        occupied_qoi_ref = None
+        thermal_input_path = case / "thermal_input.json"
+        if thermal_input_path.is_file():
+            thermal_input = json.loads(thermal_input_path.read_text(encoding="utf-8"))
+            settings = thermal_input.get("settings") or {}
+            selector = settings.get("occupied_volume_selector")
+            if selector is not None:
+                occupied_qoi = compute_occupied_volume_qois_from_vtu(
+                    source,
+                    selector,
+                    floor_elevation_m=settings.get("occupied_floor_elevation_m"),
+                )
+                occupied_qoi_path = results / "occupied_volume_qoi.json"
+                _atomic_json(occupied_qoi_path, occupied_qoi)
+                occupied_qoi_ref = {
+                    "path": occupied_qoi_path.relative_to(case).as_posix(),
+                    "sha256": _sha256(occupied_qoi_path),
+                    "selector_sha256": occupied_qoi["selector_sha256"],
+                }
         manifest = {
             "schema_version": 1,
             "contract": "result_manifest.v1",
@@ -344,6 +376,8 @@ def build_result_artifacts(case_dir):
             "summary_sha256": _sha256(summary_path),
             "slices": slice_refs,
         }
+        if occupied_qoi_ref is not None:
+            manifest["occupied_qoi"] = occupied_qoi_ref
         _atomic_json(case / "result_manifest.json", manifest)
     except (OSError, ValueError, ET.ParseError) as exc:
         return {"ok": False, "error": str(exc), "case": str(case)}
@@ -450,6 +484,16 @@ def compute_occupied_volume_qois_from_vtu(path, selector, floor_elevation_m=None
     mean_speed = sum(
         speeds[index] * volumes[index] for index in selected
     ) / selected_volume
+    p95_temperature = _weighted_percentile(
+        [temperatures[index] for index in selected],
+        [volumes[index] for index in selected],
+        0.95,
+    )
+    p95_speed = _weighted_percentile(
+        [speeds[index] for index in selected],
+        [volumes[index] for index in selected],
+        0.95,
+    )
     if not math.isfinite(mean_temperature) or not math.isfinite(mean_speed):
         raise PostprocessEvidenceError(
             "OCCUPIED_VTU_QOI_INVALID: volume-weighted occupied-zone QOIs must be finite")
@@ -470,6 +514,17 @@ def compute_occupied_volume_qois_from_vtu(path, selector, floor_elevation_m=None
         },
         "selected_cell_count": len(selected),
         "selected_volume_m3": selected_volume,
+        "scope": "selected_occupied_volume_band",
+        "aggregation": "cell_volume_weighted_final_snapshot",
+        "sample_count": len(selected),
+        "temperature": {
+            "mean_k": mean_temperature,
+            "p95_k": p95_temperature,
+        },
+        "velocity": {
+            "mean_speed_m_s": mean_speed,
+            "p95_speed_m_s": p95_speed,
+        },
         "occupied_zone_mean_temperature_k": mean_temperature,
         "occupied_zone_mean_speed_m_s": mean_speed,
     }

@@ -369,6 +369,23 @@ class BodyFittedReportTests(unittest.TestCase):
         self.assertNotIn("<script>alert(1)</script>", text)
         self.assertNotIn("<b>approved & bound</b>", text)
 
+    def test_screening_template_never_emits_design_citable_banner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, _ = _future_design_case(Path(tmp))
+            with patch.object(
+                cfd_report.cfd_case_health.cfd_evidence,
+                "validate_case_evidence", return_value=[],
+            ):
+                result = cfd_report.generate_body_fitted_report(
+                    paths["case"], projects_root=paths["root"],
+                    report_mode="screening",
+                )
+            text = Path(result["report_path"]).read_text(encoding="utf-8")
+
+        self.assertTrue(result["ok"], result)
+        self.assertIn("초기안 비교용 · 설계 인용 불가", text)
+        self.assertNotIn("설계 검토 인용 가능", text)
+
     def test_blocked_and_not_evaluated_reports_are_non_green_and_forbid_design_wording(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = make_complete_case(Path(tmp))

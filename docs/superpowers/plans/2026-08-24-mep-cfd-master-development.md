@@ -995,9 +995,10 @@ def scenario_diff(baseline: dict, candidate: dict) -> list[dict]: ...
 - Create: `scenario_comparison.v1.schema.json`
 - Create: `tests/test_cfd_compare.py`
 - Create: `tests/test_studio_design_scenario_run.py`
-- Modify: `cfd_studio.py`
+- Modify: `cfd_studio.py`, `cfd_post.py`
 - Modify: `cfd_report.py`
 - Modify: `cfd_advice.py`
+- Modify: `scenario.v1.schema.json`, `result_manifest.v1.schema.json`
 
 **Interfaces:**
 
@@ -1014,27 +1015,27 @@ def compare_runs(
 ) -> dict: ...
 ```
 
-- [ ] **Step 1: API backward-compatibility tests를 작성한다**
+- [x] **Step 1: API backward-compatibility tests를 작성한다**
 
   기존 `/api/cases`, `/api/body-results/<case>`, `/api/start-field-pipeline-job`가 그대로 동작하고 새 identity가 있을 때만 추가 metadata를 반환하는지 고정한다.
 
-- [ ] **Step 2: comparison eligibility tests를 작성한다**
+- [x] **Step 2: comparison eligibility tests를 작성한다**
 
   같은 Design revision의 2~4개 Run만 기본 비교한다. 다른 geometry, incomplete evidence, incompatible QoI selector는 명확한 blocker를 반환한다.
 
-- [ ] **Step 3: Project/Design/Scenario/Run 화면을 추가한다**
+- [x] **Step 3: Project/Design/Scenario/Run 화면을 추가한다**
 
   Design 화면은 원본·2D·3D air volume·terminal/heat-source review·승인 이력을 보여준다. Scenario 화면은 baseline clone, semantic diff, 예상 자원, 기대 citation scope를 보여준다. Run center는 기존 serial queue와 checkpoint를 재사용한다.
 
-- [ ] **Step 4: compare KPI를 제한한다**
+- [x] **Step 4: compare KPI를 제한한다**
 
-  우선 KPI는 volume/time-weighted mean/p95 temperature, occupied p95 speed, actual supply/exhaust flow, energy closure, hotspot location, case-health blockers다. Max value는 mesh-independent evidence 없이는 설계 KPI로 강조하지 않는다.
+  우선 KPI는 명시적으로 확인한 occupied-volume selector의 최종 snapshot cell-volume-weighted mean/p95 temperature와 p95 speed, solver `phi` 기반 actual supply/exhaust flow, energy closure, hotspot location, case-health blockers다. Aggregation은 `cell_volume_weighted_final_snapshot`으로 기록하며 아직 구현하지 않은 time-window weighting으로 오인시키지 않는다. Max value는 mesh-independent evidence 없이는 설계 KPI로 강조하지 않는다.
 
-- [ ] **Step 5: report 3종을 구현한다**
+- [x] **Step 5: report 3종을 구현한다**
 
   `screening`, `design-review`, `field-comparison` template을 분리하되 기존 HTML filename/link는 유지한다. Compare report는 입력 차이, 신뢰도 차이, 동일/상이한 evidence scope를 첫 페이지에 표시한다.
 
-- [ ] **Step 6: regression과 rendering smoke를 실행한다**
+- [x] **Step 6: regression과 rendering smoke를 실행한다**
 
   Run:
 
@@ -1044,7 +1045,7 @@ def compare_runs(
 
   Expected: PASS. Browser smoke에서 새 Design 하나, Scenario 두 개, 각 Run 결과, compare report에 도달한다.
 
-- [ ] **Step 7: commit한다**
+- [x] **Step 7: commit한다**
 
   ```powershell
   git add cfd_compare.py scenario_comparison.v1.schema.json cfd_studio.py cfd_report.py cfd_advice.py tests/test_cfd_compare.py tests/test_studio_design_scenario_run.py tests/test_studio_workflow.py tests/test_body_fitted_report.py tests/test_cfd_advice.py
@@ -1052,6 +1053,8 @@ def compare_runs(
   ```
 
 **Gate M2:** 같은 reviewed Design revision에서 두 Scenario가 서로 다른 CMH/temperature/heat setting으로 실행되고, 입력 diff·결과 KPI·case health·report를 GUI로 비교해야 한다. Legacy case는 계속 조회 가능해야 한다.
+
+**Task 9 code-contract 상태(2026-08-27):** API·GUI·불변 비교 artifact·3개 report scope·점유영역 QoI producer/manifest/consumer 연결은 구현됐다. 화면은 첫 Scenario를 물리 기본값 없이 생성하고 같은 Design의 서로 다른 Scenario Run 2~4개를 함께 선택한다. 비교기는 current identity/evidence/result/QoI hash, Case Health, 동일 Design revision·solver profile·selector를 재검증하고 fail closed한다. 실제 OpenFOAM으로 서로 다른 두 Scenario를 완주해 GUI compare report까지 도달한 실행 증거는 아직 없으므로 Gate M2는 `OPEN`이다. 최종 snapshot을 넘어선 occupied-volume time-window weighting은 Validation Anchor와 시간창 근거를 연결하는 후속 범위로 남는다.
 
 ### Task 10: Validation Anchor로 sensitivity·GCI·field authority를 통합한다
 
@@ -1971,6 +1974,7 @@ Task 0 Step 6은 어떤 코드 Task보다 먼저 수행한다. 현재 Tasks 1~4�
 - Task 7 public verification is green at exact implementation commit `312cb2d7b3d10d420ab18b9aa58eae8aa79c21e6`: locked Windows CI run `33036491175`, job `98400191067`, completed `1217 passed, 14 skipped, 7 warnings` with zero failures/errors. Runtime-gated skips and the absence of an actual identity-linked field solve remain explicit.
 - Task 8 is complete in code-contract scope: mixing/displacement templates contain roles, validation rules, UI copy, and a supported screening profile but no physical or solver-dictionary defaults. Applying a template requires a traceable direct `user_confirmed:<ref>` authority; a bare `approved_source:<ref>` label fails closed until a verified approval-artifact contract can resolve it. Raw `geometry.v2` is schema/recomputation-checked preview-only, and only an authoritative validated immutable Design revision can become ready. Mapping uses stable element ID/role and blocks missing/duplicate/unstable/unconfirmed terminals, missing heat inputs, unknown IDs, and supply/exhaust imbalance. Scenario semantic diff is stable-ID based, unit/effect annotated, order-insensitive, recursively expands compound additions, and compares canonical exact JSON identity before display rounding, including integer/float and missing/null differences. Focused Task 8 verification completed with `50 passed, 10 subtests passed`; the extended Design/geometry/numerics/physics boundary completed with `145 passed, 7 skipped, 7 warnings, 27 subtests passed`. Independent final review verdict is `CLEAN`. Task 9, M2, an actual two-Scenario run comparison, verified approved-source ingestion, and release remain open.
 - Task 8 public verification is green at exact implementation commit `4b2794138e7ba63031e9a329c77624130ee3197f`: locked Windows CI run [`33041856613`](https://github.com/donghyun1park-web/mep-parser/actions/runs/33041856613), job `98417004740`, completed `1241 passed, 14 skipped, 7 warnings` with zero failures/errors. Runtime-gated skips remain explicit; this CI does not claim an actual paired Scenario solve, PMV/PPD evaluation, or M2 completion.
+- Task 9 is complete in code-contract scope: Project/Design/Scenario/Run API and GUI, first-Scenario confirmed-input flow, cross-Scenario Run selection, identity-bound serial queue input, atomic immutable ordered comparison publication, first-page input/evidence scope, three report modes, fail-closed Case Health, and actual VTU occupied-volume QoI production are connected. Comparison cross-checks the result VTU, Scenario/thermal-input selector and floor datum; solver `phi` has authority over declared actual-flow fields. Reports recompute comparison claims from pinned raw artifacts. Focused authority regression completed with `37 passed, 19 subtests passed`; extended boundary completed with `255 passed, 7 skipped, 7 warnings, 38 subtests passed`; independent final review is `CLEAN`. The local Python 3.14 full suite completed `1256 passed, 14 skipped, 2 failed, 7 warnings, 115 subtests passed`; both failures are the expected authenticated Python 3.12.10 executable-hash checks. Full locked CI and an actual paired OpenFOAM Scenario execution are still pending; therefore M2 remains `OPEN` and no design-readiness or release claim is made.
 
 ## 19. 계획 개정 기록 — 2026-08-24 (검토 반영)
 

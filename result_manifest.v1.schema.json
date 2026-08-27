@@ -31,6 +31,16 @@
           "sha256": {"type": "string", "minLength": 64, "maxLength": 64}
         }
       }
+    },
+    "occupied_qoi": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "selector_sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "selector_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
     }
   },
   "additionalProperties": true

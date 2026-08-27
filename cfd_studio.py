@@ -21,12 +21,14 @@ from datetime import datetime, timezone
 import glob
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
 import shutil
 import socket
 import sys
+import tempfile
 import threading
 import uuid
 import webbrowser
@@ -42,6 +44,8 @@ import cfd_occ
 import cfd_report
 import cfd_result_gate
 import cfd_case_health
+import cfd_compare
+import cfd_numerical_sensitivity_job
 import cfd_review
 import field_acceptance
 import field_pipeline_job
@@ -3403,6 +3407,424 @@ def delete_case(name):
     return {"ok": True}
 
 
+# ── Immutable Project / Design / Scenario / Run API ─────────────────────────
+
+def _project_model_root():
+    return Path(ROOT).resolve() / "_project_model"
+
+
+def _project_path(value, *, code="PROJECT_PATH_INVALID"):
+    """Resolve a client reference inside ROOT without accepting traversal."""
+    if not isinstance(value, str) or not value.strip():
+        raise project_model.ProjectModelError(code, "project artifact path is missing")
+    raw = Path(value.strip())
+    if not raw.is_absolute() and "\\" in value:
+        raise project_model.ProjectModelError(code, "relative paths must use forward slashes")
+    target = raw.resolve() if raw.is_absolute() else (Path(ROOT) / raw).resolve()
+    try:
+        target.relative_to(Path(ROOT).resolve())
+    except ValueError as exc:
+        raise project_model.ProjectModelError(
+            "PROJECT_PATH_ESCAPE", "artifact must stay inside the project root",
+        ) from exc
+    if not target.exists():
+        raise project_model.ProjectModelError(code, f"artifact does not exist: {target}")
+    return target
+
+
+def _read_project_json(path):
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise project_model.ProjectModelError(
+            "PROJECT_ARTIFACT_INVALID", f"cannot read {path}: {exc}",
+        ) from exc
+    if not isinstance(value, dict):
+        raise project_model.ProjectModelError(
+            "PROJECT_ARTIFACT_INVALID", f"JSON object required: {path}",
+        )
+    return value
+
+
+def _atomic_project_write(path, payload):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if path.read_bytes() == payload:
+            return
+        raise project_model.ProjectModelError(
+            "IMMUTABLE_COLLISION", f"refusing to overwrite {path}",
+        )
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb", dir=path.parent, prefix=f".{path.name}.", suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _project_records(pattern):
+    return sorted(_project_model_root().glob(pattern)) if _project_model_root().is_dir() else []
+
+
+def _record_payload(path):
+    value = _read_project_json(path)
+    value["path"] = str(path.resolve())
+    value["artifact_sha256"] = _file_sha256(path)
+    return value
+
+
+def list_designs_payload(design_id=None):
+    groups = {}
+    for path in _project_records("designs/*/revisions/*.design.v1.json"):
+        value = _record_payload(path)
+        if design_id and value.get("design_id") != design_id:
+            continue
+        groups.setdefault(value["design_id"], []).append(value)
+    designs = []
+    for revisions in groups.values():
+        revisions.sort(key=lambda row: row["revision_number"])
+        latest = dict(revisions[-1])
+        latest["revision_count"] = len(revisions)
+        latest["latest_revision"] = True
+        designs.append(latest)
+    designs.sort(key=lambda row: (row.get("name", "").lower(), row["design_id"]))
+    if design_id is None:
+        return {"ok": True, "designs": designs}
+    if not designs:
+        return {"ok": False, "code": "DESIGN_NOT_FOUND", "design_id": design_id}
+    revisions = groups[design_id]
+    geometry_reviews = []
+    for revision in revisions:
+        revision_path = _project_path(revision["path"])
+        validation_issues = project_model.validate_design_revision(
+            revision_path, projects_root=ROOT,
+        )
+        geometry_path = _project_path(revision["geometry"]["path"])
+        geometry = {} if validation_issues else _read_project_json(geometry_path)
+        elements = geometry.get("elements") or {}
+        equipment = elements.get("equipment") or []
+        zones = elements.get("zone") or []
+        heights_m = [
+            float((row.get("semantic") or {})["ceiling_height_mm"]) / 1000.0
+            for row in zones
+            if isinstance((row.get("semantic") or {}).get("ceiling_height_mm"), (int, float))
+        ]
+        geometry_reviews.append({
+            **revision,
+            "geometry_review": (
+                geometry.get("review") or {}
+                if not validation_issues else {
+                    "ready": False, "blocking": True,
+                    "blocker_count": len(validation_issues),
+                }
+            ),
+            "validation_issues": validation_issues,
+            "source": geometry.get("source"),
+            "air_volume": {
+                "zones": len(zones),
+                "height_m": max(heights_m) if heights_m else None,
+            },
+            "terminal_review": [
+                {"element_id": row.get("id") or row.get("element_id"),
+                 "display_label": row.get("display_label"),
+                 "role": (row.get("semantic") or {}).get("role"),
+                 "center": row.get("center")}
+                for row in equipment
+                if (row.get("semantic") or {}).get("role") in {"supply", "exhaust"}
+            ],
+            "heat_source_review": [
+                {"element_id": row.get("id") or row.get("element_id"),
+                 "display_label": row.get("display_label"),
+                 "center": row.get("center")}
+                for row in equipment
+                if (row.get("semantic") or {}).get("role") == "heat_source"
+            ],
+        })
+    return {"ok": True, "design": designs[0], "revisions": geometry_reviews}
+
+
+def list_scenarios_payload(design_id=None):
+    rows = []
+    for path in _project_records("scenarios/*/revisions/*.scenario.v1.json"):
+        value = _record_payload(path)
+        if design_id and (value.get("design") or {}).get("design_id") != design_id:
+            continue
+        rows.append(value)
+    rows.sort(key=lambda row: (row.get("created_at", ""), row["scenario_id"]))
+    return {"ok": True, "scenarios": rows}
+
+
+def _run_link(identity_path):
+    relative = identity_path.resolve().relative_to(Path(ROOT).resolve()).as_posix()
+    sha = _file_sha256(identity_path)
+    for path in _project_records("legacy_cases/*/run_identity_link.v1.json"):
+        link = _read_project_json(path)
+        if (link.get("case_identity_path") == relative
+                and link.get("case_identity_sha256") == sha):
+            case = _project_path(link["case_path"])
+            issues = project_model.validate_run_identity(case, projects_root=ROOT)
+            return {
+                "case_path": link["case_path"],
+                "case_identity_status": "LINKED" if not issues else issues[0]["code"],
+                "comparison_eligible": not issues and (case / "case_evidence.v1.json").is_file(),
+                "results_url": (
+                    "/body-results/" + quote(case.name)
+                    if case.parent == Path(ROOT, "_body_solver").resolve() else None
+                ),
+            }
+    return {
+        "case_path": None, "case_identity_status": "IDENTITY_CREATED",
+        "comparison_eligible": False, "results_url": None,
+    }
+
+
+def list_runs_payload(scenario_id=None):
+    rows = []
+    for path in _project_records("runs/*.case_identity.v1.json"):
+        value = _record_payload(path)
+        if scenario_id and (value.get("scenario") or {}).get("scenario_id") != scenario_id:
+            continue
+        value.update(_run_link(path))
+        rows.append(value)
+    rows.sort(key=lambda row: (row.get("created_at", ""), row["run_id"]))
+    return {"ok": True, "runs": rows}
+
+
+def _run_identity_path(run_id):
+    if not isinstance(run_id, str) or not re.fullmatch(r"run-[0-9a-f]{24}", run_id):
+        raise project_model.ProjectModelError("RUN_ID_INVALID", "invalid Run ID")
+    path = _project_model_root() / "runs" / f"{run_id}.case_identity.v1.json"
+    if not path.is_file():
+        raise project_model.ProjectModelError("RUN_NOT_FOUND", run_id)
+    return path
+
+
+def materialize_scenario_run_input(identity_path):
+    """Create a generated geometry overlay that applies one frozen Scenario.
+
+    The reviewed Design and its copied geometry remain immutable.  The field
+    pipeline receives this identity-bound snapshot, whose hash is then frozen
+    into the serial job manifest.
+    """
+    identity_path = _project_path(str(identity_path))
+    issues = project_model.validate_case_identity(identity_path, projects_root=ROOT)
+    if issues:
+        raise project_model.ProjectModelError("RUN_IDENTITY_INVALID", str(issues))
+    identity = _read_project_json(identity_path)
+    design_path = _project_path(identity["design"]["path"])
+    scenario_path = _project_path(identity["scenario"]["path"])
+    design = _read_project_json(design_path)
+    scenario = _read_project_json(scenario_path)
+    geometry_path = _project_path(design["geometry"]["path"])
+    geometry = _read_project_json(geometry_path)
+    equipment = (geometry.get("elements") or {}).get("equipment") or []
+    by_id = {}
+    for row in equipment:
+        element_id = row.get("id") or row.get("element_id")
+        if isinstance(element_id, str) and element_id:
+            if element_id in by_id:
+                raise project_model.ProjectModelError(
+                    "SCENARIO_MAPPING_AMBIGUOUS", f"duplicate Design element ID: {element_id}",
+                )
+            by_id[element_id] = row
+    conditions = scenario.get("operating_conditions") or {}
+    authorities = conditions.get("input_authority") or {}
+
+    def require_authority(key, fallback=None):
+        value = authorities.get(key) or fallback
+        if not isinstance(value, str) or not value.startswith("user_confirmed:"):
+            raise project_model.ProjectModelError(
+                "SCENARIO_INPUT_AUTHORITY_INVALID",
+                f"verified user_confirmed authority is required for {key}",
+            )
+        return value
+
+    supply_temperatures = set()
+    mapped = set()
+    for terminal in conditions.get("terminals") or []:
+        terminal_id = terminal.get("terminal_id")
+        row = by_id.get(terminal_id)
+        semantic = row.get("semantic") if isinstance(row, dict) else None
+        if not isinstance(semantic, dict) or semantic.get("role") not in {"supply", "exhaust"}:
+            raise project_model.ProjectModelError(
+                "SCENARIO_TERMINAL_NOT_FOUND", str(terminal_id),
+            )
+        authority = require_authority(f"terminals[{terminal_id}].airflow_cmh")
+        semantic["airflow_cmh"] = float(terminal["airflow_cmh"])
+        semantic["operating_authority"] = authority
+        if semantic["role"] == "supply":
+            temperature = float(terminal["supply_temperature_k"])
+            require_authority(f"terminals[{terminal_id}].supply_temperature_k")
+            semantic["supply_temperature_k"] = temperature
+            supply_temperatures.add(temperature)
+        mapped.add(terminal_id)
+    design_terminal_ids = {
+        element_id for element_id, row in by_id.items()
+        if (row.get("semantic") or {}).get("role") in {"supply", "exhaust"}
+    }
+    if mapped != design_terminal_ids:
+        raise project_model.ProjectModelError(
+            "SCENARIO_TERMINAL_SET_MISMATCH", "Scenario must map every Design terminal exactly once",
+        )
+    if len(supply_temperatures) != 1:
+        raise project_model.ProjectModelError(
+            "MULTI_SUPPLY_TEMPERATURE_UNSUPPORTED",
+            "the current thermal solver requires one common supply temperature",
+        )
+
+    mapped_heat = set()
+    for source in conditions.get("heat_sources") or []:
+        source_id = source.get("source_id")
+        row = by_id.get(source_id)
+        semantic = row.get("semantic") if isinstance(row, dict) else None
+        if not isinstance(semantic, dict) or semantic.get("role") != "heat_source":
+            raise project_model.ProjectModelError("SCENARIO_HEAT_SOURCE_NOT_FOUND", str(source_id))
+        authority = require_authority(
+            f"heat_sources[{source_id}].convective_power_w", source.get("authority"),
+        )
+        power = float(source["convective_power_w"])
+        semantic.update({
+            "input_power_w": power, "power_kw": power / 1000.0,
+            "convective_fraction": 1.0, "radiative_fraction": 0.0,
+            "convective_power_w": power, "radiative_power_w": 0.0,
+            "evidence": authority, "source_type": "user_confirmed",
+        })
+        mapped_heat.add(source_id)
+    design_heat_ids = {
+        element_id for element_id, row in by_id.items()
+        if (row.get("semantic") or {}).get("role") == "heat_source"
+    }
+    if mapped_heat != design_heat_ids:
+        raise project_model.ProjectModelError(
+            "SCENARIO_HEAT_SOURCE_SET_MISMATCH",
+            "Scenario must map every Design heat source exactly once",
+        )
+    occupied = conditions.get("occupied_volume")
+    if not isinstance(occupied, dict):
+        raise project_model.ProjectModelError(
+            "OCCUPIED_SELECTOR_REQUIRED",
+            "a user-confirmed occupied-volume selector and floor elevation are required",
+        )
+    require_authority("occupied_volume", occupied.get("authority"))
+    try:
+        occupied_selector = (
+            cfd_numerical_sensitivity_job.normalize_occupied_volume_band(
+                occupied.get("selector")
+            )
+        )
+        occupied_floor = float(occupied["floor_elevation_m"])
+        if not math.isfinite(occupied_floor):
+            raise ValueError("floor elevation must be finite")
+    except (KeyError, TypeError, ValueError,
+            cfd_numerical_sensitivity_job.NumericalSensitivityJobInputError) as exc:
+        raise project_model.ProjectModelError(
+            "OCCUPIED_SELECTOR_INVALID", str(exc),
+        ) from exc
+    blockers = validate_for_body_fitted(geometry)
+    if blockers:
+        raise project_model.ProjectModelError("SCENARIO_RUNTIME_GEOMETRY_INVALID", str(blockers))
+
+    runtime_dir = _project_model_root() / "runtime_inputs" / identity["identity_sha256"]
+    runtime_geometry = runtime_dir / "scenario.geometry.v2.json"
+    payload = (json.dumps(
+        geometry, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False,
+    ) + "\n").encode("utf-8")
+    _atomic_project_write(runtime_geometry, payload)
+    profile = conditions.get("physics_intent") or {}
+    settings = {
+        "case_identity_path": str(identity_path),
+        "background_cell_m": float((conditions.get("mesh_intent") or {})["background_cell_m"]),
+        "thermal_settings": {
+            "supply_temperature_k": next(iter(supply_temperatures)),
+            "thermal_numerics_profile": profile.get("profile_name"),
+            "occupied_volume_selector": occupied_selector,
+            "occupied_floor_elevation_m": occupied_floor,
+        },
+    }
+    provenance = {
+        "contract": "scenario_runtime_input.v1",
+        "case_identity_path": identity_path.relative_to(Path(ROOT).resolve()).as_posix(),
+        "case_identity_sha256": _file_sha256(identity_path),
+        "design_revision_sha256": design["revision_sha256"],
+        "scenario_revision_sha256": scenario["revision_sha256"],
+        "source_geometry_path": geometry_path.relative_to(Path(ROOT).resolve()).as_posix(),
+        "source_geometry_sha256": _file_sha256(geometry_path),
+        "runtime_geometry_path": runtime_geometry.relative_to(Path(ROOT).resolve()).as_posix(),
+        "runtime_geometry_sha256": _file_sha256(runtime_geometry),
+        "settings": settings,
+    }
+    provenance_path = runtime_dir / "scenario_runtime_input.v1.json"
+    provenance_bytes = (json.dumps(
+        provenance, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False,
+    ) + "\n").encode("utf-8")
+    _atomic_project_write(provenance_path, provenance_bytes)
+    return {
+        "geometry_path": str(runtime_geometry.resolve()),
+        "provenance_path": str(provenance_path.resolve()),
+        "settings": settings,
+    }
+
+
+def create_scenario_comparison(run_ids):
+    if not isinstance(run_ids, list):
+        raise project_model.ProjectModelError("RUN_COUNT_INVALID", "run query is missing")
+    paths = [_run_identity_path(run_id) for run_id in run_ids]
+    comparison = cfd_compare.compare_runs(paths, projects_root=Path(ROOT))
+    comparison_bytes = (json.dumps(
+        comparison, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False,
+    ) + "\n").encode("utf-8")
+    token = hashlib.sha256(comparison_bytes).hexdigest()[:16]
+    parent = _project_model_root() / "comparisons"
+    parent.mkdir(parents=True, exist_ok=True)
+    directory = parent / f"compare-{token}"
+    if directory.exists():
+        raise project_model.ProjectModelError(
+            "COMPARISON_PUBLICATION_COLLISION", str(directory),
+        )
+    staging = Path(tempfile.mkdtemp(prefix=f".compare-{token}.", dir=parent))
+    try:
+        comparison_path = staging / "scenario_comparison.v1.json"
+        _atomic_project_write(comparison_path, comparison_bytes)
+        report = cfd_report.generate_scenario_comparison_report(
+            comparison,
+            projects_root=Path(ROOT),
+            out_html=staging / "comparison_report.html",
+        )
+        if not report.get("ok"):
+            raise project_model.ProjectModelError(
+                "COMPARISON_REPORT_FAILED",
+                report.get("error") or "report validation failed",
+            )
+        os.replace(staging, directory)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    comparison_path = directory / "scenario_comparison.v1.json"
+    report = {
+        **report,
+        "report_path": str((directory / "comparison_report.html").resolve()),
+    }
+    comparison["report_url"] = f"/scenario-compare-report/compare-{token}"
+    comparison["comparison_path"] = str(comparison_path.resolve())
+    comparison["report"] = report
+    return comparison
+
+
+def _project_api_error(exc):
+    code = getattr(exc, "code", None) or str(exc).split(":", 1)[0]
+    return {"ok": False, "code": code, "error": str(exc)}
+
+
 # ── HTTP 핸들러 ───────────────────────────────────────────────────────────────
 
 _CTYPES = {".html": "text/html; charset=utf-8", ".png": "image/png",
@@ -3471,6 +3893,10 @@ class StudioHandler(BaseHTTPRequestHandler):
             return self._send(200, PAGE_RELEASE_READINESS)
         if path == "/uat-session":
             return self._send(200, PAGE_UAT_SESSION)
+        if path == "/uat":
+            return self._send(200, PAGE_UAT_SESSION)
+        if path in ("/project-workflow", "/designs", "/scenarios", "/runs"):
+            return self._send(200, PAGE_PROJECT_WORKFLOW)
         m = re.match(r"^/body-results/([^/]+)$", path)
         if m:
             case = _body_solver_case(m.group(1))
@@ -3482,6 +3908,25 @@ class StudioHandler(BaseHTTPRequestHandler):
             return self._send(200, page)
         if path == "/api/cases":
             return self._json(scan_cases())
+        if path == "/api/designs":
+            return self._json(list_designs_payload())
+        m = re.match(r"^/api/designs/(design-[0-9a-f]{24})$", path)
+        if m:
+            result = list_designs_payload(m.group(1))
+            return self._json(result, 200 if result.get("ok") else 404)
+        if path == "/api/scenarios":
+            design_id = parse_qs(u.query).get("design", [None])[0]
+            return self._json(list_scenarios_payload(design_id))
+        if path == "/api/runs":
+            scenario_id = parse_qs(u.query).get("scenario", [None])[0]
+            return self._json(list_runs_payload(scenario_id))
+        if path == "/api/scenario-compare":
+            try:
+                return self._json(create_scenario_comparison(
+                    parse_qs(u.query).get("run", [])
+                ))
+            except (project_model.ProjectModelError, ValueError) as exc:
+                return self._json(_project_api_error(exc), 400)
         if path == "/api/body-gci-cases":
             return self._json(scan_body_gci_cases())
         if path == "/api/body-gci-geometries":
@@ -3554,6 +3999,9 @@ class StudioHandler(BaseHTTPRequestHandler):
         m = re.match(r"^/body-gci-report/([^/]+)$", path)
         if m:
             return self._serve_body_gci_report(m.group(1))
+        m = re.match(r"^/scenario-compare-report/(compare-[0-9a-f]{16})$", path)
+        if m:
+            return self._serve_scenario_compare_report(m.group(1))
         m = re.match(r"^/case/([^/]+)/file/([^/]+)$", path)
         if m:
             return self._serve_file(m.group(1), m.group(2))
@@ -3596,6 +4044,109 @@ class StudioHandler(BaseHTTPRequestHandler):
             p = json.loads(body or "{}")
             if path == "/api/environment/refresh":
                 return self._json(refresh_environment_capabilities())
+            if path in {
+                "/api/designs", "/api/design-revisions", "/api/scenarios",
+                "/api/scenario-clone", "/api/scenario-runs",
+            }:
+                try:
+                    if path == "/api/designs":
+                        design = project_model.create_design(
+                            ROOT,
+                            geometry_path=_project_path(p.get("geometry_path")),
+                            name=str(p.get("name") or "").strip(),
+                            created_by=str(p.get("created_by") or "").strip(),
+                        )
+                        return self._json({"ok": True, "design": design})
+                    if path == "/api/design-revisions":
+                        design = project_model.revise_design(
+                            str(p.get("design_id") or ""),
+                            geometry_path=_project_path(p.get("geometry_path")),
+                            reason=str(p.get("reason") or "").strip(),
+                            revised_by=str(p.get("revised_by") or "").strip(),
+                        )
+                        return self._json({"ok": True, "design": design})
+                    if path == "/api/scenarios":
+                        scenario = project_model.create_scenario(
+                            _project_path(p.get("design_revision")),
+                            name=str(p.get("name") or "").strip(),
+                            operating_conditions=p.get("operating_conditions") or {},
+                            purpose=str(p.get("purpose") or "screening"),
+                        )
+                        return self._json({"ok": True, "scenario": scenario})
+                    if path == "/api/scenario-clone":
+                        base_path = _project_path(p.get("scenario_revision"))
+                        base = _read_project_json(base_path)
+                        conditions = p.get("operating_conditions")
+                        if conditions is None:
+                            conditions = base.get("operating_conditions") or {}
+                        scenario = project_model.create_scenario(
+                            _project_path(base["design"]["path"]),
+                            name=str(p.get("name") or f"{base.get('name', 'Scenario')} clone"),
+                            operating_conditions=conditions,
+                            purpose=str(p.get("purpose") or base.get("purpose") or "screening"),
+                        )
+                        return self._json({
+                            "ok": True, "scenario": scenario,
+                            "scenario_diff": project_model.scenario_diff(base, scenario),
+                        })
+                    scenario_revision_path = _project_path(p.get("scenario_revision"))
+                    scenario_payload = _read_project_json(scenario_revision_path)
+                    requested_profile = str(p.get("solver_profile") or "")
+                    scenario_profile = (
+                        (scenario_payload.get("operating_conditions") or {})
+                        .get("physics_intent", {}).get("profile_name")
+                    )
+                    if scenario_profile and requested_profile != scenario_profile:
+                        raise project_model.ProjectModelError(
+                            "SCENARIO_SOLVER_PROFILE_MISMATCH",
+                            "Run solver profile must match the frozen Scenario physics profile",
+                        )
+                    identity = project_model.create_case_identity(
+                        _project_path(p.get("design_revision")),
+                        scenario_revision_path,
+                        run_id=str(p.get("run_id") or uuid.uuid4().hex),
+                        solver_profile=requested_profile,
+                        parent_run_id=p.get("parent_run_id"),
+                    )
+                    response = {
+                        "ok": True, "run": identity,
+                        "runtime_state": "identity_created",
+                        "comparison_eligible": False,
+                    }
+                    if p.get("case_path"):
+                        case = _project_path(p.get("case_path"))
+                        link = project_model.link_run_identity(case, Path(identity["path"]))
+                        response.update({
+                            "link": link, "runtime_state": "linked",
+                            "comparison_eligible": (case / "case_evidence.v1.json").is_file(),
+                        })
+                        if (p.get("enqueue") is True
+                                and case.parent == Path(ROOT, "_body_solver").resolve()):
+                            queued = enqueue_field_design_run(case.name)
+                            if not queued.get("ok"):
+                                raise project_model.ProjectModelError(
+                                    "RUN_QUEUE_REJECTED",
+                                    queued.get("error") or "queue rejected",
+                                )
+                            response.update(runtime_state="queued", queue=queued)
+                    elif p.get("enqueue") is True:
+                        runtime_input = materialize_scenario_run_input(identity["path"])
+                        queued = start_field_pipeline_selection(
+                            geometry_path=runtime_input["geometry_path"],
+                            settings=runtime_input["settings"],
+                        )
+                        if not queued.get("ok"):
+                            raise project_model.ProjectModelError(
+                                queued.get("code") or "RUN_QUEUE_REJECTED",
+                                queued.get("error") or "queue rejected",
+                            )
+                        response.update(
+                            runtime_state="queued" if queued.get("queued") else queued.get("status"),
+                            queue=queued, runtime_input=runtime_input,
+                        )
+                    return self._json(response)
+                except (project_model.ProjectModelError, ValueError, TypeError) as exc:
+                    return self._json(_project_api_error(exc), 400)
             if path == "/api/environment/acceptance":
                 err = enqueue_environment_acceptance()
                 return self._json({"error": err} if err else {"ok": True})
@@ -3908,6 +4459,19 @@ class StudioHandler(BaseHTTPRequestHandler):
             return self._send(404, "<meta charset='utf-8'>GCI 보고서가 없습니다.")
         return self._send(200, report.read_text(encoding="utf-8"))
 
+    def _serve_scenario_compare_report(self, comparison_name):
+        if not re.fullmatch(r"compare-[0-9a-f]{16}", comparison_name or ""):
+            return self._send(404, "not found")
+        root = (_project_model_root() / "comparisons").resolve()
+        report = (root / comparison_name / "comparison_report.html").resolve()
+        try:
+            report.relative_to(root)
+        except ValueError:
+            return self._send(404, "not found")
+        if not report.is_file():
+            return self._send(404, "<meta charset='utf-8'>비교 보고서가 없습니다.")
+        return self._send(200, report.read_text(encoding="utf-8"))
+
     def _serve_file(self, case_name, fname):
         d = safe_case_dir(case_name)
         if not d or not _SAFE_NAME.match(fname):
@@ -3918,6 +4482,42 @@ class StudioHandler(BaseHTTPRequestHandler):
         ext = os.path.splitext(fname)[1].lower()
         with open(full, "rb") as f:
             self._send(200, f.read(), _CTYPES.get(ext, "text/plain; charset=utf-8"))
+
+
+# ── Project / Design / Scenario / Run workflow ──────────────────────────────
+
+PAGE_PROJECT_WORKFLOW = """<!doctype html><html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Design · Scenario · Run</title>
+<style>:root{--navy:#15324b;--blue:#1676c2;--green:#24734a;--red:#a8322d;--amber:#a26a00;--line:#d8e2e8;--bg:#f3f6f8}*{box-sizing:border-box}body{margin:0;background:var(--bg);font:15px/1.55 Segoe UI,Malgun Gothic,sans-serif;color:#263844}main{max-width:1180px;margin:24px auto;padding:0 18px}a{color:var(--blue)}header,.panel{background:white;border:1px solid var(--line);border-radius:14px;padding:20px;margin:14px 0;box-shadow:0 5px 18px #17324a0d}h1,h2,h3{color:var(--navy);margin-top:0}.flow{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.step{border:1px solid var(--line);border-radius:10px;padding:12px}.step b{display:block;color:var(--blue)}.layout{display:grid;grid-template-columns:1fr 1.3fr;gap:14px}.list button{width:100%;text-align:left;background:#fff;color:#263844;border:1px solid var(--line);border-radius:9px;padding:10px;margin:5px 0;cursor:pointer}.list button.active{border-color:var(--blue);background:#eef7ff}.badge{display:inline-block;padding:2px 7px;border-radius:10px;background:#eef2f5;font-size:12px}.ok{color:var(--green)}.bad{color:var(--red)}.warn{color:var(--amber)}pre{white-space:pre-wrap;word-break:break-word;background:#f6f8fa;border-radius:9px;padding:10px;max-height:230px;overflow:auto}.review-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}.review{border:1px solid var(--line);padding:10px;border-radius:9px}.air{height:110px;border:2px solid #77a5c7;transform:perspective(450px) rotateX(8deg) rotateY(-10deg);background:linear-gradient(135deg,#e6f5ff,#fff);display:grid;place-items:center;color:#305f80}.toolbar{display:flex;flex-wrap:wrap;gap:8px}button.primary{border:0;border-radius:8px;padding:9px 13px;background:var(--blue);color:#fff;cursor:pointer}label.run{display:block;border-bottom:1px solid var(--line);padding:8px}.compare{overflow:auto}table{border-collapse:collapse;width:100%}th,td{padding:8px;border-bottom:1px solid var(--line);text-align:left}@media(max-width:760px){.flow,.layout,.review-grid{grid-template-columns:1fr}}</style></head><body><main>
+<p><a href="/">← 기존 대시보드</a> · <a href="/field-run">실행 센터</a> · <a href="/release-readiness">출시 준비</a></p>
+<header><h1>Project → Design → Scenario → Run</h1><p>검토된 형상과 운전 조건을 분리해 보관합니다. 비교는 같은 Design revision, 완전한 결과 증적, 같은 occupied-volume selector일 때만 열립니다.</p><div class="flow"><div class="step"><b>1 Project</b>프로젝트 로컬 증적</div><div class="step"><b>2 Design</b>형상·단말 검토</div><div class="step"><b>3 Scenario</b>CMH·온도·열원 diff</div><div class="step"><b>4 Run</b>결과·case health 비교</div></div></header>
+<div class="layout"><section class="panel"><h2>Design revisions</h2><div id="designs" class="list">불러오는 중…</div><h2>Scenarios</h2><div id="scenarios" class="list">Design을 선택하세요.</div><div id="scenarioDetail"></div></section><section class="panel"><h2>Design review</h2><div id="detail">Design을 선택하면 원본·2D·3D air volume·terminal/heat-source·승인 이력을 표시합니다.</div></section></div>
+<section class="panel"><h2>Run center</h2><p>Run 생성/재개는 기존 serial queue와 checkpoint를 사용합니다. 비교할 2~4개 Run을 선택하세요.</p><div id="runs">Scenario를 선택하세요.</div><div class="toolbar"><button class="primary" id="compare">선택 Run 비교</button><span id="message"></span></div></section>
+<section class="panel compare"><h2>Scenario comparison</h2><div id="comparison">아직 비교하지 않았습니다.</div></section>
+<script>const E=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));let selectedDesign='',selectedScenario='',designRevision='',scenarioRows=[],designDetail=null;async function get(u){const r=await fetch(u),j=await r.json();if(!r.ok||j.ok===false)throw Error(j.error||j.code||'요청 실패');return j}async function post(u,p){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)}),j=await r.json();if(!r.ok||j.ok===false)throw Error(j.error||j.code||'요청 실패');return j}async function loadDesigns(){try{const j=await get('/api/designs');E('designs').innerHTML=j.designs.length?j.designs.map(x=>`<button onclick="pickDesign('${x.design_id}')"><b>${esc(x.name)}</b><br><span class="badge">${esc(x.design_id)}</span> · rev ${x.revision_number}/${x.revision_count}</button>`).join(''):'아직 Design이 없습니다. 기존 도면 검토 화면에서 reviewed geometry를 생성하세요.'}catch(e){E('designs').textContent=e.message}}async function renderAllRuns(){const j=await get('/api/runs'),rows=j.runs.filter(x=>x.design.design_id===selectedDesign);E('runs').innerHTML=rows.length?rows.map(x=>`<label class="run"><input type="checkbox" name="run" value="${x.run_id}" ${x.comparison_eligible?'':'disabled'}> <b>${esc(x.requested_run_id)}</b> · Scenario ${esc(x.scenario.scenario_id)} · ${esc(x.case_identity_status)} ${x.results_url?`· <a href="${x.results_url}">결과</a>`:''}<br><small>${esc(x.run_id)} · ${esc(x.solver_profile)}</small></label>`).join(''):'이 Design에 Run identity가 없습니다.'}async function pickDesign(id){selectedDesign=id;const [d,s]=await Promise.all([get('/api/designs/'+id),get('/api/scenarios?design='+id)]);const r=d.revisions[d.revisions.length-1],review=r.geometry_review||{};designDetail=r;designRevision=r.path;scenarioRows=s.scenarios;E('detail').innerHTML=`<div class="review-grid"><div class="review"><h3>원본·승인 이력</h3><p>${esc(r.source||'source 미기록')}</p><p class="${review.ready?'ok':'bad'}">${review.ready?'reviewed':'검토 차단'} · blocker ${review.blocker_count??'—'}</p><small>revision ${r.revision_number} · ${esc(r.revision_author)}</small></div><div class="review"><h3>2D 형상 검토</h3><p>zone ${r.air_volume.zones}개 · terminal ${r.terminal_review.length}개</p><pre>${esc(JSON.stringify(r.terminal_review,null,2))}</pre></div><div class="review"><h3>3D air volume</h3><div class="air">closed air volume<br>${esc(r.air_volume.height_m??'높이 확인 필요')} m</div></div></div><h3>Heat-source review</h3><pre>${esc(JSON.stringify(r.heat_source_review,null,2))}</pre>`;E('scenarios').innerHTML=s.scenarios.length?s.scenarios.map(x=>`<button onclick="pickScenario('${x.scenario_id}')"><b>${esc(x.name)}</b><br><span class="badge">${esc(x.purpose)}</span> · rev ${x.revision_number}</button>`).join(''):'Scenario가 없습니다.';E('scenarioDetail').innerHTML=s.scenarios.length?'':`<h3>첫 Scenario 생성</h3><p>물리값은 자동 추정하지 않습니다. 검토자가 확인한 값을 모두 입력하세요.</p><p><label>이름 <input id="firstName" value="Baseline"></label> <label>모든 단말 CMH <input id="firstFlow" type="number" min="0" step="0.1"></label> <label>급기 K <input id="firstTemp" type="number" min="0" step="0.01"></label> <label>열원별 W <input id="firstHeat" type="number" min="0" step="1"></label> <label>해석기간 s <input id="firstDuration" type="number" min="0" step="1"></label> <label>배경셀 m <input id="firstCell" type="number" min="0" step="0.01"></label></p><button class="primary" onclick="createInitialScenario()">검토값으로 첫 Scenario 생성</button><pre id="cloneDiff"></pre>`;await renderAllRuns()}async function createInitialScenario(){const r=designDetail,flow=Number(E('firstFlow').value),temp=Number(E('firstTemp').value),heat=Number(E('firstHeat').value),duration=Number(E('firstDuration').value),cell=Number(E('firstCell').value);if(![flow,temp,duration,cell].every(x=>Number.isFinite(x)&&x>0)||!Number.isFinite(heat)||heat<0){E('cloneDiff').textContent='모든 검토값을 입력하세요.';return}const authority={},terminals=r.terminal_review.map(x=>{authority[`terminals[${x.element_id}].airflow_cmh`]='user_confirmed:project-workflow';const row={terminal_id:x.element_id,airflow_cmh:flow};if(x.role==='supply'){row.supply_temperature_k=temp;authority[`terminals[${x.element_id}].supply_temperature_k`]='user_confirmed:project-workflow'}return row}),heat_sources=r.heat_source_review.map(x=>{authority[`heat_sources[${x.element_id}].convective_power_w`]='user_confirmed:project-workflow';return {source_id:x.element_id,convective_power_w:heat,authority:'user_confirmed:project-workflow'}}),conditions={terminals,heat_sources,occupancy:null,weather:null,operating_period:{duration_s:duration},mesh_intent:{preset:'detailed',background_cell_m:cell},physics_intent:{profile_name:'design_limited_second_order_v1',profile_scope:'thermal_numerics'},input_authority:authority};try{await post('/api/scenarios',{design_revision:designRevision,name:E('firstName').value,purpose:'design_review_candidate',operating_conditions:conditions});await pickDesign(selectedDesign)}catch(e){E('cloneDiff').textContent=e.message}}async function pickScenario(id){selectedScenario=id;const s=scenarioRows.find(x=>x.scenario_id===id),c=s.operating_conditions||{},sup=(c.terminals||[]).find(x=>x.supply_temperature_k!=null)||{},heat=(c.heat_sources||[])[0]||{},mesh=c.mesh_intent||{};E('scenarioDetail').innerHTML=`<h3>선택 Scenario</h3><p><b>${esc(s.name)}</b> · expected citation scope <code>${esc(s.purpose)}</code></p><p>예상 자원: ${esc(mesh.preset||'—')} mesh · background ${esc(mesh.background_cell_m??'—')} m · simulated period ${esc((c.operating_period||{}).duration_s??'—')} s</p><pre>${esc(JSON.stringify(c,null,2))}</pre><h3>Baseline clone</h3><p><label>모든 단말 CMH <input id="cloneFlow" type="number" value="${esc(sup.airflow_cmh??'')}"></label> <label>급기 K <input id="cloneTemp" type="number" step="0.01" value="${esc(sup.supply_temperature_k??'')}"></label> <label>열원 W <input id="cloneHeat" type="number" value="${esc(heat.convective_power_w??'')}"></label></p><div class="toolbar"><button class="primary" onclick="cloneScenario()">대안 clone + semantic diff</button><button class="primary" onclick="startScenarioRun()">Run 생성 + serial queue</button></div><pre id="cloneDiff"></pre>`;await renderAllRuns()}async function cloneScenario(){const base=scenarioRows.find(x=>x.scenario_id===selectedScenario),c=structuredClone(base.operating_conditions),flow=Number(E('cloneFlow').value),temp=Number(E('cloneTemp').value),heat=Number(E('cloneHeat').value);for(const row of c.terminals||[]){row.airflow_cmh=flow;if(row.supply_temperature_k!=null)row.supply_temperature_k=temp}for(const row of c.heat_sources||[])row.convective_power_w=heat;try{const j=await post('/api/scenario-clone',{scenario_revision:base.path,name:base.name+' alternative',operating_conditions:c});E('cloneDiff').textContent=JSON.stringify(j.scenario_diff,null,2);await pickDesign(selectedDesign)}catch(e){E('cloneDiff').textContent=e.message}}async function startScenarioRun(){const s=scenarioRows.find(x=>x.scenario_id===selectedScenario),profile=(s.operating_conditions.physics_intent||{}).profile_name;E('message').textContent='Run identity와 serial job 생성 중…';try{const j=await post('/api/scenario-runs',{design_revision:designRevision,scenario_revision:s.path,run_id:'ui-'+Date.now(),solver_profile:profile,enqueue:true});E('message').textContent=j.runtime_state==='queued'?'serial queue에 등록했습니다.':'Run 상태: '+j.runtime_state;await renderAllRuns()}catch(e){E('message').textContent=e.message}}E('compare').onclick=async()=>{const ids=[...document.querySelectorAll('input[name=run]:checked')].map(x=>x.value);E('message').textContent='비교 증적 재검증 중…';try{const j=await get('/api/scenario-compare?'+ids.map(x=>'run='+encodeURIComponent(x)).join('&'));E('message').textContent=j.eligible?'비교 가능':'비교 차단';E('comparison').innerHTML=`<p class="${j.eligible?'ok':'bad'}"><b>${j.eligible?'ELIGIBLE':'BLOCKED'}</b> · ${esc((j.blockers||[]).map(x=>x.code).join(', ')||'blocker 없음')} · <a href="${j.report_url}" target="_blank">비교 보고서</a></p><h3>입력 diff</h3><pre>${esc(JSON.stringify(j.scenario_diff,null,2))}</pre><h3>KPI / case health</h3><pre>${esc(JSON.stringify(j.runs,null,2))}</pre>`}catch(e){E('message').textContent=e.message}};loadDesigns();</script></main></body></html>"""
+
+# Add the fail-closed occupied-volume inputs without duplicating physical
+# defaults in the dense self-contained page above.
+PAGE_PROJECT_WORKFLOW = PAGE_PROJECT_WORKFLOW.replace(
+    "</main></body></html>",
+    """<script>
+const pickDesignWithoutOccupiedInputs=pickDesign;
+pickDesign=async function(id){
+  await pickDesignWithoutOccupiedInputs(id);
+  if(!scenarioRows.length){
+    const button=E('scenarioDetail').querySelector('button');
+    button.insertAdjacentHTML('beforebegin',`<p><label>바닥 기준고 m <input id="firstFloor" type="number" step="0.01"></label> <label>점유영역 하단 AGL m <input id="firstZMin" type="number" min="0" step="0.01"></label> <label>점유영역 상단 AGL m <input id="firstZMax" type="number" min="0" step="0.01"></label></p>`);
+  }
+};
+createInitialScenario=async function(){
+  const r=designDetail,flow=Number(E('firstFlow').value),temp=Number(E('firstTemp').value),heat=Number(E('firstHeat').value),duration=Number(E('firstDuration').value),cell=Number(E('firstCell').value),floor=Number(E('firstFloor').value),zmin=Number(E('firstZMin').value),zmax=Number(E('firstZMax').value);
+  if(['firstFlow','firstTemp','firstHeat','firstDuration','firstCell','firstFloor','firstZMin','firstZMax'].some(id=>E(id).value==='')||![flow,temp,duration,cell].every(x=>Number.isFinite(x)&&x>0)||!Number.isFinite(heat)||heat<0||![floor,zmin,zmax].every(Number.isFinite)||zmin<0||zmax<=zmin){E('cloneDiff').textContent='물리값과 점유영역 기준을 모두 입력하세요.';return}
+  const authority={},terminals=r.terminal_review.map(x=>{authority[`terminals[${x.element_id}].airflow_cmh`]='user_confirmed:project-workflow';const row={terminal_id:x.element_id,airflow_cmh:flow};if(x.role==='supply'){row.supply_temperature_k=temp;authority[`terminals[${x.element_id}].supply_temperature_k`]='user_confirmed:project-workflow'}return row}),heat_sources=r.heat_source_review.map(x=>{authority[`heat_sources[${x.element_id}].convective_power_w`]='user_confirmed:project-workflow';return {source_id:x.element_id,convective_power_w:heat,authority:'user_confirmed:project-workflow'}});
+  const conditions={terminals,heat_sources,occupancy:null,weather:null,occupied_volume:{selector:{contract:'occupied_volume_band.v1',coordinate_source:'cell_center_m_agl',z_min_agl_m:zmin,z_max_agl_m:zmax},floor_elevation_m:floor,authority:'user_confirmed:project-workflow'},operating_period:{duration_s:duration},mesh_intent:{preset:'detailed',background_cell_m:cell},physics_intent:{profile_name:'design_limited_second_order_v1',profile_scope:'thermal_numerics'},input_authority:authority};
+  try{await post('/api/scenarios',{design_revision:designRevision,name:E('firstName').value,purpose:'design_review_candidate',operating_conditions:conditions});await pickDesign(selectedDesign)}catch(e){E('cloneDiff').textContent=e.message}
+};
+</script></main></body></html>""",
+)
 
 
 # ── 비정형 body-fitted 단면 결과 페이지 ─────────────────────────────────────

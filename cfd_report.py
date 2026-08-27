@@ -14,12 +14,15 @@ continuity·rho·bounding(불안정 신호)·크래시를 수치로 뽑아, 안�
 외부 의존성 없음(stdlib + matplotlib, 이미 프로젝트에서 사용).
 """
 import argparse
+import hashlib
 import html
 import json
 import os
 from pathlib import Path
 import re
 import sys
+
+from jsonschema import Draft202012Validator
 
 import cfd_convergence_spec
 import cfd_case_health
@@ -172,8 +175,17 @@ def generate_gci_report(study_dir, out_html=None):
     return {"ok": True, "path": os.path.abspath(out_html), "status": status}
 
 
-def generate_body_fitted_report(case_dir, out_html=None, *, projects_root=None):
+def generate_body_fitted_report(
+    case_dir, out_html=None, *, projects_root=None, report_mode="design-review",
+):
     """Generate a compact self-contained report from VTU result artifacts."""
+    if report_mode not in {"screening", "design-review", "field-comparison"}:
+        return {"ok": False, "error": "unsupported report template"}
+    template_scope = {
+        "screening": "초기안 비교 전용 · 이 template 자체는 설계 인용을 허용하지 않음",
+        "design-review": "설계 검토 · Case Evidence와 승인 기록이 인용 범위를 결정",
+        "field-comparison": "현장 비교 · field authority와 동일 evidence scope를 함께 검토",
+    }[report_mode]
     case_dir = os.path.abspath(case_dir)
     try:
         with open(os.path.join(case_dir, "result_manifest.json"), encoding="utf-8") as f:
@@ -431,7 +443,9 @@ def generate_body_fitted_report(case_dir, out_html=None, *, projects_root=None):
             f"<p>Review reason: {html.escape(str(review_binding.get('reason') or ''))}</p></details>"
         )
 
-    if citation_status == "SCREENING_ONLY":
+    if report_mode == "screening":
+        citation_banner = "<div class='citation-banner screening-only first-content'><b>초기안 비교용 · 설계 인용 불가</b></div>"
+    elif citation_status == "SCREENING_ONLY":
         citation_banner = "<div class='citation-banner screening-only first-content'><b>초기안 비교용 · 설계 인용 불가</b></div>"
     elif citation_status == "DESIGN_CITABLE" and review_binding:
         citation_banner = (
@@ -477,6 +491,7 @@ def generate_body_fitted_report(case_dir, out_html=None, *, projects_root=None):
 <p><b>수치 품질 blocker:</b> {html.escape(quality_blockers)}</p>"""
     body = f"""<!doctype html><html lang='ko'><head><meta charset='utf-8'>
 <meta name='viewport' content='width=device-width,initial-scale=1'>
+<meta name='report-template' content='{html.escape(report_mode)}'>
 <title>MEP CFD Studio 상세 열·부력 결과</title>
 <style>
 body{{font-family:Segoe UI,Malgun Gothic,sans-serif;margin:0;background:#f4f7fa;color:#1e2b36}}
@@ -489,6 +504,7 @@ table{{width:100%;border-collapse:collapse;margin:12px 0}} th,td{{border-bottom:
 small{{color:#5d6a73}} code{{background:#eef3f6;padding:2px 5px;border-radius:4px}}
 @media print{{main{{margin:0;box-shadow:none}}.first-content{{break-inside:avoid;page-break-after:avoid;margin-top:0}}}}
 </style></head><body><main>
+<p><b>Report template:</b> <code>{html.escape(report_mode)}</code> · {html.escape(template_scope)}</p>
 {citation_banner}
 <h1>상세 열·부력 결과 요약</h1>
 <h2>Case Evidence 검사표</h2>
@@ -533,7 +549,141 @@ small{{color:#5d6a73}} code{{background:#eef3f6;padding:2px 5px;border-radius:4p
             handle.write(body)
     except OSError as exc:
         return {"ok": False, "error": str(exc)}
-    return {"ok": True, "report_path": out_html, "summary": summary}
+    return {"ok": True, "report_path": out_html, "summary": summary,
+            "report_mode": report_mode}
+
+
+def generate_scenario_comparison_report(comparison, *, projects_root, out_html=None):
+    """Write a self-contained comparison report with scope on its first page."""
+    if not isinstance(comparison, dict) or comparison.get("contract") != "scenario_comparison.v1":
+        return {"ok": False, "error": "scenario_comparison.v1 is required"}
+    root = Path(projects_root).resolve()
+    try:
+        schema = json.loads(
+            Path(__file__).with_name("scenario_comparison.v1.schema.json")
+            .read_text(encoding="utf-8")
+        )
+        errors = list(Draft202012Validator(schema).iter_errors(comparison))
+        if errors:
+            raise ValueError(errors[0].message)
+        for row in comparison.get("runs") or []:
+            for reference in (row.get("artifacts") or {}).values():
+                artifact = (root / reference["path"]).resolve(strict=True)
+                artifact.relative_to(root)
+                actual = hashlib.sha256(artifact.read_bytes()).hexdigest()
+                if actual != reference["sha256"]:
+                    raise ValueError("comparison artifact hash mismatch")
+        import cfd_compare
+
+        identity_paths = [
+            root / row["artifacts"]["run_identity"]["path"]
+            for row in comparison.get("runs") or []
+        ]
+        authoritative = cfd_compare.compare_runs(
+            identity_paths, projects_root=root,
+        )
+
+        def stable(value):
+            if isinstance(value, dict):
+                return {
+                    key: stable(item) for key, item in value.items()
+                    if key != "created_at"
+                }
+            if isinstance(value, list):
+                return [stable(item) for item in value]
+            return value
+
+        submitted = {
+            key: comparison.get(key) for key in authoritative
+            if key != "created_at"
+        }
+        expected = {
+            key: authoritative.get(key) for key in authoritative
+            if key != "created_at"
+        }
+        if stable(submitted) != stable(expected):
+            raise ValueError("comparison claims differ from current raw artifacts")
+        comparison = authoritative
+    except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        return {"ok": False, "error": f"comparison evidence is invalid: {exc}"}
+    if out_html is None:
+        token = __import__("hashlib").sha256(
+            "\n".join(row.get("run_id", "") for row in comparison.get("runs") or [])
+            .encode("utf-8")
+        ).hexdigest()[:16]
+        out_path = root / "_project_model" / "comparisons" / f"compare-{token}" / "comparison_report.html"
+    else:
+        out_path = Path(out_html).resolve()
+    try:
+        out_path.relative_to(root)
+    except ValueError:
+        return {"ok": False, "error": "comparison report path escapes project root"}
+
+    blockers = comparison.get("blockers") or []
+    diff_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(row.get('candidate_run_id') or ''))}</td>"
+        f"<td><code>{html.escape(str(row.get('path') or ''))}</code></td>"
+        f"<td>{html.escape(str(row.get('baseline')))}</td>"
+        f"<td>{html.escape(str(row.get('candidate')))}</td>"
+        f"<td>{html.escape(str(row.get('engineering_effect') or ''))}</td></tr>"
+        for row in comparison.get("scenario_diff") or []
+    ) or "<tr><td colspan='5'>입력 차이가 없습니다.</td></tr>"
+    health_rows = "".join(
+        "<tr>"
+        f"<td><code>{html.escape(str(row.get('run_id') or ''))}</code></td>"
+        f"<td>{html.escape(str((row.get('case_health') or {}).get('citation_status') or 'NOT_EVALUATED'))}</td>"
+        f"<td>{html.escape(', '.join(str(item.get('code')) for item in ((row.get('case_health') or {}).get('errors') or []) if isinstance(item, dict)) or '없음')}</td>"
+        f"<td><pre>{html.escape(json.dumps(row.get('kpis'), ensure_ascii=False, indent=2))}</pre></td></tr>"
+        for row in comparison.get("runs") or []
+    )
+    first_page_diff_rows = "".join(
+        "<tr>"
+        f"<td><code>{html.escape(str(row.get('path') or ''))}</code></td>"
+        f"<td>{html.escape(str(row.get('baseline')))}</td>"
+        f"<td>{html.escape(str(row.get('candidate')))}</td></tr>"
+        for row in comparison.get("scenario_diff") or []
+    ) or "<tr><td colspan='3'>입력 차이가 없습니다.</td></tr>"
+    first_page_run_rows = "".join(
+        "<tr>"
+        f"<td><code>{html.escape(str(row.get('run_id') or ''))}</code></td>"
+        f"<td>{html.escape(str((row.get('case_health') or {}).get('status') or 'NOT_EVALUATED'))}</td>"
+        f"<td>{html.escape(str((row.get('case_health') or {}).get('citation_status') or 'NOT_EVALUATED'))}</td>"
+        f"<td><code>{html.escape(str(((row.get('case_health') or {}).get('evidence') or {}).get('path') or ''))}</code><br>"
+        f"<small>SHA-256 {html.escape(str(((row.get('case_health') or {}).get('evidence') or {}).get('sha256') or ''))}</small></td></tr>"
+        for row in comparison.get("runs") or []
+    ) or "<tr><td colspan='4'>Run 증적이 없습니다.</td></tr>"
+    blocker_html = "".join(
+        f"<li><code>{html.escape(str(row.get('code') or ''))}</code> — {html.escape(str(row.get('message') or ''))}</li>"
+        for row in blockers
+    ) or "<li>없음</li>"
+    scope = comparison.get("evidence_scope") or {}
+    import cfd_advice
+    advice_html = "".join(
+        f"<li><b>{html.escape(str(row.get('priority') or ''))}</b> {html.escape(str(row.get('finding') or ''))}<br>{html.escape(str(row.get('action') or ''))}</li>"
+        for row in cfd_advice.comparison_recommendations(comparison)
+    )
+    body = f"""<!doctype html><html lang='ko'><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<meta name='report-template' content='field-comparison'><title>Scenario comparison</title>
+<style>body{{font:15px/1.5 Segoe UI,Malgun Gothic,sans-serif;background:#f4f7f9;color:#243746;margin:0}}main{{max-width:1100px;margin:24px auto;background:#fff;padding:28px;border-radius:14px}}.scope{{border:2px solid #527b98;border-radius:10px;padding:15px;page-break-after:always}}.pass{{color:#24734a}}.fail{{color:#a8322d}}table{{width:100%;border-collapse:collapse}}th,td{{padding:8px;border-bottom:1px solid #dce5ec;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;font-size:12px}}code{{background:#eef3f6;padding:2px 5px}}@media print{{main{{margin:0}}}}</style></head><body><main>
+<section class='scope'><h1>Scenario 비교 범위</h1>
+<p class='{'pass' if comparison.get('eligible') else 'fail'}'><b>{'ELIGIBLE' if comparison.get('eligible') else 'BLOCKED'}</b></p>
+<h2>입력 차이</h2><table><tr><th>경로</th><th>기준값</th><th>대안값</th></tr>{first_page_diff_rows}</table>
+<h2>Run 증적 범위</h2><table><tr><th>Run</th><th>Health</th><th>Citation</th><th>Evidence</th></tr>{first_page_run_rows}</table>
+<h2>신뢰도 차이</h2><ul>{blocker_html}</ul>
+<h2>동일/상이한 evidence scope</h2><p><b>동일:</b> {html.escape(', '.join(scope.get('common') or []) or '없음')}</p><p><b>상이:</b> {html.escape(', '.join(scope.get('differences') or []) or '없음')}</p>
+<p>Design revision <code>{html.escape(str(comparison.get('design_revision_sha256') or '불일치'))}</code><br>Occupied selector <code>{html.escape(str(comparison.get('qoi_selector_sha256') or '불일치/누락'))}</code></p></section>
+<h2>입력 diff</h2><table><tr><th>Run</th><th>경로</th><th>기준</th><th>대안</th><th>영향</th></tr>{diff_rows}</table>
+<h2>결과 KPI와 case health</h2><p>Max 값은 mesh-independent evidence 없이는 설계 KPI로 강조하지 않습니다.</p><table><tr><th>Run</th><th>Citation</th><th>Blockers</th><th>제한 KPI</th></tr>{health_rows}</table>
+<h2>검토 조치</h2><ul>{advice_html}</ul></main></body></html>"""
+    try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(body, encoding="utf-8", newline="\n")
+    except OSError as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "report_path": str(out_path),
+            "report_mode": "field-comparison"}
 
 # ── 로그 파싱 정규식 (표준 OpenFOAM SIMPLE/PIMPLE 로그) ──────────────────────
 _RE_TIME = re.compile(r"^Time = ([\d.eE+-]+)\s*$")

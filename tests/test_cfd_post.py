@@ -79,10 +79,21 @@ class BodyFittedPostTests(unittest.TestCase):
             case = Path(tmp)
             source = case / "VTK" / "case_1" / "internal.vtu"
             source.parent.mkdir(parents=True)
-            source.write_text(_vtu(["left", "right"]), encoding="ascii")
+            source.write_text(_vtu(["left", "right"], [1.0, 3.0]), encoding="ascii")
             (case / "mesh_manifest.json").write_text('{"status":"PASS"}', encoding="utf-8")
             (case / "run_manifest.json").write_text('{"status":"WARN"}', encoding="utf-8")
-            (case / "thermal_input.json").write_text('{"contract":"thermal_input.v1"}', encoding="utf-8")
+            (case / "thermal_input.json").write_text(json.dumps({
+                "contract": "thermal_input.v1",
+                "settings": {
+                    "occupied_volume_selector": {
+                        "contract": "occupied_volume_band.v1",
+                        "coordinate_source": "cell_center_m_agl",
+                        "z_min_agl_m": 0.0,
+                        "z_max_agl_m": 1.0,
+                    },
+                    "occupied_floor_elevation_m": 0.0,
+                },
+            }), encoding="utf-8")
             result = cfd_post.build_result_artifacts(case)
             manifest = json.loads((case / "result_manifest.json").read_text(encoding="utf-8"))
             summary = json.loads((case / manifest["summary_path"]).read_text(encoding="utf-8"))
@@ -92,10 +103,14 @@ class BodyFittedPostTests(unittest.TestCase):
                 item["path"]: cfd_post._sha256(case / item["path"])
                 for item in manifest["slices"]
             }
+            qoi = json.loads((case / manifest["occupied_qoi"]["path"]).read_text(
+                encoding="utf-8"
+            ))
+            qoi_hash = cfd_post._sha256(case / manifest["occupied_qoi"]["path"])
         self.assertTrue(result["ok"], result)
         self.assertEqual(manifest["contract"], "result_manifest.v1")
         self.assertEqual(manifest["field_location"], "cell")
-        self.assertEqual(set(manifest["fields"]), {"T", "U"})
+        self.assertEqual(set(manifest["fields"]), {"T", "U", "V"})
         self.assertEqual(len(manifest["slices"]), 3)
         self.assertEqual(
             manifest["summary_sha256"],
@@ -108,6 +123,11 @@ class BodyFittedPostTests(unittest.TestCase):
         for item in manifest["slices"]:
             self.assertEqual(item["sha256"], slice_hashes[item["path"]])
         self.assertEqual(summary["aggregation"], "cell_count_unweighted")
+        self.assertEqual(manifest["occupied_qoi"]["sha256"], qoi_hash)
+        self.assertEqual(qoi["scope"], "selected_occupied_volume_band")
+        self.assertAlmostEqual(qoi["temperature"]["mean_k"], 298.5)
+        self.assertAlmostEqual(qoi["temperature"]["p95_k"], 300.0)
+        self.assertAlmostEqual(qoi["velocity"]["p95_speed_m_s"], 2.0)
 
 
 class NumericalSensitivityPostprocessTests(unittest.TestCase):
@@ -145,6 +165,8 @@ class NumericalSensitivityPostprocessTests(unittest.TestCase):
         self.assertAlmostEqual(qois["selected_volume_m3"], 4.0)
         self.assertAlmostEqual(qois["occupied_zone_mean_temperature_k"], 298.5)
         self.assertAlmostEqual(qois["occupied_zone_mean_speed_m_s"], 1.75)
+        self.assertAlmostEqual(qois["temperature"]["p95_k"], 300.0)
+        self.assertAlmostEqual(qois["velocity"]["p95_speed_m_s"], 2.0)
         self.assertRegex(qois["source_vtu_sha256"], r"^[0-9a-f]{64}$")
         self.assertRegex(qois["selector_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(qois["selector"]["coordinate_source"], "cell_center_m_agl")

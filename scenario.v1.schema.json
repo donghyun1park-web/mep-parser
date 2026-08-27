@@ -104,6 +104,35 @@
         }
       ]
     },
+    "occupiedVolume": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector", "floor_elevation_m", "authority"],
+      "properties": {
+        "selector": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["contract", "coordinate_source", "z_min_agl_m", "z_max_agl_m"],
+          "properties": {
+            "contract": {"const": "occupied_volume_band.v1"},
+            "coordinate_source": {"const": "cell_center_m_agl"},
+            "z_min_agl_m": {"type": "number", "minimum": 0},
+            "z_max_agl_m": {"type": "number", "exclusiveMinimum": 0},
+            "xy_bounds_m": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["x_min_m", "x_max_m", "y_min_m", "y_max_m"],
+              "properties": {
+                "x_min_m": {"type": "number"}, "x_max_m": {"type": "number"},
+                "y_min_m": {"type": "number"}, "y_max_m": {"type": "number"}
+              }
+            }
+          }
+        },
+        "floor_elevation_m": {"type": "number"},
+        "authority": {"type": "string", "pattern": "^user_confirmed:"}
+      }
+    },
     "operatingConditions": {
       "type": "object",
       "additionalProperties": false,
@@ -116,6 +145,7 @@
         "heat_sources": {"type": "array", "items": {"$ref": "#/$defs/heatSource"}},
         "occupancy": {"$ref": "#/$defs/occupancy"},
         "weather": {"$ref": "#/$defs/weather"},
+        "occupied_volume": {"$ref": "#/$defs/occupiedVolume"},
         "operating_period": {
           "type": "object",
           "additionalProperties": false,
