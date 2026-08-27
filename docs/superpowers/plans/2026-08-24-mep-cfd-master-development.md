@@ -1959,7 +1959,7 @@ Task 0 Step 6은 어떤 코드 Task보다 먼저 수행한다. 현재 Tasks 1~4�
 
 - The user authorized synthetic-evidence-only Task 5b execution; confirmed site geometry and accountable MEP approval are still not supplied.
 - Task 5b Step 1 is complete. A separate producer staged and generated current FreeCAD/Studio/OpenFOAM evidence, the pure validator passed the candidate, and an independent post-publication evaluation returned `PASS` with blockers 0.
-- Actual scope: locked Python 3.12.10, FreeCAD 1.1.1/OCC 7.8.1, OpenFOAM v2606 serial, 64 cells, physical time 1.0 s, Studio readiness 3/3, actionable diagnostics 5/5. Focused regression: `289 passed, 7 skipped, 7 warnings`.
+- Actual scope: locked Python 3.12.10, FreeCAD 1.1.1/OCC 7.8.1, OpenFOAM v2606 serial, 64 cells, physical time 1.0 s, Studio readiness 3/3, actionable diagnostics 5/5. Focused regression: `289 passed, 7 skipped, 7 warnings`. Public exact-code commit `9e625e2dfd6c05b03e0d6efdffbcbf6b8fc5cb35` passed Windows CI [run `33028118325`](https://github.com/donghyun1park-web/mep-parser/actions/runs/33028118325) with `1194 passed, 14 skipped, 7 warnings`.
 - Runtime artifacts remain ignored under `cfd_projects/`; the public branch contains only producer/validator code, tests, plans, governance, and sanitized progress/report records.
 - Task 5b Steps 2–3, Task 4.5, Task 5c, M1, design citation, and release remain open or blocked. MPI execution smoke remains `NOT_RUN`.
 

@@ -298,7 +298,7 @@ Run: `& $Python -B -m pytest -q tests/test_cfd_capabilities.py tests/test_cfd_mp
 
 **Completion:** `body_fitted_runtime_ready=true`, `body_fitted_engine_ready=true`, current 64-cell acceptance PASS, serial baseline PASS, startup 3/3 각각 10 s 이하, 한국어 오류 5/5 actionable, fatal/raw-traceback 0. MPI는 BLOCKED여도 된다.
 
-**2026-08-27 completion evidence:** 별도 producer가 합성 64-cell case와 FreeCAD/Studio/OpenFOAM 증거를 임시 후보에 생성하고 순수 validator PASS 후 manifest-last로 게시했다. 게시된 canonical manifest의 독립 재검증도 blockers 0으로 PASS했다. 집중 회귀는 locked Python 3.12.10에서 `289 passed, 7 skipped, 7 warnings`다. 7 skips는 이 serial Step 밖의 runtime-gated 항목이며 MPI execution smoke는 `NOT_RUN`이다.
+**2026-08-27 completion evidence:** 별도 producer가 합성 64-cell case와 FreeCAD/Studio/OpenFOAM 증거를 임시 후보에 생성하고 순수 validator PASS 후 manifest-last로 게시했다. 게시된 canonical manifest의 독립 재검증도 blockers 0으로 PASS했다. 집중 회귀는 locked Python 3.12.10에서 `289 passed, 7 skipped, 7 warnings`다. 공개 exact-code commit `9e625e2dfd6c05b03e0d6efdffbcbf6b8fc5cb35`의 Windows CI [run `33028118325`](https://github.com/donghyun1park-web/mep-parser/actions/runs/33028118325)는 `1194 passed, 14 skipped, 7 warnings`로 성공했다. skips는 이 serial Step 밖의 runtime-gated 항목이며 MPI execution smoke는 `NOT_RUN`이다.
 
 ---
 

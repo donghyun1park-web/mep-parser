@@ -62,10 +62,13 @@ focused producer/validator/capability/Studio/physics: 289 passed, 7 skipped
 Python compile: PASS
 git diff --check: PASS
 cfd_projects tracked paths: 0
+public code commit: 9e625e2dfd6c05b03e0d6efdffbcbf6b8fc5cb35
+Windows CI run 33028118325: 1194 passed, 14 skipped, 7 warnings
+JUnit artifact 9629255682: sha256:be01310ff1ca7d9dee6eb78234c8822ec84a819694630ded2c03f8d24e5c78fb
 ```
 
-Public commit, push, and CI result are recorded in the progress ledger after
-they are executed.
+The code commit is published on `origin/codex/case-evidence-review-gate`, and
+the exact-commit Windows CI run completed successfully.
 
 ## Remaining gates
 
