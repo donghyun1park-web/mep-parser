@@ -201,6 +201,8 @@ def evaluate_body_fitted_case(case_dir: Path, gci_root: Path | None = None) -> d
 
 **Completion:** GCI 입력 순환이 제거되고, sensitivity/GCI가 없는 case는 끝까지 설계 인용되지 않는다.
 
+**2026-08-28 code-contract 상태:** `evaluate_gci_candidate()`와 final gate가 분리됐고 GCI loader는 sensitivity-pending 2차 후보를 받되 인용 상태를 만들지 않는다. final gate는 live Validation Anchor와 verified scheme/time/GCI/benchmark/applicability를 요구하며, 아직 verifier가 없는 문서는 `PASS` 문자열만으로 통과할 수 없다. Step 2의 전체 negative matrix와 Step 6 UI/report 상태어 전수 검증은 계속 OPEN이다.
+
 ### Task P1.2: 직렬 1차/2차 scheme sensitivity 실행기와 검증기를 완성한다
 
 **Files:**
@@ -248,6 +250,8 @@ def verify_serial_sensitivity_pair(study_dir: Path, current_case: Path) -> dict:
 
 **Completion:** 두 독립 serial run이 ≥3.0 FTT, 동일 마지막 0.1 FTT, 각 기본 수치 gate PASS, QoI 기준 PASS, 모든 hash 재계산 PASS일 때만 sensitivity PASS.
 
+**2026-08-28 상태:** frozen pair/job/selector와 `gci_fine` Validation Anchor 결속까지 준비됐지만 serial executor와 독립 verifier는 구현되지 않았다. 따라서 이 Task는 OPEN이며 `numerical_sensitivity.v1` 최종 PASS를 주장하지 않는다.
+
 ### Task P1.3: time-step/Co 민감도 계약을 추가한다
 
 **Files:**
@@ -284,6 +288,8 @@ def verify_temporal_study(study_dir: Path, current_case: Path) -> dict:
 
 **Completion:** self-declared JSON이 아닌 재검증된 `temporal_sensitivity.v1` PASS와 time-step history/QoI convergence plot이 현재 파일에서 재현되고 current design case에 결속된다.
 
+**2026-08-28 상태:** immutable three-level input preparation과 `temporal_fine` role-document 결속만 구현됐다. solver executor, 실제 Δt history 재검증, Richardson 판정과 current fine-case 결과 결속은 OPEN이다.
+
 ### Task P1.4: field job과 GCI fine case의 권위 경로를 하나로 만든다
 
 **Files:**
@@ -308,6 +314,8 @@ def verify_temporal_study(study_dir: Path, current_case: Path) -> dict:
 - [ ] **Step 6: `field_acceptance.py --analysis-only`를 추가해 geometry→surface→mesh→run→result hash chain은 검사하되 release evidence를 등록하거나 DESIGN_CITABLE로 승격하지 않게 한다.**
 
 **Completion:** 실제 또는 완전한 integration fixture에서 authority mapping과 `--analysis-only` chain gate가 PASS하고, fine case가 해당 PASS GCI의 `cases[]`에 동일 path/provenance로 존재한다. 최종 상태는 field/UQ 전까지 `analysis_complete_not_citable`/`NOT_EVALUATED`다.
+
+**2026-08-28 부분 완료:** field manifest는 Validation Anchor reference, authoritative solver case, binding hash, study ID와 사유를 고정한다. 실행은 별도 OCC/solver를 시작하지 않고 exact anchored fine case를 재검증·재사용하며 다른 terminal result path를 차단한다. `--analysis-only`는 release evidence를 발행하지 않는다. 실제 PASS GCI/fine-case 통합 실행과 release-audit 전체 negative matrix는 OPEN이다.
 
 ### Task P1.5: scientific validation과 적용범위를 최종 gate에 연결한다
 

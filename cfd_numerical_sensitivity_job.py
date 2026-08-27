@@ -20,6 +20,7 @@ import hashlib
 import json
 import math
 from numbers import Real
+from pathlib import Path
 
 import cfd_numerics
 
@@ -917,7 +918,9 @@ def without_job_manifest_hash(job_manifest):
 
 
 def build_cfd_numerical_sensitivity_job_manifest(frozen_pair_manifest, *,
-                                                 qoi_limits):
+                                                 qoi_limits,
+                                                 validation_anchor_path=None,
+                                                 anchor_case=None):
     """Build an external central job manifest tied to one frozen serial pair.
 
     This is deliberately *not* a ``numerical_sensitivity.v1`` result.  It only
@@ -930,6 +933,21 @@ def build_cfd_numerical_sensitivity_job_manifest(frozen_pair_manifest, *,
     if not pair_validation["valid"]:
         _error("NUMERICAL_SENSITIVITY_FROZEN_PAIR_INVALID")
     limits = _normalise_qoi_limits(qoi_limits)
+    anchor_reference = None
+    resolved_anchor_case = None
+    if validation_anchor_path is not None or anchor_case is not None:
+        if validation_anchor_path is None or anchor_case is None:
+            _error("NUMERICAL_SENSITIVITY_VALIDATION_ANCHOR_INCOMPLETE")
+        import cfd_validation_anchor
+        resolved_anchor_case = Path(anchor_case).expanduser().resolve(strict=False)
+        try:
+            anchor_reference = cfd_validation_anchor.anchor_reference(
+                validation_anchor_path,
+                expected_case=resolved_anchor_case,
+                expected_role="gci_fine",
+            )
+        except (OSError, cfd_validation_anchor.ValidationAnchorError):
+            _error("NUMERICAL_SENSITIVITY_VALIDATION_ANCHOR_INVALID")
     job_manifest = {
         "contract": JOB_MANIFEST_CONTRACT,
         "status": _PENDING_STATUS,
@@ -955,6 +973,9 @@ def build_cfd_numerical_sensitivity_job_manifest(frozen_pair_manifest, *,
         "allowed_variation": _allowed_numerical_variation(),
         "qoi_plan": _qoi_plan(limits),
     }
+    if anchor_reference is not None:
+        job_manifest["validation_anchor"] = anchor_reference
+        job_manifest["validation_anchor_case"] = str(resolved_anchor_case)
     job_manifest["job_manifest_sha256"] = canonical_sha256(job_manifest)
     return job_manifest
 
@@ -968,6 +989,8 @@ def _job_manifest_structure_blockers(job_manifest, pair_manifest):
         "selector_sha256", "aggregation", "baseline", "variant",
         "allowed_variation", "qoi_plan", "job_manifest_sha256",
     }
+    if "validation_anchor" in job_manifest or "validation_anchor_case" in job_manifest:
+        allowed.update({"validation_anchor", "validation_anchor_case"})
     if set(job_manifest) != allowed:
         blockers.append("NUMERICAL_SENSITIVITY_JOB_MANIFEST_FIELDS_INVALID")
     if job_manifest.get("contract") != JOB_MANIFEST_CONTRACT:
@@ -1021,6 +1044,23 @@ def _job_manifest_structure_blockers(job_manifest, pair_manifest):
     expected_allowed = _allowed_numerical_variation()
     if job_manifest.get("allowed_variation") != expected_allowed:
         blockers.append("NUMERICAL_SENSITIVITY_ALLOWED_VARIATION_INVALID")
+    anchor_reference = job_manifest.get("validation_anchor")
+    anchor_case = job_manifest.get("validation_anchor_case")
+    if anchor_reference is not None or anchor_case is not None:
+        if not isinstance(anchor_reference, dict) or not isinstance(anchor_case, str):
+            blockers.append("NUMERICAL_SENSITIVITY_VALIDATION_ANCHOR_INCOMPLETE")
+        else:
+            import cfd_validation_anchor
+            try:
+                current = cfd_validation_anchor.anchor_reference(
+                    anchor_reference.get("path"),
+                    expected_case=anchor_case,
+                    expected_role="gci_fine",
+                )
+                if current != anchor_reference:
+                    blockers.append("NUMERICAL_SENSITIVITY_VALIDATION_ANCHOR_CHANGED")
+            except (OSError, cfd_validation_anchor.ValidationAnchorError):
+                blockers.append("NUMERICAL_SENSITIVITY_VALIDATION_ANCHOR_INVALID")
     for name in ("baseline", "variant"):
         expected = _job_side(pair_manifest[name])
         if job_manifest.get(name) != expected:

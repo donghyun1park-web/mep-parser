@@ -11,6 +11,18 @@
     "seed_case_path": {"type": "string", "minLength": 1},
     "seed_tree_sha256": {"$ref": "#/$defs/sha256"},
     "anchor_fine_case": {"type": ["string", "null"]},
+    "validation_anchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["anchor_id", "role", "path", "sha256", "binding_sha256"],
+      "properties": {
+        "anchor_id": {"type": "string", "pattern": "^anchor-[0-9a-f]{16}$"},
+        "role": {"const": "temporal_fine"},
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "binding_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
     "fixed_delta_t_s": {"const": [0.04, 0.02, 0.01]},
     "controller": {
       "type": "object", "additionalProperties": false,

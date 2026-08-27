@@ -31,6 +31,11 @@
     "case_identity_status": {
       "enum": ["LINKED", "RUN_IDENTITY_CHANGED", "SUPERSEDED_DESIGN_REVISION"]
     },
+    "validation_anchor": {"type": "object"},
+    "authoritative_solver_case": {"type": "string", "minLength": 1},
+    "authoritative_case_sha256": {"$ref": "#/$defs/sha256"},
+    "validation_study_id": {"type": "string", "minLength": 1},
+    "authority_reason": {"type": "string", "minLength": 1},
     "resume_history": {"type": "array"},
     "attempt_history": {"type": "array"}
   },

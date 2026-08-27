@@ -21,6 +21,11 @@
     "error": {"type": "string"},
     "input": {"type": "object"},
     "level": {"type": "object"},
+    "validation_anchor": {"type": "object"},
+    "authoritative_solver_case": {"type": "string", "minLength": 1},
+    "authoritative_case_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "validation_study_id": {"type": "string", "minLength": 1},
+    "authority_reason": {"type": "string", "minLength": 1},
     "resume_history": {"type": "array"},
     "attempt_history": {"type": "array"}
   },

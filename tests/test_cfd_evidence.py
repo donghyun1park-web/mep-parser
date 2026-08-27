@@ -581,14 +581,23 @@ def make_valid_field_evidence(paths: dict[str, Path]) -> tuple[Path, Path]:
     )
 
     evidence = paths["root"] / "_release_evidence" / "field_dxf" / "actual-site.json"
-    built = cfd_evidence.field_acceptance.build_field_acceptance(
-        source, paths["geometry"], paths["surface"].parent,
-        paths["mesh"].parent, paths["case"], paths["root"], True, evidence,
-    )
-    assert built["ok"], built
-    assert cfd_evidence.field_acceptance.validate_evidence(
-        evidence, projects_root=paths["root"]
-    )["ok"] is True
+    with mock.patch.object(
+        cfd_evidence.field_acceptance.cfd_result_gate,
+        "evaluate_body_fitted_case",
+        return_value={
+            "status": "PASS", "design_ready": True,
+            "citation_status": "DESIGN_CITABLE", "citable": True,
+            "blockers": [],
+        },
+    ):
+        built = cfd_evidence.field_acceptance.build_field_acceptance(
+            source, paths["geometry"], paths["surface"].parent,
+            paths["mesh"].parent, paths["case"], paths["root"], True, evidence,
+        )
+        assert built["ok"], built
+        assert cfd_evidence.field_acceptance.validate_evidence(
+            evidence, projects_root=paths["root"]
+        )["ok"] is True
     return evidence, source
 
 

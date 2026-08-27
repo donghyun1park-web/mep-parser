@@ -3,6 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 import unittest
+from unittest import mock
 
 
 import cfd_numerical_sensitivity_job as sensitivity_job
@@ -728,6 +729,33 @@ class CentralSensitivityArtifactTests(unittest.TestCase):
             "NUMERICAL_SENSITIVITY_JOB_MANIFEST_FIELDS_INVALID",
             validation["blockers"],
         )
+
+    def test_pending_scheme_job_pins_live_validation_anchor_reference(self):
+        manifest = self._manifest()
+        anchor_case = Path("C:/project/fine-case")
+        reference = {
+            "anchor_id": "anchor-" + "a" * 16,
+            "role": "gci_fine",
+            "path": "C:/project/gci.validation-anchor.json",
+            "sha256": "b" * 64,
+            "binding_sha256": "c" * 64,
+        }
+        with mock.patch(
+            "cfd_validation_anchor.anchor_reference",
+            return_value=reference,
+        ):
+            artifact = sensitivity_job.build_cfd_numerical_sensitivity_job_manifest(
+                manifest,
+                qoi_limits=self._qoi_limits(),
+                validation_anchor_path=reference["path"],
+                anchor_case=anchor_case,
+            )
+            validation = sensitivity_job.validate_cfd_numerical_sensitivity_job_manifest(
+                artifact, trusted_pair_manifest=manifest,
+            )
+
+        self.assertEqual(artifact["validation_anchor"], reference)
+        self.assertTrue(validation["structurally_valid"], validation)
 
     def test_pending_job_builder_rejects_result_qoi_arguments(self):
         manifest = self._manifest()

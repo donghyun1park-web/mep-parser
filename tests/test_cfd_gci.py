@@ -85,16 +85,21 @@ class BodyFittedGCITests(unittest.TestCase):
                 "contract": "numerical_quality.v1",
                 "status": "PASS",
                 "design_ready": True,
+                "profile": "design_limited_second_order_v1",
                 "convection_order": 2,
+                "blockers": [],
             },
         }
         summary = {
             "contract": "body_fitted_summary.v1", "time_s": time_s,
             "cell_count": cells,
+            "bounds_m": {"minimum": [0, 0, 0], "maximum": [1, 1, 1]},
+            "fields": {"T": {"unit": "K"}, "U": {"unit": "m/s"}},
             "temperature": {"maximum": 293.15 + tmax, "p95": 293.15 + tp95},
             "velocity": {"p95_speed": up95},
         }
         result = {"contract": "result_manifest.v1",
+                  "engine": "body_fitted_openfoam_vtu",
                   "summary_path": "results/body_fitted_summary.json"}
         mesh_path = case / "mesh_manifest.json"
         thermal_path = case / "thermal_input.json"
@@ -139,15 +144,36 @@ class BodyFittedGCITests(unittest.TestCase):
         run["heat"] = thermal["heat"]
         run["heat_sources"] = thermal["heat_sources"]
         run_path.write_text(json.dumps(run), encoding="utf-8")
+        summary_path = case / "results" / "body_fitted_summary.json"
+        summary_path.write_text(json.dumps(summary), encoding="utf-8")
+        source_path = case / "results" / "internal.vtu"
+        source_path.write_text("<VTKFile/>", encoding="ascii")
+        slice_refs = []
+        slices_dir = case / "results" / "slices"
+        slices_dir.mkdir()
+        for axis in "xyz":
+            slice_path = slices_dir / f"{axis}_mid.json"
+            slice_path.write_text(json.dumps({
+                "axis": axis, "target_m": 0.5,
+                "sample_count": 0, "samples": [],
+            }), encoding="utf-8")
+            slice_refs.append({
+                "axis": axis,
+                "path": slice_path.relative_to(case).as_posix(),
+                "sha256": cfd_gci._file_sha256(slice_path),
+            })
         result.update({
+            "source": {
+                "path": source_path.relative_to(case).as_posix(),
+                "sha256": cfd_gci._file_sha256(source_path),
+            },
+            "summary_sha256": cfd_gci._file_sha256(summary_path),
+            "slices": slice_refs,
             "run_manifest_sha256": cfd_gci._file_sha256(run_path),
             "mesh_manifest_sha256": cfd_gci._file_sha256(mesh_path),
             "thermal_input_sha256": cfd_gci._file_sha256(thermal_path),
         })
         result_path.write_text(json.dumps(result), encoding="utf-8")
-        (case / "results" / "body_fitted_summary.json").write_text(
-            json.dumps(summary), encoding="utf-8"
-        )
         return case
 
     @staticmethod
@@ -317,6 +343,23 @@ class BodyFittedGCITests(unittest.TestCase):
 
         with self.assertRaisesRegex(cfd_gci.GCIInputError, "numerical_quality"):
             cfd_gci.load_body_fitted_case(case)
+
+    def test_gci_accepts_second_order_candidate_when_only_sensitivity_is_pending(self):
+        case = self._case("gci-candidate", 4000, 13, 4, 0.4)
+        run_path = case / "run_manifest.json"
+        run = json.loads(run_path.read_text(encoding="utf-8"))
+        run["design_ready"] = False
+        run["numerical_quality"].update({
+            "status": "NOT_EVALUATED",
+            "design_ready": False,
+            "blockers": ["NUMERICAL_SENSITIVITY_ARTIFACT_UNVERIFIED"],
+        })
+        run_path.write_text(json.dumps(run), encoding="utf-8")
+        self._sync_case_thermal_provenance(case)
+
+        loaded = cfd_gci.load_body_fitted_case(case)
+
+        self.assertEqual(loaded["candidate_status"], "GCI_CANDIDATE")
 
     def test_gci_rejects_freshly_rehashed_upwind_numerical_semantics(self):
         """A self-consistent hash must not hide a first-order scheme."""
@@ -843,6 +886,10 @@ class BodyFittedGCITests(unittest.TestCase):
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
         summary["time_s"] = 59.9996
         summary_path.write_text(json.dumps(summary), encoding="utf-8")
+        result_path = case / "result_manifest.json"
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        result["summary_sha256"] = cfd_gci._file_sha256(summary_path)
+        result_path.write_text(json.dumps(result), encoding="utf-8")
 
         loaded = cfd_gci.load_time_window_case(case)
 

@@ -327,8 +327,9 @@ class BodyFittedResultGateTests(unittest.TestCase):
             case = Path(tmp)
             run, _source, gci_root = self._write_valid_body_artifacts(case)
 
-            fresh = cfd_result_gate.evaluate_body_fitted_case(case, gci_root=gci_root)
-            self.assertEqual(fresh["citation_status"], "DESIGN_CITABLE")
+            fresh = cfd_result_gate.evaluate_gci_candidate(case)
+            self.assertEqual(fresh["status"], "GCI_CANDIDATE")
+            self.assertFalse(fresh["citable"])
 
             self._write_json(run, {
                 "contract": "run_manifest.v1",
@@ -342,6 +343,73 @@ class BodyFittedResultGateTests(unittest.TestCase):
             self.assertEqual(stale["status"], "NOT_EVALUATED")
             self.assertEqual(stale["citation_status"], "NOT_EVALUATED")
             self.assertIn("result_manifest_stale", stale["blockers"])
+
+    def test_sensitivity_pending_second_order_case_is_gci_candidate_not_citable(self):
+        repo = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(prefix=".test-gci-candidate-", dir=repo) as tmp:
+            case = Path(tmp)
+            run_path, _source, gci_root = self._write_valid_body_artifacts(case)
+            run = json.loads(run_path.read_text(encoding="utf-8"))
+            run["design_ready"] = False
+            run["numerical_quality"].update({
+                "status": "NOT_EVALUATED",
+                "design_ready": False,
+                "blockers": ["NUMERICAL_SENSITIVITY_ARTIFACT_UNVERIFIED"],
+            })
+            self._write_json(run_path, run)
+            result_path = case / "result_manifest.json"
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            result["run_manifest_sha256"] = self._sha256(run_path)
+            self._write_json(result_path, result)
+
+            candidate = cfd_result_gate.evaluate_gci_candidate(case)
+            final = cfd_result_gate.evaluate_body_fitted_case(case, gci_root=gci_root)
+
+        self.assertEqual(candidate["status"], "GCI_CANDIDATE")
+        self.assertEqual(candidate["citation_status"], "NOT_EVALUATED")
+        self.assertFalse(candidate["design_ready"])
+        self.assertFalse(candidate["citable"])
+        self.assertNotEqual(final["citation_status"], "DESIGN_CITABLE")
+        self.assertIn("validation_anchor", final["blockers"])
+
+    def test_gci_candidate_rejects_non_sensitivity_numerical_failure(self):
+        repo = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(prefix=".test-gci-candidate-", dir=repo) as tmp:
+            case = Path(tmp)
+            run_path, _source, _gci_root = self._write_valid_body_artifacts(case)
+            run = json.loads(run_path.read_text(encoding="utf-8"))
+            run["design_ready"] = False
+            run["numerical_quality"].update({
+                "status": "NOT_EVALUATED",
+                "design_ready": False,
+                "blockers": [
+                    "NUMERICAL_SENSITIVITY_ARTIFACT_UNVERIFIED",
+                    "COURANT_LIMIT",
+                ],
+            })
+            self._write_json(run_path, run)
+            result_path = case / "result_manifest.json"
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            result["run_manifest_sha256"] = self._sha256(run_path)
+            self._write_json(result_path, result)
+
+            candidate = cfd_result_gate.evaluate_gci_candidate(case)
+
+        self.assertNotEqual(candidate["status"], "GCI_CANDIDATE")
+        self.assertIn("numerical_quality", candidate["blockers"])
+
+    def test_unverified_pass_document_is_not_final_validation_evidence(self):
+        for filename in (
+            "numerical_sensitivity.json", "temporal_sensitivity.json",
+            "benchmark_validation.json", "applicability_envelope.json",
+        ):
+            blockers = cfd_result_gate._validate_final_evidence_document(
+                filename, {"status": "PASS"}, anchor_reference={
+                    "anchor_id": "anchor-" + "a" * 16,
+                    "sha256": "b" * 64,
+                },
+            )
+            self.assertTrue(blockers, filename)
 
     def test_body_result_requires_numerical_quality_evidence(self):
         repo = Path(__file__).resolve().parents[1]
@@ -551,8 +619,8 @@ class BodyFittedResultGateTests(unittest.TestCase):
             })
             self._write_json(gci_path, gci)
 
-            fresh = cfd_result_gate.evaluate_body_fitted_case(case, gci_root=gci_root)
-            self.assertEqual(fresh["citation_status"], "DESIGN_CITABLE")
+            fresh = cfd_result_gate.evaluate_gci_candidate(case)
+            self.assertEqual(fresh["status"], "GCI_CANDIDATE")
 
             restart["settings"] = {"changed_after_run": True}
             self._write_json(restart_path, restart)

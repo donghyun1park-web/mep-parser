@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "validation_anchor.v1.schema.json",
+  "title": "MEP CFD immutable validation authority anchor",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "contract", "created_at", "status", "role",
+    "anchor_id", "case_path", "artifacts", "physical_settings",
+    "physical_settings_sha256", "solver_identity", "selector_sha256",
+    "binding_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "contract": {"const": "validation_anchor.v1"},
+    "created_at": {"type": "string", "minLength": 1},
+    "status": {"const": "BOUND_NOT_CITABLE"},
+    "role": {"enum": ["gci_fine", "temporal_fine", "field_authority"]},
+    "anchor_id": {"type": "string", "pattern": "^anchor-[0-9a-f]{16}$"},
+    "case_path": {"type": "string", "minLength": 1},
+    "artifacts": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "prefixItems": [
+        {"$ref": "#/$defs/geometry"},
+        {"$ref": "#/$defs/surface"},
+        {"$ref": "#/$defs/mesh"},
+        {"$ref": "#/$defs/thermal"},
+        {"$ref": "#/$defs/run"},
+        {"$ref": "#/$defs/result"},
+        {"$ref": "#/$defs/source"},
+        {"$ref": "#/$defs/selector"}
+      ],
+      "items": false
+    },
+    "physical_settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["settings", "numerics", "terminals", "heat_sources"],
+      "properties": {
+        "settings": {"type": "object"},
+        "numerics": {"type": "object"},
+        "terminals": {"type": "array"},
+        "heat_sources": {"type": "array"}
+      }
+    },
+    "physical_settings_sha256": {"$ref": "#/$defs/sha256"},
+    "solver_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "engine", "application", "openfoam_version",
+        "numerical_profile", "convection_order"
+      ],
+      "properties": {
+        "engine": {"type": ["string", "null"]},
+        "application": {"type": ["string", "null"]},
+        "openfoam_version": {"type": ["string", "null"]},
+        "numerical_profile": {"type": ["string", "null"]},
+        "convection_order": {"type": ["number", "null"]}
+      }
+    },
+    "selector_sha256": {"$ref": "#/$defs/sha256"},
+    "binding_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "path", "sha256"],
+      "properties": {
+        "role": {"type": "string"},
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "geometry": {"allOf": [{"$ref": "#/$defs/artifact"}, {"properties": {"role": {"const": "geometry"}}}]},
+    "surface": {"allOf": [{"$ref": "#/$defs/artifact"}, {"properties": {"role": {"const": "surface_manifest"}}}]},
+    "mesh": {"allOf": [{"$ref": "#/$defs/artifact"}, {"properties": {"role": {"const": "mesh_manifest"}}}]},
+    "thermal": {"allOf": [{"$ref": "#/$defs/artifact"}, {"properties": {"role": {"const": "thermal_input"}}}]},
+    "run": {"allOf": [{"$ref": "#/$defs/artifact"}, {"properties": {"role": {"const": "run_manifest"}}}]},
+    "result": {"allOf": [{"$ref": "#/$defs/artifact"}, {"properties": {"role": {"const": "result_manifest"}}}]},
+    "source": {"allOf": [{"$ref": "#/$defs/artifact"}, {"properties": {"role": {"const": "result_source"}}}]},
+    "selector": {"allOf": [{"$ref": "#/$defs/artifact"}, {"properties": {"role": {"const": "occupied_selector"}}}]}
+  }
+}

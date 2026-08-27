@@ -13,6 +13,8 @@ import math
 from pathlib import Path
 import stat
 
+import cfd_validation_anchor
+
 
 CONTRACT = "temporal_sensitivity.v1"
 PENDING_STATUS = "PENDING_SOLVER_EVIDENCE"
@@ -145,12 +147,28 @@ def validate_temporal_manifest(manifest):
                     or child.get("delta_t_s") != expected_dt
                     or child.get("adjust_time_step") is not False):
                 blockers.append("TEMPORAL_CHILD_INPUT_INVALID")
+    anchor_ref = manifest.get("validation_anchor")
+    if anchor_ref is not None:
+        if not isinstance(anchor_ref, dict):
+            blockers.append("TEMPORAL_VALIDATION_ANCHOR_INVALID")
+        else:
+            try:
+                current = cfd_validation_anchor.anchor_reference(
+                    anchor_ref.get("path"),
+                    expected_case=manifest.get("anchor_fine_case"),
+                    expected_role="temporal_fine",
+                )
+                if current != anchor_ref:
+                    blockers.append("TEMPORAL_VALIDATION_ANCHOR_CHANGED")
+            except (OSError, cfd_validation_anchor.ValidationAnchorError):
+                blockers.append("TEMPORAL_VALIDATION_ANCHOR_INVALID")
     return {"valid": not blockers, "contract": CONTRACT, "status": PENDING_STATUS,
             "blockers": list(dict.fromkeys(blockers))}
 
 
 def create_temporal_study(case_seed: Path, fixed_delta_t: list[float],
-                          anchor_fine_case: Path | None = None) -> dict:
+                          anchor_fine_case: Path | None = None,
+                          validation_anchor_path: Path | None = None) -> dict:
     seed = _validate_seed(case_seed)
     levels = _normalise_levels(fixed_delta_t)
     anchor = None
@@ -158,7 +176,18 @@ def create_temporal_study(case_seed: Path, fixed_delta_t: list[float],
         anchor = Path(anchor_fine_case).expanduser().resolve(strict=False)
         if not anchor.is_dir():
             _fail("TEMPORAL_ANCHOR_CASE_INVALID", str(anchor))
-        _validate_seed(anchor)
+    anchor_reference = None
+    if validation_anchor_path is not None:
+        if anchor is None:
+            _fail("TEMPORAL_ANCHOR_CASE_REQUIRED")
+        try:
+            anchor_reference = cfd_validation_anchor.anchor_reference(
+                validation_anchor_path,
+                expected_case=anchor,
+                expected_role="temporal_fine",
+            )
+        except (OSError, cfd_validation_anchor.ValidationAnchorError) as exc:
+            _fail("TEMPORAL_VALIDATION_ANCHOR_INVALID", str(exc))
     seed_hash = _tree_sha256(seed)
     children = [
         {
@@ -198,6 +227,8 @@ def create_temporal_study(case_seed: Path, fixed_delta_t: list[float],
             "requires_qoi_recomputation": True,
         },
     }
+    if anchor_reference is not None:
+        manifest["validation_anchor"] = anchor_reference
     manifest["manifest_sha256"] = _canonical_sha256(manifest)
     return manifest
 

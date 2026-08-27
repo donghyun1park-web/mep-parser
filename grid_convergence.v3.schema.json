@@ -17,6 +17,18 @@
     "uncertainty_limit_pct": {"type": "number", "exclusiveMinimum": 0},
     "errors": {"type": "array", "items": {"type": "string"}},
     "warnings": {"type": "array", "items": {"type": "string"}},
+    "validation_anchor": {
+      "type": "object",
+      "required": ["anchor_id", "role", "path", "sha256", "binding_sha256"],
+      "properties": {
+        "anchor_id": {"type": "string", "pattern": "^anchor-[0-9a-f]{16}$"},
+        "role": {"const": "gci_fine"},
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "binding_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
     "comparison": {
       "type": "object",
       "required": [

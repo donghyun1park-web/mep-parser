@@ -33,6 +33,8 @@
     },
     "pair_manifest_sha256": {"$ref": "#/$defs/sha256"},
     "selector_sha256": {"$ref": "#/$defs/sha256"},
+    "validation_anchor": {"$ref": "#/$defs/validationAnchor"},
+    "validation_anchor_case": {"type": "string", "minLength": 1},
     "aggregation": {
       "type": "object", "additionalProperties": false,
       "required": ["scope", "occupied_zone", "exhaust_temperature_rise_k"],
@@ -73,6 +75,17 @@
   },
   "$defs": {
     "sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+    "validationAnchor": {
+      "type": "object", "additionalProperties": false,
+      "required": ["anchor_id", "role", "path", "sha256", "binding_sha256"],
+      "properties": {
+        "anchor_id": {"type": "string", "pattern": "^anchor-[0-9a-f]{16}$"},
+        "role": {"const": "gci_fine"},
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "binding_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
     "side": {
       "type": "object", "additionalProperties": false,
       "required": ["run_id", "profile", "case_child", "case_seed_snapshot_sha256", "input_snapshot_sha256", "mesh_sha256", "physical_input_sha256"],

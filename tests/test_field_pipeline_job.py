@@ -144,6 +144,176 @@ class FieldPipelineJobTests(unittest.TestCase):
             field_pipeline_job.load_job(self.root, created["job"])["attempts"], 0,
         )
 
+    def test_invalid_validation_anchor_blocks_before_solver_or_attempt_increment(self):
+        created = field_pipeline_job.create_job(self.root, self.geometry)
+        manifest = dict(created["manifest"])
+        manifest["authoritative_solver_case"] = str(
+            self.root / "_body_solver" / "fine-case"
+        )
+        manifest["validation_anchor"] = {
+            "anchor_id": "anchor-" + "a" * 16,
+            "role": "field_authority",
+            "path": str(self.root / "missing.validation-anchor.json"),
+            "sha256": "b" * 64,
+            "binding_sha256": "c" * 64,
+        }
+        field_pipeline_job.cfd_gci_job._atomic_json(
+            created["manifest_path"], manifest
+        )
+
+        result = field_pipeline_job.run_job(self.root, created["job"])
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "FIELD_AUTHORITY_ANCHOR_INVALID")
+        self.assertEqual(
+            field_pipeline_job.load_job(self.root, created["job"])["attempts"], 0,
+        )
+
+    def test_create_records_validation_study_and_authoritative_case_binding(self):
+        authoritative = self.root / "_body_solver" / "fine-case"
+        anchor_path = self.root / "anchors" / "field.json"
+        reference = {
+            "anchor_id": "anchor-" + "a" * 16,
+            "role": "field_authority",
+            "path": str(anchor_path.resolve()),
+            "sha256": "b" * 64,
+            "binding_sha256": "c" * 64,
+        }
+        with mock.patch.object(
+            field_pipeline_job.cfd_validation_anchor,
+            "anchor_reference",
+            return_value=reference,
+        ):
+            created = field_pipeline_job.create_job(
+                self.root,
+                self.geometry,
+                settings={
+                    "validation_anchor_path": str(anchor_path),
+                    "authoritative_solver_case": str(authoritative),
+                    "validation_study_id": "gci-study-001",
+                    "authority_reason": "verified GCI fine case",
+                },
+            )
+
+        self.assertTrue(created["ok"], created)
+        manifest = created["manifest"]
+        self.assertEqual(manifest["validation_anchor"], reference)
+        self.assertEqual(
+            manifest["authoritative_solver_case"], str(authoritative.resolve())
+        )
+        self.assertEqual(manifest["validation_study_id"], "gci-study-001")
+        self.assertEqual(manifest["authority_reason"], "verified GCI fine case")
+
+    def test_terminal_field_result_must_be_the_authoritative_solver_case(self):
+        authoritative = self.root / "_body_solver" / "fine-case"
+        other = self.root / "_body_solver" / "field-rerun"
+        reference = {
+            "anchor_id": "anchor-" + "a" * 16,
+            "role": "field_authority",
+            "path": str(self.root / "anchors" / "field.json"),
+            "sha256": "b" * 64,
+            "binding_sha256": "c" * 64,
+        }
+        manifest = {
+            "validation_anchor": reference,
+            "authoritative_solver_case": str(authoritative),
+            "authoritative_case_sha256": reference["binding_sha256"],
+            "validation_study_id": "gci-study-001",
+            "authority_reason": "verified GCI fine case",
+            "status": "complete",
+            "result_case": str(other),
+        }
+        with mock.patch.object(
+            field_pipeline_job.cfd_validation_anchor,
+            "anchor_reference",
+            return_value=reference,
+        ):
+            issues = field_pipeline_job.validate_authoritative_case_binding(manifest)
+
+        self.assertEqual(issues[0]["code"], "FIELD_RESULT_CASE_NOT_AUTHORITATIVE")
+
+    def test_field_authority_rejects_tampered_binding_hash(self):
+        authoritative = self.root / "_body_solver" / "fine-case"
+        reference = {
+            "anchor_id": "anchor-" + "a" * 16,
+            "role": "field_authority",
+            "path": str(self.root / "anchors" / "field.json"),
+            "sha256": "b" * 64,
+            "binding_sha256": "c" * 64,
+        }
+        manifest = {
+            "validation_anchor": reference,
+            "authoritative_solver_case": str(authoritative),
+            "authoritative_case_sha256": "d" * 64,
+            "validation_study_id": "gci-study-001",
+            "authority_reason": "verified GCI fine case",
+        }
+        with mock.patch.object(
+            field_pipeline_job.cfd_validation_anchor,
+            "anchor_reference", return_value=reference,
+        ):
+            issues = field_pipeline_job.validate_authoritative_case_binding(manifest)
+
+        self.assertEqual(issues[0]["code"], "FIELD_AUTHORITY_BINDING_HASH_MISMATCH")
+
+    def test_run_reuses_authoritative_case_without_starting_occ_or_solver(self):
+        created = field_pipeline_job.create_job(self.root, self.geometry)
+        authoritative = self.root / "_body_solver" / "fine-case"
+        authoritative.mkdir(parents=True)
+        reference = {
+            "anchor_id": "anchor-" + "a" * 16,
+            "role": "field_authority",
+            "path": str(self.root / "anchors" / "field.json"),
+            "sha256": "b" * 64,
+            "binding_sha256": "c" * 64,
+        }
+        manifest = dict(created["manifest"])
+        manifest.update(
+            validation_anchor=reference,
+            authoritative_solver_case=str(authoritative),
+            authoritative_case_sha256=reference["binding_sha256"],
+            validation_study_id="gci-study-001",
+            authority_reason="verified GCI fine case",
+        )
+        manifest["input"]["validation_authority"] = {
+            key: manifest[key] for key in (
+                "validation_anchor", "authoritative_solver_case",
+                "authoritative_case_sha256", "validation_study_id",
+                "authority_reason",
+            )
+        }
+        field_pipeline_job.cfd_gci_job._atomic_json(created["manifest_path"], manifest)
+        snapshot = {
+            "citation_status": "CITATION_BLOCKED",
+            "citation_blockers": ["BENCHMARK_VALIDATOR_NOT_IMPLEMENTED"],
+            "review_summary": {"status": "MISSING"},
+        }
+        with (
+            mock.patch.object(
+                field_pipeline_job.cfd_validation_anchor,
+                "anchor_reference", return_value=reference,
+            ),
+            mock.patch.object(
+                field_pipeline_job, "_current_health_snapshot", return_value=snapshot,
+            ),
+            mock.patch.object(field_pipeline_job.cfd_occ, "run_occ_job") as occ_run,
+            mock.patch.object(
+                field_pipeline_job.cfd_gci_job, "run_thermal_design_level",
+            ) as solver_run,
+        ):
+            result = field_pipeline_job.run_job(self.root, created["job"])
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(
+            result["manifest"]["result_case"], str(authoritative.resolve())
+        )
+        self.assertEqual(
+            result["manifest"]["status"],
+            field_pipeline_job.ANALYSIS_COMPLETE_NOT_CITABLE,
+        )
+        occ_run.assert_not_called()
+        solver_run.assert_not_called()
+
     def test_new_design_revision_marks_v2_job_superseded_and_blocks_resume(self):
         import project_model
 

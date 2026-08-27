@@ -18,6 +18,7 @@ import cfd_occ
 import cfd_power
 import cfd_result_gate
 import cfd_review
+import cfd_validation_anchor
 import field_acceptance
 import project_model
 from geometry_v2 import migrate_geometry, validate_for_body_fitted
@@ -75,6 +76,73 @@ def _sha256(path):
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def validate_authoritative_case_binding(manifest):
+    """Revalidate a field job's role document against its exact solver case."""
+    manifest = manifest if isinstance(manifest, dict) else {}
+    reference = manifest.get("validation_anchor")
+    solver_case = str(manifest.get("authoritative_solver_case") or "").strip()
+    if reference is None and not solver_case:
+        return []
+    if not isinstance(reference, dict) or not solver_case:
+        return [{
+            "code": "FIELD_AUTHORITY_BINDING_INCOMPLETE",
+            "message": "validation_anchor and authoritative_solver_case are both required",
+        }]
+    try:
+        current = cfd_validation_anchor.anchor_reference(
+            reference.get("path"), expected_case=solver_case,
+            expected_role="field_authority",
+        )
+    except (OSError, cfd_validation_anchor.ValidationAnchorError) as exc:
+        code = (
+            "FIELD_AUTHORITY_CASE_MISMATCH"
+            if "ANCHOR_CASE_MISMATCH" in str(exc)
+            else "FIELD_AUTHORITY_ANCHOR_INVALID"
+        )
+        return [{"code": code, "message": str(exc)}]
+    if current != reference:
+        return [{
+            "code": "FIELD_AUTHORITY_ANCHOR_CHANGED",
+            "message": "current anchor reference differs from the field manifest",
+        }]
+    if manifest.get("authoritative_case_sha256") != reference.get("binding_sha256"):
+        return [{
+            "code": "FIELD_AUTHORITY_BINDING_HASH_MISMATCH",
+            "message": "authoritative_case_sha256 must equal the live anchor binding hash",
+        }]
+    if not str(manifest.get("validation_study_id") or "").strip() or not str(
+        manifest.get("authority_reason") or ""
+    ).strip():
+        return [{
+            "code": "FIELD_AUTHORITY_METADATA_INCOMPLETE",
+            "message": "validation_study_id and authority_reason are required",
+        }]
+    input_payload = manifest.get("input")
+    if isinstance(input_payload, dict):
+        expected_authority = {
+            key: manifest.get(key) for key in (
+                "validation_anchor", "authoritative_solver_case",
+                "authoritative_case_sha256", "validation_study_id",
+                "authority_reason",
+            )
+        }
+        if input_payload.get("validation_authority") != expected_authority:
+            return [{
+                "code": "FIELD_AUTHORITY_INPUT_SNAPSHOT_MISMATCH",
+                "message": "field input authority snapshot differs from top-level authority",
+            }]
+    result_case = str(manifest.get("result_case") or "").strip()
+    if result_case and (
+        Path(result_case).expanduser().resolve(strict=False)
+        != Path(solver_case).expanduser().resolve(strict=False)
+    ):
+        return [{
+            "code": "FIELD_RESULT_CASE_NOT_AUTHORITATIVE",
+            "message": "terminal field result is not the anchored authoritative solver case",
+        }]
+    return []
 
 
 def _review_lock_for_case(root, solver_case):
@@ -191,6 +259,15 @@ def review_terminal_job_citation(root, manifest):
     """
     reviewed = dict(manifest or {})
     if not is_terminal_status(reviewed.get("status")):
+        return reviewed
+    authority_issues = validate_authoritative_case_binding(reviewed)
+    if authority_issues:
+        reviewed.update(
+            status=ANALYSIS_COMPLETE_NOT_CITABLE,
+            citation_status="CITATION_BLOCKED",
+            citation_blockers=[item["code"] for item in authority_issues],
+            review_summary={"status": "INVALID"},
+        )
         return reviewed
     for key in (*_HEALTH_SNAPSHOT_KEYS, "citation_reasons", "citation_gate"):
         reviewed.pop(key, None)
@@ -390,6 +467,43 @@ def create_job(root, geometry_path, settings=None):
         identity_fields = _identity_fields(root, requested)
     except project_model.ProjectModelError as exc:
         return {"ok": False, "code": exc.code, "error": str(exc)}
+    authority_fields = None
+    authority_values = {
+        "validation_anchor_path": str(requested.get("validation_anchor_path") or "").strip(),
+        "authoritative_solver_case": str(requested.get("authoritative_solver_case") or "").strip(),
+        "validation_study_id": str(requested.get("validation_study_id") or "").strip(),
+        "authority_reason": str(requested.get("authority_reason") or "").strip(),
+    }
+    if any(authority_values.values()):
+        if not all(authority_values.values()):
+            return {
+                "ok": False,
+                "code": "FIELD_AUTHORITY_BINDING_INCOMPLETE",
+                "error": "Validation Anchor authority fields must be supplied together.",
+            }
+        authoritative_case = Path(
+            authority_values["authoritative_solver_case"]
+        ).expanduser().resolve(strict=False)
+        try:
+            authoritative_case.relative_to(root)
+            anchor_reference = cfd_validation_anchor.anchor_reference(
+                authority_values["validation_anchor_path"],
+                expected_case=authoritative_case,
+                expected_role="field_authority",
+            )
+        except (OSError, ValueError, cfd_validation_anchor.ValidationAnchorError) as exc:
+            return {
+                "ok": False,
+                "code": "FIELD_AUTHORITY_ANCHOR_INVALID",
+                "error": str(exc),
+            }
+        authority_fields = {
+            "validation_anchor": anchor_reference,
+            "authoritative_solver_case": str(authoritative_case),
+            "authoritative_case_sha256": anchor_reference["binding_sha256"],
+            "validation_study_id": authority_values["validation_study_id"],
+            "authority_reason": authority_values["authority_reason"],
+        }
     try:
         width = float(requested.get("background_cell_m", DEFAULT_BACKGROUND_CELL_M))
     except (TypeError, ValueError):
@@ -419,6 +533,8 @@ def create_job(root, geometry_path, settings=None):
                 "design_revision_sha256", "scenario_revision_sha256",
             )
         }
+    if authority_fields is not None:
+        job_input["validation_authority"] = dict(authority_fields)
     job_id = "field-" + cfd_gci_job._canonical_hash(job_input)[:12]
     path = _job_path(root, job_id)
     existing = load_job(root, job_id)
@@ -446,6 +562,7 @@ def create_job(root, geometry_path, settings=None):
         "review_summary": {"status": "MISSING"},
     }
     manifest.update(identity_fields or {"case_identity_status": "NOT_LINKED"})
+    manifest.update(authority_fields or {})
     cfd_gci_job._atomic_json(path, manifest)
     return {"ok": True, "job": job_id, "manifest": manifest,
             "manifest_path": str(path), "existing": False}
@@ -458,6 +575,58 @@ def _publish(path, manifest, callback=None, message=""):
         callback({"job": manifest["job"], "stage": manifest["stage"],
                   "message": message or manifest["stage"],
                   "level": manifest["level"]})
+
+
+def _complete_from_authoritative_case(root, path, manifest, callback=None):
+    """Publish a field job from its anchored fine case without a second solve."""
+    root = Path(root).expanduser().resolve()
+    completed = Path(manifest["authoritative_solver_case"]).expanduser().resolve(strict=True)
+    completed.relative_to(root)
+    started_at = _now()
+    started = time.monotonic()
+    manifest = dict(manifest)
+    manifest.update(
+        status="running", stage="authoritative_case_revalidation", error="",
+        attempts=int(manifest.get("attempts") or 0) + 1,
+        attempt_started_at=started_at,
+    )
+    _publish(path, manifest, callback, "Validation Anchor 권위 케이스 재검증")
+    if manifest.get("contract") == CONTRACT_V2:
+        link = project_model.link_run_identity(
+            completed, root / manifest["case_identity_path"],
+        )
+        manifest["case_identity_status"] = link["case_identity_status"]
+    snapshot = _current_health_snapshot(root, completed)
+    final_status = (
+        "complete" if snapshot["citation_status"] == "DESIGN_CITABLE"
+        else ANALYSIS_COMPLETE_NOT_CITABLE
+    )
+    elapsed = round(time.monotonic() - started, 3)
+    attempts = list(manifest.get("attempt_history") or [])
+    attempts.append({
+        "attempt": manifest["attempts"], "started_at": started_at,
+        "finished_at": _now(), "elapsed_s": elapsed,
+        "status": final_status, "mode": "authoritative_case_reuse",
+    })
+    level = dict(manifest.get("level") or {})
+    level.update(
+        status="PASS" if final_status == "complete" else "WARN",
+        stage="complete", error="", thermal_case=str(completed),
+    )
+    manifest.update(
+        status=final_status, stage="complete", error="", level=level,
+        result_case=str(completed),
+        report_path=str(completed / "body_fitted_report.html"),
+        **snapshot,
+        completed_at=_now(), attempt_history=attempts,
+        last_attempt_elapsed_s=elapsed,
+        total_elapsed_s=round(float(manifest.get("total_elapsed_s") or 0) + elapsed, 3),
+    )
+    _publish(path, manifest, callback, "Validation Anchor 권위 케이스 연결 완료")
+    return {
+        "ok": True, "job": manifest["job"], "manifest": manifest,
+        "case": completed.name, "authoritative_case_reused": True,
+    }
 
 
 def _run_unlocked(root, job_id, callback=None):
@@ -584,6 +753,16 @@ def run_job(root, job_id, callback=None):
     existing = load_job(root, job_id)
     if existing is None:
         return {"ok": False, "error": "현장 자동 해석 작업을 찾을 수 없습니다."}
+    authority_issues = validate_authoritative_case_binding(existing)
+    if authority_issues:
+        return {
+            "ok": False,
+            "code": authority_issues[0]["code"],
+            "error": "Validation Anchor와 authoritative solver case가 일치하지 않습니다.",
+            "issues": authority_issues,
+            "job": job_id,
+            "manifest": existing,
+        }
     identity_issues = validate_job_identity(root, existing)
     if identity_issues:
         issue_code = identity_issues[0]["code"]
@@ -604,6 +783,23 @@ def run_job(root, job_id, callback=None):
             "case": Path(str(reviewed.get("result_case") or "")).name,
             "already_complete": True,
         }
+    if str(existing.get("authoritative_solver_case") or "").strip():
+        token, owner = cfd_gci_job.acquire_job_lock(path)
+        if token is None:
+            return {
+                "ok": False, "code": "FIELD_JOB_ALREADY_RUNNING",
+                "error": (
+                    "현장 권위 케이스 재검증이 이미 실행 중입니다. "
+                    f"PID {owner.get('pid', 'unknown')}"
+                ),
+                "job": job_id, "lock": owner,
+            }
+        try:
+            return _complete_from_authoritative_case(
+                root, path, existing, callback=callback,
+            )
+        finally:
+            cfd_gci_job.release_job_lock(path, token)
     running_gci = None
     for row in cfd_gci_job.list_studies(root):
         busy_owner = cfd_gci_job.active_run_lock(root, row.get("study"))

@@ -168,7 +168,7 @@ def _same_path(left, right):
 
 def evaluate_field_case(source_dxf, geometry_path, surface_dir, mesh_case,
                         solver_case, projects_root="cfd_projects",
-                        actual_site_drawing=False):
+                        actual_site_drawing=False, analysis_only=False):
     """Return computed evidence; no stage status is accepted from the caller."""
     root = Path(projects_root).expanduser().resolve()
     source = Path(source_dxf).expanduser().resolve()
@@ -326,17 +326,27 @@ def evaluate_field_case(source_dxf, geometry_path, surface_dir, mesh_case,
     # the Studio and report.  A self-declared run status is not sufficient for
     # a design-ready field case: the result must also be provenance-current,
     # numerically qualified, and tied to a passing GCI study.
-    body_gate = cfd_result_gate.evaluate_body_fitted_case(
-        solver_case, gci_root=root / "_body_gci"
-    )
-    if not (
-        body_gate.get("status") == "PASS"
-        and body_gate.get("design_ready") is True
-        and body_gate.get("citation_status") == "DESIGN_CITABLE"
-        and body_gate.get("citable") is True
-    ):
+    if analysis_only:
+        body_gate = cfd_result_gate.evaluate_gci_candidate(solver_case)
+        body_gate_ok = (
+            body_gate.get("status") == "GCI_CANDIDATE"
+            and body_gate.get("design_ready") is False
+            and body_gate.get("citable") is False
+        )
+    else:
+        body_gate = cfd_result_gate.evaluate_body_fitted_case(
+            solver_case, gci_root=root / "_body_gci"
+        )
+        body_gate_ok = (
+            body_gate.get("status") == "PASS"
+            and body_gate.get("design_ready") is True
+            and body_gate.get("citation_status") == "DESIGN_CITABLE"
+            and body_gate.get("citable") is True
+        )
+    if not body_gate_ok:
         blockers = body_gate.get("blockers") or ["NOT_DESIGN_CITABLE"]
-        errors.append("RESULT_CITATION_GATE:" + ",".join(
+        prefix = "RESULT_ANALYSIS_GATE:" if analysis_only else "RESULT_CITATION_GATE:"
+        errors.append(prefix + ",".join(
             str(item) for item in blockers
         ))
 
@@ -354,17 +364,29 @@ def evaluate_field_case(source_dxf, geometry_path, surface_dir, mesh_case,
         "result": "PASS" if not any(item.startswith("RESULT") for item in errors) else "FAIL",
     }
     return {"status": "PASS" if not errors else "FAIL", "errors": errors,
-            "artifacts": artifacts, "variation": variation, "gates": gates}
+            "artifacts": artifacts, "variation": variation, "gates": gates,
+            "scope": "analysis_only" if analysis_only else "release_evidence"}
 
 
 def build_field_acceptance(source_dxf, geometry_path, surface_dir, mesh_case,
                            solver_case, projects_root="cfd_projects",
-                           actual_site_drawing=False, output_path=None):
+                           actual_site_drawing=False, output_path=None,
+                           analysis_only=False):
     root = Path(projects_root).expanduser().resolve()
     computed = evaluate_field_case(
         source_dxf, geometry_path, surface_dir, mesh_case, solver_case,
         root, actual_site_drawing=actual_site_drawing,
+        analysis_only=analysis_only,
     )
+    if analysis_only:
+        return {
+            "ok": computed["status"] == "PASS",
+            "analysis_only": True,
+            "citation_status": "NOT_EVALUATED",
+            "computed": computed,
+            "manifest": None,
+            "manifest_path": None,
+        }
     source = Path(source_dxf).expanduser().resolve()
     manifest = {
         "schema_version": 1,
@@ -432,11 +454,13 @@ def main(argv=None):
     parser.add_argument("--mesh-case", required=True)
     parser.add_argument("--solver-case", required=True)
     parser.add_argument("--actual-site", action="store_true")
+    parser.add_argument("--analysis-only", action="store_true")
     parser.add_argument("--output")
     args = parser.parse_args(argv)
     result = build_field_acceptance(
         args.source_dxf, args.geometry, args.surface_dir, args.mesh_case,
         args.solver_case, args.projects_root, args.actual_site, args.output,
+        analysis_only=args.analysis_only,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result["ok"] else 2

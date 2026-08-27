@@ -9,6 +9,7 @@ compares only cases with the same geometry, physics and physical time.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import copy
 import hashlib
 import json
 import math
@@ -16,6 +17,7 @@ from pathlib import Path
 import tempfile
 
 import cfd_result_gate
+import cfd_validation_anchor
 from heat_source_contract import HeatSourceContractError, source_reference_kind
 
 
@@ -44,6 +46,32 @@ _V2_METRICS = (
 
 class GCIInputError(ValueError):
     """Raised when completed cases cannot form a valid grid study."""
+
+
+def bind_validation_anchor(manifest, anchor_path, *, fine_case):
+    """Bind a PASS GCI document to the live raw bytes of its exact fine case."""
+    if not isinstance(manifest, dict):
+        raise GCIInputError("GCI manifest가 객체가 아닙니다.")
+    fine = Path(fine_case).expanduser().resolve(strict=False)
+    cases = manifest.get("cases") if isinstance(manifest.get("cases"), list) else []
+    if not any(
+        isinstance(row, dict)
+        and Path(str(row.get("path") or "")).expanduser().resolve(strict=False) == fine
+        for row in cases
+    ):
+        raise GCIInputError("Validation Anchor fine case가 GCI cases[]에 없습니다.")
+    try:
+        reference = cfd_validation_anchor.anchor_reference(
+            anchor_path, expected_case=fine, expected_role="gci_fine",
+        )
+    except (OSError, cfd_validation_anchor.ValidationAnchorError) as exc:
+        raise GCIInputError(f"Validation Anchor가 유효하지 않습니다: {exc}") from exc
+    existing = manifest.get("validation_anchor")
+    if existing not in (None, reference):
+        raise GCIInputError("GCI manifest의 기존 Validation Anchor를 바꿀 수 없습니다.")
+    bound = copy.deepcopy(manifest)
+    bound["validation_anchor"] = reference
+    return bound
 
 
 def _now():
@@ -491,7 +519,7 @@ def _geometry_payload(mesh):
 
 
 def load_body_fitted_case(case_dir):
-    """Load and validate one design-ready body-fitted thermal result."""
+    """Load one live, non-citable GCI candidate without requiring final GCI."""
     case = Path(case_dir).expanduser().resolve()
     try:
         result = _read_json(case / "result_manifest.json")
@@ -504,29 +532,16 @@ def load_body_fitted_case(case_dir):
 
     if mesh.get("status") != "PASS":
         raise GCIInputError(f"{case.name}: 메시 품질 gate가 PASS가 아닙니다.")
-    if run.get("status") != "PASS" or not run.get("design_ready"):
-        raise GCIInputError(f"{case.name}: 설계 검토 가능한 열·부력 PASS 결과가 아닙니다.")
     if run.get("engine") != "body_fitted_buoyant_urans":
         raise GCIInputError(f"{case.name}: body-fitted 열·부력 결과가 아닙니다.")
-
-    numerical_quality = run.get("numerical_quality")
-    convection_order = (
-        numerical_quality.get("convection_order")
-        if isinstance(numerical_quality, dict) else None
-    )
-    numerical_quality_ok = (
-        isinstance(numerical_quality, dict)
-        and numerical_quality.get("contract") == "numerical_quality.v1"
-        and numerical_quality.get("status") == "PASS"
-        and numerical_quality.get("design_ready") is True
-        and isinstance(convection_order, (int, float))
-        and not isinstance(convection_order, bool)
-        and math.isfinite(convection_order)
-        and convection_order >= 2
-    )
-    if not numerical_quality_ok:
+    candidate = cfd_result_gate.evaluate_gci_candidate(case)
+    if candidate.get("status") != "GCI_CANDIDATE":
         raise GCIInputError(
-            f"{case.name}: numerical_quality가 설계 검토 가능(PASS/2차) 상태가 아닙니다."
+            f"{case.name}: numerical_quality/result provenance가 GCI_CANDIDATE가 "
+            "아닙니다: " + ", ".join(
+                list(candidate.get("blockers") or [])
+                + list(candidate.get("reasons") or [])
+            )
         )
 
     numerical_provenance_issues = (
@@ -607,6 +622,7 @@ def load_body_fitted_case(case_dir):
     return {
         "name": case.name,
         "path": str(case),
+        "candidate_status": "GCI_CANDIDATE",
         "time_s": time_s,
         "cell_count": cells,
         "fluid_volume_m3": volume,
@@ -1252,7 +1268,8 @@ def build_grid_convergence_v2(case_dirs, out_path=None, limit_pct=GCI_LIMIT_PCT)
             "manifest_path": str(Path(out_path).resolve()) if out_path else None}
 
 
-def build_grid_convergence_v3(case_dirs, out_path=None, limit_pct=GCI_LIMIT_PCT):
+def build_grid_convergence_v3(case_dirs, out_path=None, limit_pct=GCI_LIMIT_PCT,
+                              validation_anchor_path=None):
     """Build a 4+ grid Eca-Hoekstra LSR mesh-uncertainty gate."""
     if not isinstance(case_dirs, (list, tuple)) or len(case_dirs) < 4:
         return {"ok": False, "error": "서로 다른 열·부력 결과가 최소 4개 필요합니다."}
@@ -1362,6 +1379,10 @@ def build_grid_convergence_v3(case_dirs, out_path=None, limit_pct=GCI_LIMIT_PCT)
         )} for item in cases],
         "metrics": metrics,
     }
+    if validation_anchor_path is not None:
+        manifest = bind_validation_anchor(
+            manifest, validation_anchor_path, fine_case=cases[0]["path"],
+        )
     if out_path is not None:
         _atomic_json(out_path, manifest)
     return {"ok": True, "manifest": manifest,

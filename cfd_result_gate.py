@@ -17,6 +17,7 @@ from pathlib import Path
 import cfd_convergence_spec
 import cfd_numerics
 import cfd_radiation
+import cfd_validation_anchor
 
 
 CONTRACT = "result_trust.v1"
@@ -425,7 +426,59 @@ def _find_passing_gci_manifest(case: Path, gci_root, provenance) -> Path | None:
     return None
 
 
-def evaluate_body_fitted_case(case_dir, *, gci_root=None):
+def _validate_final_evidence_document(filename, evidence, *, anchor_reference):
+    """Reject self-declared PASS files unless a live verifier owns the contract."""
+    if not isinstance(evidence, dict):
+        return ["FINAL_EVIDENCE_MISSING"]
+    if filename == "numerical_sensitivity.json":
+        blockers = list(
+            cfd_numerics.validate_numerical_sensitivity(evidence).get("blockers") or []
+        )
+        if evidence.get("validation_anchor") != anchor_reference:
+            blockers.append("NUMERICAL_SENSITIVITY_VALIDATION_ANCHOR_MISMATCH")
+        return list(dict.fromkeys(blockers))
+    if filename == "temporal_sensitivity.json":
+        # The current temporal contract deliberately prepares inputs only.  A
+        # solver executor/verifier is required before any PASS can be trusted.
+        return ["TEMPORAL_SENSITIVITY_VERIFIER_NOT_IMPLEMENTED"]
+    if filename == "benchmark_validation.json":
+        return ["BENCHMARK_VALIDATOR_NOT_IMPLEMENTED"]
+    if filename == "applicability_envelope.json":
+        return ["APPLICABILITY_VALIDATOR_NOT_IMPLEMENTED"]
+    return ["FINAL_EVIDENCE_CONTRACT_UNKNOWN"]
+
+
+def _resolve_gci_validation_anchor(gci_manifest_path, case):
+    """Resolve and revalidate the anchor reference owned by the PASS GCI."""
+    if gci_manifest_path is None:
+        return None, [{
+            "code": "GCI_VALIDATION_ANCHOR_MISSING",
+            "message": "no passing GCI manifest",
+        }]
+    gci_manifest = _load_json(Path(gci_manifest_path)) or {}
+    reference = gci_manifest.get("validation_anchor")
+    if not isinstance(reference, dict):
+        return None, [{
+            "code": "GCI_VALIDATION_ANCHOR_MISSING",
+            "message": str(gci_manifest_path),
+        }]
+    try:
+        current = cfd_validation_anchor.anchor_reference(
+            reference.get("path"), expected_case=case, expected_role="gci_fine",
+        )
+    except (OSError, cfd_validation_anchor.ValidationAnchorError) as exc:
+        return None, [{
+            "code": "GCI_VALIDATION_ANCHOR_INVALID", "message": str(exc),
+        }]
+    if current != reference:
+        return None, [{
+            "code": "GCI_VALIDATION_ANCHOR_CHANGED",
+            "message": "GCI anchor reference differs from current anchor bytes",
+        }]
+    return current, []
+
+
+def _evaluate_body_fitted_case(case_dir, *, gci_root=None, candidate_only=False):
     """Validate a body-fitted result against its run and mesh provenance."""
     case = Path(case_dir)
     run_path = case / "run_manifest.json"
@@ -461,12 +514,12 @@ def evaluate_body_fitted_case(case_dir, *, gci_root=None):
             reasons=["상세 열해석 run manifest가 FAIL입니다."],
             evidence={"engine": run.get("engine")},
         )
-    if run_status != "PASS" or run.get("design_ready") is not True:
+    if run_status != "PASS":
         return _payload(
             status="WARN", run_status=run_status or "WARN", convergence_status="WARN",
             design_ready=False, citation_status="NOT_EVALUATED", citable=False,
             blockers=["run_manifest"],
-            reasons=["상세 열해석이 PASS 및 design_ready 상태가 아닙니다."],
+            reasons=["상세 열해석 run manifest가 PASS 상태가 아닙니다."],
             evidence={"engine": run.get("engine")},
         )
     if run.get("engine") != "body_fitted_buoyant_urans":
@@ -494,11 +547,31 @@ def evaluate_body_fitted_case(case_dir, *, gci_root=None):
         and numerical_quality.get("convection_order")
         == effective_numerics.get("convection_order")
     )
+    quality_blockers = (
+        numerical_quality.get("blockers")
+        if isinstance(numerical_quality, dict)
+        and isinstance(numerical_quality.get("blockers"), list)
+        else []
+    )
+    pending_only = bool(quality_blockers) and all(
+        isinstance(item, str) and item.startswith("NUMERICAL_SENSITIVITY_")
+        for item in quality_blockers
+    )
     numerical_quality_ok = (
         isinstance(numerical_quality, dict)
         and numerical_quality.get("contract") == "numerical_quality.v1"
-        and numerical_quality.get("status") == "PASS"
-        and numerical_quality.get("design_ready") is True
+        and (
+            (
+                numerical_quality.get("status") == "PASS"
+                and numerical_quality.get("design_ready") is True
+                and not quality_blockers
+            )
+            or (
+                numerical_quality.get("status") == "NOT_EVALUATED"
+                and numerical_quality.get("design_ready") is False
+                and pending_only
+            )
+        )
         and _finite_at_least(numerical_quality.get("convection_order"), 2)
         and numerical_profile_ok
     )
@@ -607,9 +680,62 @@ def evaluate_body_fitted_case(case_dir, *, gci_root=None):
             or result.get("thermal_input_sha256") != _sha256(thermal_path)):
         blockers.append("result_input_provenance")
         reasons.append("결과 artifact가 현재 thermal input과 직접 연결되지 않습니다.")
-    if _find_passing_gci_manifest(case, gci_root, _current_case_provenance(case)) is None:
+    if candidate_only:
+        if blockers:
+            return _payload(
+                status="NOT_EVALUATED", run_status="PASS",
+                convergence_status="NOT_EVALUATED", design_ready=False,
+                citation_status="NOT_EVALUATED", citable=False,
+                blockers=blockers, reasons=reasons,
+                evidence={"engine": run.get("engine"), "scope": "gci_candidate"},
+            )
+        return _payload(
+            status="GCI_CANDIDATE", run_status="PASS", convergence_status="PASS",
+            design_ready=False, citation_status="NOT_EVALUATED", citable=False,
+            blockers=[], reasons=[],
+            evidence={"engine": run.get("engine"), "scope": "gci_candidate"},
+        )
+    gci_manifest_path = _find_passing_gci_manifest(
+        case, gci_root, _current_case_provenance(case)
+    )
+    if gci_manifest_path is None:
         blockers.append("gci")
         reasons.append("현재 케이스와 연결된 PASS 메시 불확실성(GCI) 증거가 없습니다.")
+    anchor_reference, anchor_issues = _resolve_gci_validation_anchor(
+        gci_manifest_path, case,
+    )
+    if anchor_issues:
+        blockers.append("validation_anchor")
+        reasons.append(
+            "현재 fine case의 raw geometry/surface/mesh/run/result/thermal/selector를 "
+            "다시 검증하는 Validation Anchor가 없습니다: "
+            + ", ".join(item["code"] for item in anchor_issues)
+        )
+    for filename, blocker, message in (
+        (
+            "numerical_sensitivity.json", "scheme_sensitivity",
+            "현재 Validation Anchor에 결속된 verified scheme sensitivity가 없습니다.",
+        ),
+        (
+            "temporal_sensitivity.json", "temporal_sensitivity",
+            "현재 Validation Anchor에 결속된 verified temporal sensitivity가 없습니다.",
+        ),
+        (
+            "benchmark_validation.json", "benchmark_validation",
+            "승인된 benchmark validation 증거가 없습니다.",
+        ),
+        (
+            "applicability_envelope.json", "applicability",
+            "현재 case의 benchmark-derived applicability 판정이 없습니다.",
+        ),
+    ):
+        evidence = _load_json(case / filename)
+        evidence_blockers = _validate_final_evidence_document(
+            filename, evidence, anchor_reference=anchor_reference,
+        )
+        if evidence_blockers:
+            blockers.append(blocker)
+            reasons.append(message + " [" + ", ".join(evidence_blockers) + "]")
     if blockers:
         return _payload(
             status="NOT_EVALUATED", run_status="PASS", convergence_status="PASS",
@@ -622,3 +748,13 @@ def evaluate_body_fitted_case(case_dir, *, gci_root=None):
         design_ready=True, citation_status="DESIGN_CITABLE", citable=True,
         reasons=[], evidence={"engine": run.get("engine")},
     )
+
+
+def evaluate_gci_candidate(case_dir):
+    """Return a non-citable GCI input when only sensitivity/GCI is pending."""
+    return _evaluate_body_fitted_case(case_dir, candidate_only=True)
+
+
+def evaluate_body_fitted_case(case_dir, *, gci_root=None):
+    """Evaluate the final citation gate, including independent V&V evidence."""
+    return _evaluate_body_fitted_case(case_dir, gci_root=gci_root)
