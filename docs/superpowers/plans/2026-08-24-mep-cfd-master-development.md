@@ -1126,7 +1126,7 @@ def validate_validation_anchor(
   git commit -m "feat: unify numerical validation authority"
   ```
 
-**Task 10 부분 완료 상태(2026-08-28):** Steps 1~5와 코드 커밋 범위는 구현됐다. `validation_anchor.v1`은 occupied selector와 geometry→surface→mesh→thermal→run→result/source의 현재 바이트, 물리 설정, solver identity를 묶고 각 consumer가 다시 해시한다. sensitivity가 pending인 2차 case는 비인용 `GCI_CANDIDATE`로만 사용할 수 있고, GCI는 정확한 `gci_fine` anchor에 결속된다. field job은 별도 해석을 만들지 않고 동일 anchor identity의 `field_authority` 문서가 지정한 fine case를 재검증·재사용하며, `--analysis-only`는 release evidence를 발행하지 않는다. 임의 `PASS` 파일은 최종 gate를 열지 못한다. 다만 P1.2 serial scheme executor/verifier, P1.3 temporal executor/verifier, Task 11 benchmark/applicability validator와 실제 장시간 solver evidence는 아직 없으므로 Step 6과 최종 `DESIGN_CITABLE`은 `OPEN`이다. Gate M2도 confirmed geometry와 근거 입력 부재 때문에 계속 `OPEN`이다.
+**Task 10 부분 완료 상태(2026-08-28):** Steps 1~5와 코드 커밋 범위는 구현됐다. `validation_anchor.v1`은 occupied selector와 geometry→surface→mesh→thermal→run→result/source의 현재 바이트, 물리 설정, solver identity를 묶고 각 consumer가 다시 해시한다. sensitivity가 pending인 2차 case는 비인용 `GCI_CANDIDATE`로만 사용할 수 있고, GCI는 정확한 `gci_fine` anchor에 결속된다. field job은 별도 해석을 만들지 않고 동일 anchor identity의 `field_authority` 문서가 지정한 fine case를 재검증·재사용하며, `--analysis-only`는 release evidence를 발행하지 않는다. 임의 `PASS` 파일은 최종 gate를 열지 못한다. exact code commit `2ce0b65`의 locked Windows CI는 `1280 passed, 14 skipped`, 실패/오류 0으로 통과했다. 다만 P1.2 serial scheme executor/verifier, P1.3 temporal executor/verifier, Task 11 benchmark/applicability validator와 실제 장시간 solver evidence는 아직 없으므로 Step 6과 최종 `DESIGN_CITABLE`은 `OPEN`이다. Gate M2도 confirmed geometry와 근거 입력 부재 때문에 계속 `OPEN`이다.
 
 ### Task 11: Benchmark registry와 model-applicability matrix를 확장한다
 
