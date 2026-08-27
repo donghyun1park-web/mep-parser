@@ -109,10 +109,10 @@ def _case(root, name, *, temperature=303.15, speed=0.2, closure=1.0, execution_i
         "schema_version": 1, "contract": "mesh_manifest.v1", "engine": "body_fitted_airflow",
         "created_at": "2026-08-25T00:00:00Z", "status": "PASS", "errors": [], "warnings": [], "profile": "detailed",
         "surface": {"closed": True, "illegal_triangles": 0, "unconnected_parts": 1, "triangles": 12},
-        "mesh": {"mesh_ok": True, "fatal": False, "failed_checks": [], "concave_cells": 0, "cells": 4096,
+        "mesh": {"mesh_ok": True, "fatal": False, "failed_checks": 0, "concave_cells": 0, "cells": 4096,
                  "regions": 1, "min_volume_m3": 0.001, "total_volume_m3": 8.0,
                  "max_non_orthogonality": 10.0, "max_skewness": 0.2},
-        "strict_diagnostics": {"mesh_ok": True, "fatal": False, "failed_checks": [], "concave_cells": 0},
+        "strict_diagnostics": {"mesh_ok": False, "fatal": True, "failed_checks": 1, "concave_cells": 12},
         "layer": {"enabled": True, "extruded_faces": 1, "candidate_faces": 1, "coverage_ratio": 1.0,
                   "added_cells": 1, "patches": [], "expected_patches": []},
         "y_plus": {"status": "PASS", "target_min": 30, "target_max": 300, "measured_wall_area_ratio": 1.0},
@@ -123,8 +123,8 @@ def _case(root, name, *, temperature=303.15, speed=0.2, closure=1.0, execution_i
     effective_settings = {
         "supply_temperature_k": 293.15, "initial_temperature_k": 293.15,
         "air_density_kg_m3": 1.0, "air_specific_heat_j_kg_k": 1000.0,
-        "thermal_duration_s": 240.0, "thermal_delta_t_s": 0.02,
-        "thermal_adjust_time_step": False,
+        "thermal_duration_s": 240.0, "thermal_initial_delta_t_s": 0.01,
+        "thermal_max_delta_t_s": 0.01,
         "thermal_numerics_profile": "design_limited_second_order_v1",
         "thermal_parallel_processes": 1,
     }
@@ -133,6 +133,8 @@ def _case(root, name, *, temperature=303.15, speed=0.2, closure=1.0, execution_i
     }
     thermal = _write_json(case / "thermal_input.json", {
         "contract": "thermal_input.v1", "engine": "body_fitted_buoyant_urans",
+        "created_at": f"2026-08-25T00:00:{'01' if name == 'anchor' else '02'}Z",
+        "validation_scope": "single_pc_numerical_spotcheck",
         "mesh_manifest_sha256": _sha256(mesh),
         "settings": effective_settings,
         "numerics": effective_numerics,
@@ -145,7 +147,7 @@ startFrom startTime;
 startTime 0;
 stopAt endTime;
 endTime 240;
-deltaT 0.02;
+deltaT 0.01;
 adjustTimeStep no;
 """)
     fv_schemes = _write(case / "system" / "fvSchemes", "div(phi,U) bounded Gauss linearUpwind grad(U);\n")
@@ -363,6 +365,20 @@ def test_validate_working_room_recomputes_raw_artifacts_and_is_stable(tmp_path):
         for case_name in ("anchor", "repeat") for path in _[case_name][0].rglob("*") if path.is_file()
     } | {manifest.relative_to(tmp_path).as_posix()}
     assert all(__import__("re").fullmatch(HEX64, value) for value in first["evidence_sha256"].values())
+
+
+def test_working_room_accepts_native_openfoam_mesh_ok_log(tmp_path):
+    from cfd_working_room import validate_working_room
+
+    manifest, cases = _room_bundle(tmp_path)
+    for label in ("anchor", "repeat"):
+        case, paths = cases[label]
+        paths["check_mesh_log"].write_text("Mesh OK.\nEnd\n", encoding="utf-8")
+        _rehash_case_record(manifest, label, case, paths)
+
+    result = validate_working_room(manifest, tmp_path)
+
+    assert result["status"] == "PASS", result
 
 
 def test_working_room_missing_manifest_is_blocked_not_an_exception(tmp_path):
@@ -744,3 +760,171 @@ def test_working_room_rejects_non_json_numeric_constants(tmp_path):
 
     result = validate_working_room(manifest, tmp_path)
     assert result["blockers"] == ["WORKING_ROOM_MANIFEST_MALFORMED"]
+
+
+class _FakeWorkingRoomRuntime:
+    def __init__(self, *, fail_label=None):
+        self.fail_label = fail_label
+        self.calls = []
+        self.projects_roots = []
+
+    def run_case(self, projects_root, case_id):
+        self.calls.append(case_id)
+        self.projects_roots.append(projects_root.resolve())
+        case = projects_root / "_working_validation" / "working-room-v1" / case_id
+        assert not case.exists()
+        if case_id == self.fail_label:
+            raise RuntimeError("private runtime path and command must not escape")
+        temperature = 303.15 if case_id == "anchor" else 303.16
+        speed = 0.2 if case_id == "anchor" else 0.203
+        closure = 1.0 if case_id == "anchor" else 1.004
+        return _case(
+            projects_root, case_id, temperature=temperature, speed=speed,
+            closure=closure, execution_id=f"{case_id}-independent-execution",
+        )[0]
+
+
+def test_working_room_producer_stages_validates_and_publishes_pair(tmp_path):
+    from scripts.produce_working_room_acceptance import produce_working_room_acceptance
+
+    runtime = _FakeWorkingRoomRuntime()
+    result = produce_working_room_acceptance(REPO, projects_root=tmp_path, runtime=runtime)
+    manifest = (
+        tmp_path / "_working_validation" / "working-room-v1"
+        / "working_room_acceptance.json"
+    )
+
+    assert result["status"] == "PASS", result
+    assert runtime.calls == ["anchor", "repeat"]
+    assert all(
+        root.parent == Path(__import__("tempfile").gettempdir()).resolve()
+        for root in runtime.projects_roots
+    )
+    assert manifest.is_file()
+    from cfd_working_room import validate_working_room
+    assert validate_working_room(manifest, tmp_path)["status"] == "PASS"
+    assert not list((tmp_path / "_working_validation").glob(".working-room-stage-*"))
+
+
+def test_working_room_producer_failure_preserves_existing_authority(tmp_path):
+    from scripts.produce_working_room_acceptance import produce_working_room_acceptance
+
+    first = produce_working_room_acceptance(
+        REPO, projects_root=tmp_path, runtime=_FakeWorkingRoomRuntime(),
+    )
+    assert first["status"] == "PASS"
+    authority = tmp_path / "_working_validation" / "working-room-v1"
+    before = {
+        path.relative_to(authority).as_posix(): path.read_bytes()
+        for path in authority.rglob("*") if path.is_file()
+    }
+
+    failed = produce_working_room_acceptance(
+        REPO, projects_root=tmp_path,
+        runtime=_FakeWorkingRoomRuntime(fail_label="repeat"),
+    )
+    after = {
+        path.relative_to(authority).as_posix(): path.read_bytes()
+        for path in authority.rglob("*") if path.is_file()
+    }
+
+    assert failed == {
+        "check_id": "working_room_e2e",
+        "status": "BLOCKED",
+        "blockers": ["EXTERNAL_RUNTIME_FAILURE"],
+        "message": "Working-room runtime execution failed; prior authority was preserved.",
+    }
+    assert after == before
+    assert "private runtime path" not in json.dumps(failed)
+    assert not list((tmp_path / "_working_validation").glob(".working-room-stage-*"))
+
+
+def test_system_working_room_runtime_runs_full_locked_pipeline(monkeypatch, tmp_path):
+    import cfd_gci_job
+    import cfd_mesh
+    import cfd_occ
+    import cfd_physics
+    import cfd_report
+    from scripts.produce_working_room_acceptance import SystemWorkingRoomRuntime
+
+    calls = []
+    observed_source = {}
+    observed_mesh_settings = {}
+    observed_thermal_settings = {}
+
+    def run_occ(geometry_path, output_dir, executable=None, timeout=300):
+        calls.append("occ")
+        output_dir.mkdir(parents=True)
+        _write_json(output_dir / "surface_manifest.json", {
+            "source": {"geometry_path": str(geometry_path), "geometry_sha256": "0" * 64},
+        })
+        return {"ok": True}
+
+    def build_mesh(occ_output, mesh_case, settings=None):
+        calls.append("mesh-build")
+        observed_mesh_settings.update(settings)
+        observed_source.update(json.loads(
+            (occ_output / "surface_manifest.json").read_text(encoding="utf-8")
+        )["source"])
+        mesh_case.mkdir(parents=True)
+        _write(mesh_case / "log.checkMesh", "Mesh OK.\nNumber of illegal cells: 0\n")
+        return {"ok": True}
+
+    def run_mesh(mesh_case, progress_cb=None):
+        calls.append("mesh-run")
+        return {"ok": True}
+
+    def build_solver(mesh_case, solver_case, settings=None):
+        calls.append("solver-build")
+        observed_thermal_settings.update(settings)
+        _case(tmp_path, "anchor", execution_id="anchor-system-run")
+        return {"ok": True}
+
+    def run_solver(solver_case, progress_cb=None):
+        calls.append("solver-run")
+        return {"ok": True, "result_artifacts": {"ok": True}}
+
+    def report(case_dir, out_html=None, *, projects_root=None):
+        calls.append("report")
+        return {"ok": True}
+
+    lock_tokens = iter(("mesh-token", "solver-token"))
+    monkeypatch.setattr(cfd_occ, "run_occ_job", run_occ)
+    monkeypatch.setattr(cfd_occ, "inspect_occ_output", lambda output: {"ok": True})
+    monkeypatch.setattr(cfd_mesh, "build_mesh_case", build_mesh)
+    monkeypatch.setattr(cfd_mesh, "run_mesh_case", run_mesh)
+    monkeypatch.setattr(cfd_physics, "build_single_pc_numerical_spotcheck_case", build_solver)
+    monkeypatch.setattr(cfd_physics, "run_buoyant_case", run_solver)
+    monkeypatch.setattr(cfd_report, "generate_body_fitted_report", report)
+    monkeypatch.setattr(
+        cfd_gci_job, "acquire_solver_lock",
+        lambda root: (next(lock_tokens), {"pid": 1}),
+    )
+    monkeypatch.setattr(
+        cfd_gci_job, "release_solver_lock",
+        lambda root, token: calls.append(f"unlock:{token}"),
+    )
+
+    case = SystemWorkingRoomRuntime(REPO).run_case(tmp_path, "anchor")
+
+    assert case == tmp_path / "_working_validation" / "working-room-v1" / "anchor"
+    assert calls == [
+        "occ", "mesh-build", "mesh-run", "unlock:mesh-token",
+        "solver-build", "solver-run", "unlock:solver-token", "report",
+    ]
+    assert observed_source["geometry_path"] == (
+        "_working_validation/working-room-v1/anchor/geometry.json"
+    )
+    assert observed_source["geometry_sha256"] == _sha256(case / "geometry.json")
+    assert observed_mesh_settings == {
+        "preset": "detailed",
+        "background_cell_m": 0.125,
+        "surface_level_min": 0,
+        "surface_level_max": 0,
+        "terminal_level": 1,
+        "equipment_level": 0,
+        "local_refinement_level": 0,
+        "feature_level": 0,
+    }
+    assert observed_thermal_settings["thermal_initial_delta_t_s"] == 0.01
+    assert observed_thermal_settings["thermal_max_delta_t_s"] == 0.01

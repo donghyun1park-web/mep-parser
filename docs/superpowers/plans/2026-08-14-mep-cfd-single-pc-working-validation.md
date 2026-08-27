@@ -52,7 +52,7 @@
 `WORKING_SINGLE_PC`에 더해 나머지 2개 check가 PASS여야 한다.
 
 1. `exact_heat_verification`: adiabatic heat-box의 analytic mean-temperature 오차 1% 이하
-2. `limited_numerical_spotchecks`: working-room의 first/second-order, medium/fine mesh, dt=0.02/0.01 s 차이가 각각 T 0.5 K, U 0.05 m/s 이내
+2. `limited_numerical_spotchecks`: working-room의 first/second-order, medium/fine mesh, dt=0.01/0.005 s 차이가 각각 T 0.5 K, U 0.05 m/s 이내
 
 사용자 문구는 상태별로 다음처럼 고정한다.
 
@@ -338,10 +338,17 @@ walls: adiabatic
 solver: serial buoyantBoussinesqPimpleFoam, kOmegaSST
 mesh target: 0.125 m
 numerics: design_limited_second_order_v1
-time control: adjustTimeStep=no, fixed deltaT=0.02 s; observed peak Co must remain <=1.0
+time control: adjustTimeStep=no, fixed deltaT=0.01 s; observed peak Co must remain <=1.0
 flow-through time: 80 s
 target: 3.0 FTT = 240 s
 ```
+
+**2026-08-27 approved numerical revision:** 실제 `deltaT=0.02 s` 실행은
+terminal level 2에서 peak Co 2.40, terminal level 1에서 peak Co 1.3895를
+기록했다. Level 0은 단말 면적 오차 9.997%로 5% mesh gate를 통과하지
+못했다. 따라서 working-room은 단말만 level 1로 세분화하고 고정
+`deltaT=0.01 s`를 사용한다. 기존 Co/면적/재현성 threshold는 완화하지
+않으며, 이전 중단 실행은 acceptance evidence로 게시하지 않는다.
 
 - [ ] **Step 1: geometry, terminal identity, airflow, heat evidence 중 하나라도 빠지면 거부되는 RED tests를 작성한다.**
 
@@ -446,7 +453,7 @@ def run_numerical_spotcheck(study_root: Path, progress_cb=None) -> dict:
     """Run all pending children serially and atomically publish verified evidence."""
 ```
 
-Only four working-room numerical states are required. The second-order fixed-`dt=0.02 s` reference case from Task 3 is reused. All four emit `adjustTimeStep no`; the verifier reconstructs every physical-time increment from the solver log and rejects controller intervention or a non-fixed history.
+Only four working-room numerical states are required. The second-order fixed-`dt=0.01 s` reference case from Task 3 is reused. All four emit `adjustTimeStep no`; the verifier reconstructs every physical-time increment from the solver log and rejects controller intervention or a non-fixed history.
 
 Occupied-zone temperature and speed QoIs use one immutable `occupied_volume_band.v1` selector. The spotcheck manifest records the selector SHA-256 beside the working-room geometry and zone SHA-256 values; exhaust temperature rise is recomputed from the exhaust patch rather than this selector.
 
@@ -460,10 +467,10 @@ z_max_agl_m: 1.80
 
 | State | Mesh | Scheme | dt |
 |---|---|---|---:|
-| Anchor | 0.125 m | second order | 0.02 s |
-| Scheme comparison | 0.125 m | first order | 0.02 s |
-| Time comparison | 0.125 m | second order | 0.01 s |
-| Mesh comparison | 0.177 m | second order | 0.02 s |
+| Anchor | 0.125 m | second order | 0.01 s |
+| Scheme comparison | 0.125 m | first order | 0.01 s |
+| Time comparison | 0.125 m | second order | 0.005 s |
+| Mesh comparison | 0.177 m | second order | 0.01 s |
 
 - [ ] **Step 1: synthetic volume weighting, p95, phi, storage integration RED tests를 작성한다.**
 
@@ -519,7 +526,7 @@ Run: `& $Python cfd_numerical_spotcheck.py --acceptance-manifest cfd_projects/_w
 
 The runner must use only `authoritative_case_path` whose current tree hash equals `authoritative_case_sha256`; it must reject parent-directory scans, `latest` selection and the repeat child as an anchor.
 
-Before any solve, freeze one common geometry, terminal/heat contract, initial fields and occupied selector. Each child must change exactly one declared variable: scheme, fixed `deltaT`, or mesh. Reject extra changes to supply temperature/flow, heat, material properties, initial fields, end time or selector. Scheme/mesh children use fixed `0.02 s`; only the time child uses fixed `0.01 s`. All comparison QoIs are time-weighted volume- or patch-weighted averages over the same final `0.1 FTT` window after every case reaches `3.0 FTT`. Require at least 5 snapshots. Compare time-weighted first-half and second-half values with these exact drift normalizers: occupied temperature rise uses `max(abs(full_window_T_rise), 1 K)`, occupied speed uses `max(abs(full_window_speed), 0.05 m/s)`, and exhaust temperature rise uses `max(abs(full_window_exhaust_T_rise), 1 K)`; every normalized drift must be <=2%.
+Before any solve, freeze one common geometry, terminal/heat contract, initial fields and occupied selector. Each child must change exactly one declared variable: scheme, fixed `deltaT`, or mesh. Reject extra changes to supply temperature/flow, heat, material properties, initial fields, end time or selector. Scheme/mesh children use fixed `0.01 s`; only the time child uses fixed `0.005 s`. All comparison QoIs are time-weighted volume- or patch-weighted averages over the same final `0.1 FTT` window after every case reaches `3.0 FTT`. Require at least 5 snapshots. Compare time-weighted first-half and second-half values with these exact drift normalizers: occupied temperature rise uses `max(abs(full_window_T_rise), 1 K)`, occupied speed uses `max(abs(full_window_speed), 0.05 m/s)`, and exhaust temperature rise uses `max(abs(full_window_exhaust_T_rise), 1 K)`; every normalized drift must be <=2%.
 
 - [ ] **Step 6: 다음 절대차 기준을 적용한다.**
 

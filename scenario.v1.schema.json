@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "scenario.v1.schema.json",
+  "title": "Immutable CFD operating scenario revision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "contract", "scenario_id", "revision_number", "name",
+    "purpose", "created_at", "design", "operating_conditions",
+    "parent_revision", "revision_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "contract": {"const": "scenario.v1"},
+    "scenario_id": {"type": "string", "pattern": "^scenario-[0-9a-f]{24}$"},
+    "revision_number": {"type": "integer", "minimum": 1},
+    "name": {"type": "string", "minLength": 1, "maxLength": 200},
+    "purpose": {
+      "enum": ["screening", "design_review_candidate", "benchmark", "field_validation"]
+    },
+    "created_at": {"type": "string", "format": "date-time"},
+    "design": {"$ref": "#/$defs/designRef"},
+    "operating_conditions": {"$ref": "#/$defs/operatingConditions"},
+    "parent_revision": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/artifactRef"}
+      ]
+    },
+    "revision_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "path": {
+      "type": "string",
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^/]+(?:/[^/]+)*$"
+    },
+    "artifactRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"$ref": "#/$defs/path"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "designRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "design_id", "revision_sha256"],
+      "properties": {
+        "path": {"$ref": "#/$defs/path"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "design_id": {"type": "string", "pattern": "^design-[0-9a-f]{24}$"},
+        "revision_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "terminal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["terminal_id", "airflow_cmh"],
+      "properties": {
+        "terminal_id": {"type": "string", "minLength": 1},
+        "airflow_cmh": {"type": "number", "exclusiveMinimum": 0},
+        "supply_temperature_k": {"type": "number", "exclusiveMinimum": 0},
+        "schedule_name": {"type": "string", "minLength": 1}
+      }
+    },
+    "heatSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_id", "convective_power_w", "authority"],
+      "properties": {
+        "source_id": {"type": "string", "minLength": 1},
+        "convective_power_w": {"type": "number", "minimum": 0},
+        "authority": {"type": "string", "minLength": 1}
+      }
+    },
+    "occupancy": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["people_count", "schedule_name"],
+          "properties": {
+            "people_count": {"type": "integer", "minimum": 0},
+            "schedule_name": {"type": "string", "minLength": 1}
+          }
+        }
+      ]
+    },
+    "weather": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["outdoor_temperature_k", "authority"],
+          "properties": {
+            "outdoor_temperature_k": {"type": "number", "exclusiveMinimum": 0},
+            "authority": {"type": "string", "minLength": 1}
+          }
+        }
+      ]
+    },
+    "operatingConditions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "terminals", "heat_sources", "occupancy", "weather",
+        "operating_period", "mesh_intent", "physics_intent"
+      ],
+      "properties": {
+        "terminals": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/terminal"}},
+        "heat_sources": {"type": "array", "items": {"$ref": "#/$defs/heatSource"}},
+        "occupancy": {"$ref": "#/$defs/occupancy"},
+        "weather": {"$ref": "#/$defs/weather"},
+        "operating_period": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["duration_s"],
+          "properties": {"duration_s": {"type": "number", "exclusiveMinimum": 0}}
+        },
+        "mesh_intent": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["preset", "background_cell_m"],
+          "properties": {
+            "preset": {"enum": ["quick", "detailed"]},
+            "background_cell_m": {"type": "number", "exclusiveMinimum": 0}
+          }
+        },
+        "physics_intent": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["solver", "turbulence_model"],
+          "properties": {
+            "solver": {
+              "enum": ["simpleFoam", "pimpleFoam", "buoyantBoussinesqPimpleFoam"]
+            },
+            "turbulence_model": {"enum": ["laminar", "kEpsilon", "kOmegaSST"]}
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "design.v1.schema.json",
+  "title": "Immutable reviewed geometry design revision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "contract", "design_id", "revision_number", "name",
+    "created_at", "revision_author", "revision_reason", "geometry",
+    "parent_revision", "revision_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "contract": {"const": "design.v1"},
+    "design_id": {"type": "string", "pattern": "^design-[0-9a-f]{24}$"},
+    "revision_number": {"type": "integer", "minimum": 1},
+    "name": {"type": "string", "minLength": 1, "maxLength": 200},
+    "created_at": {"type": "string", "format": "date-time"},
+    "revision_author": {"type": "string", "minLength": 1, "maxLength": 200},
+    "revision_reason": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "geometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "contract"],
+      "properties": {
+        "path": {"$ref": "#/$defs/path"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "contract": {"const": "geometry.v2"}
+      }
+    },
+    "parent_revision": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256"],
+          "properties": {
+            "path": {"$ref": "#/$defs/path"},
+            "sha256": {"$ref": "#/$defs/sha256"}
+          }
+        }
+      ]
+    },
+    "revision_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "path": {
+      "type": "string",
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^/]+(?:/[^/]+)*$"
+    }
+  }
+}

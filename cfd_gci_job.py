@@ -183,8 +183,15 @@ def _pid_is_alive(pid):
             process_query_limited_information, False, pid
         )
         if handle:
+            exit_code = ctypes.c_ulong()
+            queried = kernel32.GetExitCodeProcess(
+                handle, ctypes.byref(exit_code)
+            )
             kernel32.CloseHandle(handle)
-            return True
+            # A terminated Windows process object can remain open while any
+            # process still owns a handle to it.  OpenProcess alone therefore
+            # does not prove that the PID is still executing.
+            return bool(queried and exit_code.value == 259)  # STILL_ACTIVE
         return ctypes.get_last_error() == 5
     try:
         os.kill(pid, 0)

@@ -1,6 +1,8 @@
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -590,6 +592,15 @@ class GCIJobTests(unittest.TestCase):
         self.assertEqual(result, completed)
         run.assert_called_once()
         self.assertFalse(lock_path.exists())
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows process-handle semantics")
+    def test_exited_process_with_open_handle_is_not_alive(self):
+        process = subprocess.Popen([sys.executable, "-c", "raise SystemExit(7)"])
+        process.wait(timeout=10)
+        try:
+            self.assertFalse(cfd_gci_job._pid_is_alive(process.pid))
+        finally:
+            process._handle.Close()
 
     def test_live_field_job_blocks_gci_solver_overlap(self):
         created = cfd_gci_job.create_study(self.root, self.geometry)

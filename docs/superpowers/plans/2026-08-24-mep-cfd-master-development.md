@@ -752,7 +752,9 @@ M1 Exit는 계속 열려 있다. 공개 브랜치에는 현장 좌표·원본·�
 
 - [ ] **Step 2: working-room anchor/repeat를 실행한다**
 
-  Acceptance: watertight single air volume, `checkMesh` PASS, illegal cells 0, physical time ≥240 s, Co ≤1.0, terminal phi imbalance ≤0.1%, energy closure 95~105%, finite VTU/slices/report. Repeat differences: mean T ≤0.02 K, mean speed ≤0.005 m/s, closure ≤0.5 percentage point.
+  Acceptance: watertight single air volume, `checkMesh` PASS, illegal cells 0, terminal-only mesh refinement level 1 on the 0.125 m background, fixed `deltaT=0.01 s`, physical time ≥240 s, Co ≤1.0, terminal phi imbalance ≤0.1%, energy closure 95~105%, finite VTU/slices/report. Repeat differences: mean T ≤0.02 K, mean speed ≤0.005 m/s, closure ≤0.5 percentage point.
+
+  **2026-08-27 approved revision:** fixed `deltaT=0.02 s` produced peak Co 2.40 at terminal level 2 and 1.3895 at terminal level 1. Level 0 reduced Co but failed the 5% terminal-area mesh gate with 9.997% error. The user approved terminal level 1 plus fixed `deltaT=0.01 s`; no acceptance threshold was relaxed and no failed candidate was published.
 
 - [ ] **Step 3: exact heat와 limited spot-check를 실행한다**
 
@@ -834,7 +836,7 @@ def create_case_identity(
 ) -> dict: ...
 ```
 
-- [ ] **Step 1: immutability와 revision tests를 작성한다**
+- [x] **Step 1: immutability와 revision tests를 작성한다**
 
   ```python
   def test_geometry_change_creates_new_design_revision(tmp_path):
@@ -848,31 +850,31 @@ def create_case_identity(
           create_scenario(design_path(tmp_path), name="대안", operating_conditions={"geometry": {}}, purpose="screening")
   ```
 
-- [ ] **Step 2: tests가 실패하는지 확인한다**
+- [x] **Step 2: tests가 실패하는지 확인한다**
 
   Run: `& $Python -B -m pytest -q tests/test_project_model.py tests/test_design_scenario_contract.py`
 
   Expected: FAIL because module and schemas do not exist.
 
-- [ ] **Step 3: contracts를 구현한다**
+- [x] **Step 3: contracts를 구현한다**
 
   `Design`은 reviewed `geometry.v2` path/hash와 revision history만 가진다. `Scenario`는 supply/exhaust CMH, supply temperature, heat-source authority, occupancy, weather/exterior assumptions, operating time, mesh/physics intent를 가진다. 실제 solver dictionaries는 Run이 만든다.
 
-- [ ] **Step 4: content-derived IDs와 atomic repository를 구현한다**
+- [x] **Step 4: content-derived IDs와 atomic repository를 구현한다**
 
   ID prefix는 `design-`, `scenario-`, `run-`으로 고정하고 canonical JSON SHA-256으로 revision을 식별한다. 사용자 표시는 name을 사용하며 name 변경은 identity를 바꾸지 않는다.
 
-- [ ] **Step 5: variation whitelist tests를 추가한다**
+- [x] **Step 5: variation whitelist tests를 추가한다**
 
   Scenario clone에서 허용되는 변화와 geometry change를 구분한다. terminal role/normal/size 변경은 Design revision, CMH/supply temperature/operating schedule 변경은 Scenario revision으로 판정한다.
 
-- [ ] **Step 6: focused tests를 실행한다**
+- [x] **Step 6: focused tests를 실행한다**
 
   Run: `& $Python -B -m pytest -q tests/test_project_model.py tests/test_design_scenario_contract.py tests/test_geometry_v2_contract.py`
 
   Expected: PASS.
 
-- [ ] **Step 7: commit한다**
+- [x] **Step 7: commit한다**
 
   ```powershell
   git add design.v1.schema.json scenario.v1.schema.json case_identity.v1.schema.json project_model.py tests/test_project_model.py tests/test_design_scenario_contract.py
@@ -1962,6 +1964,8 @@ Task 0 Step 6은 어떤 코드 Task보다 먼저 수행한다. 현재 Tasks 1~4�
 - Actual scope: locked Python 3.12.10, FreeCAD 1.1.1/OCC 7.8.1, OpenFOAM v2606 serial, 64 cells, physical time 1.0 s, Studio readiness 3/3, actionable diagnostics 5/5. Focused regression: `289 passed, 7 skipped, 7 warnings`. Public exact-code commit `9e625e2dfd6c05b03e0d6efdffbcbf6b8fc5cb35` passed Windows CI [run `33028118325`](https://github.com/donghyun1park-web/mep-parser/actions/runs/33028118325) with `1194 passed, 14 skipped, 7 warnings`.
 - Runtime artifacts remain ignored under `cfd_projects/`; the public branch contains only producer/validator code, tests, plans, governance, and sanitized progress/report records.
 - Task 5b Steps 2–3, Task 4.5, Task 5c, M1, design citation, and release remain open or blocked. MPI execution smoke remains `NOT_RUN`.
+- Task 5b Step 2 implementation now uses the approved terminal level 1 and fixed `deltaT=0.01 s` contract. The 240 s anchor/repeat evidence has not yet been rerun, so Step 2 remains open while code-clock Task 6 proceeds by explicit user direction.
+- Task 6 is complete in code: closed `design.v1`, `scenario.v1`, and `case_identity.v1` contracts, immutable canonical-JSON-derived revisions, atomic publication, path containment, Design/Scenario variation classification, and current-reference tamper validation are implemented. Focused Task 6 plus geometry/working-room/GCI regression completed with `142 passed`; this is code-contract evidence and does not close Task 5b runtime or M1.
 
 ## 19. 계획 개정 기록 — 2026-08-24 (검토 반영)
 

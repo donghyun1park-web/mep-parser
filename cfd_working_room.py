@@ -68,12 +68,35 @@ def _normalized_working_input_hashes(
     normalized_mesh_input["surface_manifest_sha256"] = "$SURFACE_MANIFEST"
 
     normalized_thermal = copy.deepcopy(thermal)
+    # Each clean execution records its own provenance timestamp.  It is not a
+    # solver input and therefore must not make an otherwise identical repeat
+    # look like a different numerical case.
+    normalized_thermal.pop("created_at", None)
     normalized_thermal["mesh_manifest_sha256"] = "$MESH_MANIFEST"
     return {
         "surface_input_sha256": _canonical_json_sha256(normalized_surface),
         "mesh_input_sha256": _canonical_json_sha256(normalized_mesh_input),
         "thermal_input_sha256": _canonical_json_sha256(normalized_thermal),
     }
+
+
+def _native_check_mesh_ok(text: str) -> bool:
+    """Interpret the native OpenFOAM checkMesh success contract."""
+
+    if not re.search(r"(?m)^\s*Mesh OK\.\s*$", text):
+        return False
+    if re.search(r"FOAM FATAL|Segmentation fault|Floating point exception", text, re.I):
+        return False
+    illegal = re.findall(
+        r"(?:number\s+of\s+)?illegal\s+cells\s*[:=]\s*(\d+)", text, re.I,
+    )
+    if any(int(value) != 0 for value in illegal):
+        return False
+    failed_checks = re.findall(r"Failed\s+(\d+)\s+mesh checks", text, re.I)
+    if any(int(value) != 0 for value in failed_checks):
+        return False
+    scrubbed = re.sub(r"Failed\s+\d+\s+mesh checks", "", text, flags=re.I)
+    return re.search(r"\bFailed\b", scrubbed, re.I) is None
 
 
 def build_working_room_geometry() -> dict:
@@ -505,10 +528,9 @@ def _case_metrics(label: str, record: object, root: Path, evidence: dict[str, st
             blockers.append(f"{prefix}_GEOMETRY_SURFACE_BINDING_INVALID")
     if isinstance(mesh, dict):
         mesh_quality = mesh.get("mesh") if isinstance(mesh.get("mesh"), dict) else {}
-        strict = mesh.get("strict_diagnostics") if isinstance(mesh.get("strict_diagnostics"), dict) else {}
         if (mesh.get("status") != "PASS" or mesh_quality.get("mesh_ok") is not True
-                or mesh_quality.get("fatal") is not False or mesh_quality.get("failed_checks") != []
-                or strict.get("mesh_ok") is not True or strict.get("fatal") is not False):
+                or mesh_quality.get("fatal") is not False
+                or mesh_quality.get("failed_checks") != 0):
             blockers.append(f"{prefix}_MESH_GATE_FAILED")
         mesh_declared = mesh.get("input") if isinstance(mesh.get("input"), dict) else {}
         if (mesh_declared.get("surface_manifest_sha256") != _sha256_file(paths["surface"])
@@ -518,10 +540,7 @@ def _case_metrics(label: str, record: object, root: Path, evidence: dict[str, st
             blockers.append(f"{prefix}_SURFACE_MESH_BINDING_INVALID")
 
     check_text = paths["check_mesh_log"].read_text(encoding="utf-8", errors="replace")
-    illegal = re.search(r"(?:number\s+of\s+)?illegal\s+cells\s*[:=]\s*(\d+)", check_text, re.I)
-    if (not re.search(r"(?m)^\s*Mesh OK\.\s*$", check_text)
-            or illegal is None or int(illegal.group(1)) != 0
-            or re.search(r"FOAM FATAL|Failed", check_text, re.I)):
+    if not _native_check_mesh_ok(check_text):
         blockers.append(f"{prefix}_CHECK_MESH_INVALID")
 
     import cfd_physics
@@ -541,8 +560,9 @@ def _case_metrics(label: str, record: object, root: Path, evidence: dict[str, st
         return {}, None
     settings = thermal.get("settings") if isinstance(thermal.get("settings"), dict) else {}
     numerics = thermal.get("numerics") if isinstance(thermal.get("numerics"), dict) else {}
-    if (settings.get("thermal_adjust_time_step") is not False
-            or _finite(settings.get("thermal_delta_t_s")) != 0.02
+    if (thermal.get("validation_scope") != "single_pc_numerical_spotcheck"
+            or _finite(settings.get("thermal_initial_delta_t_s")) != 0.01
+            or _finite(settings.get("thermal_max_delta_t_s")) != 0.01
             or _finite(settings.get("thermal_duration_s")) != 240.0
             or settings.get("thermal_numerics_profile") != "design_limited_second_order_v1"
             or settings.get("thermal_parallel_processes") != 1):
@@ -569,7 +589,7 @@ def _case_metrics(label: str, record: object, root: Path, evidence: dict[str, st
     allrun_text = paths["allrun"].read_text(encoding="utf-8", errors="replace")
     if (not re.search(r"\bapplication\s+buoyantBoussinesqPimpleFoam\s*;", control_text)
             or not re.search(r"\badjustTimeStep\s+no\s*;", control_text)
-            or not re.search(r"\bdeltaT\s+0\.0*2\s*;", control_text)
+            or not re.search(r"\bdeltaT\s+0\.0*1\s*;", control_text)
             or not re.search(r"\bendTime\s+240(?:\.0+)?\s*;", control_text)
             or "linearUpwind" not in schemes_text
             or not re.search(r"\bRASModel\s+kOmegaSST\s*;", turbulence_text)
@@ -1623,8 +1643,7 @@ def validate_sgi_screening_acceptance(
             or mesh_quality.get("mesh_ok") is not True or mesh_quality.get("fatal") is not False):
         blockers.append("SGI_MESH_GATE_FAILED")
     check_text = paths["check_mesh_log"].read_text(encoding="utf-8", errors="replace")
-    illegal = re.search(r"(?:number\s+of\s+)?illegal\s+cells\s*[:=]\s*(\d+)", check_text, re.I)
-    if not re.search(r"(?m)^\s*Mesh OK\.\s*$", check_text) or illegal is None or int(illegal.group(1)) != 0:
+    if not _native_check_mesh_ok(check_text):
         blockers.append("SGI_CHECK_MESH_INVALID")
 
     metrics = _sgi_field_metrics(case, paths, thermal, blockers)

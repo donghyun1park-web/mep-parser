@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "case_identity.v1.schema.json",
+  "title": "Immutable Design Scenario Run identity",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "contract", "run_id", "requested_run_id", "created_at",
+    "design", "scenario", "solver_profile", "parent_run_id", "identity_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "contract": {"const": "case_identity.v1"},
+    "run_id": {"type": "string", "pattern": "^run-[0-9a-f]{24}$"},
+    "requested_run_id": {"type": "string", "minLength": 1, "maxLength": 200},
+    "created_at": {"type": "string", "format": "date-time"},
+    "design": {"$ref": "#/$defs/designRef"},
+    "scenario": {"$ref": "#/$defs/scenarioRef"},
+    "solver_profile": {"type": "string", "minLength": 1, "maxLength": 200},
+    "parent_run_id": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "pattern": "^run-[0-9a-f]{24}$"}
+      ]
+    },
+    "identity_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "path": {
+      "type": "string",
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^/]+(?:/[^/]+)*$"
+    },
+    "designRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "revision_sha256", "design_id"],
+      "properties": {
+        "path": {"$ref": "#/$defs/path"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "revision_sha256": {"$ref": "#/$defs/sha256"},
+        "design_id": {"type": "string", "pattern": "^design-[0-9a-f]{24}$"}
+      }
+    },
+    "scenarioRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "revision_sha256", "scenario_id"],
+      "properties": {
+        "path": {"$ref": "#/$defs/path"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "revision_sha256": {"$ref": "#/$defs/sha256"},
+        "scenario_id": {"type": "string", "pattern": "^scenario-[0-9a-f]{24}$"}
+      }
+    }
+  }
+}
