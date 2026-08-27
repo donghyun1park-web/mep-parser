@@ -653,7 +653,7 @@ def validate_review(review_path: Path, *, projects_root: Path) -> list[dict]: ..
 
 ### Task 4.5: 실제 DXF 1건의 geometry를 확정한다 — MEP 담당자 트랙
 
-이 Task는 코드 작업이 아니라 **기계설비 담당자의 판단 작업**이며, Task 5b/5c의 필수 선행조건이다. 개발 Task와 별도 트랙으로 병렬 진행하고, 담당자 확보 전에는 Task 5c를 착수하지 않는다.
+이 Task는 코드 작업이 아니라 **기계설비 담당자의 판단 작업**이며, Task 5c와 M1 Exit의 필수 선행조건이다. 개발 Task와 별도 트랙으로 병렬 진행하고, 담당자 확보 전에는 Task 5c를 착수하지 않는다. 사용자 승인으로 현장 geometry를 소비하지 않는 Task 5b의 합성 acceptance/benchmark 실행은 병렬 진행할 수 있지만, 그 결과가 confirmed geometry나 M1 조건을 대체하지 않는다.
 
 **Files:**
 
@@ -739,13 +739,16 @@ M1 Exit는 계속 열려 있다. 공개 브랜치에는 현장 좌표·원본·�
 
 이 Task의 각 Step은 solver wall-clock에 묶여 있으며 코드 속도로 압축되지 않는다.
 
-- [ ] **Step 1: serial environment acceptance를 세 번 실행한다**
+- [x] **Step 1: serial environment acceptance를 세 번 실행한다**
 
   ```powershell
-  & $Python scripts/local_usability_acceptance.py --repo-root . --python-executable $Python --launch-attempts 3 --output cfd_projects/_working_validation/local_usability_acceptance.json
+  & $Python -B scripts/produce_local_usability_acceptance.py --repo-root . --python-executable $Python --launch-attempts 3 --output cfd_projects/_working_validation/local_usability_acceptance.json
+  & $Python -B scripts/local_usability_acceptance.py --projects-root cfd_projects --manifest cfd_projects/_working_validation/local_usability_acceptance.json --output cfd_projects/_working_validation/evaluations/serial-environment-evaluation.json
   ```
 
   Expected: body-fitted runtime ready, current 64-cell acceptance, serial baseline, Studio startup 3/3. MPI may remain BLOCKED.
+
+  **2026-08-27 actual:** locked Python 3.12.10, FreeCAD 1.1.1/OCC 7.8.1, OpenFOAM v2606 serial, independently parsed 64 cells, physical time 1.0 s, clean solver `End`, report, runtime baseline, Studio startup 3/3, and five actionable diagnostic observations were bound to one run and independently revalidated `PASS` with blockers 0. MPI execution smoke remains `NOT_RUN`. Runtime evidence stays ignored under `cfd_projects/`.
 
 - [ ] **Step 2: working-room anchor/repeat를 실행한다**
 
@@ -755,7 +758,7 @@ M1 Exit는 계속 열려 있다. 공개 브랜치에는 현장 좌표·원본·�
 
   Acceptance: heat-box analytic mean-temperature relative error ≤1%, storage closure 0.99~1.01, Co ≤1.0, global continuity ≤1e-6. Scheme/time/mesh comparison은 formal GCI가 아니라 two-level engineering spot-check로 라벨링한다.
 
-**Gate 5b:** 세 종류의 실행 증거가 현재 artifact hash로 재검증된다.
+**Gate 5b:** Step 1은 완료됐다. 전체 Gate는 Step 2 working-room과 Step 3 exact-heat/limited-spot-check 실행 증거까지 현재 artifact hash로 재검증된 뒤에만 완료한다.
 
 ### Task 5c: 실제 DXF GUI E2E와 resume 무결성을 확인한다 — 증거 시계
 
@@ -1951,6 +1954,14 @@ Task 0 Step 6은 어떤 코드 Task보다 먼저 수행한다. 현재 Tasks 1~4�
 - M0 remains complete. M1 and general release remain `NO-GO`: Task 4.5 confirmed geometry, Task 5b genuine solver evidence, Task 5c real-DXF GUI/restart/usability evidence, and named human roles remain unavailable.
 - No FreeCAD/OpenFOAM/solver run, Studio/browser execution, real-DXF run, or manual print-preview is claimed by this snapshot.
 - Detailed rulings, per-task commits, review findings, and verification evidence are maintained in the [SDD progress ledger](../../../.superpowers/sdd/2026-08-24-mep-cfd-master-development/progress.md) and [Task 5a report](../../../.superpowers/sdd/2026-08-24-mep-cfd-master-development/task-5a-report.md).
+
+### Execution status update — 2026-08-27
+
+- The user authorized synthetic-evidence-only Task 5b execution; confirmed site geometry and accountable MEP approval are still not supplied.
+- Task 5b Step 1 is complete. A separate producer staged and generated current FreeCAD/Studio/OpenFOAM evidence, the pure validator passed the candidate, and an independent post-publication evaluation returned `PASS` with blockers 0.
+- Actual scope: locked Python 3.12.10, FreeCAD 1.1.1/OCC 7.8.1, OpenFOAM v2606 serial, 64 cells, physical time 1.0 s, Studio readiness 3/3, actionable diagnostics 5/5. Focused regression: `289 passed, 7 skipped, 7 warnings`.
+- Runtime artifacts remain ignored under `cfd_projects/`; the public branch contains only producer/validator code, tests, plans, governance, and sanitized progress/report records.
+- Task 5b Steps 2–3, Task 4.5, Task 5c, M1, design citation, and release remain open or blocked. MPI execution smoke remains `NOT_RUN`.
 
 ## 19. 계획 개정 기록 — 2026-08-24 (검토 반영)
 

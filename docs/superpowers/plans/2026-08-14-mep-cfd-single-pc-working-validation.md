@@ -198,7 +198,8 @@ New-Item -ItemType Directory -Force cfd_projects/_working_validation | Out-Null
 - Modify: `cfd_capabilities.py` — FreeCAD discovery와 bounded Boolean/tessellation probe를 분리하고 현재 runtime identity와 timeout reason code를 기록한다.
 - Modify: `cfd_studio.py` — HTTP 서버와 브라우저를 먼저 시작하고 FreeCAD/OpenFOAM 진단은 background refresh로 실행한다.
 - Modify: `cfd_run.py` — Studio acceptance가 한 번 실행한 solver result에서 runtime baseline을 만들 수 있도록 기존 recorder를 공유한다.
-- Create: `scripts/local_usability_acceptance.py`
+- Create: `scripts/produce_local_usability_acceptance.py`
+- Preserve as pure validator: `scripts/local_usability_acceptance.py`
 - Create: `local_usability_acceptance.v1.schema.json`
 - Test: `tests/test_cfd_capabilities.py`
 - Test: `tests/test_studio_workflow.py`
@@ -224,19 +225,23 @@ def diagnose_freecad_stages(executable: Path, *, per_stage_timeout_s: float) -> 
     """Bound discovery, imports, Boolean and tessellation separately and report the failing stage."""
 ```
 
-**Interface added in `scripts/local_usability_acceptance.py`:**
+**Interfaces added for local usability acceptance:**
 
 ```python
-def run_local_usability_acceptance(repo_root: Path, python_executable: Path,
-                                   *, launch_attempts: int = 3) -> dict:
-    """Measure fresh HTTP/DOM readiness and validate five actionable Korean error fixtures."""
+def produce_local_usability_acceptance(repo_root: Path, python_executable: Path,
+                                       *, runtime, launch_attempts: int = 3) -> dict:
+    """Produce, stage, validate, and only then publish current runtime evidence."""
+
+def validate_local_usability_acceptance(manifest_path: Path,
+                                        projects_root: Path) -> dict:
+    """Purely revalidate the fixed manifest and every hash-bound dependency."""
 ```
 
-- [ ] **Step 1: FreeCAD timeout과 GUI startup 비동기 동작을 재현하는 test를 실행한다.**
+- [x] **Step 1: FreeCAD timeout과 GUI startup 비동기 동작을 재현하는 test를 실행한다.**
 
 Run: `& $Python -B -m pytest -q tests/test_cfd_capabilities.py tests/test_studio_workflow.py`
 
-- [ ] **Step 2: 실제 FreeCAD probe가 다음 fields로 PASS하도록 원인을 복구한다.**
+- [x] **Step 2: 실제 FreeCAD probe가 다음 fields로 PASS하도록 원인을 복구한다.**
 
 Use the currently discovered executable explicitly and an isolated config. Close orphan FreeCAD processes manually before the probe; the program must not kill unrelated user processes.
 
@@ -257,7 +262,7 @@ Boolean smoke=PASS
 tessellation smoke=PASS
 ```
 
-- [ ] **Step 3: Studio의 환경 사용 시험으로 64-cell case를 새로 실행한다.**
+- [x] **Step 3: Studio의 환경 사용 시험으로 64-cell case를 새로 실행한다.**
 
 Required:
 
@@ -272,25 +277,28 @@ HTML report exists
 accepted OpenFOAM profile equals current profile
 ```
 
-- [ ] **Step 4: 같은 한 번의 64-cell 실행에서 report, acceptance와 serial runtime evidence를 함께 원자 발행한다.**
+- [x] **Step 4: 같은 한 번의 64-cell 실행에서 report, acceptance와 serial runtime evidence를 함께 원자 발행한다.**
 
 Do not invoke `cfd_run.py --once` a second time. `_do_environment_acceptance()` must retain the actual `run_until_closed()` result, derive runtime baseline from that result, and publish report/acceptance/runtime-capability records with one run ID and matching case/log hashes. Required non-null fields are runner wall seconds, solver clock seconds, peak RSS, case input SHA-256 and solver log SHA-256.
 
-- [ ] **Step 5: 현재 PC에서 startup과 핵심 한국어 오류 5종을 검증한다.**
+- [x] **Step 5: 현재 PC에서 startup과 핵심 한국어 오류 5종을 검증한다.**
 
 Run three fresh Studio launches. Record process-start, HTTP-ready and required first-page DOM-marker timestamps. Each attempt must be ready within 10 s; after measuring readiness, wait for the bounded background diagnostics to settle and persist before clean shutdown. The actual SGI GUI session in Task 5 supplies the interactive browser proof. For WSL, FreeCAD, invalid geometry, mesh, and solver/disk failures, require a stable diagnostic code, plain-Korean cause, impact, exact next action and log path; raw traceback/path dumps shown to the novice must be zero.
 
 ```powershell
-& $Python scripts/local_usability_acceptance.py --repo-root . --python-executable $Python --launch-attempts 3 --output cfd_projects/_working_validation/local_usability_acceptance.json
+& $Python -B scripts/produce_local_usability_acceptance.py --repo-root . --python-executable $Python --launch-attempts 3 --output cfd_projects/_working_validation/local_usability_acceptance.json
+& $Python -B scripts/local_usability_acceptance.py --projects-root cfd_projects --manifest cfd_projects/_working_validation/local_usability_acceptance.json --output cfd_projects/_working_validation/evaluations/serial-environment-evaluation.json
 ```
 
 `serial_environment` must revalidate this JSON, its Python/capability identity and all referenced evidence hashes. Missing, stale, malformed, fewer than 3 launches or fewer than 5 diagnostic rows is BLOCKED.
 
-- [ ] **Step 6: 환경 회귀를 통과시킨다.**
+- [x] **Step 6: 환경 회귀를 통과시킨다.**
 
 Run: `& $Python -B -m pytest -q tests/test_cfd_capabilities.py tests/test_cfd_mpi_smoke.py tests/test_studio_workflow.py`
 
 **Completion:** `body_fitted_runtime_ready=true`, `body_fitted_engine_ready=true`, current 64-cell acceptance PASS, serial baseline PASS, startup 3/3 각각 10 s 이하, 한국어 오류 5/5 actionable, fatal/raw-traceback 0. MPI는 BLOCKED여도 된다.
+
+**2026-08-27 completion evidence:** 별도 producer가 합성 64-cell case와 FreeCAD/Studio/OpenFOAM 증거를 임시 후보에 생성하고 순수 validator PASS 후 manifest-last로 게시했다. 게시된 canonical manifest의 독립 재검증도 blockers 0으로 PASS했다. 집중 회귀는 locked Python 3.12.10에서 `289 passed, 7 skipped, 7 warnings`다. 7 skips는 이 serial Step 밖의 runtime-gated 항목이며 MPI execution smoke는 `NOT_RUN`이다.
 
 ---
 
@@ -639,7 +647,8 @@ When status is `WORKING_SINGLE_PC`, show `단일 PC 직렬 계산 경로 동작 
 ```powershell
 & $Python -B -m pytest -q tests --junitxml=cfd_projects/_working_validation/junit-final.xml
 & $Python -B -m py_compile working_validation.py cfd_working_room.py cfd_verification.py cfd_numerical_spotcheck.py
-& $Python scripts/local_usability_acceptance.py --repo-root . --python-executable $Python --launch-attempts 3 --output cfd_projects/_working_validation/local_usability_acceptance.json
+& $Python -B scripts/produce_local_usability_acceptance.py --repo-root . --python-executable $Python --launch-attempts 3 --output cfd_projects/_working_validation/local_usability_acceptance.json
+& $Python -B scripts/local_usability_acceptance.py --projects-root cfd_projects --manifest cfd_projects/_working_validation/local_usability_acceptance.json --output cfd_projects/_working_validation/evaluations/serial-environment-evaluation.json
 & $Python vv_baseline.py --repo-root . --projects-root cfd_projects --junit cfd_projects/_working_validation/junit-final.xml --output cfd_projects/_working_validation/vv-final.json
 $WorkingRoom = Get-Content cfd_projects/_working_validation/working-room-v1/working_room_acceptance.json -Raw -Encoding UTF8 | ConvertFrom-Json
 $Sgi = Get-Content cfd_projects/_working_validation/sgi-screening-v1/sgi_screening_acceptance.json -Raw -Encoding UTF8 | ConvertFrom-Json

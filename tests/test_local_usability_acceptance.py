@@ -674,6 +674,25 @@ def test_solver_log_requires_clean_end_without_fatal_and_final_time(
     assert blocker in result["blockers"]
 
 
+def test_solver_startup_banner_does_not_masquerade_as_floating_point_crash(tmp_path):
+    """OpenFOAM reports that trapping is enabled even when the solve completes."""
+    from scripts.local_usability_acceptance import validate_local_usability_acceptance
+
+    manifest_path, manifest = _build_bundle(tmp_path)
+    solver = tmp_path / manifest["sources"]["solver_log"]["path"]
+    solver.write_text(
+        "trapFpe: Floating point exception trapping enabled (FOAM_SIGFPE).\n"
+        "Time = 0.5\nTime = 1\nEnd\n",
+        encoding="utf-8",
+    )
+    _relink_solver_log_everywhere(tmp_path, manifest_path, manifest)
+
+    result = validate_local_usability_acceptance(manifest_path, tmp_path)
+
+    assert result["status"] == "PASS"
+    assert "SOLVER_LOG_FATAL" not in result["blockers"]
+
+
 @pytest.mark.parametrize(
     ("replacement", "blocker"),
     [

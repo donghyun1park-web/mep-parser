@@ -60,7 +60,7 @@ _BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
 _LINE_COMMENT = re.compile(r"//[^\r\n]*")
 _SOLVER_FATAL = re.compile(
     r"FOAM\s+FATAL|FATAL\s+ERROR|SEGMENTATION\s+FAULT|FLOATING\s+POINT\s+EXCEPTION"
-    r"|NO\s+SPACE\s+LEFT\s+ON\s+DEVICE|^\s*KILLED\s*$",
+    r"(?!\s+TRAPPING\s+ENABLED)|NO\s+SPACE\s+LEFT\s+ON\s+DEVICE|^\s*KILLED\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
 _CACHE_PARTS = {".cache", "cache", ".pytest_cache", "__pycache__", "tmp", "temp", ".tmp"}

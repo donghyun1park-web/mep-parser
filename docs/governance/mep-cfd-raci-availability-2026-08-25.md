@@ -44,6 +44,23 @@ For every assignment, the cell states `Role`, `Owner ID`, `Availability`, and `S
 | M3; M4/M5/M6 external approval gates; M7; M8 | Excluded from the active critical path until their named owners exist. This prevents unstaffed scientific, field, release, UAT, MPI, and surrogate work from becoming an assumed schedule. |
 | Active code critical path after this record | `first-green Windows CI → Task 5a` only. This does not close M1: confirmed geometry, current single-PC evidence, and the other M1 exit conditions remain independently required. |
 
+## 2026-08-27 scope revision — user-authorized synthetic Task 5b execution
+
+The user explicitly authorized moving to Task 5 and accepted the proposed
+synthetic-evidence-only boundary. This revision permits Task 5b environment,
+working-room, heat-box, and limited numerical evidence that does not consume or
+claim confirmed site geometry. It does not appoint an MEP engineer, approve a
+scientific threshold, or convert user statements into accountable MEP approval.
+
+- Task 5b Step 1 may execute on the current PC and publish ignored local runtime
+  evidence only after the pure validator returns PASS.
+- Task 4.5 remains `BLOCKED_NO_OWNER` / `BLOCKED_INPUT_CONFIRMATION`.
+- Task 5c and M1 Exit remain blocked behind one accountable confirmed geometry.
+- Task 5b evidence remains synthetic, serial, non-citable, and non-release
+  evidence; it cannot replace field inputs, external review, or M1 exit checks.
+- This dated revision supersedes only the earlier conservative dependency of
+  all Task 5b work on Task 4.5. All human-owner availability rows remain intact.
+
 ## Future owner activation
 
 A future owner becomes active only through a new dated record or append-only revision that states the stable owner/reviewer ID, the role, availability date/window, scope, and supporting evidence/review record. A personal display name is never hard-coded into product code. Until that update is reviewed, this record remains authoritative for availability and the affected work remains blocked.
