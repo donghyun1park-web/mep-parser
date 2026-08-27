@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hvac_template.v1.schema.json",
+  "title": "Reviewable HVAC scenario template",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "contract", "template_id", "name", "description",
+    "required_terminal_roles", "allowed_parameters", "validation",
+    "ui_copy", "physics_profile"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "contract": {"const": "hvac_template.v1"},
+    "template_id": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]+$"},
+    "name": {"type": "string", "minLength": 1, "maxLength": 120},
+    "description": {"type": "string", "minLength": 1, "maxLength": 500},
+    "required_terminal_roles": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"enum": ["supply", "exhaust"]}
+    },
+    "allowed_parameters": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/parameter"}
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["airflow_balance_tolerance_fraction"],
+      "properties": {
+        "airflow_balance_tolerance_fraction": {
+          "type": "number", "minimum": 0, "maximum": 0.1
+        }
+      }
+    },
+    "ui_copy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "design_review_prompt", "input_review_prompt"],
+      "properties": {
+        "summary": {"type": "string", "minLength": 1},
+        "design_review_prompt": {"type": "string", "minLength": 1},
+        "input_review_prompt": {"type": "string", "minLength": 1}
+      }
+    },
+    "physics_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "scope"],
+      "properties": {
+        "name": {"const": "stabilized_first_order_v1"},
+        "scope": {"const": "thermal_numerics"}
+      }
+    }
+  },
+  "$defs": {
+    "parameter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "label", "unit", "required", "validation"],
+      "properties": {
+        "key": {
+          "enum": [
+            "terminal.airflow_cmh",
+            "terminal.supply_temperature_k",
+            "heat_source.convective_power_w",
+            "occupancy.people_count",
+            "weather.outdoor_temperature_k",
+            "operating_period.duration_s",
+            "mesh.background_cell_m",
+            "comfort.relative_humidity_pct",
+            "comfort.metabolic_rate_met",
+            "comfort.clothing_clo"
+          ]
+        },
+        "label": {"type": "string", "minLength": 1},
+        "unit": {"type": ["string", "null"]},
+        "required": {"type": "boolean"},
+        "validation": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "exclusive_minimum": {"type": "number"},
+            "minimum": {"type": "number"},
+            "maximum": {"type": "number"}
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "contract": "hvac_template.v1",
+  "template_id": "mixing_ventilation.v1",
+  "name": "Mixing ventilation",
+  "description": "Reviews a supply/exhaust mixing layout without inventing operating values.",
+  "required_terminal_roles": ["supply", "exhaust"],
+  "allowed_parameters": [
+    {"key": "terminal.airflow_cmh", "label": "Terminal airflow", "unit": "CMH", "required": true, "validation": {"exclusive_minimum": 0}},
+    {"key": "terminal.supply_temperature_k", "label": "Supply temperature", "unit": "K", "required": true, "validation": {"exclusive_minimum": 0}},
+    {"key": "heat_source.convective_power_w", "label": "Convective heat", "unit": "W", "required": true, "validation": {"minimum": 0}},
+    {"key": "occupancy.people_count", "label": "People count", "unit": "people", "required": false, "validation": {"minimum": 0}},
+    {"key": "weather.outdoor_temperature_k", "label": "Outdoor temperature", "unit": "K", "required": false, "validation": {"exclusive_minimum": 0}},
+    {"key": "operating_period.duration_s", "label": "Operating duration", "unit": "s", "required": true, "validation": {"exclusive_minimum": 0}},
+    {"key": "mesh.background_cell_m", "label": "Background cell size", "unit": "m", "required": true, "validation": {"exclusive_minimum": 0}},
+    {"key": "comfort.relative_humidity_pct", "label": "Relative humidity", "unit": "%", "required": false, "validation": {"minimum": 0, "maximum": 100}},
+    {"key": "comfort.metabolic_rate_met", "label": "Metabolic rate", "unit": "met", "required": false, "validation": {"exclusive_minimum": 0}},
+    {"key": "comfort.clothing_clo", "label": "Clothing insulation", "unit": "clo", "required": false, "validation": {"minimum": 0}}
+  ],
+  "validation": {"airflow_balance_tolerance_fraction": 0.01},
+  "ui_copy": {
+    "summary": "Check whether supplied and exhausted air mixes through the reviewed space.",
+    "design_review_prompt": "Confirm terminal IDs, roles, locations, normals and sizes in the Design revision.",
+    "input_review_prompt": "Enter reviewed airflow, temperature and load values with their authority."
+  },
+  "physics_profile": {"name": "stabilized_first_order_v1", "scope": "thermal_numerics"}
+}

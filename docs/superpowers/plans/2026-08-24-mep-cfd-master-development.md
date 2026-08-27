@@ -958,29 +958,29 @@ def apply_hvac_template(template: dict, design: dict, *, user_values: dict) -> d
 def scenario_diff(baseline: dict, candidate: dict) -> list[dict]: ...
 ```
 
-- [ ] **Step 1: template가 물리값을 추정하지 않는 실패 tests를 작성한다**
+- [x] **Step 1: template가 물리값을 추정하지 않는 실패 tests를 작성한다**
 
   CMH, equipment kW, RH, met, clo, external temperature가 사용자 또는 approved source 없이 채워지면 실패해야 한다. Template은 required roles, validation rules, UI copy, allowed parameters만 제공한다.
 
-- [ ] **Step 2: terminal mapping tests를 작성한다**
+- [x] **Step 2: terminal mapping tests를 작성한다**
 
   `geometry.v2`의 stable element ID와 role을 사용하고 화면 label이나 patch order에 의존하지 않는다. 빠진 terminal, 중복 terminal, 불균형 supply/exhaust를 blocker로 반환한다.
 
-- [ ] **Step 3: template loader와 apply를 구현한다**
+- [x] **Step 3: template loader와 apply를 구현한다**
 
   Built-in templates에는 난류/수치 expert defaults를 직접 노출하지 않는다. physics profile name과 그 적용범위만 선택하고 실제 dictionaries는 `cfd_physics.py`가 생성한다.
 
-- [ ] **Step 4: semantic diff를 구현한다**
+- [x] **Step 4: semantic diff를 구현한다**
 
   Diff row는 `path`, `baseline`, `candidate`, `unit`, `engineering_effect`, `requires_review`를 가진다. float display rounding과 identity hash calculation을 분리한다.
 
-- [ ] **Step 5: tests를 실행한다**
+- [x] **Step 5: tests를 실행한다**
 
   Run: `& $Python -B -m pytest -q tests/test_cfd_templates.py tests/test_project_model.py tests/test_heat_source_contract.py`
 
   Expected: PASS.
 
-- [ ] **Step 6: commit한다**
+- [x] **Step 6: commit한다**
 
   ```powershell
   git add hvac_template.v1.schema.json cfd_templates.py cfd_templates/hvac tests/test_cfd_templates.py project_model.py
@@ -1969,6 +1969,7 @@ Task 0 Step 6은 어떤 코드 Task보다 먼저 수행한다. 현재 Tasks 1~4�
 - Task 6 public verification is green at exact code/docs commit `923e4f438c35e390ca0c35600400626cace02393`: locked Windows CI run `33031962459`, job `98386275226`, completed `1208 passed, 14 skipped, 7 warnings` with zero failures/errors. The 14 skips remain runtime-gated and this CI does not assert a completed 240 s solver acceptance.
 - Task 7 is complete in code-contract scope: legacy case inventory and Run links are external immutable sidecars under `_project_model/legacy_cases`, legacy case/checkpoint/result bytes are not rewritten, identity mismatch blocks queue/solver entry, and newer Design revisions compute `SUPERSEDED_DESIGN_REVISION` without deleting prior Scenario/Run evidence. Identity-less v1 field jobs remain readable and receive in-memory `NOT_LINKED`; identity-supplied jobs publish v2 with the four frozen identity references. Focused Task 7 regression completed with `132 passed, 7 warnings, 9 subtests passed`; M2 and actual field execution remain open.
 - Task 7 public verification is green at exact implementation commit `312cb2d7b3d10d420ab18b9aa58eae8aa79c21e6`: locked Windows CI run `33036491175`, job `98400191067`, completed `1217 passed, 14 skipped, 7 warnings` with zero failures/errors. Runtime-gated skips and the absence of an actual identity-linked field solve remain explicit.
+- Task 8 is complete in code-contract scope: mixing/displacement templates contain roles, validation rules, UI copy, and a supported screening profile but no physical or solver-dictionary defaults. Applying a template requires a traceable direct `user_confirmed:<ref>` authority; a bare `approved_source:<ref>` label fails closed until a verified approval-artifact contract can resolve it. Raw `geometry.v2` is schema/recomputation-checked preview-only, and only an authoritative validated immutable Design revision can become ready. Mapping uses stable element ID/role and blocks missing/duplicate/unstable/unconfirmed terminals, missing heat inputs, unknown IDs, and supply/exhaust imbalance. Scenario semantic diff is stable-ID based, unit/effect annotated, order-insensitive, recursively expands compound additions, and compares canonical exact JSON identity before display rounding, including integer/float and missing/null differences. Focused Task 8 verification completed with `50 passed, 10 subtests passed`; the extended Design/geometry/numerics/physics boundary completed with `145 passed, 7 skipped, 7 warnings, 27 subtests passed`. Independent final review verdict is `CLEAN`. Task 9, M2, an actual two-Scenario run comparison, verified approved-source ingestion, and release remain open.
 
 ## 19. 계획 개정 기록 — 2026-08-24 (검토 반영)
 

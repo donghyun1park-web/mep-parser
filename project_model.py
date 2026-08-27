@@ -307,6 +307,167 @@ def classify_scenario_variation(base: Any, candidate: Any) -> str:
     return "SCENARIO_REVISION"
 
 
+_SCENARIO_DIFF_METADATA = {
+    "airflow_cmh": (
+        "CMH", "terminal flow and room air-change distribution",
+    ),
+    "supply_temperature_k": (
+        "K", "supply-air thermal driving force",
+    ),
+    "convective_power_w": (
+        "W", "internal convective heat load",
+    ),
+    "people_count": (
+        "people", "occupancy load and occupied-period assumption",
+    ),
+    "outdoor_temperature_k": (
+        "K", "external thermal boundary assumption",
+    ),
+    "duration_s": (
+        "s", "simulated operating period",
+    ),
+    "background_cell_m": (
+        "m", "mesh resolution intent and computational cost",
+    ),
+    "preset": (
+        None, "mesh resolution intent and computational cost",
+    ),
+    "profile_name": (
+        None, "solver physics profile selection",
+    ),
+    "profile_scope": (
+        None, "solver physics profile applicability",
+    ),
+}
+
+
+def _scenario_conditions(value: Any) -> Any:
+    if isinstance(value, dict) and "operating_conditions" in value:
+        return value["operating_conditions"]
+    return value
+
+
+_DIFF_MISSING = object()
+
+
+def _identity_equal(baseline: Any, candidate: Any) -> bool:
+    if baseline is _DIFF_MISSING or candidate is _DIFF_MISSING:
+        return baseline is candidate
+    return _canonical(baseline) == _canonical(candidate)
+
+
+def _display_diff_value(value: Any) -> Any:
+    if value is _DIFF_MISSING:
+        return "<missing>"
+    if isinstance(value, float):
+        rounded = round(value, 6)
+        return 0.0 if rounded == 0 else rounded
+    if isinstance(value, dict):
+        return {key: _display_diff_value(child) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_display_diff_value(child) for child in value]
+    return copy.deepcopy(value)
+
+
+def _diff_metadata(path: str) -> tuple[str | None, str]:
+    field = path.rsplit(".", 1)[-1]
+    if field == "input_authority" or ".input_authority." in path:
+        return None, "input provenance and review authority"
+    return _SCENARIO_DIFF_METADATA.get(
+        field, (None, "scenario operating condition"),
+    )
+
+
+def _semantic_rows(path: str, baseline: Any, candidate: Any) -> list[dict[str, Any]]:
+    if _identity_equal(baseline, candidate):
+        return []
+    if path.endswith(".terminals") and isinstance(baseline, list) and isinstance(candidate, list):
+        base_by_id = {
+            row.get("terminal_id"): row for row in baseline
+            if isinstance(row, dict) and isinstance(row.get("terminal_id"), str)
+        }
+        candidate_by_id = {
+            row.get("terminal_id"): row for row in candidate
+            if isinstance(row, dict) and isinstance(row.get("terminal_id"), str)
+        }
+        if len(base_by_id) == len(baseline) and len(candidate_by_id) == len(candidate):
+            rows: list[dict[str, Any]] = []
+            for identity in sorted(set(base_by_id) | set(candidate_by_id)):
+                rows.extend(_semantic_rows(
+                    f"{path}[{identity}]",
+                    base_by_id.get(identity, _DIFF_MISSING),
+                    candidate_by_id.get(identity, _DIFF_MISSING),
+                ))
+            return rows
+    if path.endswith(".heat_sources") and isinstance(baseline, list) and isinstance(candidate, list):
+        base_by_id = {
+            row.get("source_id"): row for row in baseline
+            if isinstance(row, dict) and isinstance(row.get("source_id"), str)
+        }
+        candidate_by_id = {
+            row.get("source_id"): row for row in candidate
+            if isinstance(row, dict) and isinstance(row.get("source_id"), str)
+        }
+        if len(base_by_id) == len(baseline) and len(candidate_by_id) == len(candidate):
+            rows = []
+            for identity in sorted(set(base_by_id) | set(candidate_by_id)):
+                rows.extend(_semantic_rows(
+                    f"{path}[{identity}]",
+                    base_by_id.get(identity, _DIFF_MISSING),
+                    candidate_by_id.get(identity, _DIFF_MISSING),
+                ))
+            return rows
+    baseline_mapping = baseline if isinstance(baseline, dict) else (
+        {} if (baseline is None or baseline is _DIFF_MISSING)
+        and isinstance(candidate, dict) else None
+    )
+    candidate_mapping = candidate if isinstance(candidate, dict) else (
+        {} if (candidate is None or candidate is _DIFF_MISSING)
+        and isinstance(baseline, dict) else None
+    )
+    if baseline_mapping is not None and candidate_mapping is not None and (
+        baseline_mapping or candidate_mapping
+    ):
+        rows = []
+        for key in sorted(set(baseline_mapping) | set(candidate_mapping)):
+            child_path = f"{path}.{key}" if path else key
+            rows.extend(_semantic_rows(
+                child_path,
+                baseline_mapping.get(key, _DIFF_MISSING),
+                candidate_mapping.get(key, _DIFF_MISSING),
+            ))
+        return rows
+    if isinstance(baseline, list) and isinstance(candidate, list):
+        rows = []
+        for index in range(max(len(baseline), len(candidate))):
+            base_value = baseline[index] if index < len(baseline) else _DIFF_MISSING
+            candidate_value = candidate[index] if index < len(candidate) else _DIFF_MISSING
+            rows.extend(_semantic_rows(f"{path}[{index}]", base_value, candidate_value))
+        return rows
+    unit, effect = _diff_metadata(path)
+    return [{
+        "path": path,
+        "baseline": _display_diff_value(baseline),
+        "candidate": _display_diff_value(candidate),
+        "unit": unit,
+        "engineering_effect": effect,
+        "requires_review": True,
+    }]
+
+
+def scenario_diff(baseline: dict, candidate: dict) -> list[dict]:
+    """Return a stable-ID semantic diff of two Scenario operating conditions.
+
+    Equality is checked on exact values first.  Rounding is presentation-only
+    and therefore cannot alter Scenario content identity.
+    """
+    return _semantic_rows(
+        "operating_conditions",
+        _scenario_conditions(copy.deepcopy(baseline)),
+        _scenario_conditions(copy.deepcopy(candidate)),
+    )
+
+
 def create_scenario(
     design_revision: str | Path,
     *,

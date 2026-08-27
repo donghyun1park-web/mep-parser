@@ -133,14 +133,33 @@
         },
         "physics_intent": {
           "type": "object",
-          "additionalProperties": false,
-          "required": ["solver", "turbulence_model"],
-          "properties": {
-            "solver": {
-              "enum": ["simpleFoam", "pimpleFoam", "buoyantBoussinesqPimpleFoam"]
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "required": ["solver", "turbulence_model"],
+              "properties": {
+                "solver": {
+                  "enum": ["simpleFoam", "pimpleFoam", "buoyantBoussinesqPimpleFoam"]
+                },
+                "turbulence_model": {"enum": ["laminar", "kEpsilon", "kOmegaSST"]}
+              }
             },
-            "turbulence_model": {"enum": ["laminar", "kEpsilon", "kOmegaSST"]}
-          }
+            {
+              "additionalProperties": false,
+              "required": ["profile_name", "profile_scope"],
+              "properties": {
+                "profile_name": {
+                  "enum": ["stabilized_first_order_v1", "design_limited_second_order_v1"]
+                },
+                "profile_scope": {"const": "thermal_numerics"}
+              }
+            }
+          ]
+        },
+        "input_authority": {
+          "type": "object",
+          "propertyNames": {"minLength": 1},
+          "additionalProperties": {"type": "string", "minLength": 1}
         }
       }
     }
