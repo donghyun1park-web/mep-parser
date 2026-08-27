@@ -20,6 +20,21 @@ class ReleaseAuditTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix=".test-release-", dir=self.repo)
         self.workspace = Path(self.tmp.name)
         self.projects = self.workspace / "cfd_projects"
+        # Release-audit unit tests exercise inventory, diversity, UAT, install,
+        # staleness and tamper gates.  Task 10 deliberately makes the real
+        # final CFD citation gate impossible until later benchmark/field-UQ
+        # validators exist, so isolate only that upstream boundary here.
+        final_gate = mock.patch.object(
+            field_acceptance.cfd_result_gate,
+            "evaluate_body_fitted_case",
+            return_value={
+                "status": "PASS", "design_ready": True,
+                "citation_status": "DESIGN_CITABLE", "citable": True,
+                "blockers": [],
+            },
+        )
+        final_gate.start()
+        self.addCleanup(final_gate.stop)
 
     def tearDown(self):
         self.tmp.cleanup()

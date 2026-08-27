@@ -1069,7 +1069,7 @@ def compare_runs(
 - Modify: `cfd_result_gate.py`
 - Modify: `field_acceptance.py`
 - Modify: `field_pipeline_job.py`
-- Test: `tests/test_cfd_numerical_sensitivity_job.py`, `tests/test_cfd_temporal_sensitivity.py`, `tests/test_cfd_gci.py`, `tests/test_field_pipeline_job.py`, `tests/test_cfd_evidence.py`.
+- Test: `tests/test_cfd_numerical_sensitivity_job.py`, `tests/test_cfd_temporal_sensitivity.py`, `tests/test_cfd_gci.py`, `tests/test_field_pipeline_job.py`, `tests/test_cfd_evidence.py`, `tests/test_release_audit.py`.
 
 **Interfaces:**
 
