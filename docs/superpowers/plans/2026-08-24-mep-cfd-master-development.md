@@ -902,27 +902,27 @@ def link_run_identity(case_dir: Path, identity_path: Path) -> dict: ...
 def validate_run_identity(case_dir: Path, *, projects_root: Path) -> list[dict]: ...
 ```
 
-- [ ] **Step 1: non-destructive legacy import tests를 작성한다**
+- [x] **Step 1: non-destructive legacy import tests를 작성한다**
 
   기존 case 폴더의 file list/hash가 import 전후 동일하고 metadata sidecar만 새로 생기는지 검증한다. provenance가 부족한 case는 `legacy_unlinked`, 조회 가능, scenario comparison 불가, design citation 불가다.
 
-- [ ] **Step 2: run identity mismatch tests를 작성한다**
+- [x] **Step 2: run identity mismatch tests를 작성한다**
 
   Design revision 또는 Scenario hash가 달라지면 field resume을 막고 `RUN_IDENTITY_CHANGED`를 반환한다. 기존 checkpoint와 결과는 삭제하지 않는다.
 
-- [ ] **Step 3: legacy reader와 sidecar writer를 구현한다**
+- [x] **Step 3: legacy reader와 sidecar writer를 구현한다**
 
   기존 `cfd_projects/<case>`를 이동하지 않는다. `_project_model/` metadata에서 legacy path를 상대 경로로 참조하고 현재 hash를 저장한다.
 
-- [ ] **Step 4: field pipeline manifest에 identity reference를 추가한다**
+- [x] **Step 4: field pipeline manifest에 identity reference를 추가한다**
 
   v2에 `case_identity_path`, `case_identity_sha256`, `design_revision_sha256`, `scenario_revision_sha256`를 필수로 추가한다. reader는 schema version을 먼저 판별하고, 이전 v1 문서는 메모리상 `case_identity_status=NOT_LINKED`를 보완해 읽되 원본 파일을 자동 변환하거나 덮어쓰지 않는다.
 
-- [ ] **Step 5: invalidation을 구현한다**
+- [x] **Step 5: invalidation을 구현한다**
 
   Design revision 변경 시 이전 Scenario/Run을 삭제하지 않고 `SUPERSEDED_DESIGN_REVISION`으로 표시한다. 같은 Run resume은 frozen identity가 current artifact와 일치할 때만 허용한다.
 
-- [ ] **Step 6: regression을 실행한다**
+- [x] **Step 6: regression을 실행한다**
 
   Run:
 
@@ -932,7 +932,7 @@ def validate_run_identity(case_dir: Path, *, projects_root: Path) -> list[dict]:
 
   Expected: PASS, 기존 field job v1 fixtures도 읽힌다.
 
-- [ ] **Step 7: commit한다**
+- [x] **Step 7: commit한다**
 
   ```powershell
   git add project_model.py field_pipeline_job.py field_pipeline_job.v2.schema.json cfd_studio.py tests/test_project_model.py tests/test_field_pipeline_job.py tests/test_studio_workflow.py
@@ -1967,6 +1967,7 @@ Task 0 Step 6은 어떤 코드 Task보다 먼저 수행한다. 현재 Tasks 1~4�
 - Task 5b Step 2 implementation now uses the approved terminal level 1 and fixed `deltaT=0.01 s` contract. The 240 s anchor/repeat evidence has not yet been rerun, so Step 2 remains open while code-clock Task 6 proceeds by explicit user direction.
 - Task 6 is complete in code: closed `design.v1`, `scenario.v1`, and `case_identity.v1` contracts, immutable canonical-JSON-derived revisions, atomic publication, path containment, Design/Scenario variation classification, and current-reference tamper validation are implemented. Focused Task 6 plus geometry/working-room/GCI regression completed with `142 passed`; this is code-contract evidence and does not close Task 5b runtime or M1.
 - Task 6 public verification is green at exact code/docs commit `923e4f438c35e390ca0c35600400626cace02393`: locked Windows CI run `33031962459`, job `98386275226`, completed `1208 passed, 14 skipped, 7 warnings` with zero failures/errors. The 14 skips remain runtime-gated and this CI does not assert a completed 240 s solver acceptance.
+- Task 7 is complete in code-contract scope: legacy case inventory and Run links are external immutable sidecars under `_project_model/legacy_cases`, legacy case/checkpoint/result bytes are not rewritten, identity mismatch blocks queue/solver entry, and newer Design revisions compute `SUPERSEDED_DESIGN_REVISION` without deleting prior Scenario/Run evidence. Identity-less v1 field jobs remain readable and receive in-memory `NOT_LINKED`; identity-supplied jobs publish v2 with the four frozen identity references. Focused Task 7 regression completed with `132 passed, 7 warnings, 9 subtests passed`; M2 and actual field execution remain open.
 
 ## 19. 계획 개정 기록 — 2026-08-24 (검토 반영)
 

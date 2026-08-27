@@ -522,3 +522,196 @@ def validate_case_identity(
         except ProjectModelError as exc:
             issues.append(_issue(exc.code, str(exc)))
     return issues
+
+
+def _case_location(case_dir: str | Path, root: Path) -> tuple[Path, str, str]:
+    case = _inside(root, Path(case_dir), code="LEGACY_CASE_PATH_ESCAPE")
+    if not case.is_dir():
+        raise ProjectModelError("LEGACY_CASE_NOT_FOUND", str(case))
+    relative = _relative(root, case)
+    if relative == _STORE or relative.startswith(f"{_STORE}/"):
+        raise ProjectModelError("LEGACY_CASE_PATH_INVALID", relative)
+    legacy_id = f"legacy-{_digest_value({'case_path': relative})[:24]}"
+    return case, relative, legacy_id
+
+
+def _case_inventory(case: Path) -> tuple[list[dict[str, Any]], str]:
+    rows: list[dict[str, Any]] = []
+    for path in sorted(case.rglob("*")):
+        if not path.is_file():
+            continue
+        resolved = _inside(case, path, code="LEGACY_CASE_FILE_ESCAPE")
+        payload = resolved.read_bytes()
+        rows.append({
+            "path": resolved.relative_to(case).as_posix(),
+            "size": len(payload),
+            "sha256": _digest_bytes(payload),
+        })
+    return rows, _digest_value(rows)
+
+
+def _legacy_directory(root: Path, legacy_id: str) -> Path:
+    return root / _STORE / "legacy_cases" / legacy_id
+
+
+def import_legacy_case(
+    case_dir: str | Path, *, projects_root: str | Path,
+) -> dict[str, Any]:
+    """Inventory a legacy case in metadata storage without touching the case."""
+    root = Path(projects_root).resolve()
+    case, relative, legacy_id = _case_location(case_dir, root)
+    inventory, inventory_sha = _case_inventory(case)
+    target = (
+        _legacy_directory(root, legacy_id) / "snapshots"
+        / f"{inventory_sha}.legacy_case.v1.json"
+    )
+    if target.exists():
+        record = _load_json(target, code="LEGACY_SIDECAR_INVALID")
+    else:
+        record = {
+            "schema_version": 1,
+            "contract": "legacy_case.v1",
+            "legacy_case_id": legacy_id,
+            "created_at": _now(),
+            "case_path": relative,
+            "inventory_sha256": inventory_sha,
+            "inventory": inventory,
+            "status": "legacy_unlinked",
+            "scenario_comparison_eligible": False,
+            "design_citation_eligible": False,
+        }
+        _atomic_write(target, _json_bytes(record))
+    result = copy.deepcopy(record)
+    result["sidecar_path"] = str(target.resolve())
+    return result
+
+
+def _case_link_path(root: Path, legacy_id: str) -> Path:
+    return _legacy_directory(root, legacy_id) / "run_identity_link.v1.json"
+
+
+def link_run_identity(
+    case_dir: str | Path, identity_path: str | Path,
+) -> dict[str, Any]:
+    """Bind a case to one frozen Run identity using an external sidecar."""
+    identity = Path(identity_path).resolve()
+    root = _find_root_from_artifact(identity)
+    case, relative, legacy_id = _case_location(case_dir, root)
+    identity_issues = validate_case_identity(identity, projects_root=root)
+    if identity_issues:
+        raise ProjectModelError("RUN_IDENTITY_INVALID", str(identity_issues))
+    identity_value = _load_json(identity, code="RUN_IDENTITY_INVALID")
+    _, inventory_sha = _case_inventory(case)
+    target = _case_link_path(root, legacy_id)
+    if target.exists():
+        existing = _load_json(target, code="RUN_IDENTITY_LINK_INVALID")
+        if (
+            existing.get("case_identity_path") == _relative(root, identity)
+            and existing.get("case_identity_sha256") == _artifact_sha(identity)
+        ):
+            result = copy.deepcopy(existing)
+            result["sidecar_path"] = str(target.resolve())
+            return result
+        raise ProjectModelError(
+            "CASE_ALREADY_LINKED", "an immutable case link already exists",
+        )
+    record = {
+        "schema_version": 1,
+        "contract": "run_identity_link.v1",
+        "legacy_case_id": legacy_id,
+        "case_path": relative,
+        "linked_at": _now(),
+        "linked_case_inventory_sha256": inventory_sha,
+        "case_identity_path": _relative(root, identity),
+        "case_identity_sha256": _artifact_sha(identity),
+        "design_revision_sha256": identity_value["design"]["revision_sha256"],
+        "scenario_revision_sha256": identity_value["scenario"]["revision_sha256"],
+        "case_identity_status": "LINKED",
+    }
+    _atomic_write(target, _json_bytes(record))
+    result = copy.deepcopy(record)
+    result["sidecar_path"] = str(target.resolve())
+    return result
+
+
+def validate_run_identity(
+    case_dir: str | Path, *, projects_root: str | Path,
+) -> list[dict[str, str]]:
+    """Validate the frozen identity currently linked to a case."""
+    root = Path(projects_root).resolve()
+    try:
+        _, relative, legacy_id = _case_location(case_dir, root)
+        link_path = _case_link_path(root, legacy_id)
+        if not link_path.is_file():
+            return [_issue("RUN_IDENTITY_NOT_LINKED", "case has no Run identity link")]
+        link = _load_json(link_path, code="RUN_IDENTITY_LINK_INVALID")
+        if (
+            link.get("contract") != "run_identity_link.v1"
+            or link.get("case_path") != relative
+        ):
+            return [_issue("RUN_IDENTITY_CHANGED", "case link metadata changed")]
+        identity = _resolve_ref(
+            root, link.get("case_identity_path"), code="RUN_IDENTITY_PATH_ESCAPE",
+        )
+        if _artifact_sha(identity) != link.get("case_identity_sha256"):
+            return [_issue("RUN_IDENTITY_CHANGED", "Run identity bytes changed")]
+        identity_value = _load_json(identity, code="RUN_IDENTITY_INVALID")
+        if (
+            identity_value.get("design", {}).get("revision_sha256")
+            != link.get("design_revision_sha256")
+            or identity_value.get("scenario", {}).get("revision_sha256")
+            != link.get("scenario_revision_sha256")
+            or validate_case_identity(identity, projects_root=root)
+        ):
+            return [_issue("RUN_IDENTITY_CHANGED", "Run identity references changed")]
+        return validate_case_identity_lifecycle(identity, projects_root=root)
+    except ProjectModelError as exc:
+        return [_issue("RUN_IDENTITY_CHANGED", str(exc))]
+
+
+def validate_case_identity_lifecycle(
+    identity_path: str | Path, *, projects_root: str | Path,
+) -> list[dict[str, str]]:
+    """Report a valid frozen Run whose Design now has a newer revision."""
+    root = Path(projects_root).resolve()
+    try:
+        identity = _inside(
+            root, Path(identity_path), code="RUN_IDENTITY_PATH_ESCAPE",
+        )
+        value = _load_json(identity, code="RUN_IDENTITY_INVALID")
+        design_id = value["design"]["design_id"]
+        latest_path = _latest_revision(
+            root / _STORE / "designs" / design_id / "revisions", "design.v1",
+        )
+        if latest_path is None:
+            return [_issue("RUN_IDENTITY_CHANGED", "linked Design no longer exists")]
+        latest = _load_json(latest_path, code="DESIGN_REVISION_INVALID")
+        if latest.get("revision_sha256") != value["design"].get("revision_sha256"):
+            return [_issue(
+                "SUPERSEDED_DESIGN_REVISION",
+                "a newer immutable Design revision exists",
+            )]
+        return []
+    except (KeyError, TypeError, ProjectModelError) as exc:
+        return [_issue("RUN_IDENTITY_CHANGED", str(exc))]
+
+
+def case_identity_summary(
+    case_dir: str | Path, *, projects_root: str | Path,
+) -> dict[str, Any]:
+    """Return display-safe identity eligibility without modifying the case."""
+    issues = validate_run_identity(case_dir, projects_root=projects_root)
+    if not issues:
+        return {
+            "case_identity_status": "LINKED",
+            "scenario_comparison_eligible": True,
+            "design_citation_eligible": True,
+        }
+    code = issues[0]["code"]
+    status = "legacy_unlinked" if code == "RUN_IDENTITY_NOT_LINKED" else code
+    return {
+        "case_identity_status": status,
+        "scenario_comparison_eligible": False,
+        "design_citation_eligible": False,
+        "case_identity_issues": issues,
+    }

@@ -19,10 +19,14 @@ import cfd_power
 import cfd_result_gate
 import cfd_review
 import field_acceptance
+import project_model
 from geometry_v2 import migrate_geometry, validate_for_body_fitted
+from jsonschema import Draft202012Validator
 
 
-CONTRACT = "field_pipeline_job.v1"
+CONTRACT_V1 = "field_pipeline_job.v1"
+CONTRACT_V2 = "field_pipeline_job.v2"
+CONTRACT = CONTRACT_V1
 DEFAULT_BACKGROUND_CELL_M = 0.35
 TARGET_FLOW_THROUGH_FRACTION = 3.0
 ANALYSIS_COMPLETE_NOT_CITABLE = "analysis_complete_not_citable"
@@ -35,6 +39,23 @@ def _now():
 
 def _read(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def _normalise_job_document(value):
+    if not isinstance(value, dict):
+        return None
+    version = value.get("schema_version")
+    contract = value.get("contract")
+    if version == 1 and contract == CONTRACT_V1:
+        result = dict(value)
+        result.setdefault("case_identity_status", "NOT_LINKED")
+        return result
+    if version != 2 or contract != CONTRACT_V2:
+        return None
+    schema = _read(Path(__file__).resolve().parent / "field_pipeline_job.v2.schema.json")
+    if list(Draft202012Validator(schema).iter_errors(value)):
+        return None
+    return dict(value)
 
 
 def is_terminal_status(status):
@@ -245,7 +266,7 @@ def load_job(root, job_id):
         return None
     path = _job_path(root, job_id)
     try:
-        return _read(path) if path.is_file() else None
+        return _normalise_job_document(_read(path)) if path.is_file() else None
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return None
 
@@ -256,8 +277,11 @@ def list_jobs(root):
     if base.is_dir():
         for path in base.glob("field-*/field_pipeline_job.json"):
             try:
-                row = _read(path)
-                if row.get("contract") == CONTRACT:
+                row = _normalise_job_document(_read(path))
+                if row is not None:
+                    identity_issues = validate_job_identity(root, row)
+                    if identity_issues:
+                        row["case_identity_status"] = identity_issues[0]["code"]
                     rows.append(row)
             except (OSError, ValueError, TypeError, json.JSONDecodeError):
                 continue
@@ -269,6 +293,62 @@ def active_run_lock(root, job_id):
     if load_job(root, job_id) is None:
         return None
     return cfd_gci_job.active_job_lock(_job_path(root, job_id))
+
+
+def _identity_fields(root, requested):
+    raw_path = str(requested.get("case_identity_path") or "").strip()
+    if not raw_path:
+        return None
+    root = Path(root).resolve()
+    identity_path = Path(raw_path).expanduser()
+    if not identity_path.is_absolute():
+        identity_path = root / identity_path
+    try:
+        identity_path = identity_path.resolve(strict=True)
+        identity_path.relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise project_model.ProjectModelError(
+            "RUN_IDENTITY_PATH_ESCAPE", str(identity_path),
+        ) from exc
+    issues = project_model.validate_case_identity(identity_path, projects_root=root)
+    if issues:
+        raise project_model.ProjectModelError("RUN_IDENTITY_INVALID", str(issues))
+    identity = _read(identity_path)
+    return {
+        "case_identity_path": identity_path.relative_to(root).as_posix(),
+        "case_identity_sha256": _sha256(identity_path),
+        "design_revision_sha256": identity["design"]["revision_sha256"],
+        "scenario_revision_sha256": identity["scenario"]["revision_sha256"],
+        "case_identity_status": "LINKED",
+    }
+
+
+def validate_job_identity(root, manifest):
+    if manifest.get("contract") == CONTRACT_V1:
+        return []
+    if manifest.get("contract") != CONTRACT_V2:
+        return [{"code": "RUN_IDENTITY_CHANGED", "message": "unknown job contract"}]
+    root = Path(root).resolve()
+    try:
+        identity_path = root / manifest["case_identity_path"]
+        identity_path = identity_path.resolve(strict=True)
+        identity_path.relative_to(root)
+        if _sha256(identity_path) != manifest.get("case_identity_sha256"):
+            raise ValueError("case identity bytes changed")
+        identity = _read(identity_path)
+        if (
+            identity.get("design", {}).get("revision_sha256")
+            != manifest.get("design_revision_sha256")
+            or identity.get("scenario", {}).get("revision_sha256")
+            != manifest.get("scenario_revision_sha256")
+            or project_model.validate_case_identity(identity_path, projects_root=root)
+        ):
+            raise ValueError("case identity references changed")
+        return project_model.validate_case_identity_lifecycle(
+            identity_path, projects_root=root,
+        )
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+        return [{"code": "RUN_IDENTITY_CHANGED", "message": str(exc)}]
 
 
 def create_job(root, geometry_path, settings=None):
@@ -307,6 +387,10 @@ def create_job(root, geometry_path, settings=None):
 
     requested = dict(settings or {})
     try:
+        identity_fields = _identity_fields(root, requested)
+    except project_model.ProjectModelError as exc:
+        return {"ok": False, "code": exc.code, "error": str(exc)}
+    try:
         width = float(requested.get("background_cell_m", DEFAULT_BACKGROUND_CELL_M))
     except (TypeError, ValueError):
         return {"ok": False, "error": "메시 크기는 숫자여야 합니다."}
@@ -328,6 +412,13 @@ def create_job(root, geometry_path, settings=None):
         "isothermal_settings": dict(requested.get("isothermal_settings") or {}),
         "thermal_settings": thermal_settings,
     }
+    if identity_fields is not None:
+        job_input["run_identity"] = {
+            key: identity_fields[key] for key in (
+                "case_identity_path", "case_identity_sha256",
+                "design_revision_sha256", "scenario_revision_sha256",
+            )
+        }
     job_id = "field-" + cfd_gci_job._canonical_hash(job_input)[:12]
     path = _job_path(root, job_id)
     existing = load_job(root, job_id)
@@ -335,7 +426,8 @@ def create_job(root, geometry_path, settings=None):
         return {"ok": True, "job": job_id, "manifest": existing,
                 "manifest_path": str(path), "existing": True}
     manifest = {
-        "schema_version": 1, "contract": CONTRACT,
+        "schema_version": 2 if identity_fields is not None else 1,
+        "contract": CONTRACT_V2 if identity_fields is not None else CONTRACT_V1,
         "engine": "body_fitted_field_pipeline",
         "created_at": _now(), "updated_at": _now(),
         "job": job_id, "study": job_id,
@@ -353,6 +445,7 @@ def create_job(root, geometry_path, settings=None):
         "citation_status": "NOT_EVALUATED", "citation_blockers": [],
         "review_summary": {"status": "MISSING"},
     }
+    manifest.update(identity_fields or {"case_identity_status": "NOT_LINKED"})
     cfd_gci_job._atomic_json(path, manifest)
     return {"ok": True, "job": job_id, "manifest": manifest,
             "manifest_path": str(path), "existing": False}
@@ -443,6 +536,11 @@ def _run_unlocked(root, job_id, callback=None):
             latest_time_s=progress.get("latest_time_s"),
             flow_through_fraction=float(progress.get("flow_through_fraction") or 0),
         )
+        if manifest.get("contract") == CONTRACT_V2:
+            link = project_model.link_run_identity(
+                completed, root / manifest["case_identity_path"],
+            )
+            manifest["case_identity_status"] = link["case_identity_status"]
         snapshot = _current_health_snapshot(root, completed)
         final_status = (
             "complete" if snapshot["citation_status"] == "DESIGN_CITABLE"
@@ -486,6 +584,17 @@ def run_job(root, job_id, callback=None):
     existing = load_job(root, job_id)
     if existing is None:
         return {"ok": False, "error": "현장 자동 해석 작업을 찾을 수 없습니다."}
+    identity_issues = validate_job_identity(root, existing)
+    if identity_issues:
+        issue_code = identity_issues[0]["code"]
+        return {
+            "ok": False,
+            "code": issue_code,
+            "error": "Design/Scenario/Run identity가 변경되어 재개할 수 없습니다.",
+            "issues": identity_issues,
+            "job": job_id,
+            "manifest": existing,
+        }
     if is_terminal_status(existing.get("status")):
         with _review_lock_for_case(root, existing.get("result_case")):
             reviewed = review_terminal_job_citation(root, existing)

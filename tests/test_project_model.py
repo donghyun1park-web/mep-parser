@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 
@@ -214,3 +215,100 @@ def test_design_validator_rejects_reference_path_escape(tmp_path):
     assert {row["code"] for row in project_model.validate_design_revision(
         path, projects_root=tmp_path,
     )} == {"DESIGN_REVISION_INVALID"}
+
+
+def _identity(root: Path):
+    import project_model
+
+    design = project_model.create_design(
+        root,
+        geometry_path=_geometry(root, "geometry.json", supply_x_mm=0.0),
+        name="전기실",
+        created_by="user:mep-01",
+    )
+    scenario = project_model.create_scenario(
+        Path(design["path"]), name="기본안",
+        operating_conditions=_conditions(), purpose="screening",
+    )
+    identity = project_model.create_case_identity(
+        Path(design["path"]), Path(scenario["path"]),
+        run_id="legacy-link", solver_profile="design_limited_second_order_v1",
+    )
+    return design, scenario, identity
+
+
+def _case_inventory(case_dir: Path) -> dict[str, str]:
+    return {
+        path.relative_to(case_dir).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(case_dir.rglob("*")) if path.is_file()
+    }
+
+
+def test_legacy_import_is_non_destructive_and_remains_unlinked(tmp_path):
+    from project_model import import_legacy_case, validate_run_identity
+
+    case = tmp_path / "legacy-case"
+    (case / "postProcessing").mkdir(parents=True)
+    (case / "cfd_case_meta.json").write_text('{"name":"legacy"}', encoding="utf-8")
+    (case / "postProcessing" / "result.dat").write_text("1 2 3\n", encoding="ascii")
+    before = _case_inventory(case)
+
+    imported = import_legacy_case(case, projects_root=tmp_path)
+
+    assert _case_inventory(case) == before
+    assert imported["status"] == "legacy_unlinked"
+    assert imported["scenario_comparison_eligible"] is False
+    assert imported["design_citation_eligible"] is False
+    assert Path(imported["sidecar_path"]).is_file()
+    assert not Path(imported["sidecar_path"]).is_relative_to(case)
+    assert {row["code"] for row in validate_run_identity(
+        case, projects_root=tmp_path,
+    )} == {"RUN_IDENTITY_NOT_LINKED"}
+
+
+def test_linked_run_detects_identity_tamper_without_changing_case(tmp_path):
+    import project_model
+
+    _, scenario, identity = _identity(tmp_path)
+    case = tmp_path / "linked-case"
+    case.mkdir()
+    checkpoint = case / "checkpoint.dat"
+    checkpoint.write_text("preserve me", encoding="utf-8")
+    before = _case_inventory(case)
+
+    linked = project_model.link_run_identity(case, Path(identity["path"]))
+    assert linked["case_identity_status"] == "LINKED"
+    assert project_model.validate_run_identity(case, projects_root=tmp_path) == []
+    assert _case_inventory(case) == before
+
+    scenario_payload = json.loads(Path(scenario["path"]).read_text(encoding="utf-8"))
+    scenario_payload["name"] = "tampered"
+    Path(scenario["path"]).write_text(json.dumps(scenario_payload), encoding="utf-8")
+
+    assert {row["code"] for row in project_model.validate_run_identity(
+        case, projects_root=tmp_path,
+    )} == {"RUN_IDENTITY_CHANGED"}
+    assert checkpoint.read_text(encoding="utf-8") == "preserve me"
+
+
+def test_new_design_revision_marks_linked_run_superseded_without_deletion(tmp_path):
+    import project_model
+
+    design, _, identity = _identity(tmp_path)
+    case = tmp_path / "linked-case"
+    case.mkdir()
+    result = case / "result.dat"
+    result.write_text("preserve result", encoding="utf-8")
+    project_model.link_run_identity(case, Path(identity["path"]))
+
+    project_model.revise_design(
+        design["design_id"],
+        geometry_path=_geometry(tmp_path, "geometry-revised.json", supply_x_mm=25.0),
+        reason="급기 위치 변경",
+        revised_by="user:mep-01",
+    )
+
+    assert {row["code"] for row in project_model.validate_run_identity(
+        case, projects_root=tmp_path,
+    )} == {"SUPERSEDED_DESIGN_REVISION"}
+    assert result.read_text(encoding="utf-8") == "preserve result"

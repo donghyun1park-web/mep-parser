@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mep-cfd-studio.local/schemas/field_pipeline_job.v2.schema.json",
+  "title": "MEP CFD Studio field_pipeline_job.v2",
+  "type": "object",
+  "required": [
+    "schema_version", "contract", "engine", "created_at", "updated_at",
+    "job", "status", "stage", "attempts", "error", "input", "level",
+    "case_identity_path", "case_identity_sha256", "design_revision_sha256",
+    "scenario_revision_sha256", "case_identity_status"
+  ],
+  "properties": {
+    "schema_version": {"const": 2},
+    "contract": {"const": "field_pipeline_job.v2"},
+    "engine": {"const": "body_fitted_field_pipeline"},
+    "job": {"type": "string", "pattern": "^field-[0-9a-f]{12}$"},
+    "status": {
+      "enum": [
+        "queued", "running", "complete", "analysis_complete_not_citable", "FAIL"
+      ]
+    },
+    "stage": {"type": "string"},
+    "attempts": {"type": "integer", "minimum": 0},
+    "error": {"type": "string"},
+    "input": {"type": "object"},
+    "level": {"type": "object"},
+    "case_identity_path": {"$ref": "#/$defs/path"},
+    "case_identity_sha256": {"$ref": "#/$defs/sha256"},
+    "design_revision_sha256": {"$ref": "#/$defs/sha256"},
+    "scenario_revision_sha256": {"$ref": "#/$defs/sha256"},
+    "case_identity_status": {
+      "enum": ["LINKED", "RUN_IDENTITY_CHANGED", "SUPERSEDED_DESIGN_REVISION"]
+    },
+    "resume_history": {"type": "array"},
+    "attempt_history": {"type": "array"}
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "path": {
+      "type": "string",
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^/]+(?:/[^/]+)*$"
+    }
+  }
+}

@@ -12,6 +12,7 @@ import cfd_evidence
 import cfd_review
 import field_pipeline_job
 from test_cfd_evidence import make_complete_case
+from test_project_model import _conditions
 
 
 class FieldPipelineJobTests(unittest.TestCase):
@@ -35,6 +36,36 @@ class FieldPipelineJobTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def _identity(self):
+        import project_model
+        from geometry_v2 import migrate_geometry
+
+        reviewed_geometry = self.root / "imports" / "identity.geometry.v2.json"
+        reviewed_geometry.write_text(
+            json.dumps(migrate_geometry(
+                json.loads(self.geometry.read_text(encoding="utf-8")),
+                source_path=str(self.source.resolve()),
+            )),
+            encoding="utf-8",
+        )
+
+        design = project_model.create_design(
+            self.root,
+            geometry_path=reviewed_geometry,
+            name="현장 기계실",
+            created_by="user:mep-01",
+        )
+        scenario = project_model.create_scenario(
+            Path(design["path"]), name="기본안",
+            operating_conditions=_conditions(), purpose="field_validation",
+        )
+        identity = project_model.create_case_identity(
+            Path(design["path"]), Path(scenario["path"]),
+            run_id="field-pipeline",
+            solver_profile="design_limited_second_order_v1",
+        )
+        return design, scenario, identity
+
     def test_create_is_deterministic_and_forces_design_contract(self):
         first = field_pipeline_job.create_job(self.root, self.geometry)
         second = field_pipeline_job.create_job(self.root, self.geometry)
@@ -53,6 +84,94 @@ class FieldPipelineJobTests(unittest.TestCase):
                 "thermal_minimum_flow_through_fraction"
             ],
             3.0,
+        )
+
+    def test_v1_reader_adds_not_linked_status_in_memory_without_rewriting(self):
+        created = field_pipeline_job.create_job(self.root, self.geometry)
+        path = Path(created["manifest_path"])
+        before = path.read_bytes()
+
+        loaded = field_pipeline_job.load_job(self.root, created["job"])
+
+        self.assertEqual(loaded["contract"], "field_pipeline_job.v1")
+        self.assertEqual(loaded["case_identity_status"], "NOT_LINKED")
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_identity_supplied_job_is_v2_and_satisfies_closed_identity_contract(self):
+        from jsonschema import Draft202012Validator
+
+        design, scenario, identity = self._identity()
+        created = field_pipeline_job.create_job(
+            self.root, self.geometry,
+            settings={"case_identity_path": identity["path"]},
+        )
+
+        self.assertTrue(created["ok"], created)
+        manifest = created["manifest"]
+        self.assertEqual(manifest["schema_version"], 2)
+        self.assertEqual(manifest["contract"], "field_pipeline_job.v2")
+        self.assertEqual(manifest["case_identity_status"], "LINKED")
+        self.assertEqual(
+            manifest["design_revision_sha256"], design["revision_sha256"],
+        )
+        self.assertEqual(
+            manifest["scenario_revision_sha256"], scenario["revision_sha256"],
+        )
+        self.assertFalse(Path(manifest["case_identity_path"]).is_absolute())
+        schema = json.loads(
+            (self.repo / "field_pipeline_job.v2.schema.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(list(Draft202012Validator(schema).iter_errors(manifest)), [])
+
+    def test_changed_v2_identity_blocks_resume_without_touching_checkpoint(self):
+        _, scenario, identity = self._identity()
+        created = field_pipeline_job.create_job(
+            self.root, self.geometry,
+            settings={"case_identity_path": identity["path"]},
+        )
+        checkpoint = self.root / "checkpoint.dat"
+        checkpoint.write_text("preserve checkpoint", encoding="utf-8")
+        scenario_payload = json.loads(Path(scenario["path"]).read_text(encoding="utf-8"))
+        scenario_payload["name"] = "tampered"
+        Path(scenario["path"]).write_text(json.dumps(scenario_payload), encoding="utf-8")
+
+        result = field_pipeline_job.run_job(self.root, created["job"])
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "RUN_IDENTITY_CHANGED")
+        self.assertEqual(checkpoint.read_text(encoding="utf-8"), "preserve checkpoint")
+        self.assertEqual(
+            field_pipeline_job.load_job(self.root, created["job"])["attempts"], 0,
+        )
+
+    def test_new_design_revision_marks_v2_job_superseded_and_blocks_resume(self):
+        import project_model
+
+        design, _, identity = self._identity()
+        created = field_pipeline_job.create_job(
+            self.root, self.geometry,
+            settings={"case_identity_path": identity["path"]},
+        )
+        design_record = json.loads(Path(design["path"]).read_text(encoding="utf-8"))
+        project_model.revise_design(
+            design["design_id"],
+            geometry_path=self.root / design_record["geometry"]["path"],
+            reason="검토 개정",
+            revised_by="user:mep-01",
+        )
+
+        issues = field_pipeline_job.validate_job_identity(
+            self.root, field_pipeline_job.load_job(self.root, created["job"]),
+        )
+        listed = field_pipeline_job.list_jobs(self.root)
+        result = field_pipeline_job.run_job(self.root, created["job"])
+
+        self.assertEqual({row["code"] for row in issues}, {"SUPERSEDED_DESIGN_REVISION"})
+        self.assertEqual(listed[0]["case_identity_status"], "SUPERSEDED_DESIGN_REVISION")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "SUPERSEDED_DESIGN_REVISION")
+        self.assertEqual(
+            field_pipeline_job.load_job(self.root, created["job"])["attempts"], 0,
         )
 
     def test_external_or_missing_source_dxf_is_rejected(self):
@@ -74,7 +193,13 @@ class FieldPipelineJobTests(unittest.TestCase):
         self.assertIn("샘플", result["error"])
 
     def test_raw_analysis_completion_is_held_for_design_citation_review(self):
-        created = field_pipeline_job.create_job(self.root, self.geometry)
+        import project_model
+
+        _, _, identity = self._identity()
+        created = field_pipeline_job.create_job(
+            self.root, self.geometry,
+            settings={"case_identity_path": identity["path"]},
+        )
         job = created["job"]
         thermal = self.root / "_body_solver" / "actual-field-design"
 
@@ -125,6 +250,9 @@ class FieldPipelineJobTests(unittest.TestCase):
         self.assertEqual(saved["level"]["status"], "WARN")
         self.assertEqual(saved["level"]["flow_through_fraction"], 3.0)
         self.assertEqual(saved["result_case"], str(thermal))
+        self.assertEqual(
+            project_model.validate_run_identity(thermal, projects_root=self.root), [],
+        )
 
     def test_forged_legacy_result_gate_cannot_promote_analysis(self):
         created = field_pipeline_job.create_job(self.root, self.geometry)

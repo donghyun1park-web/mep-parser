@@ -45,6 +45,7 @@ import cfd_case_health
 import cfd_review
 import field_acceptance
 import field_pipeline_job
+import project_model
 import release_audit
 import uat_acceptance
 from cfd_capabilities import diagnose_freecad
@@ -653,6 +654,9 @@ def scan_cases():
                      "status": "error", "mtime": 0}
             if s:
                 s["gci_pct"] = (s.get("gci") or {}).get("gci_pct")
+                s.update(project_model.case_identity_summary(
+                    full, projects_root=ROOT,
+                ))
                 cases.append(s)
     cases.sort(key=lambda c: c.get("mtime") or 0, reverse=True)
     return {"root": ROOT, "cases": cases}
@@ -1475,6 +1479,14 @@ def start_field_pipeline_selection(geometry_id="", geometry_path="", settings=No
     if not created.get("ok"):
         return created
     manifest = created["manifest"]
+    identity_issues = field_pipeline_job.validate_job_identity(ROOT, manifest)
+    if identity_issues:
+        issue_code = identity_issues[0]["code"]
+        return {
+            "ok": False, "code": issue_code,
+            "error": "Design/Scenario/Run identity가 변경되어 시작할 수 없습니다.",
+            "issues": identity_issues, "job": created["job"],
+        }
     if field_pipeline_job.is_terminal_status(manifest.get("status")):
         manifest = field_pipeline_job.review_terminal_job_citation(ROOT, manifest)
         case_name = Path(manifest.get("result_case") or "").name
@@ -1493,6 +1505,14 @@ def resume_field_pipeline_job(job_id):
     manifest = field_pipeline_job.load_job(ROOT, job_id)
     if manifest is None:
         return {"ok": False, "error": "현장 자동 해석 작업을 찾을 수 없습니다."}
+    identity_issues = field_pipeline_job.validate_job_identity(ROOT, manifest)
+    if identity_issues:
+        issue_code = identity_issues[0]["code"]
+        return {
+            "ok": False, "code": issue_code,
+            "error": "Design/Scenario/Run identity가 변경되어 재개할 수 없습니다.",
+            "issues": identity_issues, "job": job_id,
+        }
     if field_pipeline_job.is_terminal_status(manifest.get("status")):
         manifest = field_pipeline_job.review_terminal_job_citation(ROOT, manifest)
         case_name = Path(manifest.get("result_case") or "").name

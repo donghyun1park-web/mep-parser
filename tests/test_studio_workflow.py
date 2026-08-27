@@ -1562,6 +1562,60 @@ class StudioWorkflowTests(unittest.TestCase):
         self.assertIn("이 도면 확인하기", cfd_studio.PAGE_FIELD_RUN)
         self.assertIn("/field-run", cfd_studio.PAGE_RELEASE_READINESS)
 
+    def test_case_scan_keeps_unlinked_legacy_case_visible_but_ineligible(self):
+        case = Path(self.tmp.name) / "legacy-visible"
+        case.mkdir()
+        metadata = case / "cfd_case_meta.json"
+        metadata.write_text('{"name":"legacy-visible"}', encoding="utf-8")
+        before = metadata.read_bytes()
+        summary = {
+            "dir": case.name, "name": case.name, "status": "complete", "mtime": 1,
+        }
+
+        with mock.patch.object(cfd_studio.cfd_report, "case_summary", return_value=summary):
+            payload = cfd_studio.scan_cases()
+
+        row = payload["cases"][0]
+        self.assertEqual(row["case_identity_status"], "legacy_unlinked")
+        self.assertFalse(row["scenario_comparison_eligible"])
+        self.assertFalse(row["design_citation_eligible"])
+        self.assertEqual(metadata.read_bytes(), before)
+        self.assertFalse((Path(self.tmp.name) / "_project_model").exists())
+
+    def test_field_resume_rejects_changed_v2_identity_before_queueing(self):
+        job_id = "field-123456789abc"
+        job_dir = Path(self.tmp.name) / "_field_jobs" / job_id
+        job_dir.mkdir(parents=True)
+        manifest = {
+            "schema_version": 2,
+            "contract": "field_pipeline_job.v2",
+            "engine": "body_fitted_field_pipeline",
+            "created_at": "2026-08-27T00:00:00Z",
+            "updated_at": "2026-08-27T00:00:00Z",
+            "job": job_id,
+            "status": "queued",
+            "stage": "queued",
+            "attempts": 0,
+            "error": "",
+            "input": {},
+            "level": {},
+            "case_identity_path": "_project_model/runs/missing.case_identity.v1.json",
+            "case_identity_sha256": "1" * 64,
+            "design_revision_sha256": "2" * 64,
+            "scenario_revision_sha256": "3" * 64,
+            "case_identity_status": "LINKED",
+        }
+        (job_dir / "field_pipeline_job.json").write_text(
+            json.dumps(manifest), encoding="utf-8",
+        )
+        cfd_studio.RUN["worker"] = True
+
+        result = cfd_studio.resume_field_pipeline_job(job_id)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "RUN_IDENTITY_CHANGED")
+        self.assertEqual(cfd_studio.RUN["queue"], [])
+
     def test_renamed_bundled_sample_cannot_start_long_field_pipeline(self):
         imports = Path(self.tmp.name) / "_imports"
         imports.mkdir()
