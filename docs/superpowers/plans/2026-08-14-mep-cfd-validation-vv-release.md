@@ -250,7 +250,7 @@ def verify_serial_sensitivity_pair(study_dir: Path, current_case: Path) -> dict:
 
 **Completion:** 두 독립 serial run이 ≥3.0 FTT, 동일 마지막 0.1 FTT, 각 기본 수치 gate PASS, QoI 기준 PASS, 모든 hash 재계산 PASS일 때만 sensitivity PASS.
 
-**2026-08-28 진행 상태:** frozen pair/job/selector와 `gci_fine` Validation Anchor 결속에 더해 serial executor가 구현됐다. 실행기는 frozen seed의 실제 파일을 solver 전에 다시 해시하고, 기존 run/양의 시간/processor 디렉터리를 거부하며, 워크스테이션 solver lock 하나를 보유한 채 baseline 완료 checkpoint를 원자 발행한 뒤에만 variant를 시작한다. 두 run이 3.0 FTT와 독립 run hash를 확보해도 상태는 `SOLVER_RUNS_COMPLETE`/`INDEPENDENT_VERIFICATION_REQUIRED`이며 PASS가 아니다. focused 회귀는 `77 passed, 41 subtests passed`다. Steps 4~7의 마지막 0.1 FTT 체적·시간가중 QoI 재계산, selector topology 확인 강화, raw artifact 독립 verifier가 남아 있으므로 이 Task와 `numerical_sensitivity.v1` 최종 PASS는 계속 OPEN이다.
+**2026-08-28 진행 상태:** frozen pair/job/selector와 `gci_fine` Validation Anchor 결속에 더해 serial executor가 구현됐다. 실행기는 frozen seed의 실제 파일을 solver 전에 다시 해시하고, 기존 run/양의 시간/processor 디렉터리를 거부하며, 워크스테이션 solver lock 하나를 보유한 채 baseline 완료 checkpoint를 원자 발행한 뒤에만 variant를 시작한다. 두 run이 3.0 FTT와 독립 run hash를 확보해도 상태는 `SOLVER_RUNS_COMPLETE`/`INDEPENDENT_VERIFICATION_REQUIRED`이며 PASS가 아니다. focused 회귀는 `77 passed, 41 subtests passed`다. exact code HEAD `110661ab2f907e696b3543bf17332dd01922d7e3`의 locked Windows CI [run `33129901717`](https://github.com/donghyun1park-web/mep-parser/actions/runs/33129901717), job `98716723366`은 `1282 passed, 14 skipped, 7 warnings`, 실패/오류 0으로 통과했다. JUnit artifact는 `9669920851`, digest는 `sha256:2e1c10b9e82839a0bab8377299addf0dd90de61fee269642b5cb8fcc02755b93`다. Steps 4~7의 마지막 0.1 FTT 체적·시간가중 QoI 재계산, selector topology 확인 강화, raw artifact 독립 verifier가 남아 있으므로 이 Task와 `numerical_sensitivity.v1` 최종 PASS는 계속 OPEN이다.
 
 ### Task P1.3: time-step/Co 민감도 계약을 추가한다
 
