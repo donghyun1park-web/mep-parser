@@ -163,7 +163,10 @@ class SerialSensitivityExecutionContractTests(unittest.TestCase):
         self.assertFalse(result["valid"])
         self.assertIn("INDEPENDENT_VERIFICATION_REQUIRED", result["blockers"])
         acquire.assert_called_once()
-        release.assert_called_once_with(study.parent, "lock-token")
+        release.assert_called_once()
+        released_root, released_token = release.call_args.args
+        self.assertEqual(released_root, study.parent.resolve())
+        self.assertEqual(released_token, "lock-token")
         self.assertEqual(progress[-1]["stage"], "solver_runs_complete")
         saved = json.loads(
             (study / "serial_sensitivity_execution.v1.json").read_text(encoding="utf-8")
