@@ -11,7 +11,8 @@
     "baseline",
     "variant",
     "allowed_variation",
-    "qoi_comparisons"
+    "qoi_comparisons",
+    "verification"
   ],
   "properties": {
     "contract": {"const": "numerical_sensitivity.v1"},
@@ -49,6 +50,39 @@
         {"contains": {"properties": {"name": {"const": "occupied_zone_mean_speed_m_s"}}, "required": ["name"]}},
         {"contains": {"properties": {"name": {"const": "exhaust_temperature_rise_k"}}, "required": ["name"]}}
       ]
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract", "verifier", "raw_artifacts_rehashed", "study_root",
+        "current_case_child", "evidence_path", "evidence_sha256"
+      ],
+      "properties": {
+        "contract": {"const": "numerical_sensitivity_verification.v1"},
+        "verifier": {
+          "const": "run_numerical_sensitivity.verify_serial_sensitivity_pair"
+        },
+        "raw_artifacts_rehashed": {"const": true},
+        "study_root": {"type": "string", "minLength": 1},
+        "current_case_child": {"const": "variant_second_order"},
+        "evidence_path": {
+          "const": "numerical_sensitivity_verification.v1.json"
+        },
+        "evidence_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "validation_anchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["anchor_id", "role", "path", "sha256", "binding_sha256"],
+      "properties": {
+        "anchor_id": {"type": "string", "pattern": "^anchor-[0-9a-f]{16}$"},
+        "role": {"const": "gci_fine"},
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "binding_sha256": {"$ref": "#/$defs/sha256"}
+      }
     }
   },
   "$defs": {

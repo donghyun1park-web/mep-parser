@@ -13,6 +13,8 @@ import tempfile
 import cfd_gci_job
 import cfd_numerical_sensitivity_job as sensitivity_job
 import cfd_numerical_sensitivity_runner as preparation
+import cfd_numerics
+import cfd_post
 import cfd_physics
 import cfd_power
 
@@ -390,33 +392,425 @@ def run_serial_sensitivity_pair(study_dir: Path, variant_case: Path | None = Non
     return result
 
 
-def verify_serial_sensitivity_pair(study_dir: Path, current_case: Path) -> dict:
-    """Verify the immutable pre-run binding without inventing post-run PASS."""
+def verify_serial_sensitivity_pair(study_dir: Path, current_case: Path, *,
+                                   publish=True) -> dict:
+    """Rehash raw paired evidence, recompute QoIs, and publish PASS atomically."""
     study, pair, job, _ = _load_study(study_dir)
     expected_variant = _check_variant_case(study, pair, current_case)
-    blockers = []
-    seed_path = expected_variant / "case_seed_snapshot.v1.json"
-    result_manifest = expected_variant / "result_manifest.json"
-    if not seed_path.is_file():
-        blockers.append("CASE_SEED_SNAPSHOT_MISSING")
-    elif sensitivity_job.canonical_sha256(
-            json.loads(seed_path.read_text(encoding="utf-8"))) != pair["variant"]["case_seed_snapshot_sha256"]:
-        blockers.append("CASE_SEED_SNAPSHOT_HASH_MISMATCH")
-    if not result_manifest.is_file():
-        blockers.append("SOLVER_EVIDENCE_MISSING")
-    else:
-        # A result file alone is not trusted evidence.  The future verifier
-        # must rehash the complete run/log/mesh/result and recompute QoIs.
-        blockers.append("SOLVER_EVIDENCE_VERIFIER_PENDING")
+    try:
+        selector = sensitivity_job.require_confirmed_occupied_volume_band(
+            {key: value for key, value in pair["selector"].items()
+             if key != "selector_sha256"}
+        )
+    except sensitivity_job.NumericalSensitivityJobInputError as error:
+        _error("SENSITIVITY_CONFIRMED_SELECTOR_REQUIRED", str(error))
+    _verify_selector_evidence(selector)
+
+    checkpoint_path = study / EXECUTION_FILENAME
+    if not checkpoint_path.is_file():
+        return {
+            "contract": EXECUTION_CONTRACT,
+            "status": "NOT_EVALUATED",
+            "valid": False,
+            "study_root": str(study),
+            "current_case": str(expected_variant),
+            "job_manifest_sha256": job.get("job_manifest_sha256"),
+            "blockers": ["SOLVER_EVIDENCE_MISSING"],
+        }
+    checkpoint = _load_object(
+        checkpoint_path, "SENSITIVITY_EXECUTION_CHECKPOINT_MISSING")
+    if (checkpoint.get("contract") != EXECUTION_CONTRACT
+            or checkpoint.get("status") != "SOLVER_RUNS_COMPLETE"
+            or checkpoint.get("job_id") != pair["job_id"]
+            or checkpoint.get("pair_manifest_sha256") != pair["manifest_sha256"]
+            or checkpoint.get("job_manifest_sha256") != job["job_manifest_sha256"]
+            or checkpoint.get("target_flow_through_fraction") != TARGET_FLOW_THROUGH_FRACTION):
+        _error("SENSITIVITY_EXECUTION_CHECKPOINT_INVALID")
+
+    cases = {role: study / pair[role]["case_child"] for role in ("baseline", "variant")}
+    sides = {}
+    qois = {}
+    windows = {}
+    for role in ("baseline", "variant"):
+        case = cases[role]
+        _rehash_physical_tree(case, pair["shared_input"]["physical_tree"])
+        side_checkpoint = checkpoint.get(role)
+        if (not isinstance(side_checkpoint, dict)
+                or side_checkpoint.get("status") != "COMPLETE"
+                or side_checkpoint.get("profile") != pair[role]["profile"]
+                or side_checkpoint.get("case_child") != pair[role]["case_child"]
+                or side_checkpoint.get("case_seed_snapshot_sha256") != (
+                    pair[role]["case_seed_snapshot_sha256"])):
+            _error("SENSITIVITY_EXECUTION_SIDE_INCOMPLETE", role)
+        result_evidence = _verify_case_result_artifacts(
+            case, pair, side_checkpoint)
+        run = result_evidence["run"]
+        _verify_effective_numerics_files(case, run, pair[role]["profile"])
+        progress = run.get("thermal_progress")
+        if not isinstance(progress, dict):
+            _error("SENSITIVITY_FLOW_THROUGH_EVIDENCE_MISSING", role)
+        try:
+            flow_time = float(progress["flow_through_time_s"])
+            latest = float(progress["latest_time_s"])
+        except (KeyError, TypeError, ValueError):
+            _error("SENSITIVITY_FLOW_THROUGH_EVIDENCE_INVALID", role)
+        if (not math.isfinite(flow_time) or flow_time <= 0
+                or not math.isfinite(latest)
+                or _flow_fraction(run) + 1e-12 < TARGET_FLOW_THROUGH_FRACTION):
+            _error("SENSITIVITY_MINIMUM_FLOW_THROUGH_NOT_REACHED", role)
+        try:
+            checkpoint_fraction = float(side_checkpoint["flow_through_fraction"])
+        except (KeyError, TypeError, ValueError):
+            _error("SENSITIVITY_CHECKPOINT_FLOW_THROUGH_INVALID", role)
+        if (not math.isfinite(checkpoint_fraction)
+                or not math.isclose(
+                    checkpoint_fraction, _flow_fraction(run),
+                    rel_tol=1e-9, abs_tol=1e-9)):
+            _error("SENSITIVITY_CHECKPOINT_FLOW_THROUGH_MISMATCH", role)
+        window_start = latest - 0.1 * flow_time
+        windows[role] = {
+            "start_s": window_start,
+            "end_s": latest,
+            "flow_through_fraction_start": _flow_fraction(run) - 0.1,
+            "flow_through_fraction_end": _flow_fraction(run),
+        }
+        vtu_paths = sorted(case.glob("VTK/**/internal.vtu"))
+        occupied = cfd_post.compute_time_weighted_occupied_volume_qois(
+            vtu_paths, selector,
+            floor_elevation_m=_occupied_floor_elevation(run, case),
+            window_start_s=window_start, window_end_s=latest,
+            minimum_samples=5,
+        )
+        exhaust = cfd_post.read_time_weighted_exhaust_temperature_rise_from_case(
+            case, window_start_s=window_start, window_end_s=latest,
+            minimum_samples=5,
+        )
+        qois[role] = {
+            "occupied_zone_mean_temperature_k": occupied[
+                "occupied_zone_mean_temperature_k"],
+            "occupied_zone_mean_speed_m_s": occupied[
+                "occupied_zone_mean_speed_m_s"],
+            "exhaust_temperature_rise_k": exhaust["exhaust_temperature_rise_k"],
+        }
+        sides[role] = {
+            "profile": pair[role]["profile"],
+            "run_hash": result_evidence["run_manifest_sha256"],
+            "mesh_hash": pair[role]["mesh_sha256"],
+            "physical_input_hash": pair[role]["physical_input_sha256"],
+            "solver_evidence": _solver_evidence_from_run(run),
+        }
+        result_evidence.pop("run")
+        sides[role + "_verification"] = result_evidence
+
+    if sides["baseline"]["run_hash"] == sides["variant"]["run_hash"]:
+        _error("SENSITIVITY_RUN_HASH_NOT_DISTINCT")
+    if not math.isclose(
+            windows["baseline"]["end_s"] - windows["baseline"]["start_s"],
+            windows["variant"]["end_s"] - windows["variant"]["start_s"],
+            rel_tol=1e-9, abs_tol=1e-9):
+        _error("SENSITIVITY_FINAL_WINDOW_MISMATCH")
+    if not math.isclose(
+            windows["baseline"]["flow_through_fraction_end"],
+            windows["variant"]["flow_through_fraction_end"],
+            rel_tol=1e-9, abs_tol=1e-9):
+        _error("SENSITIVITY_FINAL_WINDOW_FRACTION_MISMATCH")
+    limits = {
+        item["name"]: item["limit"] for item in job["qoi_plan"]["definitions"]
+    }
+    comparisons = []
+    for name in cfd_numerics.REQUIRED_SENSITIVITY_QOIS:
+        baseline_value = float(qois["baseline"][name])
+        variant_value = float(qois["variant"][name])
+        difference = abs(variant_value - baseline_value)
+        if not all(math.isfinite(value) for value in (
+                baseline_value, variant_value, difference, limits[name])):
+            _error("SENSITIVITY_QOI_VALUE_INVALID", name)
+        if difference > limits[name]:
+            _error("SENSITIVITY_QOI_LIMIT_FAILED", name)
+        comparisons.append({
+            "name": name,
+            "baseline": baseline_value,
+            "variant": variant_value,
+            "absolute_difference": difference,
+            "limit": limits[name],
+            "passed": True,
+        })
+
+    verification_evidence = {
+        "contract": "numerical_sensitivity_verification_evidence.v1",
+        "created_at": checkpoint.get("completed_at"),
+        "study_root": str(study),
+        "pair_manifest_sha256": pair["manifest_sha256"],
+        "job_manifest_sha256": job["job_manifest_sha256"],
+        "execution_checkpoint_sha256": _sha256_file(checkpoint_path),
+        "windows": windows,
+        "baseline": sides.pop("baseline_verification"),
+        "variant": sides.pop("variant_verification"),
+    }
+    evidence_path = study / "numerical_sensitivity_verification.v1.json"
+    evidence_sha256 = _json_payload_sha256(verification_evidence)
+    if publish:
+        _atomic_json(evidence_path, verification_evidence)
+        if _sha256_file(evidence_path) != evidence_sha256:
+            _error("SENSITIVITY_VERIFICATION_EVIDENCE_WRITE_MISMATCH")
+    verification = {
+        "contract": "numerical_sensitivity_verification.v1",
+        "verifier": "run_numerical_sensitivity.verify_serial_sensitivity_pair",
+        "raw_artifacts_rehashed": True,
+        "study_root": str(study),
+        "current_case_child": pair["variant"]["case_child"],
+        "evidence_path": evidence_path.name,
+        "evidence_sha256": evidence_sha256,
+    }
+    final = {
+        "contract": cfd_numerics.SENSITIVITY_CONTRACT,
+        "status": "PASS",
+        "provenance": {
+            "explicit_job": True,
+            "source": "cfd_numerical_sensitivity_job",
+            "job_id": pair["job_id"],
+        },
+        "baseline": sides["baseline"],
+        "variant": sides["variant"],
+        "allowed_variation": job["allowed_variation"],
+        "qoi_comparisons": comparisons,
+        "verification": verification,
+    }
+    if "validation_anchor" in job:
+        final["validation_anchor"] = job["validation_anchor"]
+    validation = cfd_numerics.validate_numerical_sensitivity(final)
+    if not validation["valid"]:
+        _error("SENSITIVITY_FINAL_ARTIFACT_INVALID", ",".join(validation["blockers"]))
+    if publish:
+        _atomic_json(study / "numerical_sensitivity.v1.json", final)
+        # This case-local copy is a discovery pointer only.  Consumers must
+        # rerun the central verifier using verification.study_root; the job
+        # contract explicitly keeps case-local files non-authoritative.
+        _atomic_json(expected_variant / "numerical_sensitivity.json", final)
     return {
-        "contract": EXECUTION_CONTRACT,
-        "status": "NOT_EVALUATED",
-        "valid": False,
+        **final,
+        "valid": True,
         "study_root": str(study),
         "current_case": str(expected_variant),
-        "job_manifest_sha256": job.get("job_manifest_sha256"),
-        "blockers": list(dict.fromkeys(blockers)),
+        "blockers": [],
     }
+
+
+def _json_payload_sha256(value):
+    try:
+        encoded = (
+            json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        _error("SENSITIVITY_VERIFICATION_EVIDENCE_INVALID", str(error))
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _verify_selector_evidence(selector):
+    for name in ("geometry_ref", "zone_ref"):
+        reference = selector[name]
+        path = Path(reference["path"]).expanduser().resolve(strict=False)
+        if path.is_symlink() or not path.is_file():
+            _error("SENSITIVITY_SELECTOR_EVIDENCE_MISSING", name)
+        if _sha256_file(path) != reference["sha256"]:
+            _error("SENSITIVITY_SELECTOR_EVIDENCE_HASH_MISMATCH", name)
+
+
+def _rehash_physical_tree(case, physical_tree):
+    entries = physical_tree.get("entries") if isinstance(physical_tree, dict) else None
+    if not isinstance(entries, list) or not entries:
+        _error("SENSITIVITY_PHYSICAL_TREE_INVALID")
+    for entry in entries:
+        try:
+            path = preparation._safe_case_path(
+                case, entry.get("path"), require_directory=(
+                    entry.get("path") == "constant/polyMesh"))
+            digest = preparation._hash_regular_tree(path)
+        except preparation.NumericalSensitivityPreparationError as error:
+            _error("SENSITIVITY_PHYSICAL_TREE_REHASH_FAILED", str(error))
+        if digest != entry.get("sha256"):
+            _error("SENSITIVITY_PHYSICAL_TREE_HASH_MISMATCH", entry.get("path"))
+
+
+def _verify_hash_ref(case, raw, code):
+    if not isinstance(raw, dict) or "path" not in raw or "sha256" not in raw:
+        _error(code)
+    path = _safe_child_file(case, raw.get("path"), code)
+    if _sha256_file(path) != raw.get("sha256"):
+        _error(code, raw.get("path"))
+    return path
+
+
+def _verify_case_result_artifacts(case, pair, checkpoint_side):
+    run_path = _safe_child_file(case, "run_manifest.json", "SENSITIVITY_RUN_MISSING")
+    result_path = _safe_child_file(
+        case, "result_manifest.json", "SENSITIVITY_RESULT_MISSING")
+    run_hash = _sha256_file(run_path)
+    result_hash = _sha256_file(result_path)
+    if run_hash != checkpoint_side.get("run_manifest_sha256"):
+        _error("SENSITIVITY_RUN_HASH_MISMATCH", str(case))
+    if result_hash != checkpoint_side.get("result_manifest_sha256"):
+        _error("SENSITIVITY_RESULT_HASH_MISMATCH", str(case))
+    logs = checkpoint_side.get("solver_logs")
+    if not isinstance(logs, list) or not logs:
+        _error("SENSITIVITY_SOLVER_LOG_EVIDENCE_INVALID", str(case))
+    normalised_logs = []
+    for entry in logs:
+        path = _verify_hash_ref(case, entry, "SENSITIVITY_SOLVER_LOG_HASH_MISMATCH")
+        normalised_logs.append({
+            "path": path.relative_to(case).as_posix(),
+            "sha256": _sha256_file(path),
+        })
+    if sensitivity_job.canonical_sha256(normalised_logs) != checkpoint_side.get(
+            "solver_log_tree_sha256"):
+        _error("SENSITIVITY_SOLVER_LOG_TREE_HASH_MISMATCH", str(case))
+    run = _load_object(run_path, "SENSITIVITY_RUN_MANIFEST_INVALID")
+    result = _load_object(result_path, "SENSITIVITY_RESULT_MANIFEST_INVALID")
+    if result.get("contract") != "result_manifest.v1":
+        _error("SENSITIVITY_RESULT_MANIFEST_INVALID", str(case))
+    try:
+        run_time = float(run["thermal_progress"]["latest_time_s"])
+        result_time = float(result["time_s"])
+    except (KeyError, TypeError, ValueError):
+        _error("SENSITIVITY_RESULT_TIME_INVALID", str(case))
+    if (not math.isfinite(run_time) or not math.isfinite(result_time)
+            or not math.isclose(run_time, result_time, rel_tol=1e-9, abs_tol=1e-9)):
+        _error("SENSITIVITY_RESULT_TIME_MISMATCH", str(case))
+    if result.get("run_manifest_sha256") != run_hash:
+        _error("SENSITIVITY_RESULT_RUN_BINDING_MISMATCH", str(case))
+    mesh_path = _safe_child_file(
+        case, "mesh_manifest.json", "SENSITIVITY_MESH_MANIFEST_MISSING")
+    mesh_hash = _sha256_file(mesh_path)
+    if (mesh_hash != pair["shared_input"]["mesh_sha256"]
+            or result.get("mesh_manifest_sha256") != mesh_hash):
+        _error("SENSITIVITY_MESH_HASH_MISMATCH", str(case))
+    source_path = _verify_hash_ref(
+        case, result.get("source"), "SENSITIVITY_RESULT_SOURCE_HASH_MISMATCH")
+    summary_path = _safe_child_file(
+        case, result.get("summary_path"), "SENSITIVITY_RESULT_SUMMARY_INVALID")
+    if _sha256_file(summary_path) != result.get("summary_sha256"):
+        _error("SENSITIVITY_RESULT_SUMMARY_HASH_MISMATCH", str(case))
+    summary = _load_object(summary_path, "SENSITIVITY_RESULT_SUMMARY_INVALID")
+    try:
+        summary_time = float(summary["time_s"])
+    except (KeyError, TypeError, ValueError):
+        _error("SENSITIVITY_RESULT_SUMMARY_TIME_INVALID", str(case))
+    if (not math.isfinite(summary_time)
+            or not math.isclose(summary_time, result_time, rel_tol=1e-9, abs_tol=1e-9)):
+        _error("SENSITIVITY_RESULT_SUMMARY_TIME_MISMATCH", str(case))
+    slices = result.get("slices")
+    if not isinstance(slices, list):
+        _error("SENSITIVITY_RESULT_SLICES_INVALID", str(case))
+    for item in slices:
+        _verify_hash_ref(case, item, "SENSITIVITY_RESULT_SLICE_HASH_MISMATCH")
+    return {
+        "run": run,
+        "run_manifest_sha256": run_hash,
+        "result_manifest_sha256": result_hash,
+        "mesh_manifest_sha256": mesh_hash,
+        "source_vtu": {
+            "path": source_path.relative_to(case).as_posix(),
+            "sha256": _sha256_file(source_path),
+        },
+        "solver_log_tree_sha256": checkpoint_side["solver_log_tree_sha256"],
+    }
+
+
+def _occupied_floor_elevation(run, case):
+    settings = run.get("effective_settings")
+    value = settings.get("occupied_floor_elevation_m") if isinstance(settings, dict) else None
+    if value is None:
+        thermal = _load_object(
+            Path(case) / "thermal_input.json", "SENSITIVITY_THERMAL_INPUT_MISSING")
+        thermal_settings = thermal.get("settings")
+        value = (thermal_settings.get("occupied_floor_elevation_m")
+                 if isinstance(thermal_settings, dict) else None)
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        _error("SENSITIVITY_OCCUPIED_FLOOR_ELEVATION_MISSING")
+    if not math.isfinite(value):
+        _error("SENSITIVITY_OCCUPIED_FLOOR_ELEVATION_INVALID")
+    return value
+
+
+def _solver_evidence_from_run(run):
+    solver = run.get("solver")
+    settings = run.get("effective_settings")
+    thermal = run.get("thermal")
+    quality = run.get("numerical_quality")
+    if not all(isinstance(item, dict) for item in (solver, settings, thermal)):
+        _error("SENSITIVITY_SOLVER_EVIDENCE_INVALID")
+    residuals = {}
+    final_rows = solver.get("thermal_residuals")
+    histories = solver.get("thermal_residual_history")
+    if not isinstance(final_rows, dict) or not isinstance(histories, dict):
+        _error("SENSITIVITY_SOLVER_RESIDUAL_EVIDENCE_INVALID")
+    for field, limit in cfd_numerics.THERMAL_RESIDUAL_LIMITS.items():
+        row = final_rows.get(field)
+        history = histories.get(field)
+        if not isinstance(row, dict) or not isinstance(history, list):
+            _error("SENSITIVITY_SOLVER_RESIDUAL_EVIDENCE_INVALID", field)
+        tail = [item.get("final") for item in history[-cfd_numerics.DEFAULT_RESIDUAL_TAIL_SAMPLES:]
+                if isinstance(item, dict)]
+        try:
+            final = float(row["final"])
+            tail = [float(value) for value in tail]
+        except (KeyError, TypeError, ValueError):
+            _error("SENSITIVITY_SOLVER_RESIDUAL_EVIDENCE_INVALID", field)
+        if len(tail) < cfd_numerics.DEFAULT_RESIDUAL_TAIL_SAMPLES:
+            _error("SENSITIVITY_SOLVER_RESIDUAL_TAIL_MISSING", field)
+        residuals[field] = {
+            "final": final,
+            "tail_maximum": max(tail),
+            "tail_samples": len(tail),
+            "limit": limit,
+        }
+    courant = solver.get("courant")
+    continuity = solver.get("continuity")
+    phi = (quality.get("flux_balance") if isinstance(quality, dict)
+           else run.get("flux_balance"))
+    if not all(isinstance(item, dict) for item in (courant, continuity, phi)):
+        _error("SENSITIVITY_SOLVER_EVIDENCE_INVALID")
+    return {
+        "ended": solver.get("ended") is True,
+        "fatal_error": solver.get("fatal") is True,
+        "peak_courant": courant.get("peak_maximum"),
+        "courant_limit": settings.get(
+            "thermal_design_max_courant_gate",
+            settings.get("thermal_max_courant_gate", 1.0)),
+        "residuals": residuals,
+        "continuity": {"global": continuity.get("global"), "limit": 1e-6},
+        "phi_balance": {
+            "available": phi.get("available") is True,
+            "imbalance_ratio": phi.get("imbalance_ratio"),
+            "limit": settings.get("terminal_phi_imbalance_max", 0.001),
+        },
+        "energy_closure_basis": thermal.get("energy_closure_basis"),
+    }
+
+
+def _verify_effective_numerics_files(case, run, expected_profile):
+    numerics = run.get("effective_numerics")
+    if (not isinstance(numerics, dict)
+            or numerics.get("profile") != expected_profile):
+        _error("SENSITIVITY_EFFECTIVE_PROFILE_MISMATCH", str(case))
+    try:
+        fv_schemes = _safe_child_file(
+            case, "system/fvSchemes", "SENSITIVITY_FVSCHEMES_MISSING"
+        ).read_text(encoding="utf-8")
+        fv_solution = _safe_child_file(
+            case, "system/fvSolution", "SENSITIVITY_FVSOLUTION_MISSING"
+        ).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        _error("SENSITIVITY_NUMERICS_FILES_UNREADABLE", str(error))
+    validation = cfd_numerics.validate_effective_openfoam_numerics(
+        numerics, fv_schemes, fv_solution)
+    if not validation.get("valid"):
+        _error(
+            "SENSITIVITY_EFFECTIVE_NUMERICS_INVALID",
+            ",".join(validation.get("issues") or ["unknown"]),
+        )
 
 
 def _json_arg(path, code):
@@ -479,7 +873,8 @@ def main(argv=None):
         return 0 if result.get("status") == "PASS" else 2
     except (NumericalSensitivityExecutionError,
             preparation.NumericalSensitivityPreparationError,
-            sensitivity_job.NumericalSensitivityJobInputError) as error:
+            sensitivity_job.NumericalSensitivityJobInputError,
+            cfd_post.PostprocessEvidenceError) as error:
         result = {
             "contract": EXECUTION_CONTRACT,
             "status": "NOT_EVALUATED",

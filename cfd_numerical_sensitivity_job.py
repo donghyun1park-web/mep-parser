@@ -16,6 +16,7 @@ immutable external evidence store.
 from __future__ import annotations
 
 import copy
+from datetime import datetime
 import hashlib
 import json
 import math
@@ -32,6 +33,12 @@ JOB_MANIFEST_CONTRACT = "cfd_numerical_sensitivity_job.v1"
 FINAL_RESULT_CONTRACT = cfd_numerics.SENSITIVITY_CONTRACT
 OCCUPIED_AGGREGATION = "volume_weighted_cell_centers.v1"
 OCCUPIED_SCOPE = "selected_occupied_volume_band"
+SENSITIVITY_OCCUPIED_AGGREGATION = (
+    "time_weighted_trapezoidal_of_cell_volume_weighted_snapshots.v1"
+)
+SENSITIVITY_EXHAUST_AGGREGATION = (
+    "time_weighted_trapezoidal_of_positive_phi_weighted_samples.v1"
+)
 QOI_PLAN_CONTRACT = "numerical_sensitivity_qoi_plan.v1"
 _PENDING_STATUS = "PENDING_SOLVER_EVIDENCE"
 _SHA256_LENGTH = 64
@@ -154,6 +161,134 @@ def _normalise_xy_bounds(raw):
     return bounds
 
 
+def _normalise_evidence_ref(raw, code):
+    _unexpected_keys(raw, {"path", "sha256"}, code)
+    if set(raw) != {"path", "sha256"}:
+        _error(code)
+    return {
+        "path": _nonempty_text(raw.get("path"), code),
+        "sha256": _sha256(raw.get("sha256"), code),
+    }
+
+
+def _normalise_polygon(raw, code):
+    if not isinstance(raw, (list, tuple)) or len(raw) < 4:
+        _error(code)
+    polygon = []
+    for point in raw:
+        if not isinstance(point, (list, tuple)) or len(point) != 2:
+            _error(code)
+        polygon.append([
+            _finite_number(point[0], code),
+            _finite_number(point[1], code),
+        ])
+    if polygon[0] != polygon[-1] or len({tuple(point) for point in polygon[:-1]}) < 3:
+        _error(code)
+    twice_area = sum(
+        first[0] * second[1] - second[0] * first[1]
+        for first, second in zip(polygon, polygon[1:])
+    )
+    if math.isclose(twice_area, 0.0, abs_tol=1e-12):
+        _error(code)
+    edge_count = len(polygon) - 1
+    for first_index in range(edge_count):
+        for second_index in range(first_index + 1, edge_count):
+            if (second_index == first_index + 1
+                    or {first_index, second_index} == {0, edge_count - 1}):
+                continue
+            if _segments_intersect(
+                    polygon[first_index], polygon[first_index + 1],
+                    polygon[second_index], polygon[second_index + 1]):
+                _error(code)
+    return polygon
+
+
+def _segments_intersect(first, second, third, fourth):
+    def orientation(a, b, c):
+        value = (b[0] - a[0]) * (c[1] - a[1]) - (
+            b[1] - a[1]) * (c[0] - a[0])
+        if math.isclose(value, 0.0, abs_tol=1e-12):
+            return 0
+        return 1 if value > 0 else -1
+
+    def on_segment(a, b, point):
+        return (
+            min(a[0], b[0]) <= point[0] <= max(a[0], b[0])
+            and min(a[1], b[1]) <= point[1] <= max(a[1], b[1])
+        )
+
+    orientations = (
+        orientation(first, second, third),
+        orientation(first, second, fourth),
+        orientation(third, fourth, first),
+        orientation(third, fourth, second),
+    )
+    if orientations[0] != orientations[1] and orientations[2] != orientations[3]:
+        return True
+    return any((
+        orientations[0] == 0 and on_segment(first, second, third),
+        orientations[1] == 0 and on_segment(first, second, fourth),
+        orientations[2] == 0 and on_segment(third, fourth, first),
+        orientations[3] == 0 and on_segment(third, fourth, second),
+    ))
+
+
+def _normalise_confirmation(raw):
+    code = "OCCUPIED_SELECTOR_CONFIRMATION_INVALID"
+    allowed = {
+        "reviewer", "confirmed_at", "selection_reason",
+        "closed_zone_verified", "multilevel_voids_accounted",
+    }
+    _unexpected_keys(raw, allowed, code)
+    if set(raw) != allowed:
+        _error(code)
+    confirmed_at = _nonempty_text(raw.get("confirmed_at"), code)
+    try:
+        parsed = datetime.fromisoformat(confirmed_at.replace("Z", "+00:00"))
+    except ValueError:
+        _error(code)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        _error(code)
+    if (raw.get("closed_zone_verified") is not True
+            or raw.get("multilevel_voids_accounted") is not True):
+        _error(code)
+    return {
+        "reviewer": _nonempty_text(raw.get("reviewer"), code),
+        "confirmed_at": confirmed_at,
+        "selection_reason": _nonempty_text(raw.get("selection_reason"), code),
+        "closed_zone_verified": True,
+        "multilevel_voids_accounted": True,
+    }
+
+
+def _normalise_exclusion_volumes(raw):
+    code = "OCCUPIED_SELECTOR_EXCLUSION_VOLUME_INVALID"
+    if not isinstance(raw, list):
+        _error(code)
+    normalised = []
+    identifiers = set()
+    for volume in raw:
+        allowed = {"id", "xy_polygon_m", "z_min_agl_m", "z_max_agl_m"}
+        _unexpected_keys(volume, allowed, code)
+        if set(volume) != allowed:
+            _error(code)
+        identifier = _nonempty_text(volume.get("id"), code)
+        if identifier in identifiers:
+            _error(code)
+        identifiers.add(identifier)
+        z_min = _finite_number(volume.get("z_min_agl_m"), code, nonnegative=True)
+        z_max = _finite_number(volume.get("z_max_agl_m"), code, nonnegative=True)
+        if z_min >= z_max:
+            _error(code)
+        normalised.append({
+            "id": identifier,
+            "xy_polygon_m": _normalise_polygon(volume.get("xy_polygon_m"), code),
+            "z_min_agl_m": z_min,
+            "z_max_agl_m": z_max,
+        })
+    return normalised
+
+
 def normalize_occupied_volume_band(selector):
     """Validate an explicit AGL selector and attach a canonical selector hash.
 
@@ -168,6 +303,15 @@ def normalize_occupied_volume_band(selector):
         "z_min_agl_m",
         "z_max_agl_m",
         "xy_bounds_m",
+        "validation_scope",
+        "coordinate_system",
+        "coordinate_unit",
+        "geometry_ref",
+        "zone_ref",
+        "xy_polygon_m",
+        "exclusion_polygons_m",
+        "exclusion_volumes",
+        "confirmation",
     }
     _unexpected_keys(selector, allowed, "OCCUPIED_SELECTOR_UNSUPPORTED_FIELD")
     if selector.get("contract") != OCCUPIED_VOLUME_BAND_CONTRACT:
@@ -192,7 +336,55 @@ def normalize_occupied_volume_band(selector):
     xy_bounds = _normalise_xy_bounds(selector.get("xy_bounds_m"))
     if xy_bounds is not None:
         normalised["xy_bounds_m"] = xy_bounds
+
+    if "validation_scope" in selector:
+        design_fields = {
+            "validation_scope", "coordinate_system", "coordinate_unit",
+            "geometry_ref", "zone_ref", "xy_polygon_m",
+            "exclusion_polygons_m", "exclusion_volumes", "confirmation",
+        }
+        if (selector.get("validation_scope") != "design_validation"
+                or not design_fields.issubset(selector)
+                or xy_bounds is not None):
+            _error("OCCUPIED_SELECTOR_DESIGN_CONFIRMATION_INVALID")
+        if selector.get("coordinate_system") != "local_cartesian":
+            _error("OCCUPIED_SELECTOR_COORDINATE_SYSTEM_INVALID")
+        if selector.get("coordinate_unit") != "m":
+            _error("OCCUPIED_SELECTOR_COORDINATE_UNIT_INVALID")
+        exclusions = selector.get("exclusion_polygons_m")
+        if not isinstance(exclusions, list):
+            _error("OCCUPIED_SELECTOR_EXCLUSION_POLYGON_INVALID")
+        normalised.update({
+            "validation_scope": "design_validation",
+            "coordinate_system": "local_cartesian",
+            "coordinate_unit": "m",
+            "geometry_ref": _normalise_evidence_ref(
+                selector.get("geometry_ref"), "OCCUPIED_SELECTOR_GEOMETRY_REF_INVALID"
+            ),
+            "zone_ref": _normalise_evidence_ref(
+                selector.get("zone_ref"), "OCCUPIED_SELECTOR_ZONE_REF_INVALID"
+            ),
+            "xy_polygon_m": _normalise_polygon(
+                selector.get("xy_polygon_m"), "OCCUPIED_SELECTOR_XY_POLYGON_INVALID"
+            ),
+            "exclusion_polygons_m": [
+                _normalise_polygon(item, "OCCUPIED_SELECTOR_EXCLUSION_POLYGON_INVALID")
+                for item in exclusions
+            ],
+            "exclusion_volumes": _normalise_exclusion_volumes(
+                selector.get("exclusion_volumes")
+            ),
+            "confirmation": _normalise_confirmation(selector.get("confirmation")),
+        })
     normalised["selector_sha256"] = canonical_sha256(normalised)
+    return normalised
+
+
+def require_confirmed_occupied_volume_band(selector):
+    """Require the reviewed geometry/zone selector used for design validation."""
+    normalised = normalize_occupied_volume_band(selector)
+    if normalised.get("validation_scope") != "design_validation":
+        _error("OCCUPIED_SELECTOR_DESIGN_CONFIRMATION_REQUIRED")
     return normalised
 
 
@@ -257,13 +449,43 @@ def _cell_is_selected(cell, selector):
     x, y, z = cell["center_m"]
     if not selector["z_min_agl_m"] <= z <= selector["z_max_agl_m"]:
         return False
-    xy = selector.get("xy_bounds_m")
-    if xy is None:
+    polygon = selector.get("xy_polygon_m")
+    if polygon is not None:
+        if not _point_in_polygon(x, y, polygon):
+            return False
+        if any(_point_in_polygon(x, y, item)
+               for item in selector["exclusion_polygons_m"]):
+            return False
+        if any(
+            item["z_min_agl_m"] <= z <= item["z_max_agl_m"]
+            and _point_in_polygon(x, y, item["xy_polygon_m"])
+            for item in selector["exclusion_volumes"]
+        ):
+            return False
         return True
-    return (
+    xy = selector.get("xy_bounds_m")
+    return xy is None or (
         xy["x_min_m"] <= x <= xy["x_max_m"]
         and xy["y_min_m"] <= y <= xy["y_max_m"]
     )
+
+
+def _point_in_polygon(x, y, polygon):
+    """Return boundary-inclusive point membership for a validated closed polygon."""
+    inside = False
+    for first, second in zip(polygon, polygon[1:]):
+        x1, y1 = first
+        x2, y2 = second
+        cross = (x - x1) * (y2 - y1) - (y - y1) * (x2 - x1)
+        if (math.isclose(cross, 0.0, abs_tol=1e-12)
+                and min(x1, x2) <= x <= max(x1, x2)
+                and min(y1, y2) <= y <= max(y1, y2)):
+            return True
+        if (y1 > y) != (y2 > y):
+            intersection_x = x1 + (y - y1) * (x2 - x1) / (y2 - y1)
+            if x < intersection_x:
+                inside = not inside
+    return inside
 
 
 def compute_occupied_volume_qois(cells, selector):
@@ -867,6 +1089,20 @@ def _qoi_plan(limits):
     }
 
 
+def _sensitivity_aggregation():
+    return {
+        "scope": OCCUPIED_SCOPE,
+        "occupied_zone": SENSITIVITY_OCCUPIED_AGGREGATION,
+        "exhaust_temperature_rise_k": SENSITIVITY_EXHAUST_AGGREGATION,
+        "final_window": {
+            "basis": "flow_through_time",
+            "span_fraction": 0.1,
+            "minimum_end_fraction": 3.0,
+            "minimum_samples": 5,
+        },
+    }
+
+
 def _normalise_qoi_plan(plan):
     if not isinstance(plan, dict) or set(plan) != {"contract", "definitions"}:
         _error("NUMERICAL_SENSITIVITY_QOI_PLAN_INVALID")
@@ -963,11 +1199,7 @@ def build_cfd_numerical_sensitivity_job_manifest(frozen_pair_manifest, *,
         },
         "pair_manifest_sha256": pair_validation["manifest_sha256"],
         "selector_sha256": pair_validation["selector"]["selector_sha256"],
-        "aggregation": {
-            "scope": OCCUPIED_SCOPE,
-            "occupied_zone": OCCUPIED_AGGREGATION,
-            "exhaust_temperature_rise_k": "explicit_solver_postprocess_qoi.v1",
-        },
+        "aggregation": _sensitivity_aggregation(),
         "baseline": _job_side(frozen_pair_manifest["baseline"]),
         "variant": _job_side(frozen_pair_manifest["variant"]),
         "allowed_variation": _allowed_numerical_variation(),
@@ -1034,11 +1266,7 @@ def _job_manifest_structure_blockers(job_manifest, pair_manifest):
         blockers.append(_error_code(error))
 
     aggregation = job_manifest.get("aggregation")
-    expected_aggregation = {
-        "scope": OCCUPIED_SCOPE,
-        "occupied_zone": OCCUPIED_AGGREGATION,
-        "exhaust_temperature_rise_k": "explicit_solver_postprocess_qoi.v1",
-    }
+    expected_aggregation = _sensitivity_aggregation()
     if aggregation != expected_aggregation:
         blockers.append("NUMERICAL_SENSITIVITY_QOI_AGGREGATION_INVALID")
     expected_allowed = _allowed_numerical_variation()

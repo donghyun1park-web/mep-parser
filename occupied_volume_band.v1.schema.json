@@ -25,6 +25,83 @@
         "y_min_m": {"type": "number"},
         "y_max_m": {"type": "number"}
       }
+    },
+    "validation_scope": {"const": "design_validation"},
+    "coordinate_system": {"const": "local_cartesian"},
+    "coordinate_unit": {"const": "m"},
+    "geometry_ref": {"$ref": "#/$defs/evidenceRef"},
+    "zone_ref": {"$ref": "#/$defs/evidenceRef"},
+    "xy_polygon_m": {"$ref": "#/$defs/closedPolygon"},
+    "exclusion_polygons_m": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/closedPolygon"}
+    },
+    "exclusion_volumes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "xy_polygon_m", "z_min_agl_m", "z_max_agl_m"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "xy_polygon_m": {"$ref": "#/$defs/closedPolygon"},
+          "z_min_agl_m": {"type": "number", "minimum": 0},
+          "z_max_agl_m": {"type": "number", "exclusiveMinimum": 0}
+        }
+      }
+    },
+    "confirmation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reviewer", "confirmed_at", "selection_reason",
+        "closed_zone_verified", "multilevel_voids_accounted"
+      ],
+      "properties": {
+        "reviewer": {"type": "string", "minLength": 1},
+        "confirmed_at": {"type": "string", "format": "date-time"},
+        "selection_reason": {"type": "string", "minLength": 1},
+        "closed_zone_verified": {"const": true},
+        "multilevel_voids_accounted": {"const": true}
+      }
     }
-  }
+  },
+  "$defs": {
+    "evidenceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "point2d": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {"type": "number"}
+    },
+    "closedPolygon": {
+      "type": "array",
+      "minItems": 4,
+      "items": {"$ref": "#/$defs/point2d"}
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["validation_scope"],
+        "properties": {"validation_scope": {"const": "design_validation"}}
+      },
+      "then": {
+        "required": [
+          "validation_scope", "coordinate_system", "coordinate_unit",
+          "geometry_ref", "zone_ref", "xy_polygon_m",
+          "exclusion_polygons_m", "exclusion_volumes", "confirmation"
+        ],
+        "not": {"required": ["xy_bounds_m"]}
+      }
+    }
+  ]
 }

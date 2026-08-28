@@ -211,7 +211,9 @@ def evaluate_body_fitted_case(case_dir: Path, gci_root: Path | None = None) -> d
 - Modify: `cfd_numerical_sensitivity_job.py`
 - Modify: `cfd_numerics.py`
 - Modify: `cfd_post.py`
+- Modify: `cfd_result_gate.py`
 - Modify: `occupied_volume_band.v1.schema.json`
+- Modify: `numerical_sensitivity.v1.schema.json`
 - Create: `cfd_numerical_sensitivity_job.v1.schema.json`
 - Create: `run_numerical_sensitivity.py`
 - Test: `tests/test_cfd_numerical_sensitivity_runner.py`
@@ -226,7 +228,8 @@ def run_serial_sensitivity_pair(study_dir: Path, variant_case: Path | None = Non
                                 progress_cb=None) -> dict:
     """Run baseline first-order and either run or bind an immutable second-order variant."""
 
-def verify_serial_sensitivity_pair(study_dir: Path, current_case: Path) -> dict:
+def verify_serial_sensitivity_pair(study_dir: Path, current_case: Path,
+                                   *, publish: bool = True) -> dict:
     """Rehash frozen inputs, current run/result/log/mesh artifacts, recompute QoIs,
     and require current_case to be the exact verified second-order variant."""
 ```
@@ -234,9 +237,9 @@ def verify_serial_sensitivity_pair(study_dir: Path, current_case: Path) -> dict:
 - [x] **Step 1: solver 미실행, 동일 run 재사용, processor 디렉터리, hash 변조, profile 이외 설정 변경이 모두 FAIL인 테스트를 작성한다.**
 - [x] **Step 2: 평가 중인 current run/mesh가 verified variant와 다르면 FAIL인 테스트를 작성한다.**
 - [x] **Step 3: 전역 solver lock 아래 baseline과 variant를 순서대로 실행하고 각 checkpoint를 atomic publish한다.**
-- [ ] **Step 4: `occupied_volume_band.v1`을 적용해 체적·시간가중 QoI를 계산한다. 기본 SGI 점유영역 selector는 바닥 위 0.1~1.8m이며 XY/제외영역은 사용자가 확인한다.**
-- [ ] **Step 4a: selector에 geometry/zone SHA, 좌표계·단위, z 범위, XY polygon, exclusion polygons/volumes, 확인자·시각·선택사유를 필수로 추가한다. 단순 직사각형이나 z-band가 실제 closed zone/복층 void와 맞지 않으면 생성 단계에서 FAIL한다.**
-- [ ] **Step 5: 세 QoI와 한 보존 지표를 비교한다.**
+- [x] **Step 4: `occupied_volume_band.v1`을 적용해 체적·시간가중 QoI를 계산한다. 기본 SGI 점유영역 selector는 바닥 위 0.1~1.8m이며 XY/제외영역은 사용자가 확인한다.**
+- [x] **Step 4a: selector에 geometry/zone SHA, 좌표계·단위, z 범위, XY polygon, exclusion polygons/volumes, 확인자·시각·선택사유를 필수로 추가한다. 단순 직사각형이나 z-band가 실제 closed zone/복층 void와 맞지 않으면 생성 단계에서 FAIL한다.**
+- [x] **Step 5: 세 QoI와 한 보존 지표를 비교한다.**
 
 | QoI | 허용 차이 |
 |---|---:|
@@ -245,12 +248,14 @@ def verify_serial_sensitivity_pair(study_dir: Path, current_case: Path) -> dict:
 | 배기 유량가중 ΔT | ≤0.5 K |
 | terminal 총 `phi` imbalance | 두 run 모두 ≤0.1% |
 
-- [ ] **Step 6: 실제 파일을 다시 읽지 않고 만들어진 `PASS` JSON은 거부한다.**
-- [ ] **Step 7: verified job만 `numerical_sensitivity.v1` 요약을 PASS로 만들고, `cfd_numerics`의 무조건 unverified 분기는 이 검증 경로에 한해 해제한다.**
+- [x] **Step 6: 실제 파일을 다시 읽지 않고 만들어진 `PASS` JSON은 거부한다.**
+- [x] **Step 7: verified job만 `numerical_sensitivity.v1` 요약을 PASS로 만들고, `cfd_numerics`의 무조건 unverified 분기는 이 검증 경로에 한해 해제한다.**
 
 **Completion:** 두 독립 serial run이 ≥3.0 FTT, 동일 마지막 0.1 FTT, 각 기본 수치 gate PASS, QoI 기준 PASS, 모든 hash 재계산 PASS일 때만 sensitivity PASS.
 
-**2026-08-28 진행 상태:** frozen pair/job/selector와 `gci_fine` Validation Anchor 결속에 더해 serial executor가 구현됐다. 실행기는 frozen seed의 실제 파일을 solver 전에 다시 해시하고, 기존 run/양의 시간/processor 디렉터리를 거부하며, 워크스테이션 solver lock 하나를 보유한 채 baseline 완료 checkpoint를 원자 발행한 뒤에만 variant를 시작한다. 두 run이 3.0 FTT와 독립 run hash를 확보해도 상태는 `SOLVER_RUNS_COMPLETE`/`INDEPENDENT_VERIFICATION_REQUIRED`이며 PASS가 아니다. focused 회귀는 `77 passed, 41 subtests passed`다. exact code HEAD `110661ab2f907e696b3543bf17332dd01922d7e3`의 locked Windows CI [run `33129901717`](https://github.com/donghyun1park-web/mep-parser/actions/runs/33129901717), job `98716723366`은 `1282 passed, 14 skipped, 7 warnings`, 실패/오류 0으로 통과했다. JUnit artifact는 `9669920851`, digest는 `sha256:2e1c10b9e82839a0bab8377299addf0dd90de61fee269642b5cb8fcc02755b93`다. Steps 4~7의 마지막 0.1 FTT 체적·시간가중 QoI 재계산, selector topology 확인 강화, raw artifact 독립 verifier가 남아 있으므로 이 Task와 `numerical_sensitivity.v1` 최종 PASS는 계속 OPEN이다.
+**2026-08-28 code-contract 완료 상태:** Steps 1~7을 구현했다. 설계검증 selector는 확인된 geometry/closed-zone 파일 SHA, m 단위 local Cartesian 좌표, 폐쇄·비자기교차 XY polygon, exclusion polygon/volume, 확인자·시각·사유와 복층 void 확인을 요구하며 준비·검증 시 파일을 다시 해시한다. 각 run은 ≥3.0 FTT 후 실제 VTU 셀체적가중 점유 온도/속도와 실제 OpenFOAM `T`·양(+) `phi` owner-cell 배기온도를 마지막 0.1 FTT에서 trapezoidal 시간가중하고 최소 5 snapshots를 요구한다. 독립 verifier는 frozen physical tree, checkpoint, run/result/source/summary/slice, mesh와 solver log tree를 다시 해시하고 residual tail, peak Co, continuity, terminal `phi`, energy basis와 QoI 차이를 재계산한다. 중앙 verifier가 만든 `numerical_sensitivity.v1`만 구조적으로 PASS이며 final result gate는 `publish=False`로 raw evidence를 다시 재현해 case-local 복사본과 같은지 확인한다. focused 회귀는 `120 passed, 49 subtests passed`다. 이는 실행 가능한 검증 계약의 완료이며 실제 baseline/variant OpenFOAM 장시간 run PASS 증거는 아직 생성하지 않았으므로 운영 `numerical_sensitivity.v1 PASS`, Gate M2와 `DESIGN_CITABLE`은 계속 `OPEN`이다.
+
+전체 로컬 Python 3.14 회귀는 `1293 passed, 14 skipped, 7 warnings, 123 subtests passed`였고 실패 2건은 `toolchain.lock.json`에 고정된 인증 Python 3.12.10 실행 파일 SHA와 현재 Python 3.14 실행 파일 SHA가 다른 기존 환경 고정 검사다. 변경 관련 집중 회귀 실패는 0건이며, locked Python 3.12 CI 확인은 공개 브랜치 push 후 수행한다.
 
 ### Task P1.3: time-step/Co 민감도 계약을 추가한다
 

@@ -117,6 +117,17 @@ snGradSchemes { default limited 0.5; }
                     "passed": True,
                 },
             ],
+            "verification": {
+                "contract": "numerical_sensitivity_verification.v1",
+                "verifier": (
+                    "run_numerical_sensitivity.verify_serial_sensitivity_pair"
+                ),
+                "raw_artifacts_rehashed": True,
+                "study_root": "C:/verified-study",
+                "current_case_child": "variant_second_order",
+                "evidence_path": "numerical_sensitivity_verification.v1.json",
+                "evidence_sha256": "e" * 64,
+            },
         }
 
     def _candidate_solver(self):
@@ -416,6 +427,7 @@ snGradSchemes { default limited 0.5; }
             "numerical_sensitivity.v1",
         )
         self.assertIn("qoi_comparisons", schema["required"])
+        self.assertIn("verification", schema["required"])
         self.assertTrue({"tail_maximum", "tail_samples"}.issubset(
             schema["$defs"]["residual1e5"]["required"]
         ))

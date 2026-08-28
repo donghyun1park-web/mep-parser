@@ -456,21 +456,11 @@ def compute_occupied_volume_qois_from_vtu(path, selector, floor_elevation_m=None
         ))
     speeds = [math.sqrt(sum(value * value for value in vector)) for vector in velocity]
 
-    z_min = selector["z_min_agl_m"]
-    z_max = selector["z_max_agl_m"]
-    xy_bounds = selector.get("xy_bounds_m")
     selected = [
         index for index, centre in enumerate(centres)
-        if (
-            z_min <= (centre[2] - floor_elevation_m) <= z_max
-            and (
-                xy_bounds is None
-                or (
-                    xy_bounds["x_min_m"] <= centre[0] <= xy_bounds["x_max_m"]
-                    and xy_bounds["y_min_m"] <= centre[1] <= xy_bounds["y_max_m"]
-                )
-            )
-        )
+        if sensitivity_job._cell_is_selected({
+            "center_m": (centre[0], centre[1], centre[2] - floor_elevation_m),
+        }, selector)
     ]
     selected_volume = sum(volumes[index] for index in selected)
     if not selected or not math.isfinite(selected_volume) or selected_volume <= 0:
@@ -528,6 +518,299 @@ def compute_occupied_volume_qois_from_vtu(path, selector, floor_elevation_m=None
         "occupied_zone_mean_temperature_k": mean_temperature,
         "occupied_zone_mean_speed_m_s": mean_speed,
     }
+
+
+def _normalise_time_window_samples(timed_values, window_start_s, window_end_s,
+                                   minimum_samples, code_prefix):
+    start = _require_finite_real(
+        window_start_s, f"{code_prefix}_WINDOW_INVALID: start must be finite")
+    end = _require_finite_real(
+        window_end_s, f"{code_prefix}_WINDOW_INVALID: end must be finite")
+    if start >= end or not isinstance(minimum_samples, int) or isinstance(minimum_samples, bool):
+        raise PostprocessEvidenceError(
+            f"{code_prefix}_WINDOW_INVALID: window must have positive duration and "
+            "minimum_samples must be an integer")
+    if minimum_samples < 2:
+        raise PostprocessEvidenceError(
+            f"{code_prefix}_WINDOW_INVALID: minimum_samples must be at least two")
+    ordered = sorted(timed_values, key=lambda item: item[0])
+    if any(first[0] == second[0] for first, second in zip(ordered, ordered[1:])):
+        raise PostprocessEvidenceError(
+            f"{code_prefix}_DUPLICATE_TIME: sample times must be unique")
+    in_window = [item for item in ordered if start <= item[0] <= end]
+    if (not ordered or ordered[0][0] > start or ordered[-1][0] < end
+            or len(in_window) < minimum_samples):
+        raise PostprocessEvidenceError(
+            f"{code_prefix}_WINDOW_NOT_COVERED: final window must be covered by at "
+            f"least {minimum_samples} raw samples")
+    return ordered, start, end
+
+
+def _interpolate_at(ordered, target, value_index):
+    for item in ordered:
+        if item[0] == target:
+            return item[value_index]
+    for first, second in zip(ordered, ordered[1:]):
+        if first[0] < target < second[0]:
+            fraction = (target - first[0]) / (second[0] - first[0])
+            return first[value_index] + fraction * (
+                second[value_index] - first[value_index]
+            )
+    raise PostprocessEvidenceError(
+        "TIME_WEIGHTED_QOI_WINDOW_NOT_COVERED: cannot interpolate window boundary")
+
+
+def _trapezoidal_time_mean(ordered, start, end, value_index):
+    points = [(start, _interpolate_at(ordered, start, value_index))]
+    points.extend(
+        (item[0], item[value_index])
+        for item in ordered if start < item[0] < end
+    )
+    points.append((end, _interpolate_at(ordered, end, value_index)))
+    integral = sum(
+        (second[0] - first[0]) * (first[1] + second[1]) / 2.0
+        for first, second in zip(points, points[1:])
+    )
+    mean = integral / (end - start)
+    if not math.isfinite(mean):
+        raise PostprocessEvidenceError(
+            "TIME_WEIGHTED_QOI_VALUE_INVALID: integrated mean must be finite")
+    return mean
+
+
+def compute_time_weighted_occupied_volume_qois(
+        paths, selector, floor_elevation_m, window_start_s, window_end_s,
+        minimum_samples=5):
+    """Integrate cell-volume-weighted occupied QoIs over a fixed final window."""
+    if not isinstance(paths, (list, tuple)) or not paths:
+        raise PostprocessEvidenceError(
+            "TIME_WEIGHTED_QOI_SAMPLES_MISSING: VTU source list is empty")
+    timed = []
+    sources = []
+    canonical_selector = None
+    for raw_path in paths:
+        path = Path(raw_path)
+        parsed = read_internal_vtu(path)
+        time_s = _require_finite_real(
+            parsed.get("time_s"),
+            "TIME_WEIGHTED_QOI_TIME_INVALID: every VTU must declare a finite TimeValue",
+        )
+        qoi = compute_occupied_volume_qois_from_vtu(
+            path, selector, floor_elevation_m=floor_elevation_m)
+        canonical_selector = qoi["selector"]
+        timed.append((
+            time_s,
+            qoi["occupied_zone_mean_temperature_k"],
+            qoi["occupied_zone_mean_speed_m_s"],
+        ))
+        sources.append({"time_s": time_s, "path": str(path), "sha256": _sha256(path)})
+    ordered, start, end = _normalise_time_window_samples(
+        timed, window_start_s, window_end_s, minimum_samples, "TIME_WEIGHTED_QOI")
+    sources.sort(key=lambda item: item["time_s"])
+    return {
+        "schema_version": 1,
+        "contract": "time_weighted_occupied_volume_qoi.v1",
+        "created_at": _now(),
+        "scope": "selected_occupied_volume_band",
+        "aggregation": (
+            "time_weighted_trapezoidal_of_cell_volume_weighted_snapshots.v1"
+        ),
+        "window": {"start_s": start, "end_s": end},
+        "sample_count": sum(start <= item[0] <= end for item in ordered),
+        "selector": canonical_selector,
+        "selector_sha256": canonical_selector["selector_sha256"],
+        "floor_elevation_m": float(floor_elevation_m),
+        "sources": sources,
+        "occupied_zone_mean_temperature_k": _trapezoidal_time_mean(
+            ordered, start, end, 1),
+        "occupied_zone_mean_speed_m_s": _trapezoidal_time_mean(
+            ordered, start, end, 2),
+    }
+
+
+def _validated_source_refs(raw):
+    if not isinstance(raw, list) or not raw:
+        raise PostprocessEvidenceError(
+            "EXHAUST_TIME_QOI_SOURCE_EVIDENCE_REQUIRED: T/phi source refs are required")
+    normalised = []
+    for item in raw:
+        if not isinstance(item, dict) or set(item) != {"path", "sha256"}:
+            raise PostprocessEvidenceError(
+                "EXHAUST_TIME_QOI_SOURCE_EVIDENCE_REQUIRED: invalid source ref")
+        path = item.get("path")
+        digest = item.get("sha256")
+        if (not isinstance(path, str) or not path.strip()
+                or not isinstance(digest, str) or len(digest) != 64
+                or any(char not in "0123456789abcdef" for char in digest)):
+            raise PostprocessEvidenceError(
+                "EXHAUST_TIME_QOI_SOURCE_EVIDENCE_REQUIRED: invalid source ref")
+        normalised.append({"path": path.strip(), "sha256": digest})
+    return normalised
+
+
+def compute_time_weighted_exhaust_temperature_rise_qoi(
+        samples, supply_temperature_k, window_start_s, window_end_s,
+        minimum_samples=5):
+    """Integrate solver-phi-derived, flow-weighted exhaust temperatures in time."""
+    supply = _require_finite_real(
+        supply_temperature_k,
+        "EXHAUST_TIME_QOI_VALUE_INVALID: supply temperature must be finite")
+    if not isinstance(samples, (list, tuple)) or not samples:
+        raise PostprocessEvidenceError(
+            "EXHAUST_TIME_QOI_SAMPLES_MISSING: exhaust samples are required")
+    timed = []
+    provenance = []
+    for sample in samples:
+        if not isinstance(sample, dict):
+            raise PostprocessEvidenceError(
+                "EXHAUST_TIME_QOI_VALUE_INVALID: each sample must be an object")
+        time_s = _require_finite_real(
+            sample.get("time_s"),
+            "EXHAUST_TIME_QOI_VALUE_INVALID: sample time must be finite")
+        exhausts = sample.get("exhausts")
+        if not isinstance(exhausts, list) or not exhausts:
+            raise PostprocessEvidenceError(
+                "EXHAUST_TIME_QOI_VALUE_INVALID: exhaust list must be non-empty")
+        weighted_sum = 0.0
+        total_rate = 0.0
+        for item in exhausts:
+            if (not isinstance(item, dict)
+                    or item.get("temperature_method") != TRUSTED_EXHAUST_TEMPERATURE_METHOD):
+                raise PostprocessEvidenceError(
+                    "EXHAUST_TIME_QOI_SOLVER_PROVENANCE_REQUIRED: every sample must "
+                    "use positive solver phi and owner-cell temperature")
+            rate = _require_finite_real(
+                item.get("solved_outflow_rate_m3_s"),
+                "EXHAUST_TIME_QOI_VALUE_INVALID: outflow must be finite and positive",
+                positive=True)
+            temperature = _require_finite_real(
+                item.get("temperature_k"),
+                "EXHAUST_TIME_QOI_VALUE_INVALID: exhaust temperature must be finite")
+            total_rate += rate
+            weighted_sum += rate * temperature
+        refs = _validated_source_refs(sample.get("source_refs"))
+        mean_temperature = weighted_sum / total_rate
+        timed.append((time_s, mean_temperature, mean_temperature - supply))
+        provenance.append({"time_s": time_s, "source_refs": refs})
+    ordered, start, end = _normalise_time_window_samples(
+        timed, window_start_s, window_end_s, minimum_samples, "EXHAUST_TIME_QOI")
+    provenance.sort(key=lambda item: item["time_s"])
+    return {
+        "schema_version": 1,
+        "contract": "time_weighted_exhaust_temperature_rise_qoi.v1",
+        "created_at": _now(),
+        "aggregation": "time_weighted_trapezoidal_of_positive_phi_weighted_samples.v1",
+        "window": {"start_s": start, "end_s": end},
+        "sample_count": sum(start <= item[0] <= end for item in ordered),
+        "supply_temperature_k": supply,
+        "flow_weighted_exhaust_temperature_k": _trapezoidal_time_mean(
+            ordered, start, end, 1),
+        "exhaust_temperature_rise_k": _trapezoidal_time_mean(
+            ordered, start, end, 2),
+        "samples": provenance,
+        "provenance": {
+            "energy_closure_basis": TRUSTED_EXHAUST_ENERGY_CLOSURE_BASIS,
+            "temperature_method": TRUSTED_EXHAUST_TEMPERATURE_METHOD,
+        },
+    }
+
+
+def read_time_weighted_exhaust_temperature_rise_from_case(
+        case_dir, window_start_s, window_end_s, minimum_samples=5):
+    """Recompute final-window exhaust rise from saved OpenFOAM ``T``/``phi``."""
+    import cfd_physics
+
+    case = Path(case_dir).expanduser().resolve(strict=True)
+    try:
+        thermal_input = json.loads(
+            (case / "thermal_input.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise PostprocessEvidenceError(
+            "EXHAUST_TIME_QOI_THERMAL_INPUT_INVALID: thermal_input.json is required"
+        ) from error
+    if not isinstance(thermal_input, dict):
+        raise PostprocessEvidenceError("EXHAUST_TIME_QOI_THERMAL_INPUT_INVALID")
+    settings = thermal_input.get("settings")
+    terminals = thermal_input.get("terminals")
+    if not isinstance(settings, dict) or not isinstance(terminals, list):
+        raise PostprocessEvidenceError("EXHAUST_TIME_QOI_THERMAL_INPUT_INVALID")
+    supply = _require_finite_real(
+        settings.get("supply_temperature_k"),
+        "EXHAUST_TIME_QOI_THERMAL_INPUT_INVALID: supply temperature is required")
+    exhaust_patches = [
+        item.get("mesh_patch_name") for item in terminals
+        if isinstance(item, dict) and item.get("role") == "exhaust"
+        and isinstance(item.get("mesh_patch_name"), str)
+        and item.get("mesh_patch_name").strip()
+    ]
+    if not exhaust_patches:
+        raise PostprocessEvidenceError(
+            "EXHAUST_TIME_QOI_THERMAL_INPUT_INVALID: exhaust terminals are required")
+
+    timed_directories = []
+    for child in case.iterdir():
+        if not child.is_dir() or child.is_symlink():
+            continue
+        try:
+            time_s = float(child.name)
+        except ValueError:
+            continue
+        if math.isfinite(time_s) and window_start_s <= time_s <= window_end_s:
+            timed_directories.append((time_s, child))
+    timed_directories.sort(key=lambda item: item[0])
+    samples = []
+    for time_s, time_dir in timed_directories:
+        temperature_path = time_dir / "T"
+        phi_path = time_dir / "phi"
+        if (temperature_path.is_symlink() or phi_path.is_symlink()
+                or not temperature_path.is_file() or not phi_path.is_file()):
+            raise PostprocessEvidenceError(
+                "EXHAUST_TIME_QOI_SOURCE_EVIDENCE_REQUIRED: saved T and phi are required")
+        try:
+            internal_t = cfd_physics._internal_scalar_values(temperature_path)
+        except OSError as error:
+            raise PostprocessEvidenceError(
+                "EXHAUST_TIME_QOI_SOURCE_EVIDENCE_REQUIRED: T field is unreadable"
+            ) from error
+        if not internal_t:
+            raise PostprocessEvidenceError(
+                "EXHAUST_TIME_QOI_SOURCE_EVIDENCE_REQUIRED: T internalField is invalid")
+        exhausts = []
+        for patch_name in exhaust_patches:
+            solved = cfd_physics._exhaust_flux_temperature(
+                case, time_dir, patch_name, internal_t)
+            if (not isinstance(solved, dict)
+                    or solved.get("method") != TRUSTED_EXHAUST_TEMPERATURE_METHOD):
+                raise PostprocessEvidenceError(
+                    "EXHAUST_TIME_QOI_SOLVER_PROVENANCE_REQUIRED: positive phi "
+                    f"evidence is missing for {patch_name}")
+            exhausts.append({
+                "mesh_patch_name": patch_name,
+                "temperature_k": solved.get("temperature_k"),
+                "solved_outflow_rate_m3_s": solved.get("flow_rate_m3_s"),
+                "temperature_method": solved.get("method"),
+            })
+        samples.append({
+            "time_s": time_s,
+            "source_refs": [
+                {
+                    "path": temperature_path.relative_to(case).as_posix(),
+                    "sha256": _sha256(temperature_path),
+                },
+                {
+                    "path": phi_path.relative_to(case).as_posix(),
+                    "sha256": _sha256(phi_path),
+                },
+            ],
+            "exhausts": exhausts,
+        })
+    return compute_time_weighted_exhaust_temperature_rise_qoi(
+        samples,
+        supply_temperature_k=supply,
+        window_start_s=window_start_s,
+        window_end_s=window_end_s,
+        minimum_samples=minimum_samples,
+    )
 
 
 def read_trusted_exhaust_temperature_rise_qoi(path, expected_run_manifest_sha256=None):

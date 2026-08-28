@@ -411,6 +411,65 @@ class BodyFittedResultGateTests(unittest.TestCase):
             )
             self.assertTrue(blockers, filename)
 
+    def test_numerical_sensitivity_requires_live_raw_reverification(self):
+        anchor = {"anchor_id": "anchor-" + "a" * 16, "sha256": "b" * 64}
+        with tempfile.TemporaryDirectory() as tmp:
+            study = Path(tmp)
+            current_case = study / "variant_second_order"
+            current_case.mkdir()
+            evidence_file = study / "numerical_sensitivity_verification.v1.json"
+            evidence_file.write_text('{"verified":true}', encoding="utf-8")
+            artifact = {
+                "contract": "numerical_sensitivity.v1",
+                "status": "PASS",
+                "validation_anchor": anchor,
+                "verification": {
+                    "study_root": str(study),
+                    "evidence_path": evidence_file.name,
+                    "evidence_sha256": self._sha256(evidence_file),
+                },
+            }
+            recomputed = {**artifact, "valid": True, "blockers": []}
+            with mock.patch.object(
+                    cfd_result_gate.cfd_numerics, "validate_numerical_sensitivity",
+                    return_value={"valid": True, "blockers": []}), mock.patch(
+                    "run_numerical_sensitivity.verify_serial_sensitivity_pair",
+                    return_value=recomputed) as verify:
+                blockers = cfd_result_gate._validate_final_evidence_document(
+                    "numerical_sensitivity.json", artifact,
+                    anchor_reference=anchor,
+                    evidence_path=current_case / "numerical_sensitivity.json",
+                    current_case=current_case,
+                )
+
+        self.assertEqual(blockers, [])
+        verify.assert_called_once_with(
+            study, current_case, publish=False
+        )
+
+        tampered = {**recomputed, "status": "FAIL"}
+        with tempfile.TemporaryDirectory() as tmp:
+            study = Path(tmp)
+            current_case = study / "variant_second_order"
+            current_case.mkdir()
+            evidence_file = study / "numerical_sensitivity_verification.v1.json"
+            evidence_file.write_text('{"verified":true}', encoding="utf-8")
+            artifact["verification"].update({
+                "study_root": str(study),
+                "evidence_sha256": self._sha256(evidence_file),
+            })
+            with mock.patch.object(
+                    cfd_result_gate.cfd_numerics, "validate_numerical_sensitivity",
+                    return_value={"valid": True, "blockers": []}), mock.patch(
+                    "run_numerical_sensitivity.verify_serial_sensitivity_pair",
+                    return_value=tampered):
+                blockers = cfd_result_gate._validate_final_evidence_document(
+                    "numerical_sensitivity.json", artifact,
+                    anchor_reference=anchor,
+                    current_case=current_case,
+                )
+        self.assertIn("NUMERICAL_SENSITIVITY_LIVE_RECOMPUTE_MISMATCH", blockers)
+
     def test_body_result_requires_numerical_quality_evidence(self):
         repo = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(prefix=".test-result-gate-numerics-", dir=repo) as tmp:

@@ -44,13 +44,33 @@ class SerialSensitivityPreparationTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    @staticmethod
-    def _selector():
+    def _selector(self):
+        geometry = self.root / "confirmed-geometry.json"
+        zone = self.root / "confirmed-zone.json"
+        geometry.write_text('{"unit":"m"}', encoding="utf-8")
+        zone.write_text('{"closed":true}', encoding="utf-8")
         return {
             "contract": "occupied_volume_band.v1",
             "coordinate_source": "cell_center_m_agl",
             "z_min_agl_m": 0.1,
             "z_max_agl_m": 1.8,
+            "validation_scope": "design_validation",
+            "coordinate_system": "local_cartesian",
+            "coordinate_unit": "m",
+            "geometry_ref": {"path": str(geometry), "sha256": _file_sha256(geometry)},
+            "zone_ref": {"path": str(zone), "sha256": _file_sha256(zone)},
+            "xy_polygon_m": [
+                [0.0, 0.0], [4.0, 0.0], [4.0, 3.0], [0.0, 3.0], [0.0, 0.0]
+            ],
+            "exclusion_polygons_m": [],
+            "exclusion_volumes": [],
+            "confirmation": {
+                "reviewer": "mechanical-reviewer",
+                "confirmed_at": "2026-08-28T09:00:00+09:00",
+                "selection_reason": "Closed test zone.",
+                "closed_zone_verified": True,
+                "multilevel_voids_accounted": True,
+            },
         }
 
     @staticmethod
@@ -221,6 +241,30 @@ class SerialSensitivityPreparationTests(unittest.TestCase):
                         "NUMERICAL_SENSITIVITY_"):
                     self._prepare(target, settings)
                 self.assertFalse(target.exists())
+
+    def test_rejects_unconfirmed_or_tampered_selector_evidence_before_building(self):
+        basic = {
+            "contract": "occupied_volume_band.v1",
+            "coordinate_source": "cell_center_m_agl",
+            "z_min_agl_m": 0.1,
+            "z_max_agl_m": 1.8,
+        }
+        with self.assertRaisesRegex(
+                sensitivity_runner.NumericalSensitivityPreparationError,
+                "NUMERICAL_SENSITIVITY_CONFIRMED_SELECTOR_REQUIRED"):
+            sensitivity_runner.prepare_serial_sensitivity_pair(
+                self.mesh_case, self.root / "unconfirmed",
+                selector=basic, qoi_limits=self._qoi_limits())
+
+        confirmed = self._selector()
+        Path(confirmed["zone_ref"]["path"]).write_text(
+            '{"closed":false}', encoding="utf-8")
+        with self.assertRaisesRegex(
+                sensitivity_runner.NumericalSensitivityPreparationError,
+                "NUMERICAL_SENSITIVITY_SELECTOR_EVIDENCE_HASH_MISMATCH"):
+            sensitivity_runner.prepare_serial_sensitivity_pair(
+                self.mesh_case, self.root / "tampered-selector",
+                selector=confirmed, qoi_limits=self._qoi_limits())
 
     def test_rejects_unsafe_source_or_target_without_overwriting(self):
         nested_target = self.mesh_case / "must-not-write-here"

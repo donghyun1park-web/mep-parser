@@ -7,6 +7,9 @@ from unittest import mock
 
 import run_numerical_sensitivity as execution
 import cfd_numerical_sensitivity_job as sensitivity_job
+import cfd_numerical_sensitivity_runner as preparation
+import cfd_numerics
+import cfd_physics
 from jsonschema import validate
 
 
@@ -41,11 +44,32 @@ class SerialSensitivityExecutionContractTests(unittest.TestCase):
         root = Path(tmp.name)
         (root / "baseline_first_order").mkdir()
         (root / "variant_second_order").mkdir()
+        geometry = root / "confirmed-geometry.json"
+        zone = root / "confirmed-closed-zone.json"
+        geometry.write_text('{"unit":"m"}', encoding="utf-8")
+        zone.write_text('{"closed":true}', encoding="utf-8")
         selector = {
             "contract": "occupied_volume_band.v1",
             "coordinate_source": "cell_center_m_agl",
             "z_min_agl_m": 0.1,
             "z_max_agl_m": 1.8,
+            "validation_scope": "design_validation",
+            "coordinate_system": "local_cartesian",
+            "coordinate_unit": "m",
+            "geometry_ref": {"path": str(geometry), "sha256": self._sha256(geometry)},
+            "zone_ref": {"path": str(zone), "sha256": self._sha256(zone)},
+            "xy_polygon_m": [
+                [0.0, 0.0], [4.0, 0.0], [4.0, 3.0], [0.0, 3.0], [0.0, 0.0]
+            ],
+            "exclusion_polygons_m": [],
+            "exclusion_volumes": [],
+            "confirmation": {
+                "reviewer": "mechanical-reviewer",
+                "confirmed_at": "2026-08-28T09:00:00+09:00",
+                "selection_reason": "Closed test zone.",
+                "closed_zone_verified": True,
+                "multilevel_voids_accounted": True,
+            },
         }
         required_paths = [
             "0/U", "0/T", "0/k", "0/omega", "0/p", "0/p_rgh", "0/nut",
@@ -54,11 +78,27 @@ class SerialSensitivityExecutionContractTests(unittest.TestCase):
             "constant/polyMesh", "mesh_manifest.json", "surface_manifest.json",
             "thermal_input.physical.v1.json",
         ]
+        for case_name in ("baseline_first_order", "variant_second_order"):
+            case = root / case_name
+            for relative in required_paths:
+                target = case / relative
+                if relative == "constant/polyMesh":
+                    target.mkdir(parents=True, exist_ok=True)
+                    (target / "points").write_text("shared mesh\n", encoding="utf-8")
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(f"shared:{relative}\n", encoding="utf-8")
         physical_tree = sensitivity_job.create_physical_tree_snapshot([
-            {"path": path, "sha256": f"{index + 1:064x}", "immutable": True}
-            for index, path in enumerate(required_paths)
+            {
+                "path": path,
+                "sha256": preparation._hash_regular_tree(
+                    root / "baseline_first_order" / path
+                ),
+                "immutable": True,
+            }
+            for path in required_paths
         ])
-        mesh_sha = "a" * 64
+        mesh_sha = self._sha256(root / "baseline_first_order" / "mesh_manifest.json")
         physical_sha = sensitivity_job.derive_physical_input_sha256(
             mesh_sha256=mesh_sha, physical_tree=physical_tree, selector=selector
         )
@@ -196,6 +236,217 @@ class SerialSensitivityExecutionContractTests(unittest.TestCase):
         self.assertEqual(result["status"], "NOT_EVALUATED")
         self.assertFalse(result["valid"])
         self.assertIn("SOLVER_EVIDENCE_MISSING", result["blockers"])
+
+    def _install_verifiable_solver_evidence(self, study, *, variant_delta=0.1):
+        residuals = {
+            field: {
+                "final": 1e-6,
+                "tail_maximum": 1e-6,
+                "tail_samples": cfd_numerics.DEFAULT_RESIDUAL_TAIL_SAMPLES,
+                "limit": limit,
+            }
+            for field, limit in cfd_numerics.THERMAL_RESIDUAL_LIMITS.items()
+        }
+        pair = json.loads((study / "frozen_pair_manifest.json").read_text(
+            encoding="utf-8"))
+        checkpoint = {
+            "contract": "serial_numerical_sensitivity_execution.v1",
+            "status": "SOLVER_RUNS_COMPLETE",
+            "valid": False,
+            "job_id": pair["job_id"],
+            "pair_manifest_sha256": pair["manifest_sha256"],
+            "job_manifest_sha256": json.loads(
+                (study / "cfd_numerical_sensitivity_job.v1.json").read_text(
+                    encoding="utf-8"))["job_manifest_sha256"],
+            "target_flow_through_fraction": 3.0,
+            "blockers": ["INDEPENDENT_VERIFICATION_REQUIRED"],
+        }
+        for role in ("baseline", "variant"):
+            case = study / pair[role]["case_child"]
+            profile = pair[role]["profile"]
+            settings = dict(cfd_physics.DEFAULT_SETTINGS)
+            settings.update({
+                "thermal_numerics_profile": profile,
+                "thermal_design_max_courant_gate": 1.0,
+                "terminal_phi_imbalance_max": 0.001,
+                "occupied_floor_elevation_m": 0.0,
+            })
+            numerics = cfd_numerics.thermal_numerics_contract(
+                {"mesh": {"max_non_orthogonality": 10.0}}, settings)
+            (case / "system").mkdir(exist_ok=True)
+            (case / "system" / "fvSchemes").write_text(
+                cfd_physics._thermal_fv_schemes(numerics), encoding="utf-8")
+            (case / "system" / "fvSolution").write_text(
+                cfd_physics._thermal_fv_solution(settings, numerics), encoding="utf-8")
+            run = {
+                "contract": "run_manifest.v1",
+                "status": "PASS",
+                "effective_numerics": numerics,
+                "thermal_progress": {
+                    "flow_through_fraction": 3.0,
+                    "flow_through_time_s": 10.0,
+                    "latest_time_s": 30.0,
+                },
+                "solver": {
+                    "ended": True,
+                    "fatal": False,
+                    "courant": {"peak_maximum": 0.7},
+                    "thermal_residuals": {
+                        name: {"final": row["final"]}
+                        for name, row in residuals.items()
+                    },
+                    "thermal_residual_history": {
+                        name: [{"final": row["tail_maximum"]}] * row["tail_samples"]
+                        for name, row in residuals.items()
+                    },
+                    "continuity": {"global": 1e-7},
+                },
+                "flux_balance": {"available": True, "imbalance_ratio": 0.0005},
+                "thermal": {
+                    "energy_closure_basis": (
+                        "solver_positive_phi_and_owner_cell_temperature"
+                    )
+                },
+                "effective_settings": settings,
+            }
+            run_path = case / "run_manifest.json"
+            run_path.write_text(json.dumps(run), encoding="utf-8")
+            log_path = case / "log.solver"
+            log_path.write_text(f"solver evidence:{profile}\n", encoding="utf-8")
+            source = case / "VTK" / "final" / "internal.vtu"
+            source.parent.mkdir(parents=True)
+            source.write_text(f"raw-vtu:{profile}\n", encoding="utf-8")
+            summary = case / "results" / "body_fitted_summary.json"
+            summary.parent.mkdir(parents=True)
+            summary.write_text(json.dumps({"time_s": 30.0}), encoding="utf-8")
+            result = {
+                "contract": "result_manifest.v1",
+                "time_s": 30.0,
+                "source": {
+                    "path": source.relative_to(case).as_posix(),
+                    "sha256": self._sha256(source),
+                },
+                "run_manifest_sha256": self._sha256(run_path),
+                "mesh_manifest_sha256": self._sha256(case / "mesh_manifest.json"),
+                "summary_path": summary.relative_to(case).as_posix(),
+                "summary_sha256": self._sha256(summary),
+                "slices": [],
+            }
+            result_path = case / "result_manifest.json"
+            result_path.write_text(json.dumps(result), encoding="utf-8")
+            checkpoint[role] = execution._completed_side(case, pair[role])
+        checkpoint["completed_at"] = "2026-08-28T12:00:00+00:00"
+        (study / "serial_sensitivity_execution.v1.json").write_text(
+            json.dumps(checkpoint), encoding="utf-8")
+        occupied = {
+            "baseline": {
+                "occupied_zone_mean_temperature_k": 294.0,
+                "occupied_zone_mean_speed_m_s": 0.20,
+            },
+            "variant": {
+                "occupied_zone_mean_temperature_k": 294.0 + variant_delta,
+                "occupied_zone_mean_speed_m_s": 0.20 + variant_delta / 10.0,
+            },
+        }
+        exhaust = {
+            "baseline": {"exhaust_temperature_rise_k": 5.0},
+            "variant": {"exhaust_temperature_rise_k": 5.0 + variant_delta},
+        }
+        return occupied, exhaust
+
+    def test_verifier_rehashes_raw_evidence_recomputes_qois_and_publishes_pass(self):
+        tmp, study = self._study()
+        self.addCleanup(tmp.cleanup)
+        occupied, exhaust = self._install_verifiable_solver_evidence(study)
+
+        with mock.patch.object(
+                execution.cfd_post, "compute_time_weighted_occupied_volume_qois",
+                side_effect=[occupied["baseline"], occupied["variant"]]), mock.patch.object(
+                execution.cfd_post,
+                "read_time_weighted_exhaust_temperature_rise_from_case",
+                side_effect=[exhaust["baseline"], exhaust["variant"]]):
+            result = execution.verify_serial_sensitivity_pair(
+                study, study / "variant_second_order"
+            )
+
+        self.assertEqual(result["status"], "PASS", result)
+        self.assertTrue(result["valid"])
+        self.assertTrue((study / "numerical_sensitivity.v1.json").is_file())
+        self.assertTrue(
+            (study / "variant_second_order" / "numerical_sensitivity.json").is_file()
+        )
+        schema = json.loads((Path(__file__).resolve().parents[1]
+                             / "numerical_sensitivity.v1.schema.json").read_text(
+                                 encoding="utf-8"))
+        validate(instance=json.loads(
+            (study / "numerical_sensitivity.v1.json").read_text(encoding="utf-8")
+        ), schema=schema)
+        self.assertEqual({row["name"] for row in result["qoi_comparisons"]}, {
+            "occupied_zone_mean_temperature_k",
+            "occupied_zone_mean_speed_m_s",
+            "exhaust_temperature_rise_k",
+        })
+        self.assertTrue(result["verification"]["raw_artifacts_rehashed"])
+
+    def test_verifier_blocks_tampered_result_log_or_physical_tree(self):
+        for target in ("result", "result_time", "log", "physical", "numerics"):
+            with self.subTest(target=target):
+                tmp, study = self._study()
+                self.addCleanup(tmp.cleanup)
+                occupied, exhaust = self._install_verifiable_solver_evidence(study)
+                case = study / "variant_second_order"
+                if target == "result":
+                    (case / "result_manifest.json").write_text("{}", encoding="utf-8")
+                elif target == "result_time":
+                    result_path = case / "result_manifest.json"
+                    result = json.loads(result_path.read_text(encoding="utf-8"))
+                    result["time_s"] = 29.0
+                    result_path.write_text(json.dumps(result), encoding="utf-8")
+                    checkpoint_path = study / "serial_sensitivity_execution.v1.json"
+                    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                    checkpoint["variant"]["result_manifest_sha256"] = self._sha256(
+                        result_path)
+                    checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+                elif target == "log":
+                    (case / "log.solver").write_text("tampered", encoding="utf-8")
+                elif target == "physical":
+                    (case / "0" / "T").write_text("tampered", encoding="utf-8")
+                else:
+                    schemes = case / "system" / "fvSchemes"
+                    schemes.write_text(
+                        schemes.read_text(encoding="utf-8").replace(
+                            "linearUpwind grad(U)", "upwind"),
+                        encoding="utf-8",
+                    )
+                with mock.patch.object(
+                        execution.cfd_post,
+                        "compute_time_weighted_occupied_volume_qois",
+                        side_effect=[occupied["baseline"], occupied["variant"]]), \
+                        mock.patch.object(
+                        execution.cfd_post,
+                        "read_time_weighted_exhaust_temperature_rise_from_case",
+                        side_effect=[exhaust["baseline"], exhaust["variant"]]):
+                    with self.assertRaises(execution.NumericalSensitivityExecutionError):
+                        execution.verify_serial_sensitivity_pair(
+                            study, study / "variant_second_order")
+
+    def test_verifier_blocks_qoi_limit_failure_without_writing_pass(self):
+        tmp, study = self._study()
+        self.addCleanup(tmp.cleanup)
+        occupied, exhaust = self._install_verifiable_solver_evidence(
+            study, variant_delta=1.0)
+        with mock.patch.object(
+                execution.cfd_post, "compute_time_weighted_occupied_volume_qois",
+                side_effect=[occupied["baseline"], occupied["variant"]]), mock.patch.object(
+                execution.cfd_post,
+                "read_time_weighted_exhaust_temperature_rise_from_case",
+                side_effect=[exhaust["baseline"], exhaust["variant"]]):
+            with self.assertRaisesRegex(
+                    execution.NumericalSensitivityExecutionError,
+                    "SENSITIVITY_QOI_LIMIT_FAILED"):
+                execution.verify_serial_sensitivity_pair(
+                    study, study / "variant_second_order")
+        self.assertFalse((study / "numerical_sensitivity.v1.json").exists())
 
     def test_execution_rejects_processor_directories_before_solver(self):
         tmp, study = self._study()

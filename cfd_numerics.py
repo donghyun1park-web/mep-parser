@@ -397,6 +397,25 @@ def validate_numerical_sensitivity(sensitivity):
     if sensitivity.get("status") != "PASS":
         blockers.append("NUMERICAL_SENSITIVITY_STATUS_NOT_PASS")
 
+    verification = sensitivity.get("verification")
+    expected_verification_fields = {
+        "contract", "verifier", "raw_artifacts_rehashed", "study_root",
+        "current_case_child", "evidence_path", "evidence_sha256",
+    }
+    if (not isinstance(verification, dict)
+            or set(verification) != expected_verification_fields
+            or verification.get("contract") != "numerical_sensitivity_verification.v1"
+            or verification.get("verifier") != (
+                "run_numerical_sensitivity.verify_serial_sensitivity_pair")
+            or verification.get("raw_artifacts_rehashed") is not True
+            or not isinstance(verification.get("study_root"), str)
+            or not verification.get("study_root", "").strip()
+            or verification.get("current_case_child") != "variant_second_order"
+            or verification.get("evidence_path") != (
+                "numerical_sensitivity_verification.v1.json")
+            or not _valid_sha256(verification.get("evidence_sha256"))):
+        blockers.append("NUMERICAL_SENSITIVITY_VERIFICATION_INVALID")
+
     provenance = sensitivity.get("provenance")
     if (not isinstance(provenance, dict)
             or provenance.get("explicit_job") is not True

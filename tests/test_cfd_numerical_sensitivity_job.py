@@ -28,6 +28,29 @@ class OccupiedVolumeBandTests(unittest.TestCase):
         selector.update(overrides)
         return selector
 
+    def _confirmed_selector(self, **overrides):
+        selector = self._selector(
+            validation_scope="design_validation",
+            coordinate_system="local_cartesian",
+            coordinate_unit="m",
+            geometry_ref={"path": "C:/evidence/geometry.json", "sha256": HASH_A},
+            zone_ref={"path": "C:/evidence/closed-zone.json", "sha256": HASH_B},
+            xy_polygon_m=[
+                [0.0, 0.0], [4.0, 0.0], [4.0, 3.0], [0.0, 3.0], [0.0, 0.0]
+            ],
+            exclusion_polygons_m=[],
+            exclusion_volumes=[],
+            confirmation={
+                "reviewer": "mechanical-reviewer",
+                "confirmed_at": "2026-08-28T09:00:00+09:00",
+                "selection_reason": "Closed lobby occupied zone excluding all voids.",
+                "closed_zone_verified": True,
+                "multilevel_voids_accounted": True,
+            },
+        )
+        selector.update(overrides)
+        return selector
+
     def test_missing_selector_is_rejected_without_a_whole_volume_default(self):
         validation = sensitivity_job.validate_occupied_volume_band(None)
 
@@ -35,6 +58,44 @@ class OccupiedVolumeBandTests(unittest.TestCase):
         self.assertIn("OCCUPIED_SELECTOR_MISSING", validation["blockers"])
         with self.assertRaises(sensitivity_job.NumericalSensitivityJobInputError):
             sensitivity_job.compute_occupied_volume_qois([], None)
+
+    def test_design_validation_requires_confirmed_geometry_zone_and_closed_polygon(self):
+        with self.assertRaisesRegex(
+                sensitivity_job.NumericalSensitivityJobInputError,
+                "OCCUPIED_SELECTOR_DESIGN_CONFIRMATION_REQUIRED"):
+            sensitivity_job.require_confirmed_occupied_volume_band(self._selector())
+
+        normalised = sensitivity_job.require_confirmed_occupied_volume_band(
+            self._confirmed_selector()
+        )
+
+        self.assertEqual(normalised["validation_scope"], "design_validation")
+        self.assertEqual(normalised["geometry_ref"]["sha256"], HASH_A)
+        self.assertEqual(normalised["zone_ref"]["sha256"], HASH_B)
+        self.assertTrue(normalised["confirmation"]["closed_zone_verified"])
+        self.assertRegex(normalised["selector_sha256"], r"^[0-9a-f]{64}$")
+
+    def test_design_validation_rejects_open_polygon_or_unaccounted_voids(self):
+        invalid = (
+            self._confirmed_selector(xy_polygon_m=[
+                [0.0, 0.0], [4.0, 0.0], [4.0, 3.0], [0.0, 3.0]
+            ]),
+            self._confirmed_selector(confirmation={
+                "reviewer": "mechanical-reviewer",
+                "confirmed_at": "2026-08-28T09:00:00+09:00",
+                "selection_reason": "Void review is incomplete.",
+                "closed_zone_verified": True,
+                "multilevel_voids_accounted": False,
+            }),
+            self._confirmed_selector(xy_polygon_m=[
+                [0.0, 0.0], [4.0, 0.0], [1.0, 3.0],
+                [3.0, -1.0], [0.0, 2.0], [0.0, 0.0],
+            ]),
+        )
+        for selector in invalid:
+            with self.subTest(selector=selector):
+                with self.assertRaises(sensitivity_job.NumericalSensitivityJobInputError):
+                    sensitivity_job.require_confirmed_occupied_volume_band(selector)
 
     def test_invalid_or_empty_band_is_rejected(self):
         with self.assertRaises(sensitivity_job.NumericalSensitivityJobInputError):
@@ -115,6 +176,37 @@ class OccupiedVolumeBandTests(unittest.TestCase):
             sensitivity_job.compute_occupied_volume_qois(invalid, selector)
         self.assertIn("OCCUPIED_CELL_VOLUME_INVALID", str(caught.exception))
 
+    def test_confirmed_polygon_and_exclusions_control_selected_cells(self):
+        selector = self._confirmed_selector(
+            exclusion_polygons_m=[[
+                [2.5, 0.5], [3.5, 0.5], [3.5, 1.5], [2.5, 1.5], [2.5, 0.5]
+            ]],
+            exclusion_volumes=[{
+                "id": "atrium-void",
+                "xy_polygon_m": [
+                    [0.5, 1.5], [1.5, 1.5], [1.5, 2.5], [0.5, 2.5], [0.5, 1.5]
+                ],
+                "z_min_agl_m": 0.0,
+                "z_max_agl_m": 3.0,
+            }],
+        )
+        cells = [
+            {"center_m": [1.0, 1.0, 1.0], "volume_m3": 1.0,
+             "temperature_k": 290.0, "velocity_m_s": 0.1},
+            {"center_m": [3.0, 1.0, 1.0], "volume_m3": 10.0,
+             "temperature_k": 500.0, "velocity_m_s": 5.0},
+            {"center_m": [1.0, 2.0, 1.0], "volume_m3": 10.0,
+             "temperature_k": 600.0, "velocity_m_s": 6.0},
+            {"center_m": [5.0, 1.0, 1.0], "volume_m3": 10.0,
+             "temperature_k": 700.0, "velocity_m_s": 7.0},
+        ]
+
+        qois = sensitivity_job.compute_occupied_volume_qois(cells, selector)
+
+        self.assertEqual(qois["selected_cell_count"], 1)
+        self.assertEqual(qois["occupied_zone_mean_temperature_k"], 290.0)
+        self.assertEqual(qois["occupied_zone_mean_speed_m_s"], 0.1)
+
     def test_occupied_volume_band_contract_has_a_strict_schema(self):
         schema_path = Path("occupied_volume_band.v1.schema.json")
 
@@ -127,6 +219,15 @@ class OccupiedVolumeBandTests(unittest.TestCase):
         self.assertEqual(
             set(schema["required"]),
             {"contract", "coordinate_source", "z_min_agl_m", "z_max_agl_m"},
+        )
+        design_rule = schema["allOf"][0]
+        self.assertEqual(
+            set(design_rule["then"]["required"]),
+            {
+                "validation_scope", "coordinate_system", "coordinate_unit",
+                "geometry_ref", "zone_ref", "xy_polygon_m",
+                "exclusion_polygons_m", "exclusion_volumes", "confirmation",
+            },
         )
 
 
@@ -797,8 +898,18 @@ class CentralSensitivityArtifactTests(unittest.TestCase):
         )
         self.assertEqual(
             artifact["aggregation"]["occupied_zone"],
-            "volume_weighted_cell_centers.v1",
+            "time_weighted_trapezoidal_of_cell_volume_weighted_snapshots.v1",
         )
+        self.assertEqual(
+            artifact["aggregation"]["exhaust_temperature_rise_k"],
+            "time_weighted_trapezoidal_of_positive_phi_weighted_samples.v1",
+        )
+        self.assertEqual(artifact["aggregation"]["final_window"], {
+            "basis": "flow_through_time",
+            "span_fraction": 0.1,
+            "minimum_end_fraction": 3.0,
+            "minimum_samples": 5,
+        })
         for side_name in ("baseline", "variant"):
             side = artifact[side_name]
             self.assertIn("case_seed_snapshot_sha256", side)

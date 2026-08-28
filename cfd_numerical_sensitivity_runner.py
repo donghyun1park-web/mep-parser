@@ -675,9 +675,18 @@ def _prepare_serial_sensitivity_pair_locked(mesh_case, target, *, settings,
 
     common_settings = _validate_settings(settings)
     try:
-        normalised_selector = sensitivity_job.normalize_occupied_volume_band(selector)
+        normalised_selector = sensitivity_job.require_confirmed_occupied_volume_band(
+            selector)
     except sensitivity_job.NumericalSensitivityJobInputError as error:
-        _fail("NUMERICAL_SENSITIVITY_SELECTOR_INVALID", str(error))
+        _fail("NUMERICAL_SENSITIVITY_CONFIRMED_SELECTOR_REQUIRED", str(error))
+    for name in ("geometry_ref", "zone_ref"):
+        reference = normalised_selector[name]
+        path = _resolved_path(
+            reference["path"], "NUMERICAL_SENSITIVITY_SELECTOR_EVIDENCE_MISSING")
+        if _is_reparse_or_symlink(path) or not path.is_file():
+            _fail("NUMERICAL_SENSITIVITY_SELECTOR_EVIDENCE_MISSING", name)
+        if _sha256_file(path) != reference["sha256"]:
+            _fail("NUMERICAL_SENSITIVITY_SELECTOR_EVIDENCE_HASH_MISMATCH", name)
     source_mesh_sha256 = _validate_mesh_source(mesh_case)
     # The builder must be read-only with respect to its mesh source.  Hash the
     # entire source tree rather than just the mesh manifest: a rewrite of the

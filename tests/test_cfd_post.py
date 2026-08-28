@@ -3,11 +3,13 @@ import math
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 import cfd_post
 
 
-def _vtu(cells, volumes=None, *, points=None, temperatures=None, velocities=None):
+def _vtu(cells, volumes=None, *, points=None, temperatures=None, velocities=None,
+         time_s=0.5):
     points = [
         (0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0),
         (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1),
@@ -36,7 +38,7 @@ def _vtu(cells, volumes=None, *, points=None, temperatures=None, velocities=None
     return f"""<?xml version='1.0'?>
 <VTKFile type='UnstructuredGrid' version='0.1' byte_order='LittleEndian'>
  <UnstructuredGrid>
-  <FieldData><DataArray type='Float32' Name='TimeValue' format='ascii'>0.5</DataArray></FieldData>
+  <FieldData><DataArray type='Float32' Name='TimeValue' format='ascii'>{time_s}</DataArray></FieldData>
   <Piece NumberOfPoints='16' NumberOfCells='{len(cells)}'>
    <Points><DataArray type='Float32' Name='Points' NumberOfComponents='3' format='ascii'>{point_text}</DataArray></Points>
    <Cells>
@@ -178,6 +180,151 @@ class NumericalSensitivityPostprocessTests(unittest.TestCase):
                 "output_coordinate": "cell_center_m_agl",
             },
         )
+
+    def test_time_weights_volume_weighted_occupied_qois_over_final_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sources = []
+            for index, time_s in enumerate((9.0, 9.25, 9.5, 9.75, 10.0)):
+                temperature = 294.0 + index
+                speed = 1.0 + 0.25 * index
+                source = root / f"internal-{index}.vtu"
+                source.write_text(_vtu(
+                    ["left", "right"], [1.0, 3.0],
+                    temperatures=[temperature, temperature],
+                    velocities=[(speed, 0.0, 0.0), (speed, 0.0, 0.0)],
+                    time_s=time_s,
+                ), encoding="ascii")
+                sources.append(source)
+
+            qois = cfd_post.compute_time_weighted_occupied_volume_qois(
+                sources,
+                self._selector(),
+                floor_elevation_m=0.0,
+                window_start_s=9.0,
+                window_end_s=10.0,
+                minimum_samples=5,
+            )
+
+        self.assertEqual(
+            qois["aggregation"],
+            "time_weighted_trapezoidal_of_cell_volume_weighted_snapshots.v1",
+        )
+        self.assertEqual(qois["sample_count"], 5)
+        self.assertEqual(qois["window"], {"start_s": 9.0, "end_s": 10.0})
+        self.assertAlmostEqual(qois["occupied_zone_mean_temperature_k"], 296.0)
+        self.assertAlmostEqual(qois["occupied_zone_mean_speed_m_s"], 1.5)
+        self.assertEqual(len(qois["sources"]), 5)
+        self.assertTrue(all(len(item["sha256"]) == 64 for item in qois["sources"]))
+
+    def test_time_weighted_occupied_qoi_fails_closed_on_sparse_or_uncovered_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sources = []
+            for index, time_s in enumerate((9.25, 9.5, 9.75, 10.0)):
+                source = root / f"internal-{index}.vtu"
+                source.write_text(
+                    _vtu(["left", "right"], [1.0, 3.0], time_s=time_s),
+                    encoding="ascii",
+                )
+                sources.append(source)
+            with self.assertRaisesRegex(
+                    cfd_post.PostprocessEvidenceError,
+                    "TIME_WEIGHTED_QOI_WINDOW_NOT_COVERED"):
+                cfd_post.compute_time_weighted_occupied_volume_qois(
+                    sources, self._selector(), floor_elevation_m=0.0,
+                    window_start_s=9.0, window_end_s=10.0, minimum_samples=5,
+                )
+
+    def test_time_weights_solver_derived_exhaust_rise_samples(self):
+        samples = []
+        for index, time_s in enumerate((9.0, 9.25, 9.5, 9.75, 10.0)):
+            samples.append({
+                "time_s": time_s,
+                "source_refs": [
+                    {"path": f"{time_s}/T", "sha256": "a" * 64},
+                    {"path": f"{time_s}/phi", "sha256": "b" * 64},
+                ],
+                "exhausts": [{
+                    "mesh_patch_name": "exhaust",
+                    "temperature_k": 298.15 + index,
+                    "solved_outflow_rate_m3_s": 1.0,
+                    "temperature_method": (
+                        "positive_phi_weighted_owner_cell_temperature"
+                    ),
+                }],
+            })
+
+        qoi = cfd_post.compute_time_weighted_exhaust_temperature_rise_qoi(
+            samples,
+            supply_temperature_k=293.15,
+            window_start_s=9.0,
+            window_end_s=10.0,
+            minimum_samples=5,
+        )
+
+        self.assertEqual(qoi["sample_count"], 5)
+        self.assertAlmostEqual(qoi["exhaust_temperature_rise_k"], 7.0)
+        self.assertAlmostEqual(qoi["flow_weighted_exhaust_temperature_k"], 300.15)
+        self.assertEqual(
+            qoi["provenance"]["temperature_method"],
+            "positive_phi_weighted_owner_cell_temperature",
+        )
+
+    def test_time_weighted_exhaust_rejects_fallback_or_uncovered_samples(self):
+        samples = [{
+            "time_s": time_s,
+            "source_refs": [],
+            "exhausts": [{
+                "mesh_patch_name": "exhaust",
+                "temperature_k": 300.0,
+                "solved_outflow_rate_m3_s": 1.0,
+                "temperature_method": "fallback",
+            }],
+        } for time_s in (9.0, 9.25, 9.5, 9.75, 10.0)]
+        with self.assertRaisesRegex(
+                cfd_post.PostprocessEvidenceError,
+                "EXHAUST_TIME_QOI_SOLVER_PROVENANCE_REQUIRED"):
+            cfd_post.compute_time_weighted_exhaust_temperature_rise_qoi(
+                samples, supply_temperature_k=293.15,
+                window_start_s=9.0, window_end_s=10.0, minimum_samples=5,
+            )
+
+    def test_reads_time_weighted_exhaust_from_raw_saved_T_and_phi_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            case = Path(tmp)
+            (case / "thermal_input.json").write_text(json.dumps({
+                "settings": {"supply_temperature_k": 293.15},
+                "terminals": [
+                    {"role": "supply", "mesh_patch_name": "supply"},
+                    {"role": "exhaust", "mesh_patch_name": "exhaust"},
+                ],
+            }), encoding="utf-8")
+            for index, time_s in enumerate((9.0, 9.25, 9.5, 9.75, 10.0)):
+                time_dir = case / str(time_s)
+                time_dir.mkdir()
+                (time_dir / "T").write_text(
+                    "internalField uniform 300;", encoding="utf-8")
+                (time_dir / "phi").write_text(
+                    "boundaryField { exhaust { value uniform 1; } }", encoding="utf-8")
+
+            with mock.patch("cfd_physics._exhaust_flux_temperature") as extract:
+                extract.side_effect = [
+                    {"temperature_k": 298.15 + index, "flow_rate_m3_s": 1.0,
+                     "method": "positive_phi_weighted_owner_cell_temperature"}
+                    for index in range(5)
+                ]
+                qoi = cfd_post.read_time_weighted_exhaust_temperature_rise_from_case(
+                    case, window_start_s=9.0, window_end_s=10.0,
+                    minimum_samples=5,
+                )
+
+        self.assertAlmostEqual(qoi["exhaust_temperature_rise_k"], 7.0)
+        self.assertEqual(qoi["sample_count"], 5)
+        self.assertEqual(len(qoi["samples"][0]["source_refs"]), 2)
+        self.assertTrue(all(extract_call.args[1].name in {
+            "9.0", "9.25", "9.5", "9.75", "10.0"
+        } for extract_call in extract.call_args_list))
 
     def test_occupied_qoi_rejects_missing_mismatched_or_nonpositive_volume_data(self):
         cases = (

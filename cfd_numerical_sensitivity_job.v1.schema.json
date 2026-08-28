@@ -37,11 +37,26 @@
     "validation_anchor_case": {"type": "string", "minLength": 1},
     "aggregation": {
       "type": "object", "additionalProperties": false,
-      "required": ["scope", "occupied_zone", "exhaust_temperature_rise_k"],
+      "required": ["scope", "occupied_zone", "exhaust_temperature_rise_k", "final_window"],
       "properties": {
         "scope": {"const": "selected_occupied_volume_band"},
-        "occupied_zone": {"const": "volume_weighted_cell_centers.v1"},
-        "exhaust_temperature_rise_k": {"const": "explicit_solver_postprocess_qoi.v1"}
+        "occupied_zone": {
+          "const": "time_weighted_trapezoidal_of_cell_volume_weighted_snapshots.v1"
+        },
+        "exhaust_temperature_rise_k": {
+          "const": "time_weighted_trapezoidal_of_positive_phi_weighted_samples.v1"
+        },
+        "final_window": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["basis", "span_fraction", "minimum_end_fraction", "minimum_samples"],
+          "properties": {
+            "basis": {"const": "flow_through_time"},
+            "span_fraction": {"const": 0.1},
+            "minimum_end_fraction": {"const": 3.0},
+            "minimum_samples": {"const": 5}
+          }
+        }
       }
     },
     "baseline": {"$ref": "#/$defs/baseline"},

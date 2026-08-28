@@ -426,7 +426,8 @@ def _find_passing_gci_manifest(case: Path, gci_root, provenance) -> Path | None:
     return None
 
 
-def _validate_final_evidence_document(filename, evidence, *, anchor_reference):
+def _validate_final_evidence_document(filename, evidence, *, anchor_reference,
+                                      evidence_path=None, current_case=None):
     """Reject self-declared PASS files unless a live verifier owns the contract."""
     if not isinstance(evidence, dict):
         return ["FINAL_EVIDENCE_MISSING"]
@@ -436,6 +437,32 @@ def _validate_final_evidence_document(filename, evidence, *, anchor_reference):
         )
         if evidence.get("validation_anchor") != anchor_reference:
             blockers.append("NUMERICAL_SENSITIVITY_VALIDATION_ANCHOR_MISMATCH")
+        verification = evidence.get("verification")
+        if not isinstance(verification, dict):
+            blockers.append("NUMERICAL_SENSITIVITY_LIVE_VERIFICATION_REQUIRED")
+        elif current_case is None:
+            blockers.append("NUMERICAL_SENSITIVITY_LIVE_VERIFICATION_REQUIRED")
+        elif not blockers:
+            try:
+                import run_numerical_sensitivity
+                study_root = Path(verification["study_root"])
+                verification_evidence_path = (
+                    study_root / verification["evidence_path"]
+                )
+                if (not verification_evidence_path.is_file()
+                        or _sha256(verification_evidence_path)
+                        != verification["evidence_sha256"]):
+                    raise ValueError("verification evidence hash mismatch")
+                recomputed = run_numerical_sensitivity.verify_serial_sensitivity_pair(
+                    study_root, Path(current_case), publish=False)
+            except (KeyError, OSError, TypeError, ValueError, RuntimeError):
+                blockers.append("NUMERICAL_SENSITIVITY_LIVE_REVERIFICATION_FAILED")
+            else:
+                comparable = {
+                    key: recomputed.get(key) for key in evidence
+                }
+                if comparable != evidence:
+                    blockers.append("NUMERICAL_SENSITIVITY_LIVE_RECOMPUTE_MISMATCH")
         return list(dict.fromkeys(blockers))
     if filename == "temporal_sensitivity.json":
         # The current temporal contract deliberately prepares inputs only.  A
@@ -732,6 +759,7 @@ def _evaluate_body_fitted_case(case_dir, *, gci_root=None, candidate_only=False)
         evidence = _load_json(case / filename)
         evidence_blockers = _validate_final_evidence_document(
             filename, evidence, anchor_reference=anchor_reference,
+            evidence_path=case / filename, current_case=case,
         )
         if evidence_blockers:
             blockers.append(blocker)
