@@ -465,9 +465,36 @@ def _validate_final_evidence_document(filename, evidence, *, anchor_reference,
                     blockers.append("NUMERICAL_SENSITIVITY_LIVE_RECOMPUTE_MISMATCH")
         return list(dict.fromkeys(blockers))
     if filename == "temporal_sensitivity.json":
-        # The current temporal contract deliberately prepares inputs only.  A
-        # solver executor/verifier is required before any PASS can be trusted.
-        return ["TEMPORAL_SENSITIVITY_VERIFIER_NOT_IMPLEMENTED"]
+        blockers = []
+        if evidence.get("contract") != "temporal_sensitivity.v1":
+            blockers.append("TEMPORAL_SENSITIVITY_CONTRACT_INVALID")
+        if evidence.get("status") != "PASS":
+            blockers.append("TEMPORAL_SENSITIVITY_STATUS_INVALID")
+        if evidence.get("validation_anchor") != anchor_reference:
+            blockers.append("TEMPORAL_SENSITIVITY_VALIDATION_ANCHOR_MISMATCH")
+        verification = evidence.get("verification")
+        if not isinstance(verification, dict) or current_case is None:
+            blockers.append("TEMPORAL_SENSITIVITY_LIVE_VERIFICATION_REQUIRED")
+        elif not blockers:
+            try:
+                import run_temporal_sensitivity
+                study_root = Path(verification["study_root"])
+                verification_evidence_path = (
+                    study_root / verification["evidence_path"]
+                )
+                if (not verification_evidence_path.is_file()
+                        or _sha256(verification_evidence_path)
+                        != verification["evidence_sha256"]):
+                    raise ValueError("verification evidence hash mismatch")
+                recomputed = run_temporal_sensitivity.verify_temporal_study(
+                    study_root, Path(current_case), publish=False)
+            except (KeyError, OSError, TypeError, ValueError, RuntimeError):
+                blockers.append("TEMPORAL_SENSITIVITY_LIVE_REVERIFICATION_FAILED")
+            else:
+                comparable = {key: recomputed.get(key) for key in evidence}
+                if comparable != evidence:
+                    blockers.append("TEMPORAL_SENSITIVITY_LIVE_RECOMPUTE_MISMATCH")
+        return list(dict.fromkeys(blockers))
     if filename == "benchmark_validation.json":
         return ["BENCHMARK_VALIDATOR_NOT_IMPLEMENTED"]
     if filename == "applicability_envelope.json":

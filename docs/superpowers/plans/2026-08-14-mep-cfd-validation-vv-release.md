@@ -255,7 +255,7 @@ def verify_serial_sensitivity_pair(study_dir: Path, current_case: Path,
 
 **2026-08-28 code-contract 완료 상태:** Steps 1~7을 구현했다. 설계검증 selector는 확인된 geometry/closed-zone 파일 SHA, m 단위 local Cartesian 좌표, 폐쇄·비자기교차 XY polygon, exclusion polygon/volume, 확인자·시각·사유와 복층 void 확인을 요구하며 준비·검증 시 파일을 다시 해시한다. 각 run은 ≥3.0 FTT 후 실제 VTU 셀체적가중 점유 온도/속도와 실제 OpenFOAM `T`·양(+) `phi` owner-cell 배기온도를 마지막 0.1 FTT에서 trapezoidal 시간가중하고 최소 5 snapshots를 요구한다. 독립 verifier는 frozen physical tree, checkpoint, run/result/source/summary/slice, mesh와 solver log tree를 다시 해시하고 residual tail, peak Co, continuity, terminal `phi`, energy basis와 QoI 차이를 재계산한다. 중앙 verifier가 만든 `numerical_sensitivity.v1`만 구조적으로 PASS이며 final result gate는 `publish=False`로 raw evidence를 다시 재현해 case-local 복사본과 같은지 확인한다. focused 회귀는 `120 passed, 49 subtests passed`다. 이는 실행 가능한 검증 계약의 완료이며 실제 baseline/variant OpenFOAM 장시간 run PASS 증거는 아직 생성하지 않았으므로 운영 `numerical_sensitivity.v1 PASS`, Gate M2와 `DESIGN_CITABLE`은 계속 `OPEN`이다.
 
-전체 로컬 Python 3.14 회귀는 `1293 passed, 14 skipped, 7 warnings, 123 subtests passed`였고 실패 2건은 `toolchain.lock.json`에 고정된 인증 Python 3.12.10 실행 파일 SHA와 현재 Python 3.14 실행 파일 SHA가 다른 기존 환경 고정 검사다. 변경 관련 집중 회귀 실패는 0건이다. exact code HEAD `9bf41f8e3c49bbda36a891f250e315b625ea071d`의 locked Windows CI [run `33134292688`](https://github.com/donghyun1park-web/mep-parser/actions/runs/33134292688), job `98730694471`은 인증 Python 3.12 환경에서 `1295 passed, 14 skipped, 7 warnings`, 실패 0으로 통과했다. JUnit artifact는 `9671513310`, digest는 `sha256:f6f27e8fde734d0ead3a5d317d1cb3f4e56edb6b25c1546ca9ecf629cee85c29`다.
+전체 로컬 Python 3.14 회귀는 `1303 passed, 14 skipped, 7 warnings, 123 subtests passed`였고 실패 2건은 `toolchain.lock.json`에 고정된 인증 Python 3.12.10 실행 파일 SHA와 현재 Python 3.14 실행 파일 SHA가 다른 기존 환경 고정 검사다. 변경 관련 집중 회귀 실패는 0건이다. 이전 exact code HEAD `9bf41f8e3c49bbda36a891f250e315b625ea071d`의 locked Windows CI [run `33134292688`](https://github.com/donghyun1park-web/mep-parser/actions/runs/33134292688), job `98730694471`은 인증 Python 3.12 환경에서 `1295 passed, 14 skipped, 7 warnings`, 실패 0으로 통과했다. JUnit artifact는 `9671513310`, digest는 `sha256:f6f27e8fde734d0ead3a5d317d1cb3f4e56edb6b25c1546ca9ecf629cee85c29`다.
 
 ### Task P1.3: time-step/Co 민감도 계약을 추가한다
 
@@ -282,18 +282,18 @@ def verify_temporal_study(study_dir: Path, current_case: Path) -> dict:
     """Rehash and recompute all evidence; return PASS/FAIL/NOT_EVALUATED."""
 ```
 
-- [ ] **Step 1: 요청 Δt만 기록하고 실제 사용 Δt 이력이 없거나, 전달받은 PASS JSON만 읽는 artifact를 거부하는 테스트를 작성한다.**
-- [ ] **Step 2: immutable seed/child input hash, 실제 run/log/mesh/result hash, 동일 초기장·mesh·scheme·물리시간 중 하나라도 다르면 거부한다.**
-- [ ] **Step 3: 변수를 하나만 바꾸기 위해 `adjustTimeStep=no`, 고정 `deltaT=0.04/0.02/0.01 s`를 사용한다. 세 run 모두 peak Co≤1.0을 별도 acceptance로 적용하고, coarse가 넘으면 triplet 전체를 같은 비율로 줄여 새 study ID로 다시 만든다.**
-- [ ] **Step 4: 실제 time history로 fixed Δt와 인접비 2.0을 확인한다. 인접비가 1.8 미만이거나 time-step controller/limiter가 개입하면 FAIL한다.**
-- [ ] **Step 5: 각 run ≥3.0 FTT, 동일 마지막 0.1 FTT, 기본 수치 gate PASS를 요구한다.**
-- [ ] **Step 6: VTU/phi를 다시 읽어 QoI를 재계산하고 temporal uncertainty≤5%, medium–fine 차이 T≤0.5 K, U≤0.05 m/s, 배기 ΔT≤0.5 K를 판정한다.**
-- [ ] **Step 6a: Euler 시간도식의 3-level generalized Richardson extrapolation을 사용한다. observed temporal order는 0.5≤p≤1.5, monotonic convergence를 요구하고 safety factor 1.25를 적용한다. 비단조·p 범위 밖·asymptotic ratio 실패는 PASS가 아니라 NOT_EVALUATED다. near-zero floor와 absolute limits는 P5 GCI와 동일하게 고정한다.**
-- [ ] **Step 7: `current_case`의 mesh/run/result hash가 verified fine-time child와 같지 않으면 최종 gate에서 거부한다.**
+- [x] **Step 1: 요청 Δt만 기록하고 실제 사용 Δt 이력이 없거나, 전달받은 PASS JSON만 읽는 artifact를 거부하는 테스트를 작성한다.**
+- [x] **Step 2: immutable seed/child input hash, 실제 run/log/mesh/result hash, 동일 초기장·mesh·scheme·물리시간 중 하나라도 다르면 거부한다.**
+- [x] **Step 3: 변수를 하나만 바꾸기 위해 `adjustTimeStep=no`, 고정 `deltaT=0.04/0.02/0.01 s`를 사용한다. 세 run 모두 peak Co≤1.0을 별도 acceptance로 적용하고, coarse가 넘으면 triplet 전체를 같은 비율로 줄여 새 study ID로 다시 만든다.**
+- [x] **Step 4: 실제 time history로 fixed Δt와 인접비 2.0을 확인한다. 인접비가 1.8 미만이거나 time-step controller/limiter가 개입하면 FAIL한다.**
+- [x] **Step 5: 각 run ≥3.0 FTT, 동일 마지막 0.1 FTT, 기본 수치 gate PASS를 요구한다.**
+- [x] **Step 6: VTU/phi를 다시 읽어 QoI를 재계산하고 temporal uncertainty≤5%, medium–fine 차이 T≤0.5 K, U≤0.05 m/s, 배기 ΔT≤0.5 K를 판정한다.**
+- [x] **Step 6a: Euler 시간도식의 3-level generalized Richardson extrapolation을 사용한다. observed temporal order는 0.5≤p≤1.5, monotonic convergence를 요구하고 safety factor 1.25를 적용한다. 비단조·p 범위 밖·asymptotic ratio 실패는 PASS가 아니라 NOT_EVALUATED다. near-zero floor와 absolute limits는 P5 GCI와 동일하게 고정한다.**
+- [x] **Step 7: `current_case`의 mesh/run/result hash가 verified fine-time child와 같지 않으면 최종 gate에서 거부한다.**
 
 **Completion:** self-declared JSON이 아닌 재검증된 `temporal_sensitivity.v1` PASS와 time-step history/QoI convergence plot이 현재 파일에서 재현되고 current design case에 결속된다.
 
-**2026-08-28 상태:** immutable three-level input preparation과 `temporal_fine` role-document 결속만 구현됐다. solver executor, 실제 Δt history 재검증, Richardson 판정과 current fine-case 결과 결속은 OPEN이다.
+**2026-08-28 code-contract 완료 상태:** Steps 1~7을 구현했다. executor는 동일 immutable seed에서 coarse→medium→fine을 전역 solver lock 아래 직렬 실행하고, `adjustTimeStep=no`, Δt=0.04/0.02/0.01 s, `maxCo=1.0`을 각 실행 후 `controlDict`에서 다시 확인한다. 독립 verifier는 actual solver time history, immutable input/run/result/mesh/log SHA, ≥3.0 FTT, 공통 마지막 0.1 FTT, base numerical gates와 confirmed occupied selector를 재검증하고 실제 VTU 및 OpenFOAM `T`·양(+) `phi`에서 QoI를 다시 계산한다. 단조 3-level generalized Richardson(p=0.5~1.5, safety factor 1.25), 상대 불확실성 5% 및 absolute limits를 모두 통과해야만 중앙 PASS와 해시 결속 SVG convergence plot을 발행한다. final result gate는 이를 `publish=False`로 live 재현한다. 외부 fine anchor 재사용은 P5.3 provenance 결속 전까지 fail-closed다. 집중 회귀는 `114 passed, 26 subtests passed`다. 실제 OpenFOAM 3개 장시간 run은 아직 실행하지 않았으므로 운영 `temporal_sensitivity.v1 PASS`, P4.3 `PRELIMINARY_PASS`, P5.3 anchor 통합과 최종 `DESIGN_CITABLE`은 계속 `OPEN`이다.
 
 ### Task P1.4: field job과 GCI fine case의 권위 경로를 하나로 만든다
 
@@ -553,9 +553,15 @@ $StudyRoot = Join-Path 'cfd_projects\_temporal_sensitivity' $StudyId
 .\.venv-vv\Scripts\python.exe run_temporal_sensitivity.py `
   --mesh-case $MeshCase --study-root $StudyRoot --selector $Selector `
   --fixed-delta-t 0.04 0.02 0.01 --courant-ceiling 1.0
+.\.venv-vv\Scripts\python.exe run_temporal_sensitivity.py $StudyRoot --execute
+$FineCase = Join-Path $StudyRoot 'fine_dt_0p01'
+.\.venv-vv\Scripts\python.exe run_temporal_sensitivity.py $StudyRoot `
+  --verify --current-case $FineCase
 ```
 
 **Completion:** grid-family 설계용 `PRELIMINARY_PASS`. P5.3에서 GCI fine case를 temporal fine child로 직접 결속해 최종 증거를 만든다.
+
+**2026-08-28 상태:** 위 명령을 실행할 code-contract와 verifier는 완료됐다. 다만 현재 대표 mesh에서 0.04/0.02/0.01 s 세 장시간 OpenFOAM 실행을 아직 수행하지 않았으므로 이 운영 단계는 `OPEN`이다.
 
 ---
 

@@ -29,6 +29,68 @@ import cfd_case_health
 import cfd_review
 from cfd_status_catalog import CASE_HEALTH_CHECKS, status_descriptor
 
+
+def render_temporal_sensitivity_svg(qoi_convergence):
+    """Render a deterministic three-row temporal convergence plot as SVG."""
+    if not isinstance(qoi_convergence, list) or len(qoi_convergence) != 3:
+        raise ValueError("three temporal QoI convergence rows are required")
+    width, height = 960, 540
+    rows = []
+    palette = ("#2563eb", "#16a34a", "#ea580c")
+    for index, item in enumerate(qoi_convergence):
+        if not isinstance(item, dict):
+            raise ValueError("temporal QoI convergence row is invalid")
+        values = [float(item[key]) for key in ("coarse", "medium", "fine")]
+        minimum, maximum = min(values), max(values)
+        span = max(maximum - minimum, max(abs(value) for value in values) * 1e-9, 1e-12)
+        top = 92 + index * 142
+        bottom = top + 82
+        points = []
+        for x, value in zip((190, 480, 770), values):
+            y = bottom - (value - minimum) / span * 64
+            points.append((x, y, value))
+        polyline = " ".join(f"{x},{y:.3f}" for x, y, _ in points)
+        label = html.escape(str(item.get("name") or "QoI"))
+        order = float(item.get("observed_order"))
+        uncertainty = float(item.get("uncertainty_fine_pct"))
+        rows.append(
+            f'<text x="36" y="{top - 18}" class="label">{label}</text>'
+            f'<text x="770" y="{top - 18}" class="meta">p={order:.3f} · U={uncertainty:.3f}%</text>'
+            f'<line x1="190" y1="{bottom}" x2="770" y2="{bottom}" class="axis"/>'
+            f'<polyline points="{polyline}" fill="none" stroke="{palette[index]}" stroke-width="3"/>'
+            + "".join(
+                f'<circle cx="{x}" cy="{y:.3f}" r="5" fill="{palette[index]}"/>'
+                f'<text x="{x}" y="{y - 10:.3f}" text-anchor="middle" class="value">{value:.6g}</text>'
+                for x, y, value in points
+            )
+        )
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}">\n'
+        '<rect width="100%" height="100%" fill="#ffffff"/>\n'
+        '<style>.title{font:700 22px sans-serif;fill:#111827}.label{font:600 14px sans-serif;fill:#111827}'
+        '.meta{font:12px monospace;fill:#374151}.value{font:11px monospace;fill:#111827}'
+        '.axis{stroke:#cbd5e1;stroke-width:1}</style>\n'
+        '<text x="36" y="38" class="title">Temporal sensitivity — fixed Δt convergence</text>\n'
+        + "\n".join(rows)
+        + '\n<text x="190" y="514" text-anchor="middle" class="meta">0.04 s</text>'
+          '<text x="480" y="514" text-anchor="middle" class="meta">0.02 s</text>'
+          '<text x="770" y="514" text-anchor="middle" class="meta">0.01 s</text>\n'
+          '</svg>\n'
+    )
+
+
+def write_temporal_sensitivity_plot(qoi_convergence, output_path):
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(
+        render_temporal_sensitivity_svg(qoi_convergence),
+        encoding="utf-8", newline="\n",
+    )
+    temporary.replace(path)
+    return path
+
 def generate_gci_report(study_dir, out_html=None):
     """Generate a self-contained Korean mesh-uncertainty report."""
     study_dir = os.path.abspath(study_dir)

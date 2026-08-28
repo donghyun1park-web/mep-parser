@@ -11,8 +11,10 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import re
 import stat
 
+import cfd_numerical_sensitivity_job as sensitivity_job
 import cfd_validation_anchor
 
 
@@ -22,6 +24,9 @@ FIXED_DELTA_T_S = (0.04, 0.02, 0.01)
 MAX_CO = 1.0
 _CHILD_NAMES = ("coarse_dt_0p04", "medium_dt_0p02", "fine_dt_0p01")
 _FORBIDDEN_NAMES = {"run_manifest.json", "result_manifest.json", "thermal_progress.json"}
+_TIME_LINE = re.compile(
+    r"(?m)^\s*Time\s*=\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*$"
+)
 
 
 class TemporalSensitivityInputError(ValueError):
@@ -108,6 +113,144 @@ def _normalise_levels(levels):
     return list(FIXED_DELTA_T_S)
 
 
+def verify_fixed_delta_t_history(log_paths, expected_delta_t_s):
+    """Reconstruct actual solver steps and reject any controller intervention."""
+    try:
+        expected = float(expected_delta_t_s)
+    except (TypeError, ValueError):
+        expected = math.nan
+    blockers = []
+    if not math.isfinite(expected) or expected <= 0:
+        blockers.append("TEMPORAL_EXPECTED_DELTA_T_INVALID")
+    if not isinstance(log_paths, (list, tuple)) or not log_paths:
+        blockers.append("TEMPORAL_TIME_HISTORY_MISSING")
+        paths = []
+    else:
+        paths = [Path(path) for path in log_paths]
+    times = []
+    source_logs = []
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            blockers.append("TEMPORAL_TIME_HISTORY_READ_FAILED")
+            continue
+        source_logs.append(path.name)
+        try:
+            times.extend(float(value) for value in _TIME_LINE.findall(text))
+        except ValueError:
+            blockers.append("TEMPORAL_TIME_HISTORY_INVALID")
+    ordered = sorted(set(times))
+    if not ordered or any(not math.isfinite(value) or value <= 0 for value in ordered):
+        blockers.append("TEMPORAL_TIME_HISTORY_MISSING")
+        steps = []
+    else:
+        steps = [current - previous for previous, current in zip([0.0, *ordered[:-1]], ordered)]
+        if (math.isfinite(expected)
+                and any(not math.isclose(
+                    step, expected, rel_tol=0.0, abs_tol=max(1e-12, expected * 1e-9)
+                ) for step in steps)):
+            blockers.append("TEMPORAL_ACTUAL_DELTA_T_MISMATCH")
+    return {
+        "valid": not blockers,
+        "expected_delta_t_s": expected_delta_t_s,
+        "sample_count": len(ordered),
+        "minimum_delta_t_s": min(steps) if steps else None,
+        "maximum_delta_t_s": max(steps) if steps else None,
+        "first_time_s": ordered[0] if ordered else None,
+        "last_time_s": ordered[-1] if ordered else None,
+        "source_logs": source_logs,
+        "blockers": list(dict.fromkeys(blockers)),
+    }
+
+
+def calculate_temporal_richardson(
+        name, *, coarse, medium, fine, fixed_delta_t_s,
+        near_zero_floor, relative_limit_pct, absolute_limit):
+    """Evaluate a uniform three-level first-order temporal refinement."""
+    levels = _normalise_levels(fixed_delta_t_s)
+    try:
+        values = [float(coarse), float(medium), float(fine)]
+        floor = float(near_zero_floor)
+        relative_limit = float(relative_limit_pct)
+        absolute = float(absolute_limit)
+    except (TypeError, ValueError):
+        _fail("TEMPORAL_RICHARDSON_INPUT_INVALID", str(name))
+    if (not all(math.isfinite(value) for value in values)
+            or not all(math.isfinite(value) and value > 0
+                       for value in (floor, relative_limit, absolute))):
+        _fail("TEMPORAL_RICHARDSON_INPUT_INVALID", str(name))
+    ratios = [levels[0] / levels[1], levels[1] / levels[2]]
+    if (min(ratios) < 1.8
+            or not math.isclose(ratios[0], ratios[1], rel_tol=1e-9, abs_tol=1e-12)):
+        _fail("TEMPORAL_REFINEMENT_RATIO_INVALID", str(name))
+    coarse_value, medium_value, fine_value = values
+    coarse_medium = medium_value - coarse_value
+    medium_fine = fine_value - medium_value
+    scale = max(abs(value) for value in values)
+    tiny = max(1.0, scale) * 1e-12
+    result = {
+        "name": str(name),
+        "coarse": coarse_value,
+        "medium": medium_value,
+        "fine": fine_value,
+        "fixed_delta_t_s": levels,
+        "refinement_ratios": ratios,
+        "convergence": None,
+        "observed_order": None,
+        "extrapolated": None,
+        "safety_factor": 1.25,
+        "uncertainty_fine": None,
+        "uncertainty_fine_pct": None,
+        "relative_limit_pct": relative_limit,
+        "medium_fine_absolute_difference": abs(medium_fine),
+        "absolute_limit": absolute,
+        "asymptotic_ratio": None,
+        "status": "NOT_EVALUATED",
+        "blockers": [],
+    }
+    if (abs(coarse_medium) <= tiny or abs(medium_fine) <= tiny
+            or coarse_medium * medium_fine <= 0):
+        result["convergence"] = "non_monotonic"
+        result["blockers"] = ["TEMPORAL_CONVERGENCE_NON_MONOTONIC"]
+        return result
+    observed_order = math.log(abs(coarse_medium / medium_fine)) / math.log(ratios[1])
+    result["convergence"] = "monotonic"
+    result["observed_order"] = observed_order
+    if not math.isfinite(observed_order) or not 0.5 <= observed_order <= 1.5:
+        result["blockers"] = ["TEMPORAL_OBSERVED_ORDER_OUT_OF_RANGE"]
+        return result
+    denominator = ratios[1] ** observed_order - 1.0
+    if denominator <= 0:
+        result["convergence"] = "indeterminate"
+        result["blockers"] = ["TEMPORAL_RICHARDSON_INDETERMINATE"]
+        return result
+    extrapolated = fine_value + (fine_value - medium_value) / denominator
+    uncertainty = 1.25 * abs(extrapolated - fine_value)
+    uncertainty_pct = uncertainty / max(abs(fine_value), floor) * 100.0
+    asymptotic_ratio = abs(coarse_medium / medium_fine) / (
+        ratios[1] ** observed_order
+    )
+    result.update({
+        "extrapolated": extrapolated,
+        "uncertainty_fine": uncertainty,
+        "uncertainty_fine_pct": uncertainty_pct,
+        "asymptotic_ratio": asymptotic_ratio,
+    })
+    if not 0.8 <= asymptotic_ratio <= 1.2:
+        result["blockers"] = ["TEMPORAL_ASYMPTOTIC_RATIO_FAILED"]
+        return result
+    if uncertainty_pct > relative_limit or abs(medium_fine) > absolute:
+        result["status"] = "FAIL"
+        if uncertainty_pct > relative_limit:
+            result["blockers"].append("TEMPORAL_UNCERTAINTY_LIMIT_FAILED")
+        if abs(medium_fine) > absolute:
+            result["blockers"].append("TEMPORAL_MEDIUM_FINE_LIMIT_FAILED")
+        return result
+    result["status"] = "PASS"
+    return result
+
+
 def _without_manifest_hash(manifest):
     copied = dict(manifest)
     copied.pop("manifest_sha256", None)
@@ -162,13 +305,27 @@ def validate_temporal_manifest(manifest):
                     blockers.append("TEMPORAL_VALIDATION_ANCHOR_CHANGED")
             except (OSError, cfd_validation_anchor.ValidationAnchorError):
                 blockers.append("TEMPORAL_VALIDATION_ANCHOR_INVALID")
+    selector = manifest.get("selector")
+    if selector is not None:
+        try:
+            supplied_selector_sha = selector.get("selector_sha256")
+            normalised = sensitivity_job.require_confirmed_occupied_volume_band({
+                key: value for key, value in selector.items()
+                if key != "selector_sha256"
+            })
+            if (supplied_selector_sha != normalised.get("selector_sha256")
+                    or selector != normalised):
+                blockers.append("TEMPORAL_SELECTOR_HASH_MISMATCH")
+        except (AttributeError, sensitivity_job.NumericalSensitivityJobInputError):
+            blockers.append("TEMPORAL_CONFIRMED_SELECTOR_INVALID")
     return {"valid": not blockers, "contract": CONTRACT, "status": PENDING_STATUS,
             "blockers": list(dict.fromkeys(blockers))}
 
 
 def create_temporal_study(case_seed: Path, fixed_delta_t: list[float],
                           anchor_fine_case: Path | None = None,
-                          validation_anchor_path: Path | None = None) -> dict:
+                          validation_anchor_path: Path | None = None,
+                          selector: dict | None = None) -> dict:
     seed = _validate_seed(case_seed)
     levels = _normalise_levels(fixed_delta_t)
     anchor = None
@@ -188,6 +345,14 @@ def create_temporal_study(case_seed: Path, fixed_delta_t: list[float],
             )
         except (OSError, cfd_validation_anchor.ValidationAnchorError) as exc:
             _fail("TEMPORAL_VALIDATION_ANCHOR_INVALID", str(exc))
+    normalised_selector = None
+    if selector is not None:
+        try:
+            normalised_selector = sensitivity_job.require_confirmed_occupied_volume_band(
+                selector
+            )
+        except sensitivity_job.NumericalSensitivityJobInputError as exc:
+            _fail("TEMPORAL_CONFIRMED_SELECTOR_INVALID", str(exc))
     seed_hash = _tree_sha256(seed)
     children = [
         {
@@ -229,6 +394,8 @@ def create_temporal_study(case_seed: Path, fixed_delta_t: list[float],
     }
     if anchor_reference is not None:
         manifest["validation_anchor"] = anchor_reference
+    if normalised_selector is not None:
+        manifest["selector"] = normalised_selector
     manifest["manifest_sha256"] = _canonical_sha256(manifest)
     return manifest
 

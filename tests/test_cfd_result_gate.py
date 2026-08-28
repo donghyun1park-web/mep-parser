@@ -470,6 +470,37 @@ class BodyFittedResultGateTests(unittest.TestCase):
                 )
         self.assertIn("NUMERICAL_SENSITIVITY_LIVE_RECOMPUTE_MISMATCH", blockers)
 
+    def test_temporal_sensitivity_requires_live_raw_reverification(self):
+        anchor = {"anchor_id": "anchor-" + "a" * 16, "sha256": "b" * 64}
+        with tempfile.TemporaryDirectory() as tmp:
+            study = Path(tmp)
+            current_case = study / "fine_dt_0p01"
+            current_case.mkdir()
+            evidence_file = study / "temporal_sensitivity_verification.v1.json"
+            evidence_file.write_text('{"verified":true}', encoding="utf-8")
+            artifact = {
+                "contract": "temporal_sensitivity.v1",
+                "status": "PASS",
+                "validation_anchor": anchor,
+                "verification": {
+                    "study_root": str(study),
+                    "evidence_path": evidence_file.name,
+                    "evidence_sha256": self._sha256(evidence_file),
+                },
+            }
+            recomputed = {**artifact, "valid": True, "blockers": []}
+            with mock.patch(
+                    "run_temporal_sensitivity.verify_temporal_study",
+                    return_value=recomputed) as verify:
+                blockers = cfd_result_gate._validate_final_evidence_document(
+                    "temporal_sensitivity.json", artifact,
+                    anchor_reference=anchor,
+                    current_case=current_case,
+                )
+
+        self.assertEqual(blockers, [])
+        verify.assert_called_once_with(study, current_case, publish=False)
+
     def test_body_result_requires_numerical_quality_evidence(self):
         repo = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(prefix=".test-result-gate-numerics-", dir=repo) as tmp:

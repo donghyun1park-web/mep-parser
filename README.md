@@ -128,6 +128,8 @@ Windows에는 최신 28개를 유지해 마지막 0.1 FTT 정상성 시간창이
 
 직렬 scheme sensitivity는 확인된 geometry/closed-zone 해시와 점유영역 polygon·보이드 제외정보를 먼저 고정합니다. 1차/2차 두 케이스가 각각 3.0 FTT 이상 완료된 뒤에도 자동 PASS하지 않으며, 독립 검증기가 실제 VTU와 OpenFOAM `T`/`phi`, run/result/mesh/log 및 frozen physical tree를 다시 읽어 마지막 0.1 FTT의 최소 5개 snapshot QoI와 모든 수치 기준을 재현한 경우에만 중앙 `numerical_sensitivity.v1` PASS를 발행합니다. 실제 두 장시간 solver run이 없는 상태는 계속 `PENDING_SOLVER_EVIDENCE`입니다.
 
+시간간격 민감도는 같은 confirmed mesh·물리입력에서 `adjustTimeStep=no`, Δt=0.04/0.02/0.01 s 세 케이스를 coarse→fine 순서로 직렬 실행합니다. 각 케이스의 실제 solver time history, peak Co≤1.0, ≥3.0 FTT와 공통 마지막 0.1 FTT를 확인하고, 실제 VTU와 OpenFOAM `T`/`phi`에서 점유영역 평균온도·평균유속·배기온도상승을 다시 계산합니다. 단조 generalized Richardson 수렴, 관측 시간차수 0.5~1.5, 불확실성 5% 이하와 절대차 기준을 모두 만족할 때만 해시 결속 `temporal_sensitivity.v1` 및 SVG 수렴 플롯을 발행합니다. 현재는 실행·검증 code-contract가 완료된 상태이며 실제 세 장시간 solver run이 없으면 계속 `PENDING_SOLVER_EVIDENCE`입니다.
+
 G2 장시간 수용시험은 물리시간 59.2236초, 유동 교환시간 확보율 25.00%에서 `PASS`했습니다. 최대 Courant는 0.305, 온도 범위는 293.150~306.099 K였습니다. 누적 투입열 47,378.88 J에 대해 OpenFOAM 셀 체적 기반 실내 축열 39,707.06 J와 실제 유출 `phi` 적분 배기열 7,675.47 J를 합산한 과도 에너지 폐합률은 100.0077%였습니다. 잔여 계산시간이 저장 간격보다 짧으면 `writeInterval`을 자동 축소하며, 셀 체적은 최초 생성 후 재시작 time으로 복사해 반복 후처리 비용을 줄입니다.
 
 상세 결과가 생성되면 Studio의 **2D·3D 단면 보기**에서 X/Y/Z 중앙 단면의 온도·속도를 전환하고, 세 단면을 한 화면의 3D 투영으로 확인할 수 있습니다. 모든 데이터와 렌더링 코드는 로컬에 있어 인터넷 연결이 필요 없습니다.
