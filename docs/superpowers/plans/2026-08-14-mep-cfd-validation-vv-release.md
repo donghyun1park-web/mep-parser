@@ -231,9 +231,9 @@ def verify_serial_sensitivity_pair(study_dir: Path, current_case: Path) -> dict:
     and require current_case to be the exact verified second-order variant."""
 ```
 
-- [ ] **Step 1: solver 미실행, 동일 run 재사용, processor 디렉터리, hash 변조, profile 이외 설정 변경이 모두 FAIL인 테스트를 작성한다.**
-- [ ] **Step 2: 평가 중인 current run/mesh가 verified variant와 다르면 FAIL인 테스트를 작성한다.**
-- [ ] **Step 3: 전역 solver lock 아래 baseline과 variant를 순서대로 실행하고 각 checkpoint를 atomic publish한다.**
+- [x] **Step 1: solver 미실행, 동일 run 재사용, processor 디렉터리, hash 변조, profile 이외 설정 변경이 모두 FAIL인 테스트를 작성한다.**
+- [x] **Step 2: 평가 중인 current run/mesh가 verified variant와 다르면 FAIL인 테스트를 작성한다.**
+- [x] **Step 3: 전역 solver lock 아래 baseline과 variant를 순서대로 실행하고 각 checkpoint를 atomic publish한다.**
 - [ ] **Step 4: `occupied_volume_band.v1`을 적용해 체적·시간가중 QoI를 계산한다. 기본 SGI 점유영역 selector는 바닥 위 0.1~1.8m이며 XY/제외영역은 사용자가 확인한다.**
 - [ ] **Step 4a: selector에 geometry/zone SHA, 좌표계·단위, z 범위, XY polygon, exclusion polygons/volumes, 확인자·시각·선택사유를 필수로 추가한다. 단순 직사각형이나 z-band가 실제 closed zone/복층 void와 맞지 않으면 생성 단계에서 FAIL한다.**
 - [ ] **Step 5: 세 QoI와 한 보존 지표를 비교한다.**
@@ -250,7 +250,7 @@ def verify_serial_sensitivity_pair(study_dir: Path, current_case: Path) -> dict:
 
 **Completion:** 두 독립 serial run이 ≥3.0 FTT, 동일 마지막 0.1 FTT, 각 기본 수치 gate PASS, QoI 기준 PASS, 모든 hash 재계산 PASS일 때만 sensitivity PASS.
 
-**2026-08-28 상태:** frozen pair/job/selector와 `gci_fine` Validation Anchor 결속까지 준비됐지만 serial executor와 독립 verifier는 구현되지 않았다. 따라서 이 Task는 OPEN이며 `numerical_sensitivity.v1` 최종 PASS를 주장하지 않는다.
+**2026-08-28 진행 상태:** frozen pair/job/selector와 `gci_fine` Validation Anchor 결속에 더해 serial executor가 구현됐다. 실행기는 frozen seed의 실제 파일을 solver 전에 다시 해시하고, 기존 run/양의 시간/processor 디렉터리를 거부하며, 워크스테이션 solver lock 하나를 보유한 채 baseline 완료 checkpoint를 원자 발행한 뒤에만 variant를 시작한다. 두 run이 3.0 FTT와 독립 run hash를 확보해도 상태는 `SOLVER_RUNS_COMPLETE`/`INDEPENDENT_VERIFICATION_REQUIRED`이며 PASS가 아니다. focused 회귀는 `77 passed, 41 subtests passed`다. Steps 4~7의 마지막 0.1 FTT 체적·시간가중 QoI 재계산, selector topology 확인 강화, raw artifact 독립 verifier가 남아 있으므로 이 Task와 `numerical_sensitivity.v1` 최종 PASS는 계속 OPEN이다.
 
 ### Task P1.3: time-step/Co 민감도 계약을 추가한다
 
