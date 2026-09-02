@@ -777,6 +777,22 @@ def _main_impl():
     fcstd = f"{out_base}.FCStd"
     ifc   = f"{out_base}.ifc"
 
+    # ── 보조 형상 숨김 ────────────────────────────────────────────────────────
+    # Arch 객체의 Base(벽 축선·슬래브 윤곽)는 GUI 워크벤치에서 자동으로 숨겨지지만
+    # freecadcmd(headless)에는 ViewObject 가 없어 Visibility=true 로 저장된다.
+    # → GUI 로 열면 Z=0 평면에 축선 수백 개가 함께 보임. App 레벨 Visibility 로 숨긴다.
+    _n_hidden = 0
+    for _o in doc.Objects:
+        _lbl = getattr(_o, "Label", "")
+        if _lbl.startswith(("WallAxis", "SlabBase", "ColBase", "SpaceShape", "_wall_")):
+            try:
+                _o.Visibility = False
+                _n_hidden += 1
+            except Exception:
+                pass
+    if _n_hidden:
+        print(f"  보조 형상 {_n_hidden}개 숨김(축선/베이스)")
+
     # ── saveAs: ASCII 임시경로 저장 → GUI Python이 최종경로로 이동 ────────────
     # FreeCAD C++ saveAs 는 한글/공백 경로에서 조용히 실패하거나 빈 파일 생성.
     # 해결책: builder는 항상 ASCII 경로인 스크립트 디렉토리에 저장하고,
