@@ -176,3 +176,62 @@ def test_pair_bounds_takes_min_across_layers():
     assert hi == dp.WALL_PAIR_MAX_MM, f"교차 쌍이 느슨한 쪽을 따라갔다: {hi}"
     lo2, hi2 = dp._pair_bounds(loose, loose)
     assert hi2 == 2500.0, "같은 레이어끼리인데 안 넓어졌다"
+
+
+# ── from=dim (DIMENSION 을 부재로) ─────────────────────────────────────────
+class _FakeDim:
+    """DIMENSION 최소 스텁 — ezdxf 없이 핸들러 로직만 검증."""
+    class _P:
+        def __init__(s, x, y): s.x, s.y = x, y
+
+    class _D:
+        pass
+
+    def __init__(self, text, p2=(0, 0), p3=(1000, 0), dimtype=32, layer="G"):
+        self.dxf = self._D()
+        self.dxf.text = text
+        self.dxf.dimtype = dimtype
+        self.dxf.layer = layer
+        self.dxf.defpoint2 = self._P(*p2)
+        self.dxf.defpoint3 = self._P(*p3)
+        self.dxf.defpoint = self._P(p3[0], p3[1] + 1900)   # 치수선 위치(측정점 아님)
+
+    def dxftype(self):
+        return "DIMENSION"
+
+
+def test_dim_member_extracted_from_defpoint2_3():
+    """defpoint(10)는 치수선 위치이지 측정점이 아니다 — defpoint2(13)→defpoint3(14)."""
+    r = dp.entity_to_record(_FakeDim("RAG11B", (100, 200), (5100, 200)), 1.0, {"from": "dim"})
+    assert r is not None
+    assert r["points"] == [[100, 200], [5100, 200]], r["points"]
+    assert r["member_name"] == "RAG11B" and r["source"] == "dimension"
+
+
+def test_dim_ignored_without_optin():
+    """opts 에 from=dim 이 없으면 DIMENSION 은 예전처럼 무시된다(다른 도면 영향 없음)."""
+    assert dp.entity_to_record(_FakeDim("RAG11B"), 1.0, None) is None
+    assert dp.entity_to_record(_FakeDim("RAG11B"), 1.0, {}) is None
+
+
+def test_real_dimensions_are_not_members():
+    """빈 텍스트/'<>'/순수 숫자는 진짜 치수선 — 부재로 만들면 안 된다."""
+    for t in ("", "<>", "15,000", " 3600 ", "2,400x1,200", "1.5"):
+        assert dp.entity_to_record(_FakeDim(t), 1.0, {"from": "dim"}) is None, f"{t!r} 가 부재가 됐다"
+
+
+def test_non_linear_dimtype_rejected():
+    """각도·반경 치수는 부재 축선이 아니다."""
+    assert dp.entity_to_record(_FakeDim("X1", dimtype=2), 1.0, {"from": "dim"}) is None
+
+
+def test_zero_length_dim_rejected():
+    assert dp.entity_to_record(_FakeDim("X1", (0, 0), (0, 0)), 1.0, {"from": "dim"}) is None
+
+
+def test_member_re_narrows_selection():
+    """일반 가드로는 부재명과 상세도 기호를 구분 못 한다 — member_re 로 좁힌다."""
+    o = {"from": "dim", "member_re": r"^R[AS][BG]"}
+    assert dp.entity_to_record(_FakeDim("RAB1D"), 1.0, o) is not None
+    assert dp.entity_to_record(_FakeDim("Hu1"), 1.0, o) is None
+    assert dp.entity_to_record(_FakeDim("Lt"), 1.0, o) is None

@@ -178,6 +178,9 @@ OPT_SPEC = {
     "pair_min":  ("float", "페어링 최소 간격(mm)"),
     "from":      ("str",   "형상 출처: geom(기본) | dim(DIMENSION 을 부재로 사용)"),
     "schedule":  ("str",   "부재일람표 레이어명 — 부재명으로 단면을 조인"),
+    "member_re": ("str",   "from=dim 일 때 부재명으로 인정할 정규식. 미지정이면 "
+                           "'측정값 표시가 아닌 텍스트' 전부. 철근 상세도처럼 기호 라벨이 "
+                           "섞인 도면에서 '^R[AS]' 같이 좁힐 때 쓴다"),
 }
 
 
@@ -333,8 +336,9 @@ def _ocs_to_wcs_fn(e):
     return xf
 
 
-def entity_to_record(e, scale):
+def entity_to_record(e, scale, opts=None):
     """DXF 엔티티 → 정규화 레코드 (polyline/circle). 미지원이면 None.
+    opts: 해당 레이어의 파서 옵션(layer_map 의 opts 컬럼). from=dim 이면 DIMENSION 도 처리.
     반환 레코드는 raw_entity_sig 기반 _sigs(EID 산정용 시그니처 목록)를 포함한다.
     OCS 엔티티는 _ocs_to_wcs_fn 으로 WCS 정합 후 좌표화(미러 블록 대응)."""
     t = e.dxftype()
@@ -381,7 +385,51 @@ def entity_to_record(e, scale):
         pts = [[p[0] * scale, p[1] * scale] for p in e.control_points]
         return (_tag_sig({"kind": "polyline", "closed": e.closed, "layer": layer,
                  "points": pts}) if pts else None)
+    if t == "DIMENSION" and opts and opts.get("from") == "dim":
+        return _dimension_to_record(e, scale, layer, opts.get("member_re"))
     return None
+
+
+# 치수 텍스트가 '측정값 표시'를 뜻하는 형태들 — 이런 건 진짜 치수선이지 부재가 아니다.
+_DIM_MEASURED_RE = re.compile(r"^\s*(<>|)\s*$")          # 빈 문자열 또는 '<>'
+_DIM_NUMERIC_RE = re.compile(r"^[\s0-9.,\-+×xX*/()]*$")   # 순수 숫자/기호
+
+
+def _dimension_to_record(e, scale, layer, member_re=None):
+    """DIMENSION 을 부재 축선으로 해석. `opts: from=dim` 인 레이어에서만 호출된다.
+
+    실무 구조도면은 부재를 '치수선으로 그리고 텍스트를 부재명으로 덮어쓰는' 관행이 있다
+    (양끝 화살표 선 + 'RAG11B' 라벨). 이때 실제 부재 양끝은 치수 정의점에 들어있다.
+
+    ★ 정의점 주의: defpoint(코드 10)는 '치수선이 그려질 위치'이지 측정점이 아니다.
+      실제 측정 구간은 defpoint2(13) → defpoint3(14).
+      한 도면에서 둘이 우연히 겹쳐 defpoint 로도 통했지만, 다른 도면에선
+      1,661개 중 1,404개가 어긋난다.
+
+    ★ 오용 방지: 텍스트가 비어있거나 '<>' 이거나 순수 숫자면 **진짜 치수선**이므로
+      부재로 만들지 않는다. 레이어 규칙을 잘못 걸어도 쓰레기 형상이 아니라
+      '0개 추출' 로 안전하게 떨어진다."""
+    name = (getattr(e.dxf, "text", "") or "").strip()
+    if _DIM_MEASURED_RE.match(name) or _DIM_NUMERIC_RE.match(name):
+        return None
+    # 일반 가드로는 부재명('RAB1D')과 상세도 기호('Lt','Hu1','ta')를 구분할 수 없다.
+    # 필요한 도면은 member_re 로 좁힌다.
+    if member_re and not re.search(member_re, name):
+        return None
+    dt = int(getattr(e.dxf, "dimtype", 0)) & 7
+    if dt not in (0, 1):          # 0=선형/회전, 1=정렬. 각도·반경 등은 부재가 아니다
+        return None
+    try:
+        p2 = e.dxf.defpoint2
+        p3 = e.dxf.defpoint3
+    except Exception:
+        return None
+    a = [p2.x * scale, p2.y * scale]
+    b = [p3.x * scale, p3.y * scale]
+    if math.hypot(b[0] - a[0], b[1] - a[1]) < 1.0:
+        return None
+    return _tag_sig({"kind": "polyline", "closed": False, "layer": layer,
+                     "points": [a, b], "member_name": name, "source": "dimension"})
 
 
 def _centroid(rec):
@@ -525,7 +573,10 @@ _JOIN_LINE_SNAP = 5.0  # 끝점 공유 판정 거리(mm). LINE 연결 pre-join�
 def join_connected_lines(wall_records):
     """같은 레이어의 2점 LINE 레코드들 중 끝점이 이어지는 것을 다중점 폴리라인으로 병합.
     detect_wall_pairs 전에 실행. 개별 LINE export된 DXF의 벽 파편화 방지.
-    LWPOLYLINE / closed / 다중점 레코드는 변경 없이 통과."""
+    LWPOLYLINE / closed / 다중점 레코드는 변경 없이 통과.
+
+    ★ DIMENSION 유래 부재(source="dimension")는 제외한다. 끝점을 공유하는 연속 구간이
+      서로 다른 부재(RAB1D 13개 등)이므로 이어붙이면 부재명·수량이 사라진다."""
     from collections import defaultdict
 
     def ptkey(p):
@@ -533,7 +584,8 @@ def join_connected_lines(wall_records):
         return (round(p[0] / t), round(p[1] / t))
 
     two_pt = {i for i, r in enumerate(wall_records)
-              if len(r.get("points", [])) == 2 and not r.get("closed")}
+              if len(r.get("points", [])) == 2 and not r.get("closed")
+              and r.get("source") != "dimension"}
     keep   = [i for i in range(len(wall_records)) if i not in two_pt]
 
     # 레이어별 끝점 맵
@@ -794,13 +846,19 @@ def detect_wall_pairs(wall_records, params):
     # ① 닫힌 폴리선은 세그먼트 분해 대상에서 제외 ─ 교차 벽 파편화 방지
     #    단, npts<3 인 퇴화 closed(예: 2점 폴리라인)는 solid extrude 불가 →
     #    open_recs 로 보내 일반 면선 페어링 경로를 태운다.
-    closed_recs = [r for r in wall_records
+    # ①-b DIMENSION 유래 부재(source="dimension")는 **이미 중심선**이다.
+    #     외곽선 두 줄을 짝지어 중심선을 구하는 페어링에 태우면 안 된다
+    #     (짝이 없으니 single 로 떨어지고, 그 과정에서 member_name 도 유실된다).
+    #     축선 + 부재표 단면이 이미 있으므로 그대로 통과시킨다.
+    dim_recs = [r for r in wall_records if r.get("source") == "dimension"]
+    rest = [r for r in wall_records if r.get("source") != "dimension"]
+    closed_recs = [r for r in rest
                    if r.get("closed", False) and len(r.get("points", [])) >= 3]
-    open_recs   = [r for r in wall_records
+    open_recs   = [r for r in rest
                    if not (r.get("closed", False) and len(r.get("points", [])) >= 3)]
 
     segs = _merge_collinear_segments(_wall_segments(open_recs))
-    if not segs and not closed_recs:
+    if not segs and not closed_recs and not dim_recs:
         return wall_records
 
     pairs, matched = _find_wall_pairs(segs) if segs else ([], set())
@@ -840,6 +898,15 @@ def detect_wall_pairs(wall_records, params):
         nr = copy.deepcopy(r)
         nr["pairing"] = "closed"
         nr.setdefault("confidence", 0.7)
+        nr.setdefault("needs_review", False)
+        out.append(nr)
+
+    # ③ DIMENSION 부재: 축선을 centerline 으로 확정해 통과(페어링 대상 아님)
+    for r in dim_recs:
+        nr = copy.deepcopy(r)
+        nr["centerline"] = [list(p) for p in nr["points"]]
+        nr["pairing"] = "axis"
+        nr.setdefault("confidence", 1.0)
         nr.setdefault("needs_review", False)
         out.append(nr)
 
@@ -1034,9 +1101,19 @@ def _merge_two_segments(seg1, seg2):
 
 
 def merge_collinear_walls(wall_records, params):
-    """같은 직선 위 끝-끝이 가까운 벽 세그먼트를 한 벽으로 재병합(O(N log N))."""
+    """같은 직선 위 끝-끝이 가까운 벽 세그먼트를 한 벽으로 재병합(O(N log N)).
+
+    ★ DIMENSION 유래 부재(pairing="axis")는 병합 대상에서 제외한다.
+      쪼개진 LINE 을 잇는 것이 이 함수의 목적인데, 부재표 도면에서는 같은 직선 위의
+      연속 구간이 **서로 다른 부재**(RAB1D 13개 등)다. 병합하면 148개가 21개로
+      뭉개지고 부재명·수량이 사라진다."""
     if not wall_records:
         return wall_records
+    axis_recs = [r for r in wall_records if r.get("pairing") == "axis"]
+    if axis_recs:
+        merged = merge_collinear_walls(
+            [r for r in wall_records if r.get("pairing") != "axis"], params)
+        return list(merged) + axis_recs
     items = []
     for rec in wall_records:
         cl = rec.get("centerline") or rec.get("points")
@@ -1765,6 +1842,7 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
               "warnings": []}
     unmapped, unmapped_blocks, n_inserts, unmapped_recs = {}, {}, 0, {}
     ignored = {}            # ignore 규칙으로 버린 것: {레이어: 개수}
+    _dim_skipped = {}       # from=dim 레이어에서 '진짜 치수선' 이라 건너뛴 수
     _rule_hits = set()      # 실제 매칭된 규칙 인덱스 — 그림자 규칙 탐지용
     _layers_seen = set()
     unmapped_block_recs = {}      # 블록명 → explode 기하 샘플(제안 통계용)
@@ -1820,9 +1898,15 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
             except Exception:
                 pass
             continue
-        rec = entity_to_record(e, scale)
+        _opts = (attrs or {}).get("_opts") or {}
+        rec = entity_to_record(e, scale, _opts)
         if rec is None:
-            result["warnings"].append(f"unhandled {e.dxftype()} @ {e.dxf.layer}")
+            # from=dim 레이어의 DIMENSION 은 '측정값 표시' 치수선이면 정상적으로 버려진다.
+            # 이것까지 경고하면 노이즈이므로 별도 집계만 한다.
+            if e.dxftype() == "DIMENSION" and _opts.get("from") == "dim":
+                _dim_skipped[e.dxf.layer] = _dim_skipped.get(e.dxf.layer, 0) + 1
+            else:
+                result["warnings"].append(f"unhandled {e.dxftype()} @ {e.dxf.layer}")
             continue
         if attrs:
             rec["overrides"] = _pub_attrs(attrs)
@@ -2013,6 +2097,12 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         result["ignored"] = ignored
         print(f"  [ignore] {sum(ignored.values())}개 드롭: "
               + ", ".join(f"{k}({v})" for k, v in sorted(ignored.items())[:5]))
+    if _dim_skipped:
+        result["dimension_skipped"] = _dim_skipped
+        _nm = sum(1 for _c in ("wall", "column", "slab", "beam")
+                  for _r in result["elements"].get(_c, []) if _r.get("member_name"))
+        print(f"  [from=dim] 부재 {_nm}개 추출, 측정값 치수선 "
+              f"{sum(_dim_skipped.values())}개 건너뜀")
     # 그림자 규칙: 앞선 넓은 패턴에 가려 한 번도 못 걸린 규칙
     _shadow = shadowed_rules(rules, _rule_hits, _layers_seen)
     if _shadow:
