@@ -1,5 +1,11 @@
 pattern,category,width,height,thickness
-#chk_U_250212,column,,,
+# 선매칭 우선(first-match-wins): 좁은/제외 패턴을 넓은 패턴보다 위에 둘 것.
+# 예) 배수판_벽체 는 '벽'을 포함하므로 WALL|벽|CON 아래에 두면 영원히 가려진다.
+# 주의) 패턴 주석 처리 시 alternation 은 첫 가지만 죽는다 — '#WALL|벽|CON' 은 여전히 '벽','CON'에 매칭됨.
+# chk_U_250212 (이전 점검 표기 — 규칙 아님)
+배수판_벽체|배수판,ignore,,,
+A-CEN$|A-CEN-SUB,ignore,,,
+A-HAT,ignore,,,
 WALL|벽|CON,wall,200,2800,
 COL|기둥|Block_C,column,,3000,
 SLAB|FLOOR|바닥|슬래브,slab,,,200
@@ -10,8 +16,5 @@ DUCT|덕트,duct,400,300,
 TRAY|트레이|CABLE|전선,tray,300,100,
 A\-STEEL,wall,,,
 OPEN,opening,,,
-배수판_벽체|배수판,ignore,,,
-A-CEN$|A-CEN-SUB,ignore,,,
-A-HAT,ignore,,,
 A-ELE,wall,200,2800,
 A-INSUL,wall,100,2800,
