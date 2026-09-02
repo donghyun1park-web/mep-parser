@@ -53,3 +53,6 @@ case_*/
 cfd_report_*.html
 _residuals.png
 _sections.png
+
+# 현장별 산출물(고객 도면 데이터) — 저장소에 넣지 않음
+*_geometry.json
