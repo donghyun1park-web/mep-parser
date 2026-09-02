@@ -226,7 +226,8 @@ def build_walls(doc, walls, params):
         open_wall_global_indices.append(i)
         
     chains = _chain_wall_segments(open_walls)
-    
+
+    n_folds = 0
     for c_idx, (base_el, chain_pts, chain_ids) in enumerate(chains):
         if len(chain_pts) < 2:
             continue
@@ -234,26 +235,68 @@ def build_walls(doc, walls, params):
         width  = float(base_el.get("width_detected") or ov.get("width", d.get("width", 200.0)))
         height = float(ov.get("height", d.get("height", 2800.0)))
         z_base = float(base_el.get("z_base", 0.0))
-        try:
-            base = make_wire(chain_pts, False, doc=doc, label=f"WallAxis_{c_idx}")
-            if not base:
+        # [실측] 겹치는 동일선상 벽이 체이닝되면 baseline 이 180° 되꺾여(A→B→A방향)
+        # Arch.makeWall(align="Center") 의 오프셋이 폭주 → 좌표 1e7 규모의 깨진 솔리드 생성
+        # (isValid()=True 라 탐지도 안 됨). 되꺾임 지점에서 잘라 각각 별도 벽으로 만든다.
+        subchains = _split_folded_chain(chain_pts)
+        if len(subchains) > 1:
+            n_folds += 1
+        for s_idx, sub_pts in enumerate(subchains):
+            if len(sub_pts) < 2:
                 continue
-            wall = Arch.makeWall(base, width=width, height=height, align="Center")
-            if not wall:
-                continue
-            wall.Label = f"Wall_{c_idx}"
-            wall.Placement.Base.z = z_base
-            wall.addProperty("App::PropertyString", "DxfId", "Metadata", "")
-            wall.DxfId = base_el.get("handle") or f"WALL_CHAIN_{c_idx}"
-            objs.append(wall)
-            src_els.append(base_el)
-            for cid in chain_ids:
-                global_i = open_wall_global_indices[cid]
-                idx_map[global_i] = wall
-        except Exception as e:
-            print(f"[warn] Wall_{c_idx} 체인 생성 실패: {e}")
-            
+            label = f"Wall_{c_idx}" if len(subchains) == 1 else f"Wall_{c_idx}_{s_idx}"
+            try:
+                base = make_wire(sub_pts, False, doc=doc, label=f"WallAxis_{label[5:]}")
+                if not base:
+                    continue
+                wall = Arch.makeWall(base, width=width, height=height, align="Center")
+                if not wall:
+                    continue
+                wall.Label = label
+                wall.Placement.Base.z = z_base
+                wall.addProperty("App::PropertyString", "DxfId", "Metadata", "")
+                wall.DxfId = base_el.get("handle") or f"WALL_CHAIN_{c_idx}"
+                objs.append(wall)
+                src_els.append(base_el)
+                if s_idx == 0:
+                    for cid in chain_ids:
+                        global_i = open_wall_global_indices[cid]
+                        idx_map[global_i] = wall
+            except Exception as e:
+                print(f"[warn] {label} 체인 생성 실패: {e}")
+    if n_folds:
+        print(f"  [fix] 되꺾인 벽 체인 {n_folds}건 분할 (깨진 형상 방지)")
+
     return objs, idx_map, src_els
+
+
+def _split_folded_chain(pts, cos_tol=-0.99):
+    """벽 baseline 이 180° 되꺾이는 지점에서 분할.
+
+    겹치는 동일선상 벽 세그먼트가 체이닝되면 A→B→A 형태가 되어
+    Arch.makeWall 의 중심선 오프셋이 발산한다. 연속 방향벡터의
+    코사인이 cos_tol 이하(≈172° 이상 꺾임)면 그 지점에서 자른다.
+    """
+    import math as _m
+
+    def _dir(a, b):
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        L = _m.hypot(dx, dy)
+        return (dx / L, dy / L) if L > 1e-9 else None
+
+    out, cur = [], [pts[0]]
+    prev = None
+    for a, b in zip(pts, pts[1:]):
+        v = _dir(a, b)
+        if v is None:
+            continue          # 길이 0 세그먼트는 건너뜀
+        if prev is not None and (prev[0] * v[0] + prev[1] * v[1]) <= cos_tol:
+            out.append(cur)   # 되꺾임 → 여기서 끊음
+            cur = [a]
+        cur.append(b)
+        prev = v
+    out.append(cur)
+    return [c for c in out if len(c) >= 2]
 
 
 def apply_opening_voids(idx_map, openings, params):
