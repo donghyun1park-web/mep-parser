@@ -319,7 +319,9 @@ function buildSlab(rec){
   const pts=rec.points||[]; if(pts.length<3) return;
   const t=(rec.overrides?.thickness ?? slabT)*S; const z0=(rec.z_base||0)*S;
   const geo=new THREE.ExtrudeGeometry(shapeFrom(pts), {depth:t, bevelEnabled:false});
-  addMesh(geo,'slab',rec,z0);
+  // 슬래브/보의 z_base 는 '상단' 기준(freecad_builder.build_slabs 와 동일 규약).
+  // ExtrudeGeometry 는 0..t 로 +Z 압출하므로 상단이 z_base 에 오도록 t 만큼 내린다.
+  addMesh(geo,'slab',rec,z0-t);
 }
 function buildZone(rec){
   const pts=rec.points||[]; if(pts.length<3) return;
