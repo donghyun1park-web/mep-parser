@@ -472,6 +472,16 @@ def build_columns(doc, columns, params):
     return objs, src_els
 
 
+def _ccw(pts):
+    """닫힌 폴리곤 정점을 반시계(CCW, 면 법선 +Z)로 정규화. 이미 CCW면 그대로 반환."""
+    if not pts or len(pts) < 3:
+        return pts
+    a = 0.0
+    for (x1, y1), (x2, y2) in zip(pts, list(pts[1:]) + [pts[0]]):
+        a += x1 * y2 - x2 * y1
+    return pts if a > 0 else list(reversed(pts))
+
+
 def build_slabs(doc, slabs, params):
     d = params.get("slab", {})
     objs = []
@@ -480,11 +490,18 @@ def build_slabs(doc, slabs, params):
         if el["kind"] != "polyline" or not el.get("closed"):
             continue
         thk = float(el.get("overrides", {}).get("thickness", d.get("thickness", 200.0)))
-        base = make_wire(el["points"], True)
+        # [실측·확정] Arch.makeStructure 는 닫힌 와이어를 면으로 만들어 '면 법선' 방향으로 압출한다.
+        # 법선은 폴리곤 감김 방향(winding)이 결정 → CW 면 -Z 로 압출되어 결과가 두께만큼 더 내려간다
+        # (356개 중 CW 352개가 전부 z_base-thk 로 밀림, CCW 4개만 정상 — 상관계수 1.0 으로 확인).
+        # 입력 감김에 좌우되지 않도록 항상 CCW(법선 +Z)로 정규화한다.
+        base = make_wire(_ccw(el["points"]), True)
         base.Label = f"SlabBase_{i}"
         # 슬래브는 바닥(-thk) 방향으로 두께. 여기선 +Z 로 두고 배치만 내림.
         slab = Arch.makeStructure(base, height=thk)
-        slab.IfcType = "Slab"
+        # [실측] 가늘고 긴(보 형태) 폴리곤에 IfcType="Slab" 강제 시 FreeCAD IFC exporter가
+        # 조용히(에러 없이) 해당 오브젝트를 통째로 누락시킴(실측: 30/30 사례 재현·확정).
+        # overrides.ifc_type 로 명시적 지정 가능(기본값은 기존 그대로 "Slab" — 하위호환).
+        slab.IfcType = el.get("overrides", {}).get("ifc_type", "Slab")
         slab.Label = f"Slab_{i}"
         z_b = float(el.get("z_base", 0.0))
         slab.Placement.Base.z = z_b - thk  # [4b] 층 Z + 슬래브 하향 오프셋
