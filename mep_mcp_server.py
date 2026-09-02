@@ -260,11 +260,16 @@ def apply_layer_rule(layer_pattern: str, category: str,
 
     Args:
         layer_pattern: 레이어명 정규식(예: 'A-PIPE|배관').
-        category: wall|column|slab|zone|opening|pipe|duct|tray|equipment.
+        category: wall|column|slab|beam|zone|opening|pipe|duct|tray|equipment|ignore.
+                  'ignore' = 도면에는 있으나 모델에 넣지 않을 레이어(세고 버림).
         width/height/thickness: mm (0이면 비움 = 기본값 사용).
+
+    주의: 규칙은 **선매칭 우선**이다. 좁은/제외 규칙은 넓은 규칙 위에 있어야 한다.
+    (예: '배수판_벽체'는 '벽'을 포함하므로 'WALL|벽|CON' 아래에 두면 영원히 가려진다.)
+    추가 후 parse_dxf 를 다시 돌려 warnings 의 '가려진 규칙' 경고를 확인할 것.
     """
-    valid = ("wall", "column", "slab", "zone", "opening",
-             "pipe", "duct", "tray", "equipment")
+    valid = ("wall", "column", "slab", "beam", "zone", "opening",
+             "pipe", "duct", "tray", "equipment", "ignore")
     if category not in valid:
         return f"Error: category must be one of {valid}."
     if not os.path.exists(LAYER_MAP):

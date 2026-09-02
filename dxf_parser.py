@@ -35,6 +35,7 @@ if sys.stdout is not None and getattr(sys.stdout, "encoding", None) \
 import ezdxf
 
 from element_id import raw_entity_sig, element_eid
+import geom_contract as _GC   # z 기준면 규약의 단일 출처(계약 블록 기입용)
 
 try:
     from shapely.geometry import Point, Polygon
@@ -116,26 +117,94 @@ CORNER_SNAP_TOL_MM = 50.0      # 끝점 이 거리 이내면 centroid로 스냅(
 WALL_JUNCTION_HEAL_TOL_MM = 200.0  # [4.2] snap 이후 남는 dangling 끝점→인접 벽 연장/트림 최대 갭(mm)
 
 
+# 유효 카테고리 — 오타로 조용히 새 버킷이 생기는 것을 막는다.
+# 'ignore' 는 정식 카테고리다: 매칭되면 세고 버린다(도면에는 있으나 모델엔 넣지 않을 것).
+VALID_CATEGORIES = ("wall", "column", "slab", "zone", "opening",
+                    "pipe", "duct", "tray", "equipment", "beam", "ignore")
+
+
+class LayerMapError(ValueError):
+    """layer_map.csv 형식/내용 오류."""
+
+
 # ── [MEP 물량산출] 외부 CSV 매핑 테이블 로드 ──────────────────
 def load_layer_map(csv_path):
-    """layer_map.csv → 규칙 리스트. 파라미터(width/height/thickness)도 함께."""
+    """layer_map.csv → 규칙 리스트. 파라미터(width/height/thickness)도 함께.
+
+    주의(실무에서 물린 함정 둘):
+      · 주석은 '#' 로 시작하면 전부 건너뛴다. 종전엔 '# '(샵+공백)만 걸러서
+        '#chk_...' 같은 줄이 살아있는 규칙으로 파싱됐다.
+      · 규칙은 선매칭 우선이다. 패턴을 주석 처리해도 alternation 은 첫 가지만
+        죽는다 — '#WALL|벽|CON' 은 여전히 '벽','CON' 에 매칭된다.
+    """
     rules = []
     with open(csv_path, encoding="utf-8") as f:
-        for row in csv.DictReader(filter(lambda l: not l.startswith("# "), f)):
+        rdr = csv.DictReader(filter(lambda l: not l.lstrip().startswith("#"), f))
+        for lineno, row in enumerate(rdr, start=2):
+            pat = (row.get("pattern") or "").strip()
+            cat = (row.get("category") or "").strip()
+            if not pat:
+                continue
+            if cat not in VALID_CATEGORIES:
+                raise LayerMapError(
+                    f"{os.path.basename(csv_path)} {lineno}행: 알 수 없는 카테고리 "
+                    f"{cat!r} (패턴 {pat!r}). 사용 가능: {', '.join(VALID_CATEGORIES)}")
+            try:
+                re.compile(pat)
+            except re.error as _re:
+                raise LayerMapError(
+                    f"{os.path.basename(csv_path)} {lineno}행: 정규식 오류 {pat!r} — {_re}")
             attrs = {}
             for k in ("width", "height", "thickness"):
                 v = (row.get(k) or "").strip()
                 if v:
-                    attrs[k] = float(v)
-            rules.append((row["pattern"], row["category"], attrs))
+                    try:
+                        attrs[k] = float(v)
+                    except ValueError:
+                        raise LayerMapError(
+                            f"{os.path.basename(csv_path)} {lineno}행: {k}={v!r} 는 숫자가 아니다")
+            rules.append((pat, cat, attrs))
     return rules
 
 
-def classify(layer_name, rules):
-    for pattern, category, attrs in rules:
+def classify(layer_name, rules, hit_log=None):
+    """선매칭 우선. hit_log(set)를 주면 매칭된 규칙 인덱스를 기록한다
+    — 어떤 규칙이 한 번도 안 걸렸는지(그림자 규칙) 보고하기 위함."""
+    for i, (pattern, category, attrs) in enumerate(rules):
         if re.search(pattern, layer_name, re.IGNORECASE):
+            if hit_log is not None:
+                hit_log.add(i)
             return category, attrs
     return None, {}
+
+
+def shadowed_rules(rules, hit_log, layers_seen):
+    """한 번도 매칭되지 않은 규칙 중, '앞선 규칙에 가려진' 것을 골라낸다.
+
+    배수판 사고: '배수판_벽체|배수판,ignore' 가 'WALL|벽|CON' 아래에 있어
+    '벽' 부분문자열 때문에 영원히 가려졌고, 배수판이 200mm 벽으로 모델링됐다.
+    단순히 '안 걸린 규칙' 을 세면 그 도면에 없는 레이어까지 잡히므로,
+    **실제 등장한 레이어에 매칭되는데도 앞 규칙에 뺏긴 경우**만 보고한다."""
+    out = []
+    for i, (pat, cat, _a) in enumerate(rules):
+        if i in hit_log:
+            continue
+        stolen = []
+        for lyr in layers_seen:
+            try:
+                if not re.search(pat, lyr, re.IGNORECASE):
+                    continue
+            except re.error:
+                continue
+            for j in range(i):
+                if re.search(rules[j][0], lyr, re.IGNORECASE):
+                    stolen.append({"layer": lyr, "by_rule": rules[j][0],
+                                   "by_category": rules[j][1]})
+                    break
+        if stolen:
+            out.append({"rule": pat, "category": cat, "shadowed_by": stolen[:5],
+                        "count": len(stolen)})
+    return out
 
 
 # ── 엔티티 → 점열 (ATA 추출 로직 정비·통합) ──────────────────
@@ -1631,6 +1700,9 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
                            "pipe": [], "duct": [], "tray": [], "equipment": []},
               "warnings": []}
     unmapped, unmapped_blocks, n_inserts, unmapped_recs = {}, {}, 0, {}
+    ignored = {}            # ignore 규칙으로 버린 것: {레이어: 개수}
+    _rule_hits = set()      # 실제 매칭된 규칙 인덱스 — 그림자 규칙 탐지용
+    _layers_seen = set()
     unmapped_block_recs = {}      # 블록명 → explode 기하 샘플(제안 통계용)
     unmapped_block_entities = {}  # 블록명 → INSERT 엔티티(AI 자동적용 재추출용)
     for e in msp:
@@ -1663,7 +1735,13 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
                     rec["z_base"] = elev  # [4b] 층 분리용 Z 기준
                 result["elements"].setdefault(cat, []).append(rec)
             continue
-        cat, attrs = classify(e.dxf.layer, rules)
+        _layers_seen.add(e.dxf.layer)
+        cat, attrs = classify(e.dxf.layer, rules, _rule_hits)
+        if cat == "ignore":
+            # 정식 드롭. 종전엔 setdefault 로 elements["ignore"] 버킷이 생겨
+            # JSON 에 그대로 실렸다(빌더는 안 읽어 무해했지만 계약 위반).
+            ignored[e.dxf.layer] = ignored.get(e.dxf.layer, 0) + 1
+            continue
         if cat is None:
             unmapped[e.dxf.layer] = unmapped.get(e.dxf.layer, 0) + 1
             bucket = unmapped_recs.setdefault(e.dxf.layer, [])
@@ -1862,6 +1940,23 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
               f"미커버 면선 {_qa['uncovered_count']}개 | 검토필요 {_qa['needs_review']}")
     result["blocks"] = {"inserts": n_inserts, "unmapped": sum(unmapped_blocks.values())}
     result["mep"] = {c: len(result["elements"].get(c, [])) for c in MEP_CATEGORIES}
+    result["contract"] = _GC.contract_block()   # 파일이 자기 규약을 스스로 기술한다
+    if ignored:
+        result["ignored"] = ignored
+        print(f"  [ignore] {sum(ignored.values())}개 드롭: "
+              + ", ".join(f"{k}({v})" for k, v in sorted(ignored.items())[:5]))
+    # 그림자 규칙: 앞선 넓은 패턴에 가려 한 번도 못 걸린 규칙
+    _shadow = shadowed_rules(rules, _rule_hits, _layers_seen)
+    if _shadow:
+        result["shadowed_layer_rules"] = _shadow
+        for s in _shadow:
+            ex = s["shadowed_by"][0]
+            result["warnings"].append(
+                f"가려진 규칙: {s['rule']!r}→{s['category']} 가 "
+                f"{ex['by_rule']!r}→{ex['by_category']} 에 선점됨 (예: {ex['layer']})")
+            print(f"  [!] 가려진 레이어 규칙: {s['rule']!r}→{s['category']} "
+                  f"(앞선 {ex['by_rule']!r} 가 {ex['layer']} 를 가져감). "
+                  f"제외/좁은 규칙을 넓은 규칙 위로 올릴 것")
     # [Phase 4b] 층 감지: structural z_base 값 수집 → 100mm tol 양자화 → floors 목록
     _FLOOR_TOL = 100.0
     _z_vals = set()
