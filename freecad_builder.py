@@ -28,6 +28,10 @@ import Part
 import Draft
 import Arch
 
+# z 기준면 규약은 geom_contract 에만 존재한다. 여기서 재구현하지 말 것.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import geom_contract as GC
+
 
 def vec(p, z=0.0):
     return App.Vector(p[0], p[1], z)
@@ -175,7 +179,6 @@ def _chain_wall_segments(walls):
 
 
 def build_walls(doc, walls, params):
-    d = params.get("wall", {})
     objs = []
     src_els = []
     idx_map = {}
@@ -190,9 +193,8 @@ def build_walls(doc, walls, params):
         baseline = el.get("centerline") or el.get("points", [])
         if len(baseline) < 3:
             continue
-        ov = el.get("overrides", {})
-        height = float(ov.get("height", d.get("height", 2800.0)))
-        z_base = float(el.get("z_base", 0.0))
+        z_base, _z1 = GC.z_range("wall", el, params)
+        height = _z1 - z_base
         dxf_id = el.get("handle") or f"CLOSEDWALL_{i}"
         try:
             pts_3d = [App.Vector(p[0], p[1], z_base) for p in baseline]
@@ -231,10 +233,9 @@ def build_walls(doc, walls, params):
     for c_idx, (base_el, chain_pts, chain_ids) in enumerate(chains):
         if len(chain_pts) < 2:
             continue
-        ov = base_el.get("overrides", {})
-        width  = float(base_el.get("width_detected") or ov.get("width", d.get("width", 200.0)))
-        height = float(ov.get("height", d.get("height", 2800.0)))
-        z_base = float(base_el.get("z_base", 0.0))
+        width = GC.width_of(base_el, params, "wall")
+        z_base, _z1 = GC.z_range("wall", base_el, params)
+        height = _z1 - z_base
         # [실측] 겹치는 동일선상 벽이 체이닝되면 baseline 이 180° 되꺾여(A→B→A방향)
         # Arch.makeWall(align="Center") 의 오프셋이 폭주 → 좌표 1e7 규모의 깨진 솔리드 생성
         # (isValid()=True 라 탐지도 안 됨). 되꺾임 지점에서 잘라 각각 별도 벽으로 만든다.
@@ -487,24 +488,24 @@ def build_openings(doc, openings, wall_idx_map, params):
 
 
 def build_columns(doc, columns, params):
-    d = params.get("column", {})
     objs = []
     src_els = []
     for i, el in enumerate(columns):
-        height = float(el.get("overrides", {}).get("height", d.get("height", 3000.0)))
+        z0, z1 = GC.z_range("column", el, params)
+        height = z1 - z0
         if el["kind"] == "circle":
             base = Draft.makeCircle(el["radius"], placement=App.Placement(
                 vec(el["center"]), App.Rotation()))
         elif el["kind"] == "polyline" and el.get("closed"):
-            base = make_wire(el["points"], True)
+            base = make_wire(GC.ccw(el["points"]), True)
         else:
             continue
         base.Label = f"ColBase_{i}"
         col = Arch.makeStructure(base, height=height)
         col.IfcType = "Column"
         col.Label = f"Column_{i}"
-        col.Normal = App.Vector(0, 0, 1)  # Force upward extrusion regardless of polyline winding
-        col.Placement.Base.z = float(el.get("z_base", 0.0))  # [4b]
+        col.Normal = App.Vector(0, 0, 1)  # 감김 무관하게 +Z 압출(슬래브는 GC.ccw 로 동일 효과)
+        col.Placement.Base.z = z0
         
         # [라운드트립 기반] DXF Handle 주입
         col.addProperty("App::PropertyString", "DxfId", "Metadata", "Original DXF Handle")
@@ -515,29 +516,20 @@ def build_columns(doc, columns, params):
     return objs, src_els
 
 
-def _ccw(pts):
-    """닫힌 폴리곤 정점을 반시계(CCW, 면 법선 +Z)로 정규화. 이미 CCW면 그대로 반환."""
-    if not pts or len(pts) < 3:
-        return pts
-    a = 0.0
-    for (x1, y1), (x2, y2) in zip(pts, list(pts[1:]) + [pts[0]]):
-        a += x1 * y2 - x2 * y1
-    return pts if a > 0 else list(reversed(pts))
-
-
 def build_slabs(doc, slabs, params):
-    d = params.get("slab", {})
     objs = []
     src_els = []
     for i, el in enumerate(slabs):
         if el["kind"] != "polyline" or not el.get("closed"):
             continue
-        thk = float(el.get("overrides", {}).get("thickness", d.get("thickness", 200.0)))
+        cat = "beam" if (el.get("overrides", {}).get("ifc_type") == "Beam") else "slab"
+        z0, z1 = GC.z_range(cat, el, params)
+        thk = z1 - z0
         # [실측·확정] Arch.makeStructure 는 닫힌 와이어를 면으로 만들어 '면 법선' 방향으로 압출한다.
         # 법선은 폴리곤 감김 방향(winding)이 결정 → CW 면 -Z 로 압출되어 결과가 두께만큼 더 내려간다
         # (356개 중 CW 352개가 전부 z_base-thk 로 밀림, CCW 4개만 정상 — 상관계수 1.0 으로 확인).
         # 입력 감김에 좌우되지 않도록 항상 CCW(법선 +Z)로 정규화한다.
-        base = make_wire(_ccw(el["points"]), True)
+        base = make_wire(GC.ccw(el["points"]), True)
         base.Label = f"SlabBase_{i}"
         # 슬래브는 바닥(-thk) 방향으로 두께. 여기선 +Z 로 두고 배치만 내림.
         slab = Arch.makeStructure(base, height=thk)
@@ -546,8 +538,7 @@ def build_slabs(doc, slabs, params):
         # overrides.ifc_type 로 명시적 지정 가능(기본값은 기존 그대로 "Slab" — 하위호환).
         slab.IfcType = el.get("overrides", {}).get("ifc_type", "Slab")
         slab.Label = f"Slab_{i}"
-        z_b = float(el.get("z_base", 0.0))
-        slab.Placement.Base.z = z_b - thk  # [4b] 층 Z + 슬래브 하향 오프셋
+        slab.Placement.Base.z = z0  # 기준면 해석은 geom_contract 가 단독 담당
         
         # [라운드트립 기반] DXF Handle 주입
         slab.addProperty("App::PropertyString", "DxfId", "Metadata", "Original DXF Handle")
@@ -560,8 +551,6 @@ def build_slabs(doc, slabs, params):
 
 def build_spaces(doc, zones, params):
     """zone 닫힌 폴리라인 → Arch.makeSpace 방 객체. IFC Space 태깅."""
-    d = params.get("wall", {})
-    room_h = float(d.get("height", 2800.0))
     objs = []
     src_els = []
     for i, el in enumerate(zones):
@@ -571,7 +560,11 @@ def build_spaces(doc, zones, params):
         if len(pts) < 3:
             continue
         try:
-            z_b = float(el.get("z_base", 0.0))
+            # zone 은 벽 높이를 기본값으로 쓴다(방 높이). 규약은 geom_contract 단독.
+            z_b, _z1 = GC.z_range("zone", el, params)
+            room_h = _z1 - z_b
+            if room_h <= 0:
+                room_h = GC.height_of(el, params, "wall")
             pts_3d = [App.Vector(float(p[0]), float(p[1]), z_b) for p in pts]
             pts_3d.append(pts_3d[0])  # 닫기
             wire = Part.makePolygon(pts_3d)

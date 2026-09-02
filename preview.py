@@ -23,6 +23,9 @@ import os
 import sys
 import webbrowser
 
+import geom_contract as _GC   # z 기준면 규약의 단일 출처
+
+
 def _vendor_dir():
     """three.js 동봉 폴더. PyInstaller onefile 이면 sys._MEIPASS, 아니면 소스 dir."""
     base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
@@ -107,6 +110,10 @@ def build_html(data):
     data_json = data_json.replace("</", "<\\/")
     html = _TEMPLATE.replace("/*__DATA__*/null", data_json)
     html = html.replace("<!--__IMPORTMAP__-->", importmap_section())
+    # z 기준면 규약은 geom_contract 가 단독 정의한다. JS 는 import 가 불가하므로
+    # 상수+헬퍼를 주입해서 쓴다 — 이 파일에서 규약을 다시 구현하면 안 된다.
+    # (그렇게 재구현했다가 슬래브를 '하단'으로 해석해 보가 한 두께 떠 보인 적이 있다.)
+    html = html.replace("/*__CONTRACT__*/", _GC.js_constants())
     return html
 
 
@@ -234,6 +241,8 @@ window.addEventListener('error', e => {
     document.getElementById('err').style.display='block';
 });
 
+/*__CONTRACT__*/
+
 const S = 0.001;                  // mm -> m
 const CX = DATA.center[0], CY = DATA.center[1];
 const P = DATA.params || {};
@@ -285,11 +294,12 @@ function addMesh(geo, cat, rec, z, opts={}){
 }
 
 // 벽: centerline a-b, width, height → 배향 박스
+// z 범위는 gcZRange(주입된 geom_contract 규약)만 사용한다.
 function buildWall(rec){
   const cl = rec.centerline || rec.points; if(!cl||cl.length<2) return;
   const w = (rec.overrides?.width ?? rec.width_detected ?? (P.wall?.width) ?? 200)*S;
-  const h = (rec.overrides?.height ?? wallH)*S;
-  const z0 = (rec.z_base||0)*S;
+  const zr = gcZRange('wall', rec, P);
+  const z0 = zr[0]*S, h = (zr[1]-zr[0])*S;
   for(let i=0;i<cl.length-1;i++){
     const a=toM(cl[i]), b=toM(cl[i+1]);
     const dx=b[0]-a[0], dy=b[1]-a[1]; const len=Math.hypot(dx,dy); if(len<1e-6) continue;
@@ -305,7 +315,8 @@ function shapeFrom(pts){
   return s;
 }
 function buildColumn(rec){
-  const z0=(rec.z_base||0)*S, h=(rec.overrides?.height ?? colH)*S;
+  const zr = gcZRange('column', rec, P);
+  const z0 = zr[0]*S, h = (zr[1]-zr[0])*S;
   if(rec.kind==='circle'){
     const r=(rec.radius||200)*S; const geo=new THREE.CylinderGeometry(r,r,h,24);
     geo.rotateX(Math.PI/2); const m=addMesh(geo,'column',rec,z0+h/2);
@@ -317,11 +328,12 @@ function buildColumn(rec){
 }
 function buildSlab(rec){
   const pts=rec.points||[]; if(pts.length<3) return;
-  const t=(rec.overrides?.thickness ?? slabT)*S; const z0=(rec.z_base||0)*S;
+  // 보(ifc_type=Beam)와 슬래브는 둘 다 'top' 기준이지만 기본 치수가 다르다.
+  const cat = (rec.overrides?.ifc_type === 'Beam') ? 'beam' : 'slab';
+  const zr = gcZRange(cat, rec, P);
+  const z0 = zr[0]*S, t = (zr[1]-zr[0])*S;
   const geo=new THREE.ExtrudeGeometry(shapeFrom(pts), {depth:t, bevelEnabled:false});
-  // 슬래브/보의 z_base 는 '상단' 기준(freecad_builder.build_slabs 와 동일 규약).
-  // ExtrudeGeometry 는 0..t 로 +Z 압출하므로 상단이 z_base 에 오도록 t 만큼 내린다.
-  addMesh(geo,'slab',rec,z0-t);
+  addMesh(geo,'slab',rec,z0);   // ExtrudeGeometry 는 0..t 로 +Z 압출 → 아랫면을 z0 에
 }
 function buildZone(rec){
   const pts=rec.points||[]; if(pts.length<3) return;
