@@ -123,3 +123,56 @@ def test_repo_layer_map_loads_and_has_no_shadow():
     assert got["WALL-1"] == "wall" and got["S_RC-CON"] == "wall"
     sh = dp.shadowed_rules(rules, hits, set(layers))
     assert sh == [], f"저장소 layer_map.csv 에 가려진 규칙이 있다: {sh}"
+
+
+# ── opts 컬럼 (레이어별 튜닝) ──────────────────────────────────────────────
+def test_opts_parsed():
+    r = dp.load_layer_map(write_csv(
+        "pattern,category,width,height,thickness,opts\n"
+        "AU_GIRDER,beam,,,,pair_max=1800;from=dim;schedule=BEAM_SCHEDULE\n"))
+    o = r[0][2]["_opts"]
+    assert o == {"pair_max": 1800.0, "from": "dim", "schedule": "BEAM_SCHEDULE"}
+
+
+def test_opts_column_is_optional():
+    """opts 없는 기존 5컬럼 CSV 가 그대로 동작해야 한다(하위호환)."""
+    r = dp.load_layer_map(write_csv(HEAD + "WALL,wall,200,2800,\n"))
+    assert r[0][2] == {"width": 200.0, "height": 2800.0}
+    assert "_opts" not in r[0][2]
+
+
+def test_unknown_opt_key_raises():
+    """오타난 허용치를 조용히 무시하면 안 된다."""
+    try:
+        dp.load_layer_map(write_csv(
+            "pattern,category,width,height,thickness,opts\nX,wall,,,,pairmax=1800\n"))
+    except dp.LayerMapError as e:
+        assert "pairmax" in str(e)
+        return
+    raise AssertionError("오타 opts 키가 통과했다")
+
+
+def test_non_numeric_opt_raises():
+    try:
+        dp.load_layer_map(write_csv(
+            "pattern,category,width,height,thickness,opts\nX,wall,,,,pair_max=넓게\n"))
+    except dp.LayerMapError:
+        return
+    raise AssertionError("숫자 아닌 opts 값이 통과했다")
+
+
+def test_opts_do_not_leak_into_overrides():
+    """_opts 는 파서 전용. 빌더가 읽는 overrides 로 새면 안 된다."""
+    attrs = {"width": 200.0, "_opts": {"pair_max": 1800.0}}
+    assert dp._pub_attrs(attrs) == {"width": 200.0}
+
+
+def test_pair_bounds_takes_min_across_layers():
+    """교차 레이어 쌍은 min — 양쪽 모두 허용해야 넓힌다.
+    안 그러면 느슨한 보 레이어가 옆 벽선을 빨아들인다."""
+    loose = {"opts": {"pair_max": 2500.0}}
+    tight = {"opts": {}}
+    lo, hi = dp._pair_bounds(loose, tight)
+    assert hi == dp.WALL_PAIR_MAX_MM, f"교차 쌍이 느슨한 쪽을 따라갔다: {hi}"
+    lo2, hi2 = dp._pair_bounds(loose, loose)
+    assert hi2 == 2500.0, "같은 레이어끼리인데 안 넓어졌다"

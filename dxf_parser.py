@@ -163,8 +163,56 @@ def load_layer_map(csv_path):
                     except ValueError:
                         raise LayerMapError(
                             f"{os.path.basename(csv_path)} {lineno}행: {k}={v!r} 는 숫자가 아니다")
+            opts = _parse_opts(row.get("opts"), csv_path, lineno)
+            if opts:
+                attrs["_opts"] = opts        # '_' 접두 = 파서 전용, 빌더로 새지 않는다
             rules.append((pat, cat, attrs))
     return rules
+
+
+# opts 컬럼에서 허용하는 키. 모르는 키는 조용히 무시하지 말고 경고한다
+# (오타난 허용치를 말없이 버리는 건 지금 없애려는 버그와 같은 종류다).
+OPT_SPEC = {
+    "pair_max":  ("float", "이 레이어의 평행선 페어링 최대 간격(mm). "
+                           "보/거더 외곽선은 벽보다 훨씬 넓다"),
+    "pair_min":  ("float", "페어링 최소 간격(mm)"),
+    "from":      ("str",   "형상 출처: geom(기본) | dim(DIMENSION 을 부재로 사용)"),
+    "schedule":  ("str",   "부재일람표 레이어명 — 부재명으로 단면을 조인"),
+}
+
+
+def _parse_opts(raw, csv_path="", lineno=0):
+    """'k=v;k=v' → dict. 컬럼을 늘리는 대신 이 하나로 확장한다
+    (허용치가 늘 때마다 스키마 변경과 apply_layer_rule 인자 추가가 따라오는 걸 막는다)."""
+    out = {}
+    for tok in (raw or "").replace(",", ";").split(";"):
+        tok = tok.strip()
+        if not tok:
+            continue
+        if "=" not in tok:
+            raise LayerMapError(
+                f"{os.path.basename(csv_path)} {lineno}행: opts 형식 오류 {tok!r} — 'key=value' 여야 한다")
+        k, v = tok.split("=", 1)
+        k, v = k.strip(), v.strip()
+        if k not in OPT_SPEC:
+            raise LayerMapError(
+                f"{os.path.basename(csv_path)} {lineno}행: 알 수 없는 opts 키 {k!r}. "
+                f"사용 가능: {', '.join(sorted(OPT_SPEC))}")
+        kind = OPT_SPEC[k][0]
+        if kind == "float":
+            try:
+                out[k] = float(v)
+            except ValueError:
+                raise LayerMapError(
+                    f"{os.path.basename(csv_path)} {lineno}행: opts {k}={v!r} 는 숫자가 아니다")
+        else:
+            out[k] = v
+    return out
+
+
+def _pub_attrs(attrs):
+    """빌더가 읽는 overrides 로 나갈 공개 치수만. '_' 접두(파서 전용)는 제외한다."""
+    return {k: v for k, v in (attrs or {}).items() if not k.startswith("_")}
 
 
 def classify(layer_name, rules, hit_log=None):
@@ -575,6 +623,7 @@ def _wall_segments(wall_records):
                          "src": idx, "layer": rec.get("layer", ""),
                          "sigs": rec.get("_sigs", []),
                          "overrides": rec.get("overrides", {}),
+                         "opts": rec.get("_parse_opts", {}),
                          "z_base": rec.get("z_base", 0.0)})
     return segs
 
@@ -626,6 +675,20 @@ def _merge_collinear_segments(segs, gap_tol=None):
     return out
 
 
+def _pair_bounds(sa, sb):
+    """이 세그먼트 쌍에 적용할 (최소, 최대) 페어링 간격.
+
+    교차 레이어 쌍은 **min** 을 쓴다 — 양쪽 모두 허용해야 넓힌다.
+    안 그러면 느슨하게 설정한 보 레이어가 옆 벽선을 빨아들인다."""
+    oa = sa.get("opts") or {}
+    ob = sb.get("opts") or {}
+    lo = max(float(oa.get("pair_min", WALL_PAIR_MIN_MM)),
+             float(ob.get("pair_min", WALL_PAIR_MIN_MM)))
+    hi = min(float(oa.get("pair_max", WALL_PAIR_MAX_MM)),
+             float(ob.get("pair_max", WALL_PAIR_MAX_MM)))
+    return lo, hi
+
+
 def _pair_geometry(sa, sb):
     """평행 후보 두 세그먼트 → (수직거리, 겹침길이, 중선[[],[]], sa_t범위, sb_t범위) 또는 None.
     sa_t=(lo,hi)는 sa.p1 기준 sa.dir 사영, sb_t는 sb.p1 기준 sb.dir 사영.
@@ -647,7 +710,8 @@ def _pair_geometry(sa, sb):
     foot = (o[0] + foot_t * ux, o[1] + foot_t * uy)
     off = (sb["p1"][0] - foot[0], sb["p1"][1] - foot[1])
     perp = math.hypot(off[0], off[1])
-    if not (WALL_PAIR_MIN_MM <= perp <= WALL_PAIR_MAX_MM):
+    _lo, _hi = _pair_bounds(sa, sb)
+    if not (_lo <= perp <= _hi):
         return None
     half = (off[0] * 0.5, off[1] * 0.5)
     c_lo = (o[0] + t_lo * ux + half[0], o[1] + t_lo * uy + half[1])
@@ -1728,7 +1792,9 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
             elev = _entity_elevation(e, scale)
             for rec in insert_to_records(e, scale, cat, attrs):
                 if attrs:
-                    rec["overrides"] = attrs
+                    rec["overrides"] = _pub_attrs(attrs)
+                    if attrs.get("_opts"):
+                        rec["_parse_opts"] = attrs["_opts"]
                 if cat in MEP_CATEGORIES:
                     annotate_mep(rec, cat, attrs, elev)
                 else:
@@ -1759,7 +1825,9 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
             result["warnings"].append(f"unhandled {e.dxftype()} @ {e.dxf.layer}")
             continue
         if attrs:
-            rec["overrides"] = attrs
+            rec["overrides"] = _pub_attrs(attrs)
+            if attrs.get("_opts"):
+                rec["_parse_opts"] = attrs["_opts"]
         elev = _entity_elevation(e, scale)
         if cat in MEP_CATEGORIES:
             annotate_mep(rec, cat, attrs, elev)
@@ -2004,7 +2072,21 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         prefix = ELEMENT_EID_PREFIX.get(_cat, _cat[:1])
         for _rec in _recs:
             sigs = _rec.pop("_sigs", None) or [raw_entity_sig(_rec)]
+            _rec.pop("_parse_opts", None)      # 파서 전용 — 출력에는 싣지 않는다
             _rec["eid"] = element_eid(prefix, sigs)
+
+    # 실제 적용된 튜닝값을 파일이 스스로 기록한다 — 몽키패치 방지 장치.
+    # (보 페어링이 안 되던 시절, 모듈 전역을 런타임에 덮어써서 우회했고
+    #  그 사실이 산출물 어디에도 남지 않았다.)
+    _eff = {"defaults": {"pair_min": WALL_PAIR_MIN_MM, "pair_max": WALL_PAIR_MAX_MM,
+                         "angle_tol_deg": WALL_ANGLE_TOL_DEG}}
+    _per_layer = {}
+    for _pat, _cat, _at in rules:
+        if _at.get("_opts"):
+            _per_layer[_pat] = dict(_at["_opts"])
+    if _per_layer:
+        _eff["per_layer"] = _per_layer
+    result["tolerances_effective"] = _eff
 
     return result
 
