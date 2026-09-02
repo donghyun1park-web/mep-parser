@@ -1,6 +1,0 @@
-Loaded 639 walls and 72 columns.
-  Built wall batch 0-500
-  Built wall batch 500-639
-  Built 72 columns
-  Built 83 openings (0 leaves)
-Success
