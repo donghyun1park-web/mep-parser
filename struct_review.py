@@ -19,32 +19,36 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from preview import importmap_section  # three.js importmap 재사용
 
-# ══════════ 구조개요서 [APPENDIX 12] 별첨#4 설계기준 ══════════
+# ══════════ 설계기준 ══════════
+# ⚠ 아래 값은 **형식을 보여주기 위한 샘플**이다. 실제 현장 기준은 저장소에 넣지 말고
+#   --criteria <설계기준.json> 으로 외부에서 주입한다(현장 기준서는 고객 자료다).
+#   샘플 형식은 criteria.sample.json 참고. *_criteria.json 은 .gitignore 대상.
 CRITERIA = {
-    "project": "NHN 광주 EDC 데이터센터",
-    "doc": "[APPENDIX 12] 별첨#4 구조 개요 (O-002026)",
+    "project": "(샘플) 데이터센터",
+    "doc": "(구조개요서 미지정 — --criteria 로 주입)",
     "code": "KDS 41 00 00 / ACI 318-19 / ASCE 7-16",
     "structure": "철골조 (하부 철근콘크리트)",
-    "foundation": "지내력기초 (지반조사 후 변경 가능)",
+    "foundation": "지내력기초",
     "gwl": "GL 0.00 m (가정치)",
-    "program": "MIDAS Design+ / BeST Pro",
+    "program": "-",
     "concrete": [("기초", "24 MPa"), ("기초 외 (수직·수평부재)", "27 MPa")],
     "rebar": [("HD13 이하", "SD500  fy=500 MPa"), ("HD16 이상", "SD600  fy=600 MPa")],
     "steel": [("SS275", "Fy=275 (t≤16) / 265 MPa"), ("SM355", "Fy=355 (t≤16) / 345 MPa"),
               ("SHN355", "Fy=355 MPa (t≤75)"), ("접합볼트", "F10T H.S.B")],
 }
-# 2.1 하중표 (kN/m²)
+# 하중표 (kN/m²) — (실명, DL, LL). 샘플값.
 LOAD_TABLE = [
     ("데이터홀", 7.30, 20.00),
     ("기계실·발전기실 등", 7.30, 35.00),
-    ("전기실·복도·소화가스실·UPS실·배터리실 등", 7.30, 25.00),
-    ("사무동·검사실·하역장·쓰레기처리실·업무공간 등", 7.30, 20.00),
+    ("전기실·복도·UPS실 등", 7.30, 25.00),
+    ("사무·업무공간 등", 7.30, 20.00),
     ("옥상층", 7.30, 10.00),
 ]
 SNOW = dict(Sg=0.5, Cb=0.7, Ce=1.1, Ct=1.2, Is=1.1, Sf=0.51, rain=0.25, total=0.76)
-WIND = dict(V0=28.0, expo="B", Iw=1.00, region="광주")
+WIND = dict(V0=28.0, expo="B", Iw=1.00, region="-")
 SEIS = dict(Z=0.11, S="S4", Fa=1.448, Fv=2.048, SDS=0.425, SD1=0.240,
             R=3.0, Omega=3.0, Cd=3.0, IE=1.20, Ta=0.274, cat="D", vs=320.7)
+# 하중조합은 KDS 41 표준이므로 코드에 둔다(현장 고유 정보 아님).
 COMBOS = [
     ("1.4(D+F)", "고정하중·유체"),
     ("1.2(D+F+T)+1.6L+0.5(Lr or S or R)", "고정·유체·온도·활하중"),
@@ -55,8 +59,8 @@ COMBOS = [
     ("0.9D+1.0E", "지진 (전도)"),
 ]
 # 층별 적용 (층, 슬래브 레이어, 용도, DL, LL, 지지요소 z_base, 추가벽 z_base)
-# TODO: 슬래브 레이어명과 z 값이 NHN 장성 DC 전용 하드코딩이다.
-#       stack.json 이 생기면 levels 선언에서 읽어 프로젝트 독립으로 만들 것.
+# ⚠ 슬래브 레이어명과 z 값은 현장마다 다르다. 샘플이며 --criteria 로 덮어쓴다.
+# TODO: stack.json(선언적 층 조립)이 생기면 levels 선언에서 읽어 이 상수를 없앨 것.
 LEVELS = [
     ("PIT",    "generated_from_exterior_walls_bbox", "기계실·발전기실 등", 7.30, 35.00, None, None),
     ("1F",     "generated_1F_slab_bbox",            "데이터홀",           7.30, 20.00, 2500.0, None),
@@ -64,6 +68,33 @@ LEVELS = [
     ("옥상 RF1", "옥상_deck_generated",               "옥상층",             7.30, 10.00, 6050.0, 10550.0),
     ("옥상 RF2", "PH_deck_generated",                 "옥상층",             7.30, 10.00, 14750.0, None),
 ]
+
+
+def load_criteria(path):
+    """외부 설계기준 JSON 을 읽어 모듈 상수를 덮어쓴다.
+
+    현장 기준서(구조개요서)는 고객 자료이므로 저장소에 두지 않는다.
+    형식은 criteria.sample.json 참고. 지정한 키만 덮어쓰고 나머지는 샘플값 유지."""
+    global CRITERIA, LOAD_TABLE, SNOW, WIND, SEIS, LEVELS, FCK, FY, RHO
+    with open(path, encoding="utf-8") as f:
+        c = json.load(f)
+    if "criteria" in c:
+        CRITERIA = dict(CRITERIA); CRITERIA.update(c["criteria"])
+    if "load_table" in c:
+        LOAD_TABLE = [tuple(r) for r in c["load_table"]]
+    if "snow" in c:
+        SNOW = dict(SNOW); SNOW.update(c["snow"])
+    if "wind" in c:
+        WIND = dict(WIND); WIND.update(c["wind"])
+    if "seismic" in c:
+        SEIS = dict(SEIS); SEIS.update(c["seismic"])
+    if "levels" in c:
+        LEVELS = [tuple(r) for r in c["levels"]]
+    if "column" in c:
+        FCK = float(c["column"].get("fck", FCK))
+        FY = float(c["column"].get("fy", FY))
+        RHO = float(c["column"].get("rho", RHO))
+    return c
 FCK, FY, RHO = 27.0, 500.0, 0.01
 CELL = 1000.0
 
@@ -402,7 +433,15 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("geometry")
     ap.add_argument("-o", "--out", default=None)
+    ap.add_argument("--criteria", default=None,
+                    help="설계기준 JSON (현장 구조개요서 값). 미지정 시 코드의 샘플값 사용 "
+                         "— 형식은 criteria.sample.json 참고")
     a = ap.parse_args()
+    if a.criteria:
+        load_criteria(a.criteria)
+        print(f"설계기준: {a.criteria}")
+    else:
+        print("설계기준: (샘플값) — 실제 현장 검토는 --criteria 로 기준서 값을 주입할 것")
     d = json.load(open(a.geometry, encoding="utf-8"))
     r = compute(d)
     r.update(loadTable=LOAD_TABLE, snow=SNOW, wind=WIND, seis=SEIS, combos=COMBOS)

@@ -1,0 +1,40 @@
+{
+  "_note": [
+    "struct_review.py --criteria <이 파일> 로 주입하는 설계기준 형식 예시.",
+    "값은 전부 예시다. 실제 현장 기준서(구조개요서) 값을 넣은 파일은",
+    "고객 자료이므로 저장소에 커밋하지 말 것 — .gitignore 에 *_criteria.json 등록됨.",
+    "지정한 키만 덮어쓰고 나머지는 코드의 샘플값이 유지된다."
+  ],
+
+  "criteria": {
+    "project": "○○ 데이터센터",
+    "doc": "구조개요서 (문서번호)",
+    "code": "KDS 41 00 00 / ACI 318-19 / ASCE 7-16",
+    "structure": "철골조 (하부 철근콘크리트)",
+    "foundation": "지내력기초",
+    "gwl": "GL 0.00 m",
+    "program": "구조해석 프로그램명"
+  },
+
+  "load_table": [
+    ["실명", 7.30, 20.00],
+    ["기계실 등", 7.30, 35.00],
+    ["옥상층", 7.30, 10.00]
+  ],
+
+  "snow":    {"Sg": 0.5, "Cb": 0.7, "Ce": 1.1, "Ct": 1.2, "Is": 1.1,
+              "Sf": 0.51, "rain": 0.25, "total": 0.76},
+  "wind":    {"V0": 28.0, "expo": "B", "Iw": 1.00, "region": "지역명"},
+  "seismic": {"Z": 0.11, "S": "S4", "Fa": 1.448, "Fv": 2.048,
+              "SDS": 0.425, "SD1": 0.240, "R": 3.0, "Omega": 3.0, "Cd": 3.0,
+              "IE": 1.20, "Ta": 0.274, "cat": "D", "vs": 320.7},
+
+  "column": {"fck": 27.0, "fy": 500.0, "rho": 0.01},
+
+  "_levels_note": "층, 슬래브 레이어명, 용도, DL, LL, 지지요소 z_base, 추가벽 z_base",
+  "levels": [
+    ["PIT",  "generated_from_exterior_walls_bbox", "기계실 등", 7.30, 35.00, null, null],
+    ["1F",   "generated_1F_slab_bbox",             "데이터홀",   7.30, 20.00, 2500.0, null],
+    ["옥상", "옥상_deck_generated",                 "옥상층",     7.30, 10.00, 6050.0, null]
+  ]
+}

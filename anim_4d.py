@@ -20,9 +20,8 @@ import tempfile
 from PIL import Image, ImageDraw, ImageFont
 
 # ── 시공 단계 정의 (순서 = 실제 시공 순서) ──────────────────────────────────
-# TODO: 아래 z 값(1200/2500/6050/10550/14750...)과 레이어명은 NHN 장성 DC 전용 하드코딩이다.
-#       stack.json(선언적 층 조립)이 생기면 levels 선언에서 읽어 프로젝트 독립으로 만들 것.
-#       현 상태로는 다른 현장에 그대로 못 쓴다.
+# ⚠ 아래 z 값과 레이어명은 특정 현장 기준 샘플이다. 다른 현장에는 그대로 못 쓴다.
+# TODO: stack.json(선언적 층 조립)이 생기면 levels 선언에서 읽어 프로젝트 독립으로 만들 것.
 STAGES = [
     ("1. 매트기초",        lambda c, r: c == "column" and abs(r.get("z_base", 0) - 1200) < 1),
     ("2. PIT 바닥슬래브",   lambda c, r: c == "slab" and r.get("layer") == "generated_from_exterior_walls_bbox"),
@@ -187,6 +186,7 @@ def main():
     ap.add_argument("--fps", type=int, default=24)
     ap.add_argument("--width", type=int, default=1600)
     ap.add_argument("--frames-per-stage", type=int, default=30)
+    ap.add_argument("--project", default="", help="자막에 표기할 현장명(선택)")
     args = ap.parse_args()
 
     data = json.load(open(args.geometry, encoding="utf-8"))
@@ -208,7 +208,7 @@ def main():
         cum = sum(1 for p in prisms if p[3] <= si)
         for k in range(args.frames_per_stage):
             img = render(prisms, si, azs[n], (W, Hh), cam,
-                         name, f"부재 {cnt}개 시공  ·  누적 {cum}개  ·  NHN 장성 DC")
+                         name, f"부재 {cnt}개 시공  ·  누적 {cum}개" + (f"  ·  {args.project}" if args.project else ""))
             img.save(os.path.join(tmp, f"f{n:05d}.png"))
             n += 1
         print(f"  {name}: +{cnt} (누적 {cum})")
