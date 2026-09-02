@@ -38,7 +38,10 @@ CHECKS = {
     "V104": ("error", "모델 bbox 가 입력 bbox 대비 비정상적으로 큼(폭주 솔리드)"),
 }
 
-_STRUCT_CATS = ("wall", "column", "slab")
+# 'beam' 은 정식 카테고리다(layer_map 의 category=beam). 빠져 있으면 보의
+# needs_review·퇴화형상·좌표폭주가 통째로 검사에서 빠진다 — 일람표 미매칭 보
+# 236개가 "OK" 로 통과하던 경위.
+_STRUCT_CATS = ("wall", "column", "slab", "beam")
 _COORD_LIMIT_FACTOR = 10.0     # 입력 bbox 의 몇 배를 넘으면 이상치로 볼지
 _FLOOR_TOL = 100.0             # freecad_builder._at_floor 과 동일해야 한다
 

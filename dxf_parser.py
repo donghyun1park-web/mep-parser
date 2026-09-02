@@ -36,6 +36,7 @@ import ezdxf
 
 from element_id import raw_entity_sig, element_eid
 import geom_contract as _GC   # z 기준면 규약의 단일 출처(계약 블록 기입용)
+import schedule_table as _ST  # 부재일람표(TEXT 격자) 복원 — opts 의 schedule= 소비자
 
 try:
     from shapely.geometry import Point, Polygon
@@ -1825,14 +1826,44 @@ def build_qa(face_segs, wall_records, params, top_n=QA_TOP_N):
     }
 
 
+def apply_member_schedule(msp, layers, elements):
+    """[D3] 부재일람표를 복원해 member_name 을 가진 레코드에 단면을 부여한다.
+
+    일람표는 도면과 **다른 레이어**에 있는 TEXT 격자다. 여기서 읽은 폭·춤이
+    레이어 기본치수를 이긴다(레이어 값은 '이 레이어의 모든 부재' 용 폴백,
+    일람표는 부재별 실제값). 매칭 실패는 조용한 기본값이 아니라 needs_review.
+
+    일람표 레이어 자체는 형상이 아니므로 layer_map.csv 에서 `ignore` 로 두면
+    미매핑 경고 없이 깔끔하다(여기서는 msp 를 레이어명으로 직접 읽으므로
+    분류 결과와 무관하게 동작한다)."""
+    tables = _ST.extract_tables(msp, layers)
+    index, warns = _ST.build_member_index(tables)
+    st = _ST.join_members(elements, index, categories=list(elements))
+    out = {"layers": list(layers), "tables": len(tables), "members": len(index),
+           "matched": st["matched"], "unmatched": st["unmatched"],
+           "unparsed": st["unparsed"], "names_unmatched": st["names_unmatched"],
+           "warnings": warns + st["warnings"]}
+    if not tables:
+        out["warnings"].append(
+            f"일람표 레이어 {layers} 에서 표를 찾지 못했다 — 레이어명 오타이거나 "
+            "TEXT 가 아닌 형식(블록/OLE)일 수 있다")
+    elif st["unmatched"]:
+        out["warnings"].append(
+            f"일람표에 없는 부재 {st['unmatched']}개 — 치수 미상으로 needs_review 처리 "
+            f"(예: {', '.join(sorted(st['names_unmatched'])[:5])})")
+    return out
+
+
 def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAMS,
           use_ai=False, use_vision=False, api_key=None, ai_threshold=0.8,
-          ext_schedule=None):
+          ext_schedule=None, member_schedule=None):
     """DXF → geometry.json dict.
     use_ai: 텍스트 LLM 분류 + 고신뢰 자동적용. use_vision: Vision 폴백.
     ai_threshold: best_classification confidence 이 값 초과면 자동 카테고리 적용.
     ext_schedule: 외부 창호일람(Excel/별도 DXF에서 로드한 schedule 레코드 목록).
-        주어지면 DXF 내부 추출본과 병합(외부 우선) 후 벽 끊김 매칭에 사용."""
+        주어지면 DXF 내부 추출본과 병합(외부 우선) 후 벽 끊김 매칭에 사용.
+    member_schedule: 부재일람표 레이어명 목록(CLI --member-schedule).
+        layer_map 의 opts `schedule=<레이어>` 와 합집합으로 쓰인다."""
     doc = ezdxf.readfile(dxf_path)
     msp = doc.modelspace()
     scale = 1000.0 if doc.header.get("$INSUNITS", 0) == 6 else 1.0
@@ -1918,6 +1949,25 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         else:
             rec["z_base"] = elev  # [4b] 층 분리용 Z 기준(단층=0.0)
         result["elements"].setdefault(cat, []).append(rec)
+
+    # ── [D3] 부재일람표 조인 ────────────────────────────────────────────────
+    # from=dim 등으로 얻은 member_name 에 실제 단면(폭×춤)을 부여한다.
+    # 레이어 opts 의 schedule=<레이어> 또는 CLI --member-schedule 로 옵트인.
+    _sched_layers = list(member_schedule or [])
+    for _p, _c, _a in rules:
+        _sl = (_a.get("_opts") or {}).get("schedule")
+        if _sl and _sl not in _sched_layers:
+            _sched_layers.append(_sl)
+    if _sched_layers:
+        _sched = apply_member_schedule(msp, _sched_layers, result["elements"])
+        result["member_schedule"] = _sched
+        result["warnings"].extend(_sched.get("warnings", []))
+        print(f"  [일람표] {_sched['layers']} → 표 {_sched['tables']}개 "
+              f"부재 {_sched['members']}개 | 조인 {_sched['matched']}건, "
+              f"미매칭 {_sched['unmatched']}건")
+        if _sched["names_unmatched"]:
+            print("    [!] 일람표에 없는 부재명: " + ", ".join(
+                f"{k}({v})" for k, v in sorted(_sched["names_unmatched"].items())[:8]))
 
     # ── [Phase B] AI 분류 + 고신뢰 자동적용 (wall 후처리 전에 요소 합류) ─────────
     # 미매핑 레이어/블록 → 제안 생성 → (옵션)LLM/Vision → confidence>임계 자동 카테고리.
@@ -2129,8 +2179,10 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
     assign_zones(result["elements"], result["elements"].get("zone", []))
     # 미매핑 로그 (suggestions 는 위 [Phase B] 에서 이미 result["suggestions"] 설정)
     # AI 자동적용으로 해소된 항목은 suggestion 에 applied=True 표기됨.
+    # 일람표 레이어는 '미매핑' 이 아니다 — 형상이 아니라 표로 소비했다.
     _remain_layers = {k: v for k, v in unmapped.items()
-                      if not _is_applied(result.get("suggestions", []), k, "layer")}
+                      if not _is_applied(result.get("suggestions", []), k, "layer")
+                      and k not in _sched_layers}
     _remain_blocks = {k: v for k, v in unmapped_blocks.items()
                       if not _is_applied(result.get("suggestions", []), k, "block")}
     if _remain_layers:
@@ -2548,6 +2600,9 @@ def main():
                     help="별도 창호일람표 DXF에서 일람 추출해 평면 파싱에 병합")
     ap.add_argument("--schedule-out", default=None,
                     help="추출/병합된 창호일람을 Excel 양식(.xlsx)으로 저장")
+    ap.add_argument("--member-schedule", action="append", default=None, metavar="LAYER",
+                    help="부재일람표 레이어(반복 가능). 부재명→단면(폭×춤) 조인. "
+                         "layer_map 의 opts 'schedule=<레이어>' 와 동일 효과")
     args = ap.parse_args()
 
     if args.checklist:
@@ -2588,7 +2643,8 @@ def main():
     # use_ai/use_vision: parse() 내부에서 분류·자동적용(요소 합류 후 wall 후처리 보장)
     data = parse(args.dxf, rules, block_rules,
                  use_ai=args.llm, use_vision=args.vision,
-                 ai_threshold=args.ai_threshold, ext_schedule=_ext_sched)
+                 ai_threshold=args.ai_threshold, ext_schedule=_ext_sched,
+                 member_schedule=args.member_schedule)
 
     # 추출/병합된 창호일람을 Excel 양식으로 저장(검토·수정용)
     if args.schedule_out:

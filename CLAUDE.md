@@ -16,6 +16,9 @@
 | 파일 | 역할 |
 |------|------|
 | `dxf_parser.py` | DXF → geometry.json 파서 v2 |
+| `geom_contract.py` | **z 기준면 규약의 단일 출처.** 모든 소비자가 `z_range()` 만 호출한다. 폴리곤 감김 정규화 `ccw()` 포함. FreeCAD 의존 없음(단위테스트 가능) |
+| `verify.py` | **빌드 게이트.** `verify_geometry`(빌드 전) / `verify_build`(빌드 후). 검사 ID V001~V104. 실패 시 빌더가 마커를 출력하지 않아 산출물이 나가지 않는다 |
+| `schedule_table.py` | **부재일람표(MEMBER LIST) 복원.** TEXT 격자 → 표 → `{부재명: 단면}`. `layer_map` 의 `opts: schedule=<레이어>` 로 조인 |
 | `layer_map.csv` | 레이어명 정규식 → 카테고리·치수 매핑 |
 | `block_map.csv` | **블록(INSERT)명 정규식 → 카테고리·치수 매핑** (Phase 2) |
 | `freecad_builder.py` | geometry.json → FreeCAD .FCStd + .ifc |
@@ -42,6 +45,7 @@
     "wall":    [{"kind": "polyline", "closed": false, "points": [[x,y],[x,y]], "centerline": [[cx,cy],[cx,cy]], "width_detected": 200.0, "confidence": 0.92, "pairing": "paired", "needs_review": false, "overrides": {...}, "zone": 0}],
     "column":  [{"kind": "circle"|"polyline", "center":[x,y], "radius": r}  또는  {"kind":"polyline","closed":true,...}],
     "slab":    [{"kind": "polyline", "closed": true, "points": [...]}],
+    "beam":    [{"kind": "polyline", "points": [[x,y],[x,y]], "source": "dimension", "member_name": "RAG11B", "schedule_match": "ok", "section": {"name": "RAG11B", "size": "400x1800x25x25", "notation": "BxD", "b": 400.0, "h": 1800.0}, "overrides": {"width": 400.0, "thickness": 1800.0}}],
     "zone":    [{"kind": "polyline", "closed": true, "points": [...]}],
     "opening": [{"kind": "circle", "center": [...], "radius": r}],
     "pipe":    [{"kind": "polyline", "points": [...], "elevation": 2600.0, "diameter": 100.0}],
@@ -51,15 +55,68 @@
   },
   "blocks": {"inserts": 2, "unmapped": 0},
   "mep": {"pipe": 2, "duct": 1, "tray": 1, "equipment": 2},
+  "contract": {"version": 2, "z_datum": {"wall": "bottom", "slab": "top", "...": "..."}},
+  "floors": [{"z": 0.0, "label": "Level_1"}],
+  "ignored": {"배수판_벽체": 128},
+  "shadowed_layer_rules": [{"rule": "...", "category": "ignore", "shadowed_by": [...]}],
+  "tolerances_effective": {"defaults": {"pair_max": 500.0}, "per_layer": {"^00-보$": {"pair_max": 2500.0}}},
+  "member_schedule": {"layers": ["BEAM_SCHEDULE"], "tables": 8, "members": 77, "matched": 225, "unmatched": 0, "names_unmatched": {}},
   "warnings": ["미매핑 레이어: ..."]
 }
 ```
 
+### ★ z 기준면(datum) — 규약의 유일한 출처는 `geom_contract.py`
+**이 표를 코드에 다시 구현하지 말 것.** 소비자는 `geom_contract.z_range(cat, rec, params)` 만 호출한다.
+규약이 4곳에 흩어져 있다가 preview 가 슬래브를 '하단' 으로 읽어 보/슬래브가 한 두께 떠 보였고,
+그 증상을 원인 미상으로 두고 `z_base` 에 두께를 더하는 보정을 **데이터에** 넣어 다른 소비자까지 오염시켰다.
+
+| 카테고리 | 키 | 기준면 | 뜻 |
+|---|---|---|---|
+| wall / column / zone / opening / equipment | `z_base` | **하단** | 위로 `height` |
+| slab / **beam** | `z_base` | **상단** | 아래로 `thickness`. 구조도면이 주는 값이 FL(상단)이기 때문 |
+| pipe / duct / tray | `elevation` | **중심축** | 위아래로 절반씩. MEP 는 키 이름부터 다르다 — 개명하면 `cfd_export`·`boq_export` 가 깨진다 |
+
+실무 규약: **콘크리트 보 상단 = 슬래브 상단**, 춤은 슬래브 두께를 포함한다.
+(철골 거더는 반대로 **상단 = 데크 하단**.)
+
+폴리곤 감김도 같은 계약이다: `Arch.makeStructure` 는 **면 법선 방향으로** 압출하므로 CW 폴리곤은
+−Z 로 밀린다. 닫힌 폴리곤은 반드시 `geom_contract.ccw()` 를 통과시킬 것.
+
 ## layer_map.csv 컬럼
-`pattern,category,width,height,thickness`
-- `pattern`: 정규식 (re.search, 대소문자 무시)
-- `category`: `wall` | `column` | `slab` | `zone` | `opening`
+`pattern,category,width,height,thickness,opts`
+- `pattern`: 정규식 (re.search, 대소문자 무시). **선매칭 우선** — 좁은/제외 패턴을 넓은 패턴 위에 둘 것.
+  (`배수판_벽체` 는 `벽` 을 포함하므로 `WALL|벽|CON` 아래에 두면 영원히 가려진다. 파서가
+  `result["shadowed_layer_rules"]` 로 이런 규칙을 잡아낸다.)
+- `category`: `wall` | `column` | `slab` | `beam` | `zone` | `opening` | `pipe` | `duct` | `tray` |
+  `equipment` | `ignore`. **오타는 로드 시점에 `LayerMapError`** — 조용히 새 버킷이 생기지 않는다.
+  `ignore` 는 정식 카테고리다: 세고 버린다(`result["ignored"]`).
 - `width/height/thickness`: mm, 빈칸이면 params 기본값 사용
+- `opts`: `키=값;키=값` — 컬럼을 늘리는 대신 여기로 확장한다. **모르는 키는 오류**(오타난
+  허용치를 조용히 무시하지 않는다). 실제 적용값은 `result["tolerances_effective"]` 에 기록되어
+  산출물이 자기 튜닝을 스스로 말한다 — 몽키패치 방지 장치.
+
+| opts 키 | 뜻 |
+|---|---|
+| `pair_max` / `pair_min` | 이 레이어의 평행선 페어링 간격(mm). 보/거더 외곽선은 벽보다 훨씬 넓다(500~2500). 교차 레이어 쌍은 **두 값의 min** |
+| `from=dim` | 이 레이어의 **DIMENSION 을 부재 축선으로** 해석. 실무 구조도면은 부재를 치수선으로 긋고 텍스트를 부재명으로 덮어쓴다. 끝점은 `defpoint2`(13)→**`defpoint3`(14)** — `defpoint`(10)는 치수선이 그려질 위치일 뿐 측정점이 아니다 |
+| `member_re` | `from=dim` 에서 부재명으로 인정할 정규식. 일반 가드로는 부재명(`RAB1D`)과 철근상세 기호(`Lt`,`ta`)를 구분할 수 없다 |
+| `schedule=<레이어>` | 부재일람표 레이어. `member_name` → 실제 폭×춤 조인 |
+
+```
+# 보/거더: 외곽선은 넓게 페어링, 축선은 DIMENSION, 단면은 일람표에서
+^(AU|STEEL)_(BEAM|GIRDER)$,beam,,,,pair_max=1800;from=dim;schedule=BEAM_SCHEDULE
+^BEAM_SCHEDULE$,ignore,,,,
+```
+
+### 부재일람표 조인 (`schedule=`)
+도면은 부재의 **위치**만, 일람표는 **단면**만 준다(`RAG11B` → `400x1800x25x25`).
+`schedule_table.py` 가 TEXT 격자를 표로 복원해 이어붙인다.
+- 표기 관례가 표마다 다르다: `H 800x300x14/26` = **춤×폭**, `350x1100x8x8` = **폭×춤**.
+  뒤집으면 납작한 보가 나오므로 결과에 `notation` 을 남긴다. 폭>춤이면 경고.
+- 한 레이어에 표가 여러 개다(실측 `BEAM_SCHEDULE`: TEXT 291개 = 표 8개). 제목 행 기준으로 분리한다.
+- TEXT 는 `align_point` 가 진짜 앵커다(중앙정렬). `insert` 로 열을 묶으면 문자열 길이에 따라 섞인다.
+- **매칭 실패는 기본값으로 때우지 않는다** — `needs_review` + 경고. 일람표가 `from=dim` 의
+  2차 오용 가드로도 작동한다(상세도 기호는 일람표에 없으므로 전부 미매칭으로 드러난다).
 
 ## block_map.csv 컬럼 (Phase 2)
 layer_map.csv와 **동일 형식**이나 `pattern`이 **블록(INSERT)명**에 매칭.
@@ -90,6 +147,12 @@ python dxf_parser.py sample_plan.dxf --scan
 ### 4. 파싱
 ```
 python dxf_parser.py sample_plan.dxf -m layer_map.csv -b block_map.csv -o geometry.json
+
+# 부재일람표를 CSV 대신 CLI 로 지정(= opts 의 schedule= 과 동일 효과, 반복 가능)
+python dxf_parser.py plan.dxf -m layer_map.csv --member-schedule BEAM_SCHEDULE -o geometry.json
+
+# 일람표만 따로 확인 (표 구조·단면 파싱 점검용)
+python schedule_table.py plan.dxf --layer BEAM_SCHEDULE
 ```
 
 ### 5. FreeCAD BIM 빌드 (freecadcmd 필요)
@@ -194,7 +257,9 @@ MEP는 "추출은 곧, 3D 빌드는 나중"으로 분할(D 합의). 스키마 �
 - [x] **[4b] 다층 Z 오프셋** — **완료(2026-05-29)**. dxf_parser: structural 요소에 `z_base` 추가
       (`_entity_elevation` 재활용), `detect_wall_pairs`/`merge_collinear_walls`/`snap_wall_corners`에
       z_base 전파. parse() 내 floors 감지: z_base 값 100mm tol 양자화 → `result["floors"]=[{z,label}]`.
-      freecad_builder: `build_walls/columns/slabs`에 `Placement.Base.z=z_base` 적용.
+      freecad_builder: `build_walls/columns/slabs`가 `geom_contract.z_range()` 로 (z0,z1)을 받아
+      `Placement.Base.z=z0` 적용. ★ 슬래브/보는 `z_base`가 **상단**이라 z0 = z_base − thickness다
+      (종전 이 줄이 "z_base 적용"으로만 적혀 있어 preview 가 하단으로 오해한 것이 D6 사고).
       main()에서 `floors_info`로 루프 → `Arch.makeFloor` per level + `fl.Placement.Base.z=fz`.
       단층 폴백: floors 없으면 Level_1(z=0). 검증: 3샘플 z_base=0.0·floors=Level_1 OK, 다층 합성 2층 감지 OK.
 - [x] **[4c] zone → Arch.makeSpace** — **완료(2026-05-29)**. `build_spaces()`: zone 닫힌폴리 →
@@ -243,3 +308,26 @@ MEP는 "추출은 곧, 3D 빌드는 나중"으로 분할(D 합의). 스키마 �
       GUI: "AI auto-classify"+"Vision fallback" 체크박스, 자동적용 로그.
 - 검증: 샘플4종 회귀불변, 실무도면 walls=921/cols=76/openings=307(스키마 완비),
       FreeCAD 빌드 OK(void=272, FCStd 3.37MB+IFC 587KB). AI/Vision 라이브 테스트는 ANTHROPIC_API_KEY 필요.
+
+## 개선 작업 (2026-09, 실무 다층 프로젝트 회고 기반)
+"잘못된 결과물이 그냥 나온다 / 같은 설명을 반복한다 / 결과를 믿기 어렵다 / 일회성 작업이 많다"
+— 이 4가지가 **구조적으로** 재발하지 않게 만드는 것이 목표. 상세 계획은 plan 파일 참조.
+
+- [x] **Phase 1 — 규약 중앙화**: `geom_contract.py` 신설. z 기준면·감김 정규화가 존재하는 유일한 장소.
+      `preview.py` 는 import 가 불가능하므로 `js_constants()` 로 **주입**받는다(재구현 금지).
+- [x] **Phase 4(일부) — 빌드 게이트**: `verify.py` + 마커 withhold 방식.
+      검사 실패 시 빌더가 `FCSTD_DST`/`IFC_DST` 마커를 **출력하지 않는다** → GUI·MCP 가 파일을
+      옮기지 못한다. 소비자 코드 변경 없이 fail-closed. 탈출구 `MEP_ALLOW_ERRORS=1` 은
+      `verify_status="failed_override"` 를 산출물에 찍는다.
+- [x] **D1 — layer_map `opts` 컬럼**: 레이어별 페어링 허용치 등. 몽키패치 제거,
+      `tolerances_effective` 로 자기기술.
+- [x] **D2 — `from=dim`**: DIMENSION 을 부재 축선으로(옵트인). 후처리 3종(join/pair/merge) 우회.
+- [x] **D3 — `schedule=`**: 부재일람표 조인. `schedule_table.py`.
+      실측 검증: 표 8개·부재 77개 → DIMENSION 부재 225개 전부 조인, 미매칭 0.
+- [ ] **D3b — `beam` 정식 빌드**: `build_beams` 로 중심선을 따라 b×h 스윕, `IfcType="Beam"`.
+      ⚠ 지뢰: 얇고 긴 폴리곤을 `IfcType="Slab"` 로 태그하면 IFC exporter 가 **조용히 누락**시킨다(30/30 재현).
+      현재 보는 `slab + overrides.ifc_type=Beam` 경로로 나가고 있어 그 지뢰 위에 서 있다.
+- [ ] **Phase 3 — `stack_build.py` + `stack.json`**: 선언적 층 조립(일회성 스크립트 제거).
+      offset 해결기에 가드 3개(모호성 마진 / 증거 하한 ≥3축 / 하부층 bbox 포함).
+- [ ] **Phase 5 — 스킬** `add-floor` / `verify-model` / `map-layers`.
+      ★ 스킬에 파이썬 스크립트를 넣지 않는다 — 넣고 싶어지면 그건 모듈이 빠졌다는 신호다.

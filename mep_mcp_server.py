@@ -251,7 +251,8 @@ def change_category(old_category: str, index: int, new_category: str,
 
 @mcp.tool()
 def apply_layer_rule(layer_pattern: str, category: str,
-                     width: float = 0, height: float = 0, thickness: float = 0) -> str:
+                     width: float = 0, height: float = 0, thickness: float = 0,
+                     opts: str = "") -> str:
     """
     Step 3c (권장): layer_map.csv 에 분류 규칙을 추가한다. 원천 수정이라 재파싱 시
     결정론적으로 반영된다(per-item change_category 보다 견고).
@@ -263,6 +264,13 @@ def apply_layer_rule(layer_pattern: str, category: str,
         category: wall|column|slab|beam|zone|opening|pipe|duct|tray|equipment|ignore.
                   'ignore' = 도면에는 있으나 모델에 넣지 않을 레이어(세고 버림).
         width/height/thickness: mm (0이면 비움 = 기본값 사용).
+        opts: 'key=value;key=value' 레이어별 튜닝. 사용 가능한 키:
+              pair_max/pair_min  — 이 레이어의 평행선 페어링 간격(mm).
+                                   보/거더 외곽선은 벽보다 넓다(500~2500).
+              from=dim           — DIMENSION 을 부재 축선으로 해석(구조도 관행).
+              member_re          — from=dim 에서 부재명으로 인정할 정규식.
+              schedule=<레이어>   — 부재일람표 레이어. 부재명 → 실제 폭×춤 조인.
+              모르는 키는 여기서 거절한다(다음 파싱까지 미루지 않는다).
 
     주의: 규칙은 **선매칭 우선**이다. 좁은/제외 규칙은 넓은 규칙 위에 있어야 한다.
     (예: '배수판_벽체'는 '벽'을 포함하므로 'WALL|벽|CON' 아래에 두면 영원히 가려진다.)
@@ -274,12 +282,17 @@ def apply_layer_rule(layer_pattern: str, category: str,
         return f"Error: category must be one of {valid}."
     if not os.path.exists(LAYER_MAP):
         return f"Error: layer_map.csv not found at {LAYER_MAP}."
+    if opts:
+        try:
+            _P._parse_opts(opts, LAYER_MAP, 0)
+        except Exception as e:
+            return f"Error: opts 형식 오류 — {e}"
     w = str(width) if width else ""
     h = str(height) if height else ""
     t = str(thickness) if thickness else ""
     try:
         with open(LAYER_MAP, "a", encoding="utf-8") as f:
-            f.write(f"\n{layer_pattern},{category},{w},{h},{t}")
+            f.write(f"\n{layer_pattern},{category},{w},{h},{t},{opts}")
         return (f"Added rule '{layer_pattern}' -> {category} to layer_map.csv. "
                 "Re-run parse_dxf to apply.")
     except Exception as e:
