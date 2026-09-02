@@ -14,6 +14,7 @@ geometry.json 을 읽어 FreeCAD Arch(BIM) 객체를 생성하고
 """
 import json
 import os
+import shutil
 import sys
 
 # Windows 한글 출력 크래시 방지
@@ -1010,6 +1011,7 @@ def _main_impl():
         except Exception:
             continue
     _ifc_ok = False
+    _ifc_withheld = False       # 게이트가 IFC 를 보류했는가 — 이동 대상에서 제외
     try:
         if _exporter is None:
             raise ImportError("IFC exporter 모듈을 찾지 못함")
@@ -1032,6 +1034,7 @@ def _main_impl():
             print("  [게이트] IFC 검사 실패 — IFC 를 내보내지 않는다:")
             print(_rep2.text())
             print(f"IFC_FAILED:{_stats_path}", flush=True)
+            _ifc_withheld = True
         else:
             if _rep2 is not None:
                 build_stats["verify_ifc"] = _rep2.to_dict()
@@ -1044,14 +1047,41 @@ def _main_impl():
         build_stats.setdefault("verify", _rep.to_dict())
     _write_json(_stats_path, build_stats)
 
+    # ── 임시파일 → 최종경로 이동 ────────────────────────────────────────────
+    # 임시 ASCII 경로는 FreeCAD C++ saveAs 가 한글/공백 경로에서 조용히 실패하기
+    # 때문이고, 파이썬 이동은 그 제약이 없다. 종전엔 이동을 호출자(GUI/MCP)에만
+    # 맡겨서, CLAUDE.md 가 안내하는 freecadcmd 직접 실행에서는 "-> out.FCStd" 를
+    # 출력하고도 그 경로에 아무것도 없었다 — 성공을 보고하고 산출물이 없는 사례.
+    # 두 소비자 모두 이동 전에 os.path.exists(TMP) 를 확인하므로 여기서 먼저
+    # 옮겨도 안전하다(그쪽은 no-op 이 되고 DST 에서 파일을 찾는다).
+    def _deliver(tmp, dst):
+        if not (tmp and dst and os.path.exists(tmp)):
+            return None
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(dst)) or ".", exist_ok=True)
+            shutil.move(tmp, dst)
+            return dst
+        except Exception as _me:
+            print(f"  [warn] 최종경로 이동 실패({dst}): {_me} — 임시본 유지: {tmp}")
+            return None
+
+    _out_fcstd = _deliver(_tmp_fcstd if _saved_fcstd else None, os.path.abspath(fcstd))
+    _out_ifc = _deliver(_tmp_ifc if (_ifc_ok and not _ifc_withheld) else None,
+                        os.path.abspath(ifc))
+
     print(f"빌드 완료: floors={len(floor_containers)} walls={len(walls)}"
           f" columns={len(cols)} slabs={len(slabs)} spaces={len(spaces)}"
           f" mep={len(mep_objs)}"
           + (f" openings_void={n_voids}" if n_voids else "")
           + (f" clashes={len(clashes)}" if clashes else ""))
-    print(f"  -> {fcstd}")
-    print(f"  -> {ifc}")
-    print(f"  -> {_stats_path}")
+    # 실제로 그 경로에 있는 것만 산출물로 보고한다.
+    for _p in (_out_fcstd, _out_ifc, _stats_path):
+        if _p:
+            print(f"  -> {_p}")
+    if not _out_fcstd:
+        print("  [!] FCStd 산출물 없음 — 위 로그의 게이트/저장 실패 사유를 확인할 것")
+    elif not _out_ifc:
+        print("  [!] IFC 산출물 없음(게이트 보류 또는 export 실패)")
     if n_err:
         print(f"  [warn] 형상 검증 실패 객체 {n_err}개")
 
