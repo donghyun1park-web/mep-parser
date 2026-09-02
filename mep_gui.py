@@ -770,17 +770,50 @@ class App:
         import shutil
         # stdout 파싱: FCSTD_TMP/FCSTD_DST 마커로 임시파일 → 최종경로 이동
         fcstd_tmp = fcstd_dst = ifc_tmp = ifc_dst = None
+        build_failed = ifc_failed = None
+
+        def _marker(line, tag):
+            """FreeCAD 진행률 표시가 줄 앞에 붙을 수 있어 startswith 로는 놓친다.
+            (mep_mcp_server 는 처음부터 find() 를 썼는데 GUI 만 startswith 였다.)"""
+            i = line.find(tag + ":")
+            return line[i + len(tag) + 1:].strip() if i >= 0 else None
+
         for line in (r.stdout or "").splitlines():
-            if line.startswith("FCSTD_TMP:"):
-                fcstd_tmp = line[len("FCSTD_TMP:"):].strip()
-            elif line.startswith("FCSTD_DST:"):
-                fcstd_dst = line[len("FCSTD_DST:"):].strip()
-            elif line.startswith("IFC_TMP:"):
-                ifc_tmp = line[len("IFC_TMP:"):].strip()
-            elif line.startswith("IFC_DST:"):
-                ifc_dst = line[len("IFC_DST:"):].strip()
-            else:
+            hit = False
+            for tag, setter in (("FCSTD_TMP", "fcstd_tmp"), ("FCSTD_DST", "fcstd_dst"),
+                                ("IFC_TMP", "ifc_tmp"), ("IFC_DST", "ifc_dst"),
+                                ("BUILD_FAILED", "build_failed"), ("IFC_FAILED", "ifc_failed")):
+                v = _marker(line, tag)
+                if v:
+                    if setter == "fcstd_tmp": fcstd_tmp = v
+                    elif setter == "fcstd_dst": fcstd_dst = v
+                    elif setter == "ifc_tmp": ifc_tmp = v
+                    elif setter == "ifc_dst": ifc_dst = v
+                    elif setter == "build_failed": build_failed = v
+                    elif setter == "ifc_failed": ifc_failed = v
+                    hit = True
+                    break
+            if not hit:
                 self._log("  " + line)
+
+        # ── 게이트 실패는 크게 알린다 ────────────────────────────────────────
+        if build_failed:
+            self._log("")
+            self._log("  ██ 빌드 검사 실패 — 산출물이 생성되지 않았습니다 ██")
+            self._log(f"  검사 리포트: {build_failed}")
+            self._log("  (검사를 무시하고 강제 생성하려면 환경변수 MEP_ALLOW_ERRORS=1)")
+            try:
+                messagebox.showerror("빌드 검사 실패",
+                                     "모델에 문제가 있어 산출물을 생성하지 않았습니다.\n"
+                                     "로그의 검사 결과를 확인하세요.\n\n"
+                                     f"리포트: {build_failed}")
+            except Exception:
+                pass
+            return
+        if ifc_failed:
+            self._log("")
+            self._log("  ██ IFC 검사 실패 — FCStd 만 생성되고 IFC 는 보류됩니다 ██")
+            self._log(f"  검사 리포트: {ifc_failed}")
 
         # FCStd 이동
         if fcstd_tmp and fcstd_dst and os.path.exists(fcstd_tmp):

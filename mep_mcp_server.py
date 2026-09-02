@@ -364,6 +364,15 @@ def build_freecad(out_name: str, json_path: str = DEFAULT_JSON) -> str:
     if not os.path.isabs(out_name):
         out_name = os.path.join(os.path.dirname(os.path.abspath(json_path)), out_name)
 
+    # ★ 이전 빌드가 남긴 파일이 있으면 '실패한 빌드'가 성공으로 보고된다
+    #   (아래 성공 판정이 os.path.exists 이므로). 실행 전에 목적지를 치운다.
+    for _stale in (out_name + ".FCStd", out_name + ".ifc"):
+        try:
+            if os.path.exists(_stale):
+                os.remove(_stale)
+        except Exception:
+            pass
+
     env = dict(os.environ, MEP_GEOMETRY=json_path, MEP_OUT=out_name,
                PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
     success, output = _run_cmd([fc, os.path.join(HERE, "freecad_builder.py")], env=env)
@@ -372,10 +381,30 @@ def build_freecad(out_name: str, json_path: str = DEFAULT_JSON) -> str:
     # FreeCAD 진행바(개행 없는 '(75%')가 마커 앞에 붙을 수 있어 startswith 대신 find 사용.
     moves = {}
     for line in output.splitlines():
-        for tag in ("FCSTD_TMP", "FCSTD_DST", "IFC_TMP", "IFC_DST"):
+        for tag in ("FCSTD_TMP", "FCSTD_DST", "IFC_TMP", "IFC_DST",
+                    "BUILD_FAILED", "IFC_FAILED"):
             idx = line.find(tag + ":")
             if idx >= 0:
                 moves[tag] = line[idx + len(tag) + 1:].strip()
+
+    # ── 게이트 실패: 산출물이 없는 게 정상이다. 사유를 그대로 올린다 ──────────
+    if moves.get("BUILD_FAILED"):
+        rep = ""
+        try:
+            with open(moves["BUILD_FAILED"], "r", encoding="utf-8") as f:
+                d = json.load(f)
+            v = d.get("verify") or {}
+            rep = "\n".join("  " + f.get("message", "")
+                            for f in (v.get("findings") or []) if f.get("severity") == "error")
+        except Exception:
+            pass
+        return ("Build BLOCKED by verification gate — no output was written.\n"
+                f"Report: {moves['BUILD_FAILED']}\n"
+                f"{rep}\n\n"
+                "Fix the geometry.json (usually: a level's z in floors[] doesn't match "
+                "the records' z_base) and re-run. To override: MEP_ALLOW_ERRORS=1.\n\n"
+                f"Log tail:\n{output[-1200:]}")
+
     moved = []
     try:
         if moves.get("FCSTD_TMP") and moves.get("FCSTD_DST") and os.path.exists(moves["FCSTD_TMP"]):
@@ -393,7 +422,11 @@ def build_freecad(out_name: str, json_path: str = DEFAULT_JSON) -> str:
     if not success and not ok:
         return f"Failed to build:\n{output[-2000:]}"
     status = "OK" if ok else "FAILED (FCStd missing)"
-    return (f"Build {status}.\nSaved: {', '.join(moved) if moved else '(none moved)'}\n\n"
+    note = ""
+    if moves.get("IFC_FAILED"):
+        note = ("\n[!] IFC was withheld by the verification gate (FCStd is fine).\n"
+                f"    Report: {moves['IFC_FAILED']}\n")
+    return (f"Build {status}.{note}\nSaved: {', '.join(moved) if moved else '(none moved)'}\n\n"
             f"Log tail:\n{output[-1200:]}")
 
 

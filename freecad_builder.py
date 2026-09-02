@@ -789,27 +789,79 @@ def _main_impl():
     print("[6/8] 층 컨테이너 생성")
     _FLOOR_TOL  = 100.0
     floors_info = data.get("floors") or [{"z": 0.0, "label": "Level_1"}]
+    _fz_list = [float(f.get("z", 0.0)) for f in floors_info]
 
-    def _at_floor(obj_list, src_list, fz):
-        return [obj for obj, el_r in zip(obj_list, src_list)
-                if abs(float(el_r.get("z_base", 0.0)) - fz) < _FLOOR_TOL]
+    # ★ 어느 Floor 에도 못 들어간 객체는 Arch.makeBuilding 트리 밖에 남아
+    #   export([building]) 에서 조용히 빠진다(보 135개가 IfcBeam:0 이 된 원인).
+    #   두 Floor 에 동시 매칭되면 중복 삽입된다. 둘 다 세어서 게이트로 넘긴다.
+    _hits = {}          # id(obj) -> 매칭된 층 인덱스 목록
+    _meta = {}          # id(obj) -> (라벨, z_base)
+
+    def _at_floor(obj_list, src_list, fz, fi):
+        out = []
+        for obj, el_r in zip(obj_list, src_list):
+            zb = float(el_r.get("z_base", el_r.get("elevation", 0.0)) or 0.0)
+            _meta.setdefault(id(obj), (getattr(obj, "Label", "?"), zb))
+            _hits.setdefault(id(obj), [])
+            if abs(zb - fz) < _FLOOR_TOL:
+                _hits[id(obj)].append(fi)
+                out.append(obj)
+        return out
+
+    def _in_story(obj_list, src_list, fi):
+        """MEP 전용 배정. 배관 elevation(예: 2600)이 층 z 와 '일치' 할 리 없다 —
+        층 안에서 도는 설비이므로 elevation 을 포함하는 층(가장 큰 z <= elev)에 넣는다.
+        정확 매칭을 요구하면 MEP 는 영원히 고아가 되어 IFC 에서 빠진다."""
+        out = []
+        for obj, el_r in zip(obj_list, src_list):
+            elev = float(el_r.get("elevation", 0.0) or 0.0)
+            _meta.setdefault(id(obj), (getattr(obj, "Label", "?"), elev))
+            _hits.setdefault(id(obj), [])
+            below = [k for k, z in enumerate(_fz_list) if z <= elev + _FLOOR_TOL]
+            owner = max(below, key=lambda k: _fz_list[k]) if below else \
+                min(range(len(_fz_list)), key=lambda k: abs(_fz_list[k] - elev))
+            if owner == fi:
+                _hits[id(obj)].append(fi)
+                out.append(obj)
+        return out
+
+    # MEP 도 그룹핑 대상에 넣는다 — 지금까지 src_els 가 없어 구조적으로 제외돼
+    # IFC 에서 항상 누락됐다. elevation 을 z_base 자리에 넣어 동일하게 다룬다.
+    mep_src = []
+    for _cat in ("pipe", "duct", "tray", "equipment"):
+        for _r in el.get(_cat, []):
+            mep_src.append(_r)
+    if len(mep_src) != len(mep_objs):
+        mep_src = [{"elevation": 0.0}] * len(mep_objs)   # 개수 불일치 시 안전 폴백
 
     floor_containers = []
     for fi, finfo in enumerate(floors_info):
         fz    = float(finfo.get("z", 0.0))
         flbl  = finfo.get("label", f"Level_{fi+1}")
-        fw  = _at_floor(walls,  wall_src,  fz)
-        fc  = _at_floor(cols,   col_src,   fz)
-        fs  = _at_floor(slabs,  slab_src,  fz)
-        fsp = _at_floor(spaces, space_src, fz)
+        fw  = _at_floor(walls,   wall_src,  fz, fi)
+        fc  = _at_floor(cols,    col_src,   fz, fi)
+        fs  = _at_floor(slabs,   slab_src,  fz, fi)
+        fsp = _at_floor(spaces,  space_src, fz, fi)
+        fm  = _in_story(mep_objs, mep_src, fi)
         try:
-            fl = Arch.makeFloor(fw + fc + fs + fsp)
+            fl = Arch.makeFloor(fw + fc + fs + fsp + fm)
             fl.Label = flbl
             fl.Placement.Base.z = fz
             floor_containers.append(fl)
-            print(f"  {flbl}: walls={len(fw)} cols={len(fc)}")
+            print(f"  {flbl}: walls={len(fw)} cols={len(fc)} slabs={len(fs)}"
+                  + (f" mep={len(fm)}" if fm else ""))
         except Exception as _fe:
             print(f"  [warn] makeFloor 실패({flbl}): {_fe}")
+
+    _orphans = [_meta[k] for k, v in _hits.items() if not v]
+    _dups    = [_meta[k] for k, v in _hits.items() if len(v) > 1]
+    if _orphans:
+        print(f"  [!] 어느 층에도 속하지 않은 객체 {len(_orphans)}개 — IFC 에서 누락된다")
+        print(f"      floors z = {[round(z) for z in _fz_list]}")
+        for lbl, zb in _orphans[:5]:
+            print(f"      {lbl}  z_base={zb:.0f}")
+    if _dups:
+        print(f"  [!] 두 층에 중복 삽입된 객체 {len(_dups)}개")
     try:
         building = Arch.makeBuilding(floor_containers)
         building.Label = "Building"
@@ -846,15 +898,91 @@ def _main_impl():
     if _n_hidden:
         print(f"  보조 형상 {_n_hidden}개 숨김(축선/베이스)")
 
-    # ── saveAs: ASCII 임시경로 저장 → GUI Python이 최종경로로 이동 ────────────
-    # FreeCAD C++ saveAs 는 한글/공백 경로에서 조용히 실패하거나 빈 파일 생성.
-    # 해결책: builder는 항상 ASCII 경로인 스크립트 디렉토리에 저장하고,
-    #         stdout 으로 임시경로를 알려준다 → GUI가 shutil.move 로 이동.
+    # ── 게이트 준비: 형상검증은 저장 '전' 에 한다 ────────────────────────────
+    # 종전에는 saveAs/IFC export 이후에 세고 경고만 했다 — 깨진 형상이 이미
+    # 디스크에 쓰인 뒤였고 아무도 그 경고에 반응하지 않았다.
+    try:
+        n_err = sum(1 for o in doc.Objects if _shape_ok(o) is False)
+    except Exception:
+        n_err = 0
+
+    _bbox = None
+    try:
+        import FreeCAD as _A
+        _bb = None
+        for _o in doc.Objects:
+            _s = getattr(_o, "Shape", None)
+            if _s is None or _s.isNull():
+                continue
+            b = _s.BoundBox
+            if b.XLength > 1e9:
+                continue
+            _bb = b if _bb is None else _bb.united(b)
+        if _bb is not None:
+            _bbox = [_bb.XMin, _bb.YMin, _bb.ZMin, _bb.XMax, _bb.YMax, _bb.ZMax]
+    except Exception:
+        pass
+
+    # intent 는 원본 카테고리 수가 아니라 **실제 부여된 IfcType** 으로 센다.
+    # 닫힌 폴리선 벽은 Arch.makeStructure 라 IfcWall 이 아니고, 보는 slab 버킷에
+    # 있지만 IfcType=Beam 이다. 원본 수로 세면 정상 빌드가 불일치로 걸린다.
+    _by_ifctype = {}
+    for _o in (walls + cols + slabs):
+        _t = str(getattr(_o, "IfcType", "") or "").strip().lower().replace(" ", "")
+        if _t:
+            _by_ifctype[_t] = _by_ifctype.get(_t, 0) + 1
+    build_stats = {
+        "intent": {"wall": _by_ifctype.get("wall", 0),
+                   "column": _by_ifctype.get("column", 0),
+                   "slab": _by_ifctype.get("slab", 0),
+                   "beam": _by_ifctype.get("beam", 0)},
+        "ifctype_counts": _by_ifctype,
+        "built": {"walls": len(walls), "columns": len(cols), "slabs": len(slabs),
+                  "spaces": len(spaces), "mep": len(mep_objs),
+                  "floors": len(floor_containers)},
+        "floor_orphans": len(_orphans), "floor_dups": len(_dups),
+        "floor_orphan_detail": [{"label": l, "z_base": z} for l, z in _orphans[:20]],
+        "invalid_shapes": n_err,
+        "bbox": _bbox,
+        "openings_void": n_voids, "opening_leaves": n_leaf,
+        "clashes": [{"struct": c.get("struct"), "mep": c.get("mep"),
+                     "volume_mm3": c.get("volume_mm3")} for c in (clashes or [])],
+    }
+
+    # ── 게이트 ①: 저장 전 검사 ───────────────────────────────────────────────
+    # 실패하면 마커를 출력하지 않는다. GUI(mep_gui._build_done)와 MCP(build_freecad)는
+    # 둘 다 FCSTD_DST 마커가 있어야만 파일을 옮기므로, 마커를 withhold 하는 것만으로
+    # 소비자 코드 변경 없이 fail-closed 가 된다.
+    _allow = os.environ.get("MEP_ALLOW_ERRORS", "").strip() not in ("", "0", "false")
+    _rep = None
+    try:
+        import verify as _V
+        _rep = _V.verify_build(data, build_stats, None)
+    except Exception as _ve:
+        print(f"  [warn] 검증 모듈 로드 실패(게이트 미작동): {_ve}")
+
     print("[8/8] 저장")
-    import shutil as _shutil
     _HERE_B = os.path.dirname(os.path.abspath(__file__))
-    _tmp_fcstd = os.path.join(_HERE_B, "_mep_tmp_out.FCStd")
-    _tmp_ifc   = os.path.join(_HERE_B, "_mep_tmp_out.ifc")
+    _stats_path = os.path.abspath(f"{out_base}.build.json")
+    if _rep is not None and _rep.failed and not _allow:
+        build_stats["verify"] = _rep.to_dict()
+        _write_json(_stats_path, build_stats)
+        print("  [게이트] 저장 전 검사 실패 — 산출물을 내보내지 않는다:")
+        print(_rep.text())
+        print(f"BUILD_FAILED:{_stats_path}", flush=True)
+        print("  (검사를 무시하고 강제 저장하려면 MEP_ALLOW_ERRORS=1)")
+        sys.exit(2)
+    if _rep is not None and _rep.failed and _allow:
+        print("  [게이트] 검사 실패했으나 MEP_ALLOW_ERRORS=1 로 강제 진행:")
+        print(_rep.text())
+        build_stats["verify_status"] = "failed_override"
+
+    # ── saveAs: ASCII 임시경로 저장 → 호출자가 최종경로로 이동 ────────────────
+    # FreeCAD C++ saveAs 는 한글/공백 경로에서 조용히 실패하거나 빈 파일 생성.
+    # 임시파일명에 pid+시각을 넣어 동시 빌드 충돌을 막는다.
+    _tag = f"{os.getpid()}.{int(_time.time())}"
+    _tmp_fcstd = os.path.join(_HERE_B, f"_mep_tmp_out.{_tag}.FCStd")
+    _tmp_ifc   = os.path.join(_HERE_B, f"_mep_tmp_out.{_tag}.ifc")
     print(f"  saveAs → {_tmp_fcstd}")
     _saved_fcstd = False
     try:
@@ -866,7 +994,6 @@ def _main_impl():
         import traceback as _tb2; _tb2.print_exc()
 
     if _saved_fcstd:
-        # GUI 가 이 마커를 읽어 파일을 이동시킴. flush: 이후 크래시에도 마커 전달 보장.
         print(f"FCSTD_TMP:{_tmp_fcstd}", flush=True)
         print(f"FCSTD_DST:{os.path.abspath(fcstd)}", flush=True)
     else:
@@ -882,21 +1009,40 @@ def _main_impl():
                 break
         except Exception:
             continue
+    _ifc_ok = False
     try:
         if _exporter is None:
             raise ImportError("IFC exporter 모듈을 찾지 못함")
         _exporter.export([building], _tmp_ifc)
-        if os.path.exists(_tmp_ifc):
-            print(f"IFC_TMP:{_tmp_ifc}")
-            print(f"IFC_DST:{os.path.abspath(ifc)}")
+        _ifc_ok = os.path.exists(_tmp_ifc)
     except Exception as e:
-        print("[warn] IFC export 실패:", e)
+        print("[warn] IFC export 실패:", e, flush=True)
 
-    try:
-        n_err = sum(1 for o in doc.Objects
-                    if _shape_ok(o) is False)
-    except Exception:
-        n_err = 0
+    # ── 게이트 ②: IFC 는 별도 게이팅 ────────────────────────────────────────
+    # 전부-아니면-전무보다 낫다. 멀쩡한 FCStd 는 남기고 IFC 만 사유와 함께 보류한다.
+    if _ifc_ok:
+        _rep2 = None
+        try:
+            import verify as _V2
+            _rep2 = _V2.verify_build(data, build_stats, _tmp_ifc)
+        except Exception:
+            pass
+        if _rep2 is not None and _rep2.failed and not _allow:
+            build_stats["verify_ifc"] = _rep2.to_dict()
+            print("  [게이트] IFC 검사 실패 — IFC 를 내보내지 않는다:")
+            print(_rep2.text())
+            print(f"IFC_FAILED:{_stats_path}", flush=True)
+        else:
+            if _rep2 is not None:
+                build_stats["verify_ifc"] = _rep2.to_dict()
+                if _rep2.failed:
+                    print("  [게이트] IFC 검사 실패했으나 MEP_ALLOW_ERRORS=1 로 진행")
+            print(f"IFC_TMP:{_tmp_ifc}", flush=True)
+            print(f"IFC_DST:{os.path.abspath(ifc)}", flush=True)
+
+    if _rep is not None:
+        build_stats.setdefault("verify", _rep.to_dict())
+    _write_json(_stats_path, build_stats)
 
     print(f"빌드 완료: floors={len(floor_containers)} walls={len(walls)}"
           f" columns={len(cols)} slabs={len(slabs)} spaces={len(spaces)}"
@@ -905,8 +1051,20 @@ def _main_impl():
           + (f" clashes={len(clashes)}" if clashes else ""))
     print(f"  -> {fcstd}")
     print(f"  -> {ifc}")
+    print(f"  -> {_stats_path}")
     if n_err:
-        print(f"  [warn] 형상 검증 실패 객체 {n_err}개 (자가수정 루프 대상)")
+        print(f"  [warn] 형상 검증 실패 객체 {n_err}개")
+
+
+def _write_json(path, obj):
+    try:
+        d = os.path.dirname(path)
+        if d and not os.path.isdir(d):
+            os.makedirs(d, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=1)
+    except Exception as e:
+        print(f"  [warn] build.json 저장 실패: {e}")
 
 
 def _shape_ok(o):
