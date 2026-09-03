@@ -10,10 +10,14 @@ cd /d "%~dp0"
 
 REM Python 3.11 우선, 없으면 기본 python
 py -3.11 -V >nul 2>&1 && (set "PY=py -3.11") || (set "PY=python")
-echo [1/2] 빌드 의존성 설치 (%PY%)
+echo [1/3] 빌드 의존성 설치 (%PY%)
 %PY% -m pip install --upgrade ezdxf shapely pyinstaller || goto :err
 
-echo [2/2] PyInstaller 빌드
+REM 깨진 .exe 를 만들지 않는다 — CI 없이 이 한 줄로 같은 효과를 낸다.
+echo [2/3] 테스트
+%PY% testsun_all.py || goto :testerr
+
+echo [3/3] PyInstaller 빌드
 %PY% -m PyInstaller mep_parser.spec --noconfirm || goto :err
 
 echo.
@@ -22,6 +26,11 @@ echo  빌드 완료: dist\MEP-Parser.exe
 echo  스모크 테스트:  dist\MEP-Parser.exe --selftest
 echo ============================================================
 goto :eof
+
+:testerr
+echo.
+echo [중단] 테스트 실패 — .exe 를 만들지 않습니다. 위 로그를 확인하세요.
+exit /b 1
 
 :err
 echo.
