@@ -1,0 +1,86 @@
+{
+  "NHN_구조도_보일람표": {
+    "bbox": [
+      492754,
+      302000,
+      570754,
+      670400
+    ],
+    "counts": {
+      "beam": 225
+    },
+    "eid_count": 225,
+    "eid_hash": "7a32b0a74e2f",
+    "face_coverage_pct": 0,
+    "floors": [
+      0
+    ],
+    "member_schedule": {
+      "matched": 225,
+      "members": 77,
+      "tables": 8,
+      "unmatched": 0
+    },
+    "needs_review": 0,
+    "thin_pairs": {},
+    "wall_pairing": {
+      "paired": 0,
+      "single": 0,
+      "single_offset": 0
+    },
+    "wall_thickness_10mm": {}
+  },
+  "지하3층_건축평면": {
+    "bbox": [
+      -4009,
+      -63273,
+      132233,
+      607
+    ],
+    "counts": {
+      "column": 93,
+      "equipment": 6,
+      "opening": 288,
+      "slab": 8,
+      "wall": 678
+    },
+    "eid_count": 1073,
+    "eid_hash": "4faf15054aed",
+    "face_coverage_pct": 95,
+    "floors": [
+      0
+    ],
+    "member_schedule": {},
+    "needs_review": 210,
+    "thin_pairs": {
+      "A-CON": 35,
+      "A-WALL": 1,
+      "상부골조": 19
+    },
+    "wall_pairing": {
+      "paired": 485,
+      "single": 0,
+      "single_offset": 155
+    },
+    "wall_thickness_10mm": {
+      "0": 4,
+      "150": 1,
+      "20": 3,
+      "200": 311,
+      "220": 1,
+      "250": 120,
+      "30": 24,
+      "300": 34,
+      "350": 2,
+      "400": 33,
+      "420": 1,
+      "450": 10,
+      "460": 2,
+      "470": 1,
+      "480": 2,
+      "50": 55,
+      "500": 35,
+      "70": 1
+    }
+  }
+}

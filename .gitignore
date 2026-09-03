@@ -64,3 +64,6 @@ scratch/
 # 현장 설계기준(고객 자료) — 저장소에 넣지 않음. 샘플은 criteria.sample.json
 *_criteria.json
 criteria.json
+
+# 골든 회귀용 로컬 도면 경로(고객 자료 위치) — 다이제스트만 커밋한다
+tests/golden.local.json

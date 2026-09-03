@@ -33,6 +33,8 @@
 | `sample_blocks.dxf` | **블록 참조(기둥/문 INSERT) 샘플** (Phase 2 검증용) |
 | `sample_mep.dxf` | **MEP 샘플** (배관/덕트/트레이 중심선 + 장비 블록, Phase 2.7 검증용) |
 | `geometry.json` | 파서 출력 예시 |
+| `tests/run_all.py` | 의존성 없는 테스트 러너(`python tests/run_all.py`). pytest 로도 수집된다. `build_exe.bat` 이 빌드 전에 돌리고 실패 시 중단 — 깨진 .exe 를 못 만든다 |
+| `tests/golden.json` | **실무 도면 회귀 다이제스트.** 도면은 고객 자료라 커밋하지 않고 경로만 `tests/golden.local.json`(gitignore)에 둔다. 도면이 없으면 `[skip]`. 갱신은 `python tests/test_golden.py --bless` |
 | `extractors.py` + `mep_macro/` | **FreeCAD 안에서만** 쓰는 라이브 자연어 모델링용 헬퍼(`freecad_live_addon`). 일반 파이프라인은 이걸 거치지 않는다 |
 | `FIX_SPEC.md` | **미실행 작업지시서** — 면선 페어링 재설계(라인-버킷)·곡선벽 ARC. `_pair_line_buckets`/`_pair_arc_faces` 아직 없음 |
 
