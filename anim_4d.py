@@ -19,6 +19,8 @@ import tempfile
 
 from PIL import Image, ImageDraw, ImageFont
 
+import geom_contract as GC   # z 기준면 규약을 여기서 재구현하지 말 것
+
 # ── 시공 단계 정의 (순서 = 실제 시공 순서) ──────────────────────────────────
 # ⚠ 아래 z 값과 레이어명은 특정 현장 기준 샘플이다. 다른 현장에는 그대로 못 쓴다.
 # TODO: stack.json(선언적 층 조립)이 생기면 levels 선언에서 읽어 프로젝트 독립으로 만들 것.
@@ -62,9 +64,8 @@ def prisms_from(data):
         si = stage_of("column", rec)
         if si is None or rec.get("kind") != "polyline":
             continue
-        z0 = float(rec.get("z_base", 0))
-        h = float(rec.get("overrides", {}).get("height", params.get("column", {}).get("height", 3000)))
-        out.append((rec["points"], z0, z0 + h, si))
+        z0, z1 = GC.z_range("column", rec, params)
+        out.append((rec["points"], z0, z1, si))
 
     for rec in el.get("wall", []):
         si = stage_of("wall", rec)
@@ -73,28 +74,19 @@ def prisms_from(data):
         cl = rec.get("centerline") or rec.get("points") or []
         if len(cl) < 2:
             continue
-        w = float(rec.get("overrides", {}).get("width")
-                  or rec.get("width_detected")
-                  or params.get("wall", {}).get("width", 200))
-        z0 = float(rec.get("z_base", 0))
-        h = float(rec.get("overrides", {}).get("height", params.get("wall", {}).get("height", 2800)))
+        w = GC.width_of(rec, params, "wall")
+        z0, z1 = GC.z_range("wall", rec, params)
         for a, b in zip(cl, cl[1:]):
-            dx, dy = b[0] - a[0], b[1] - a[1]
-            L = math.hypot(dx, dy)
-            if L < 1e-6:
-                continue
-            nx, ny = -dy / L * w / 2, dx / L * w / 2
-            quad = [(a[0] + nx, a[1] + ny), (b[0] + nx, b[1] + ny),
-                    (b[0] - nx, b[1] - ny), (a[0] - nx, a[1] - ny)]
-            out.append((quad, z0, z0 + h, si))
+            quad = GC.beam_footprint(a, b, w)      # 축선+폭→footprint 도 계약이다
+            if quad:
+                out.append((quad, z0, z1, si))
 
     for rec in el.get("slab", []):
         si = stage_of("slab", rec)
         if si is None or rec.get("kind") != "polyline":
             continue
-        t = float(rec.get("overrides", {}).get("thickness", params.get("slab", {}).get("thickness", 200)))
-        z1 = float(rec.get("z_base", 0))            # 슬래브 z_base = 상단
-        out.append((rec["points"], z1 - t, z1, si))
+        z0, z1 = GC.z_range("slab", rec, params)   # 슬래브 z_base = 상단
+        out.append((rec["points"], z0, z1, si))
     return out
 
 

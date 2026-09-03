@@ -65,30 +65,6 @@ def make_wire(points, closed, doc=None, label="_wall_base"):
         return None
 
 
-def make_draft_wire(points, closed, doc=None, label="_wall_wire"):
-    """Draft.make_wire 로 베이스라인 생성.
-    다중점(3점 이상) 꺾인 벽 전용 — FreeCAD가 코너 Miter 자동 처리.
-    실패 시 None 반환(호출자가 Part 폴백 처리)."""
-    pts = []
-    for p in points:
-        v = vec(p)
-        if not pts or (pts[-1] - v).Length > 1.0:
-            pts.append(v)
-    if len(pts) < 2:
-        return None
-    try:
-        # FreeCAD 0.19+ snake_case API 시도, 구버전은 camelCase 폴백
-        if hasattr(Draft, "make_wire"):
-            w = Draft.make_wire(pts, closed=closed, face=False)
-        else:
-            w = Draft.makeWire(pts, closed=closed, face=False)
-        if w:
-            w.Label = label
-        return w
-    except Exception:
-        return None
-
-
 # ── 벽 체이닝: snap_wall_corners로 정렬된 끝점 기준 연결 ──────────────────────
 # 목적: 연속 세그먼트 → 하나의 Draft Wire → Arch.makeWall 1개 → 코너 Miter 자동
 # 핵심: snap_wall_corners(50mm tol) 이후 실제 연결된 끝점은 동일 좌표.
@@ -299,44 +275,6 @@ def _split_folded_chain(pts, cos_tol=-0.99):
         prev = v
     out.append(cur)
     return [c for c in out if len(c) >= 2]
-
-
-def apply_opening_voids(idx_map, openings, params):
-    """doc.recompute() 이후 호출. opening["wall_indices"] 벽에 원통 절단 적용.
-    [Phase 4a]: Part.makeCylinder → wall_obj.Shape.cut() → 비파라메트릭 덮어쓰기.
-    이후 doc.recompute() 를 호출하면 덮어씌워지므로 saveAs() 직전에 실행할 것.
-    v1: 원통(radius=opening.radius, height=wall_height+여유). 사각형 개구부는 v2 예정."""
-    if not openings:
-        return 0
-    d = params.get("wall", {})
-    wall_h = float(d.get("height", 2800.0))
-    margin = 100.0
-    n_ok = 0
-    for op in openings:
-        r = float(op.get("radius", 50.0))
-        if r <= 0:
-            continue
-        c = op.get("center") or [0, 0]
-        cx, cy = float(c[0]), float(c[1])
-        # 원통 cutter: 개구부 반경, 벽 높이+위아래 여유, z=-margin 기준점
-        cutter = Part.makeCylinder(
-            r, wall_h + margin * 2,
-            App.Vector(cx, cy, -margin),
-            App.Vector(0, 0, 1))
-        for wi in op.get("wall_indices", []):
-            if wi not in idx_map:
-                continue
-            wall_obj = idx_map[wi]
-            try:
-                cut = wall_obj.Shape.cut(cutter)
-                if cut.isValid():
-                    wall_obj.Shape = cut
-                    n_ok += 1
-                else:
-                    print(f"[warn] opening void 형상 오류: Wall_{wi}")
-            except Exception as e:
-                print(f"[warn] opening void 실패 Wall_{wi}: {e}")
-    return n_ok
 
 
 def _opening_axes(op):

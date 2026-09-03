@@ -20,18 +20,7 @@ import math
 import os
 import sys
 
-
-def _poly_area(pts):
-    """신발끈 공식 (mm² → 호출측에서 단위 변환)."""
-    n = len(pts)
-    if n < 3:
-        return 0.0
-    s = 0.0
-    for i in range(n):
-        x1, y1 = pts[i][0], pts[i][1]
-        x2, y2 = pts[(i + 1) % n][0], pts[(i + 1) % n][1]
-        s += x1 * y2 - x2 * y1
-    return abs(s) / 2.0
+from geom_contract import poly_area as _poly_area
 
 
 def _polyline_len(pts):

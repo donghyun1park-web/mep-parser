@@ -23,6 +23,8 @@ import math
 import os
 import sys
 
+from geom_contract import poly_area as _poly_area
+
 try:
     import numpy as np
     import ifcopenshell
@@ -185,19 +187,6 @@ def _add_storey(model, bld, name, z_mm=0.0):
         pass
     ifcopenshell.api.aggregate.assign_object(model, relating_object=bld, products=[sto])
     return sto
-
-
-def _poly_area(coords):
-    """닫힌 폴리곤 면적(신발끈, mm²). Qto 단면적/바닥면적용."""
-    n = len(coords)
-    if n < 3:
-        return 0.0
-    s = 0.0
-    for i in range(n):
-        x1, y1 = coords[i][0], coords[i][1]
-        x2, y2 = coords[(i + 1) % n][0], coords[(i + 1) % n][1]
-        s += x1 * y2 - x2 * y1
-    return abs(s) / 2.0
 
 
 def _build_elements(model, body, sb, sto, data, z_offset=0.0, connect=False,

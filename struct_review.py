@@ -17,6 +17,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import geom_contract as GC
 from preview import importmap_section  # three.js importmap 재사용
 
 # ══════════ 설계기준 ══════════
@@ -102,10 +103,8 @@ CELL = 1000.0
 
 
 def poly_area(pts):
-    a = 0.0
-    for (x1, y1), (x2, y2) in zip(pts, pts[1:] + pts[:1]):
-        a += x1 * y2 - x2 * y1
-    return abs(a) / 2.0 / 1e6
+    """m² — 신발끈은 geom_contract 단독(세 파일이 각자 들고 있었다)."""
+    return GC.poly_area(pts) / 1e6
 
 
 def supports_at(d, zb):

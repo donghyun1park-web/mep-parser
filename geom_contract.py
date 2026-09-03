@@ -177,6 +177,15 @@ def beam_rings(rec, params=None):
     return out
 
 
+def poly_area(pts):
+    """닫힌 폴리곤 면적(신발끈, 부호 없음). 단위 변환은 호출측 몫.
+
+    boq_export·ifc_builder·struct_review 가 각자 같은 신발끈을 들고 있었다.
+    부호를 잘못 다루면 면적이 음수로 나오는 종류의 실수라 한 곳에 둔다.
+    """
+    return abs(signed_area(pts)) if len(pts) >= 3 else 0.0
+
+
 def ccw(pts):
     """닫힌 폴리곤을 CCW(법선 +Z)로 정규화. 이미 CCW면 그대로 반환.
 
