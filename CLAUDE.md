@@ -18,6 +18,7 @@
 | `dxf_parser.py` | DXF → geometry.json 파서 v2 |
 | `geom_contract.py` | **기하 계약의 단일 출처.** z 기준면 `z_range()`, 감김 정규화 `ccw()`, 보 축선→footprint `beam_rings()`. JS 소비자(preview)는 `js_constants()` 로 같은 식을 주입받는다. FreeCAD 의존 없음(단위테스트 가능) |
 | `verify.py` | **빌드 게이트.** `verify_geometry`(빌드 전) / `verify_build`(빌드 후). 검사 ID V001~V104. 실패 시 빌더가 마커를 출력하지 않아 산출물이 나가지 않는다 |
+| `stack_build.py` | **선언적 다층 조립.** `stack.json`(층별 dxf·z·offset) → 한 geometry.json. 통심선 offset 해결기 + 가드 3개. 파싱은 `dxf_parser.parse` 호출만 한다 |
 | `schedule_table.py` | **부재일람표(MEMBER LIST) 복원.** TEXT 격자 → 표 → `{부재명: 단면}`. `layer_map` 의 `opts: schedule=<레이어>` 로 조인 |
 | `layer_map.csv` | 레이어명 정규식 → 카테고리·치수 매핑 |
 | `block_map.csv` | **블록(INSERT)명 정규식 → 카테고리·치수 매핑** (Phase 2) |
@@ -332,7 +333,15 @@ MEP는 "추출은 곧, 3D 빌드는 나중"으로 분할(D 합의). 스키마 �
       축선→footprint 규칙은 `geom_contract.beam_rings()` 단독 — preview 는 `gcBeamRings` 로 주입받는다.
       소비자 3종 동기화: `freecad_builder`(빌드) · `preview`(렌더) · `boq_export`(부재명별 연장·물량).
       실측: 부재 225개 → `IfcBeam: 225`, 형상오류 0, `RAG11B`=400×1800·`SB0`=100×200(춤×폭 표기 정정 반영).
-- [ ] **Phase 3 — `stack_build.py` + `stack.json`**: 선언적 층 조립(일회성 스크립트 제거).
-      offset 해결기에 가드 3개(모호성 마진 / 증거 하한 ≥3축 / 하부층 bbox 포함).
+- [x] **Phase 3 — `stack_build.py` + `stack.json`**: 선언적 층 조립. 층마다 임시 스크립트를
+      새로 쓰던 것을 대체한다. `floors[]` 를 레벨 선언에서 직접 만들므로 **층 고아가 불가능**하다.
+      EID 에 층 id 접두(`1F:w:722069bb`) — 같은 DXF 를 두 층에 쓰면 조용히 충돌했다.
+      offset 해결기(`grid_detect` 재사용, 통심선 축 기준)에 가드 3개:
+      ① 증거 하한 방향별 ≥3축 — 기둥 4개짜리 층은 점수를 보기 전에 거부(43,000mm 사고를 잡았을 검사)
+      ② 모호성 마진 — 2위가 1위의 0.9배 이상이면 거부(상부층 축이 그리드 부분열이면 여러 shift 가 동점)
+      ③ 포함 검사 — offset 적용 후 상부층이 하부층 bbox 안. 그리드와 독립이라 그리드가 놓친 것을 잡는다
+      `--dry-run` 은 offset 만 해결하고 멈춘다. 결과·증거는 산출물의 `stack.levels` 에 남는다.
+      레벨의 `height` 는 레이어 높이를 **이긴다**(적어줬는데 조용히 지면 원래 문제로 되돌아감) —
+      덮은 개수를 보고한다. 미구현: 참조/xref 레이어 자동판별(D16) — `ignore` 규칙으로 수동 처리.
 - [ ] **Phase 5 — 스킬** `add-floor` / `verify-model` / `map-layers`.
       ★ 스킬에 파이썬 스크립트를 넣지 않는다 — 넣고 싶어지면 그건 모듈이 빠졌다는 신호다.
