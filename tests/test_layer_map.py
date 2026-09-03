@@ -267,3 +267,25 @@ def test_shipped_layer_map_has_the_opts_column():
     with open(os.path.join(here, "layer_map.csv"), encoding="utf-8") as f:
         header = f.readline().strip()
     assert header.endswith(",opts"), header
+
+
+# ── 호 근사 오차 ───────────────────────────────────────────────────────────
+def test_arc_chord_error_is_bounded_in_mm_not_degrees():
+    """고정 각도 밀도는 반지름이 커질수록 조용히 더 틀린다.
+
+    실측: r=13,040 곡선벽의 두께 500mm 가 476mm 로 측정됐다(사지타 27mm).
+    오차를 mm 로 묶으면 반지름과 무관하게 일정하다."""
+    import math
+    for r in (500.0, 6000.0, 13040.0, 50000.0):
+        span = math.radians(103.5)
+        n = dp._arc_segments(r, span)
+        sagitta = r * (1 - math.cos((span / n) / 2))
+        assert sagitta <= dp.ARC_CHORD_TOL_MM + 1e-6 or n == dp.ARC_MAX_SEGS, \
+            f"r={r}: n={n} 사지타={sagitta:.2f}mm"
+
+
+def test_arc_segments_never_explodes_or_degenerates():
+    import math
+    assert dp._arc_segments(1e9, math.pi) == dp.ARC_MAX_SEGS      # 상한
+    assert dp._arc_segments(0.0, 0.01) >= 2                       # 하한
+    assert dp._arc_segments(100.0, math.radians(5)) >= 2

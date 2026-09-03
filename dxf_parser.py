@@ -94,7 +94,9 @@ DEFAULT_PARAMS = {
     "column": {"height": 3000.0},
     "slab": {"thickness": 200.0},
 }
-ARC_SEG_PER_RAD = 8.0
+ARC_SEG_PER_RAD = 8.0         # 최소 각도 밀도(작은 호도 최소한 이만큼은 쪼갠다)
+ARC_CHORD_TOL_MM = 5.0        # 코드 근사 오차 상한(사지타). 각도가 아니라 mm 로 묶는다
+ARC_MAX_SEGS = 128            # 폭주 방지(반지름이 아주 크면 여기서 잘린다)
 
 # ── [Phase 1] 평행선 벽 검출 튜닝 상수 ───────────────────────
 WALL_ANGLE_TOL_DEG = 5.0      # 평행 판정 허용 사이각(도)
@@ -268,11 +270,30 @@ def shadowed_rules(rules, hit_log, layers_seen):
 
 
 # ── 엔티티 → 점열 (ATA 추출 로직 정비·통합) ──────────────────
+def _arc_segments(radius, span_rad):
+    """호를 몇 조각으로 쪼갤지. **오차를 각도가 아니라 mm 로 묶는다.**
+
+    고정 각도 밀도(ARC_SEG_PER_RAD)만 쓰면 코드 근사 오차가 반지름에 비례해 커진다.
+    실측(지하3층, r=13,040 곡선벽): 고정 밀도로는 사지타가 27mm 라 **두께가
+    500mm 인 벽이 476~478mm 로 측정**됐다(4.8% 오차). tol=5mm 로 묶으면 495~497.
+    두께를 mm 로 재는 파이프라인에서 근사 오차만 각도로 두면 큰 곡선벽에서 반드시
+    틀어진다 — 반지름이 커질수록 조용히 더 틀린다.
+
+    사지타 s = r(1-cos(δ/2)) ≤ tol  →  δ ≤ 2·acos(1 - tol/r)
+    """
+    n = max(2, int(span_rad * ARC_SEG_PER_RAD))
+    if radius > 0:
+        dmax = 2.0 * math.acos(max(-1.0, 1.0 - min(1.0, ARC_CHORD_TOL_MM / radius)))
+        if dmax > 1e-9:
+            n = max(n, int(math.ceil(span_rad / dmax)))
+    return min(n, ARC_MAX_SEGS)
+
+
 def arc_to_points(cx, cy, r, a0, a1):
     a0r, a1r = math.radians(a0), math.radians(a1)
     if a1r < a0r:
         a1r += 2 * math.pi
-    n = max(2, int((a1r - a0r) * ARC_SEG_PER_RAD))
+    n = _arc_segments(r, a1r - a0r)
     return [(cx + r * math.cos(a0r + (a1r - a0r) * i / n),
              cy + r * math.sin(a0r + (a1r - a0r) * i / n)) for i in range(n + 1)]
 
@@ -296,7 +317,7 @@ def _bulge_points(x1, y1, x2, y2, bulge):
     sagitta = bulge * chord / 2.0
     r = ((chord / 2.0) ** 2 + sagitta ** 2) / (2 * abs(sagitta))
     theta = 4 * math.atan(abs(bulge))
-    n = max(2, int(theta * ARC_SEG_PER_RAD))
+    n = _arc_segments(r, theta)   # LWPOLYLINE bulge 도 같은 오차 규칙
     mx, my = (x1 + x2) / 2.0, (y1 + y2) / 2.0
     dx, dy = (x2 - x1) / chord, (y2 - y1) / chord
     h = math.sqrt(max(r * r - (chord / 2.0) ** 2, 0.0))
