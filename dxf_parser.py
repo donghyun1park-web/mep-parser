@@ -344,6 +344,9 @@ def entity_to_record(e, scale, opts=None):
     OCS 엔티티는 _ocs_to_wcs_fn 으로 WCS 정합 후 좌표화(미러 블록 대응)."""
     t = e.dxftype()
     layer = getattr(e.dxf, "layer", "")
+    # from=dim 레이어의 형상 출처는 DIMENSION 뿐이다 — 나머지는 치수 장식.
+    if _is_dim_decoration(e, opts):
+        return None
     xf = _ocs_to_wcs_fn(e)
 
     def P(x, y, z=0.0):
@@ -389,6 +392,20 @@ def entity_to_record(e, scale, opts=None):
     if t == "DIMENSION" and opts and opts.get("from") == "dim":
         return _dimension_to_record(e, scale, layer, opts.get("member_re"))
     return None
+
+
+def _is_dim_decoration(e, opts):
+    """`from=dim` 레이어에서 DIMENSION 이 아닌 엔티티 = 치수 장식이지 부재가 아니다.
+
+    opts 의 `from` 은 이름 그대로 **형상 출처**다(geom | dim). dim 이면 그 레이어의
+    형상은 DIMENSION 에서 온다는 뜻이고, 나머지는 그 치수를 그리기 위한 부속이다.
+
+    실측(구조도면): 부재 하나당 DIMENSION 1 + 보조선 LINE 1 + 화살표 INSERT 2 가
+    같은 레이어에 그려져 있다. 이걸 안 걸러내면 부재 225개 옆에 길이 500mm 짜리
+    화살촉·보조선 690개가 같은 카테고리로 들어앉는다(레코드일 땐 잡음이지만
+    build_beams 가 생기면 모델 안에 실제 쓰레기 솔리드가 된다).
+    """
+    return bool(opts) and opts.get("from") == "dim" and e.dxftype() != "DIMENSION"
 
 
 # 치수 텍스트가 '측정값 표시'를 뜻하는 형태들 — 이런 건 진짜 치수선이지 부재가 아니다.
@@ -1874,6 +1891,7 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
     unmapped, unmapped_blocks, n_inserts, unmapped_recs = {}, {}, 0, {}
     ignored = {}            # ignore 규칙으로 버린 것: {레이어: 개수}
     _dim_skipped = {}       # from=dim 레이어에서 '진짜 치수선' 이라 건너뛴 수
+    _nondim_skipped = {}    # from=dim 레이어의 비-DIMENSION(보조선·화살표) 건너뛴 수
     _rule_hits = set()      # 실제 매칭된 규칙 인덱스 — 그림자 규칙 탐지용
     _layers_seen = set()
     unmapped_block_recs = {}      # 블록명 → explode 기하 샘플(제안 통계용)
@@ -1886,6 +1904,9 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
             cat, attrs = classify(bname, block_rules) if block_rules else (None, {})
             if cat is None:
                 cat, attrs = classify(e.dxf.layer, rules)  # 레이어 폴백
+            if cat is not None and _is_dim_decoration(e, (attrs or {}).get("_opts")):
+                _nondim_skipped[e.dxf.layer] = _nondim_skipped.get(e.dxf.layer, 0) + 1
+                continue
             if cat is None:
                 unmapped_blocks[bname] = unmapped_blocks.get(bname, 0) + 1
                 unmapped_block_entities.setdefault(bname, []).append(e)
@@ -1932,10 +1953,13 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         _opts = (attrs or {}).get("_opts") or {}
         rec = entity_to_record(e, scale, _opts)
         if rec is None:
-            # from=dim 레이어의 DIMENSION 은 '측정값 표시' 치수선이면 정상적으로 버려진다.
-            # 이것까지 경고하면 노이즈이므로 별도 집계만 한다.
-            if e.dxftype() == "DIMENSION" and _opts.get("from") == "dim":
-                _dim_skipped[e.dxf.layer] = _dim_skipped.get(e.dxf.layer, 0) + 1
+            # from=dim 레이어에서 None 은 둘 중 하나이고, 둘 다 정상이다.
+            # 경고 대신 집계만 한다(부재당 3~4개씩 나와 경고로 내면 로그가 묻힌다).
+            if _opts.get("from") == "dim":
+                if e.dxftype() == "DIMENSION":     # '측정값 표시' 진짜 치수선
+                    _dim_skipped[e.dxf.layer] = _dim_skipped.get(e.dxf.layer, 0) + 1
+                else:                              # 보조선·화살표 등 치수 장식
+                    _nondim_skipped[e.dxf.layer] = _nondim_skipped.get(e.dxf.layer, 0) + 1
             else:
                 result["warnings"].append(f"unhandled {e.dxftype()} @ {e.dxf.layer}")
             continue
@@ -2147,12 +2171,17 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         result["ignored"] = ignored
         print(f"  [ignore] {sum(ignored.values())}개 드롭: "
               + ", ".join(f"{k}({v})" for k, v in sorted(ignored.items())[:5]))
-    if _dim_skipped:
-        result["dimension_skipped"] = _dim_skipped
+    if _dim_skipped or _nondim_skipped:
+        if _dim_skipped:
+            result["dimension_skipped"] = _dim_skipped
+        if _nondim_skipped:
+            result["dimension_decoration_skipped"] = _nondim_skipped
         _nm = sum(1 for _c in ("wall", "column", "slab", "beam")
                   for _r in result["elements"].get(_c, []) if _r.get("member_name"))
-        print(f"  [from=dim] 부재 {_nm}개 추출, 측정값 치수선 "
-              f"{sum(_dim_skipped.values())}개 건너뜀")
+        print(f"  [from=dim] 부재 {_nm}개 추출"
+              + (f", 측정값 치수선 {sum(_dim_skipped.values())}개" if _dim_skipped else "")
+              + (f", 치수 장식(보조선·화살표) {sum(_nondim_skipped.values())}개"
+                 if _nondim_skipped else "") + " 건너뜀")
     # 그림자 규칙: 앞선 넓은 패턴에 가려 한 번도 못 걸린 규칙
     _shadow = shadowed_rules(rules, _rule_hits, _layers_seen)
     if _shadow:
