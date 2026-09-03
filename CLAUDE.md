@@ -343,5 +343,8 @@ MEP는 "추출은 곧, 3D 빌드는 나중"으로 분할(D 합의). 스키마 �
       `--dry-run` 은 offset 만 해결하고 멈춘다. 결과·증거는 산출물의 `stack.levels` 에 남는다.
       레벨의 `height` 는 레이어 높이를 **이긴다**(적어줬는데 조용히 지면 원래 문제로 되돌아감) —
       덮은 개수를 보고한다. 미구현: 참조/xref 레이어 자동판별(D16) — `ignore` 규칙으로 수동 처리.
-- [ ] **Phase 5 — 스킬** `add-floor` / `verify-model` / `map-layers`.
-      ★ 스킬에 파이썬 스크립트를 넣지 않는다 — 넣고 싶어지면 그건 모듈이 빠졌다는 신호다.
+- [x] **Phase 5 — 스킬** `.claude/skills/` 에 `add-floor` / `verify-model` / `map-layers`.
+      SKILL.md 세 장뿐 — **파이썬을 넣지 않는다**(넣고 싶어지면 모듈이 빠졌다는 신호다).
+      `add-floor` 는 `--dry-run` offset 을 보여주고 **멈추는 것**이 절차의 핵심이고,
+      `verify-model` 은 검사ID→진단→조치 표가 본체다. 상시 사실(z 규약·opts)은 여기 CLAUDE.md,
+      절차와 중단지점은 스킬 — 나누는 기준이 그거다.
