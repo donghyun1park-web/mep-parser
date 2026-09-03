@@ -33,6 +33,8 @@
 | `sample_blocks.dxf` | **블록 참조(기둥/문 INSERT) 샘플** (Phase 2 검증용) |
 | `sample_mep.dxf` | **MEP 샘플** (배관/덕트/트레이 중심선 + 장비 블록, Phase 2.7 검증용) |
 | `geometry.json` | 파서 출력 예시 |
+| `extractors.py` + `mep_macro/` | **FreeCAD 안에서만** 쓰는 라이브 자연어 모델링용 헬퍼(`freecad_live_addon`). 일반 파이프라인은 이걸 거치지 않는다 |
+| `FIX_SPEC.md` | **미실행 작업지시서** — 면선 페어링 재설계(라인-버킷)·곡선벽 ARC. `_pair_line_buckets`/`_pair_arc_faces` 아직 없음 |
 
 ## geometry.json 스키마
 ```json

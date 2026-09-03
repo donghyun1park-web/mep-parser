@@ -1,11 +1,9 @@
-import ezdxf
 import math
 import os
 import time
 from shapely.geometry import LineString, Point, box
 from shapely.strtree import STRtree
 from shapely.ops import linemerge
-import yaml
 from collections import defaultdict
 
 from mep_macro.geometry import pair_rect, dv
@@ -402,78 +400,13 @@ def post_merge_centerlines(centerlines, angle_tol=2.0, gap_tol=300.0):
     return final_results
 
 class WallExtractor:
-    def __init__(self, config_path):
+    def __init__(self, config_path=None):
+        # config_path 는 하위호환용 자리다. YAML 설정(layers_config.yaml)은
+        # dxf_parser 의 layer_map.csv 와 같은 개념이 둘로 갈라진 것이라 제거했다.
+        # 유일한 소비자(freecad_utils.build_walls_from_segments)는 이미 None 을 넘기고
+        # wall_mappings 를 직접 채운다. PyYAML 의존도 같이 사라진다(.exe 용량).
         self.wall_mappings = {}
-        self.last_unpaired_segments = []  # [(p1, p2), ...] 마지막 추출에서 짝을 못 찾고 버려진 원본 선분
-        self._load_config(config_path)
-
-    def _load_config(self, config_path):
-        try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                data = yaml.safe_load(f)
-                
-                # 지원 포맷 1: 계층형 (layers -> wall -> [종류] -> patterns)
-                if data and 'layers' in data and 'wall' in data['layers']:
-                    for wtype, props in data['layers']['wall'].items():
-                        patterns = props.get('patterns', [])
-                        for pat in patterns:
-                            # 와일드카드 일단 제거해서 정확한 이름으로 취급
-                            clean_name = pat.replace('*', '').strip()
-                            if clean_name:
-                                self.wall_mappings[clean_name] = {
-                                    'layer': clean_name,
-                                    'default_thickness': props.get('default_thickness', 200),
-                                    'height': props.get('height', 3000),
-                                    'label': f"Wall_{wtype}"
-                                }
-                # 지원 포맷 2: 플랫 배열형 (mappings)
-                elif data and 'mappings' in data:
-                    for mapping in data['mappings']:
-                        if mapping.get('type') == 'Wall':
-                            self.wall_mappings[mapping['layer']] = mapping
-        except Exception as e:
-            print(f"Error loading config {config_path}: {e}")
-
-    def extract_from_dxf(self, dxf_path):
-        """Extracts walls from a DXF file based on the config."""
-        try:
-            doc = ezdxf.readfile(dxf_path)
-            msp = doc.modelspace()
-        except Exception as e:
-            print(f"Failed to read DXF: {e}")
-            return []
-
-        results = []
-        all_unpaired = []
-
-        for layer_name, props in self.wall_mappings.items():
-            print(f"\n[Layer: {layer_name}]")
-            raw_lines = self._get_lines_from_layer(msp, layer_name)
-            if not raw_lines:
-                print("  -> 선분 없음.")
-                continue
-
-            # 1. Pre-merge
-            pre_merged_lines = pre_merge_lines(raw_lines)
-            print(f"  [Pre-merge] 원본 선분 {len(raw_lines)}개 -> 병합 후 {len(pre_merged_lines)}개")
-
-            # 2. Extract pairs (Pass 1 & Pass 2 with Statistical Filtering)
-            centerlines = self._extract_centerlines(pre_merged_lines, props)
-            all_unpaired.extend(self.last_unpaired_segments)
-
-            # 3. Post-merge
-            post_merged = post_merge_centerlines(centerlines)
-            if centerlines:
-                print(f"  [Post-merge] 중심선 {len(centerlines)}개 -> 병합 후 {len(post_merged)}개")
-
-            if self.last_unpaired_segments:
-                print(f"  [경고] '{layer_name}' 레이어에서 짝을 못 찾아 벽으로 생성되지 않은 선분 "
-                      f"{len(self.last_unpaired_segments)}개")
-
-            results.extend(post_merged)
-
-        self.last_unpaired_segments = all_unpaired
-        return results
+        self.last_unpaired_segments = []  # 짝을 못 찾고 버려진 원본 선분 [(p1,p2), ...]
 
     def extract_from_raw_lines(self, raw_lines, props):
         """Extracts walls directly from a list of raw 2D line segments."""
@@ -506,18 +439,6 @@ class WallExtractor:
         _dlog(f"extract_from_raw_lines END: {len(post_merged)} final walls, "
               f"{len(self.last_unpaired_segments)} unpaired segments dropped")
         return post_merged
-
-    def _get_lines_from_layer(self, msp, layer_name):
-        lines = []
-        for entity in msp.query(f'LINE LWPOLYLINE[layer=="{layer_name}"]'):
-            if entity.dxftype() == 'LINE':
-                s, e = entity.dxf.start, entity.dxf.end
-                lines.append(((s.x, s.y), (e.x, e.y)))
-            elif entity.dxftype() == 'LWPOLYLINE':
-                pts = [(p[0], p[1]) for p in entity]
-                for i in range(len(pts) - 1):
-                    lines.append((pts[i], pts[i+1]))
-        return lines
 
     def _extract_centerlines(self, lines, props):
         t0 = time.time()

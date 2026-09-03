@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """geometry.json 기하 계약(contract) — z 기준면 규약이 존재하는 **유일한 장소**.
 
-이 저장소에서 z 기준면 규약은 과거 4곳(freecad_builder / preview / anim_4d /
+이 저장소에서 z 기준면 규약은 과거 여러 곳(freecad_builder / preview / 4D 애니메이션 /
 struct_review)에 각자 구현돼 있었고, 그중 preview 가 슬래브를 '하단' 기준으로
 해석해 보/슬래브가 한 두께 떠 보이는 버그가 났다. 더 나쁜 것은 그 증상을
 "원인 미상"으로 두고 z_base 에 +thickness 를 더하는 보정을 데이터에 적용한 것이다.
