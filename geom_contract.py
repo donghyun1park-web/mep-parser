@@ -146,6 +146,37 @@ def signed_area(pts):
     return a / 2.0
 
 
+def beam_footprint(a, b, width, min_len=1.0):
+    """축선 한 구간 + 폭 → 평면 사각 footprint(축 중심, CCW). 너무 짧으면 None.
+
+    보는 '축선 + 단면' 으로 온다(`from=dim` + 일람표). 축선을 솔리드로 만드는
+    규칙이 빌더·preview·물량산출에 각자 구현되면 D6 이 그대로 재현되므로
+    여기에 한 번만 둔다. JS 쪽은 js_constants() 로 같은 식을 주입받는다.
+    """
+    ax, ay, bx, by = float(a[0]), float(a[1]), float(b[0]), float(b[1])
+    dx, dy = bx - ax, by - ay
+    L = (dx * dx + dy * dy) ** 0.5
+    if L < min_len or width <= 0:
+        return None
+    nx, ny = -dy / L * width / 2.0, dx / L * width / 2.0
+    return ccw([[ax + nx, ay + ny], [bx + nx, by + ny],
+                [bx - nx, by - ny], [ax - nx, ay - ny]])
+
+
+def beam_rings(rec, params=None):
+    """보 레코드 → 압출할 평면 링 목록. 닫힌 외곽선은 그대로, 축선은 구간별 사각형."""
+    if rec.get("closed"):
+        return [rec.get("points") or []]
+    w = width_of(rec, params, "beam")
+    pts = rec.get("centerline") or rec.get("points") or []
+    out = []
+    for a, b in zip(pts, pts[1:]):
+        fp = beam_footprint(a, b, w)
+        if fp:
+            out.append(fp)
+    return out
+
+
 def ccw(pts):
     """닫힌 폴리곤을 CCW(법선 +Z)로 정규화. 이미 CCW면 그대로 반환.
 
@@ -208,6 +239,24 @@ def js_constants():
         "  const half = (cat === 'pipe') ? gcDim('pipe','diameter',rec,params)/2\n"
         "                                : gcDim(cat,'height_mm',rec,params)/2;\n"
         "  return [z - half, z + half];\n"
+        "}\n"
+        "function gcSignedArea(p){let a=0;for(let i=0;i<p.length;i++){const q=p[(i+1)%p.length];\n"
+        "  a += p[i][0]*q[1] - q[0]*p[i][1];} return a/2;}\n"
+        "function gcCcw(p){ return (p.length<3 || gcSignedArea(p)>0) ? p : p.slice().reverse(); }\n"
+        "function gcBeamRings(rec, params){\n"
+        "  if (rec.closed) return [rec.points || []];\n"
+        "  const w = gcDim('beam','width',rec,params);\n"
+        "  const pts = rec.centerline || rec.points || [];\n"
+        "  const out = [];\n"
+        "  for (let i=0;i+1<pts.length;i++){\n"
+        "    const a=pts[i], b=pts[i+1];\n"
+        "    const dx=b[0]-a[0], dy=b[1]-a[1], L=Math.hypot(dx,dy);\n"
+        "    if (L < 1 || w <= 0) continue;\n"
+        "    const nx=-dy/L*w/2, ny=dx/L*w/2;\n"
+        "    out.push(gcCcw([[a[0]+nx,a[1]+ny],[b[0]+nx,b[1]+ny],\n"
+        "                    [b[0]-nx,b[1]-ny],[a[0]-nx,a[1]-ny]]));\n"
+        "  }\n"
+        "  return out;\n"
         "}\n"
     )
 

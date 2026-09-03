@@ -87,6 +87,57 @@ def test_ccw_handles_degenerate():
     assert GC.ccw([(0, 0), (1, 1)]) == [(0, 0), (1, 1)]
 
 
+# ── 보 footprint (축선 + 폭 → 평면 사각형) ─────────────────────────────────
+def test_beam_footprint_is_centred_on_the_axis():
+    fp = GC.beam_footprint([0, 0], [1000, 0], 400)
+    xs = sorted({round(p[0]) for p in fp})
+    ys = sorted({round(p[1]) for p in fp})
+    assert xs == [0, 1000] and ys == [-200, 200], fp
+    assert GC.signed_area(fp) > 0, "footprint 가 CW — 압출이 -Z 로 간다"
+
+
+def test_beam_footprint_follows_direction():
+    """대각선 축선도 축에 수직으로 폭이 잡혀야 한다."""
+    fp = GC.beam_footprint([0, 0], [0, 1000], 400)
+    xs = sorted({round(p[0]) for p in fp})
+    ys = sorted({round(p[1]) for p in fp})
+    assert xs == [-200, 200] and ys == [0, 1000], fp
+
+
+def test_beam_footprint_rejects_degenerate():
+    assert GC.beam_footprint([0, 0], [0, 0], 400) is None
+    assert GC.beam_footprint([0, 0], [1000, 0], 0) is None
+
+
+def test_beam_rings_from_centreline_uses_schedule_width():
+    """일람표가 준 overrides.width 가 footprint 폭이 된다."""
+    rec = {"points": [[0, 0], [1000, 0]], "overrides": {"width": 400.0, "thickness": 1800.0}}
+    rings = GC.beam_rings(rec, P)
+    assert len(rings) == 1
+    assert sorted({round(p[1]) for p in rings[0]}) == [-200, 200]
+
+
+def test_beam_rings_one_per_segment():
+    rec = {"points": [[0, 0], [1000, 0], [1000, 1000]], "overrides": {"width": 300.0}}
+    assert len(GC.beam_rings(rec, P)) == 2
+
+
+def test_beam_rings_closed_outline_passes_through():
+    """외곽선으로 온 보는 footprint 가 이미 있다 — 축선 규칙을 적용하면 안 된다."""
+    pts = [[0, 0], [1000, 0], [1000, 400], [0, 400]]
+    assert GC.beam_rings({"closed": True, "points": pts}, P) == [pts]
+
+
+def test_beam_solid_spans_downward_from_z_base():
+    """보 상단 = z_base, 아래로 춤. footprint 와 z 규약이 함께 맞아야 솔리드가 맞다."""
+    rec = {"z_base": 6050.0, "points": [[0, 0], [1000, 0]],
+           "overrides": {"width": 400.0, "thickness": 1800.0}}
+    z0, z1 = GC.z_range("beam", rec, P)
+    assert (z0, z1) == (4250.0, 6050.0)
+    ring = GC.beam_rings(rec, P)[0]
+    assert sorted({round(p[1]) for p in ring}) == [-200, 200]
+
+
 # ── 계약 블록 ──────────────────────────────────────────────────────────────
 def test_contract_block_roundtrip():
     d = {"contract": GC.contract_block(), "elements": {}}
@@ -116,3 +167,10 @@ def test_js_constants_carry_the_same_datums():
     for cat, datum in GC.Z_DATUM.items():
         assert f'"{cat}": "{datum}"' in js, f"{cat} 규약이 JS 에 안 실렸다"
     assert "gcZRange" in js and "gcDim" in js
+
+
+def test_js_carries_the_beam_footprint_rule_too():
+    """preview 가 보를 그리려면 축선→footprint 규칙도 같아야 한다.
+    파이썬에만 두면 preview 가 자기 식을 다시 쓰게 되고, 그게 D6 이었다."""
+    js = GC.js_constants()
+    assert "gcBeamRings" in js and "gcCcw" in js

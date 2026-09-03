@@ -131,6 +131,33 @@ def aggregate(data):
     tot = ["합계", "", round(ta / 1e6, 1), "", round(tv / 1e9, 2)]
     out["슬래브"] = (["번호", "레이어", "면적(㎡)", "두께(mm)", "체적(㎥)"], rows, tot)
 
+    # ── 보/거더: 부재명·단면별 ────────────────────────────────
+    # elements["beam"] 이 물량에서 통째로 빠져 있었다(빌더도 안 읽던 시절의 잔재).
+    # 부재명이 있으면 일람표 단면이 붙어 있으므로 그대로 집계 단위로 쓴다.
+    bg = {}
+    for b in els.get("beam", []):
+        pts = b.get("centerline") or b.get("points") or []
+        if len(pts) < 2:
+            continue
+        sec = b.get("section") or {}
+        ov = b.get("overrides") or {}
+        bw = float(ov.get("width") or sec.get("b") or 0.0)
+        bh = float(ov.get("thickness") or sec.get("h") or 0.0)
+        name = sec.get("name") or b.get("member_name") or "-"
+        size = sec.get("size") or (f"{_r10(bw)}x{_r10(bh)}" if bw and bh else "-")
+        key = (name, size)
+        L = _polyline_len(pts)
+        prev = bg.get(key) or [0, 0.0, 0.0]
+        bg[key] = [prev[0] + 1, prev[1] + L, prev[2] + L * bw * bh]
+    rows = [[k[0], k[1], n, round(L / 1000.0, 1), round(v / 1e9, 2)]
+            for k, (n, L, v) in sorted(bg.items())]
+    if rows:
+        tot = ["합계", "", sum(r[2] for r in rows),
+               round(sum(r[3] for r in rows), 1), round(sum(r[4] for r in rows), 2)]
+        # 철골 보의 정산 단위는 연장(m)·중량(ton)이지 체적이 아니다. 체적은 b×h
+        # 외곽이라 형강 실체적보다 훨씬 크므로 열 이름에 '외곽' 을 명시한다.
+        out["보"] = (["부재명", "단면(mm)", "개수", "연장(m)", "외곽체적(㎥)"], rows, tot)
+
     # ── 창호: 규격별 ─────────────────────────────────────────
     og = {}
     for o in els.get("opening", []):

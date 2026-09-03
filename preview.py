@@ -251,7 +251,7 @@ const colH  = (P.column && P.column.height) || 3000;
 const slabT = (P.slab && P.slab.thickness) || 200;
 
 const CAT_COLOR = {
-  wall:0x6b8fb5, column:0xc77dff, slab:0x8d99ae, zone:0x495057,
+  wall:0x6b8fb5, column:0xc77dff, slab:0x8d99ae, beam:0x5a9aa8, zone:0x495057,
   opening:0xe85d5d, pipe:0x4cc9f0, duct:0xf4a261, tray:0x90be6d, equipment:0xf9c74f
 };
 const PAIR_COLOR = { paired:0x4caf50, single:0xff9800, single_offset:0xf44336, closed:0x26a69a };
@@ -335,6 +335,18 @@ function buildSlab(rec){
   const geo=new THREE.ExtrudeGeometry(shapeFrom(pts), {depth:t, bevelEnabled:false});
   addMesh(geo,'slab',rec,z0);   // ExtrudeGeometry 는 0..t 로 +Z 압출 → 아랫면을 z0 에
 }
+// 보: 축선 + 단면(폭 b × 춤 h). footprint 규칙은 gcBeamRings(주입) 이 단독 소유 —
+// 빌더와 같은 식을 쓰지 않으면 D6(규약 재구현)이 그대로 재현된다.
+function buildBeam(rec){
+  const zr = gcZRange('beam', rec, P);
+  const z0 = zr[0]*S, d = (zr[1]-zr[0])*S;
+  if(d<=0) return;
+  for(const ring of gcBeamRings(rec, P)){
+    if(!ring || ring.length<3) continue;
+    const geo=new THREE.ExtrudeGeometry(shapeFrom(ring), {depth:d, bevelEnabled:false});
+    addMesh(geo,'beam',rec,z0);
+  }
+}
 function buildZone(rec){
   const pts=rec.points||[]; if(pts.length<3) return;
   const geo=new THREE.ExtrudeGeometry(shapeFrom(pts), {depth:0.02, bevelEnabled:false});
@@ -379,6 +391,7 @@ function rebuild(){
   meshes.length=0;
   const E=DATA.elements;
   (E.slab||[]).forEach(buildSlab);
+  (E.beam||[]).forEach(buildBeam);
   (E.zone||[]).forEach(buildZone);
   (E.wall||[]).forEach(buildWall);
   (E.column||[]).forEach(buildColumn);
@@ -408,7 +421,7 @@ function topView(){
 const ray=new THREE.Raycaster(), mouse=new THREE.Vector2();
 let selected=null;
 const edits = {};   // eid -> {category?, overrides?, deleted?}
-const CATS=['wall','column','slab','zone','opening','pipe','duct','tray','equipment'];
+const CATS=['wall','column','slab','beam','zone','opening','pipe','duct','tray','equipment'];
 const sel=document.getElementById('e_cat'); CATS.forEach(c=>{const o=document.createElement('option');o.value=o.textContent=c;sel.appendChild(o);});
 
 renderer.domElement.addEventListener('click', ev=>{

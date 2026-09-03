@@ -16,7 +16,7 @@
 | 파일 | 역할 |
 |------|------|
 | `dxf_parser.py` | DXF → geometry.json 파서 v2 |
-| `geom_contract.py` | **z 기준면 규약의 단일 출처.** 모든 소비자가 `z_range()` 만 호출한다. 폴리곤 감김 정규화 `ccw()` 포함. FreeCAD 의존 없음(단위테스트 가능) |
+| `geom_contract.py` | **기하 계약의 단일 출처.** z 기준면 `z_range()`, 감김 정규화 `ccw()`, 보 축선→footprint `beam_rings()`. JS 소비자(preview)는 `js_constants()` 로 같은 식을 주입받는다. FreeCAD 의존 없음(단위테스트 가능) |
 | `verify.py` | **빌드 게이트.** `verify_geometry`(빌드 전) / `verify_build`(빌드 후). 검사 ID V001~V104. 실패 시 빌더가 마커를 출력하지 않아 산출물이 나가지 않는다 |
 | `schedule_table.py` | **부재일람표(MEMBER LIST) 복원.** TEXT 격자 → 표 → `{부재명: 단면}`. `layer_map` 의 `opts: schedule=<레이어>` 로 조인 |
 | `layer_map.csv` | 레이어명 정규식 → 카테고리·치수 매핑 |
@@ -73,7 +73,7 @@
 | 카테고리 | 키 | 기준면 | 뜻 |
 |---|---|---|---|
 | wall / column / zone / opening / equipment | `z_base` | **하단** | 위로 `height` |
-| slab / **beam** | `z_base` | **상단** | 아래로 `thickness`. 구조도면이 주는 값이 FL(상단)이기 때문 |
+| slab / **beam** | `z_base` | **상단** | 아래로 `thickness`(보는 춤). 구조도면이 주는 값이 FL(상단)이기 때문 |
 | pipe / duct / tray | `elevation` | **중심축** | 위아래로 절반씩. MEP 는 키 이름부터 다르다 — 개명하면 `cfd_export`·`boq_export` 가 깨진다 |
 
 실무 규약: **콘크리트 보 상단 = 슬래브 상단**, 춤은 슬래브 두께를 포함한다.
@@ -98,7 +98,7 @@
 | opts 키 | 뜻 |
 |---|---|
 | `pair_max` / `pair_min` | 이 레이어의 평행선 페어링 간격(mm). 보/거더 외곽선은 벽보다 훨씬 넓다(500~2500). 교차 레이어 쌍은 **두 값의 min** |
-| `from=dim` | 이 레이어의 **DIMENSION 을 부재 축선으로** 해석. 실무 구조도면은 부재를 치수선으로 긋고 텍스트를 부재명으로 덮어쓴다. 끝점은 `defpoint2`(13)→**`defpoint3`(14)** — `defpoint`(10)는 치수선이 그려질 위치일 뿐 측정점이 아니다 |
+| `from=dim` | 이 레이어의 **형상 출처가 DIMENSION**이라는 뜻. 실무 구조도면은 부재를 치수선으로 긋고 텍스트를 부재명으로 덮어쓴다. 끝점은 `defpoint2`(13)→**`defpoint3`(14)** — `defpoint`(10)는 치수선이 그려질 위치일 뿐 측정점이 아니다. ★ 같은 레이어의 **비-DIMENSION 엔티티는 치수 장식**(보조선 LINE·화살표 INSERT)이라 제외하고 `dimension_decoration_skipped` 로 센다. 실측: 부재 225개 옆에 장식 694개 — 안 거르면 길이 500mm 화살촉이 보로 세워진다 |
 | `member_re` | `from=dim` 에서 부재명으로 인정할 정규식. 일반 가드로는 부재명(`RAB1D`)과 철근상세 기호(`Lt`,`ta`)를 구분할 수 없다 |
 | `schedule=<레이어>` | 부재일람표 레이어. `member_name` → 실제 폭×춤 조인 |
 
@@ -324,9 +324,14 @@ MEP는 "추출은 곧, 3D 빌드는 나중"으로 분할(D 합의). 스키마 �
 - [x] **D2 — `from=dim`**: DIMENSION 을 부재 축선으로(옵트인). 후처리 3종(join/pair/merge) 우회.
 - [x] **D3 — `schedule=`**: 부재일람표 조인. `schedule_table.py`.
       실측 검증: 표 8개·부재 77개 → DIMENSION 부재 225개 전부 조인, 미매칭 0.
-- [ ] **D3b — `beam` 정식 빌드**: `build_beams` 로 중심선을 따라 b×h 스윕, `IfcType="Beam"`.
-      ⚠ 지뢰: 얇고 긴 폴리곤을 `IfcType="Slab"` 로 태그하면 IFC exporter 가 **조용히 누락**시킨다(30/30 재현).
-      현재 보는 `slab + overrides.ifc_type=Beam` 경로로 나가고 있어 그 지뢰 위에 서 있다.
+- [x] **D3b — `beam` 정식 빌드**: `build_beams` — 축선을 따라 b×h footprint 를 압출, `IfcType="Beam"`,
+      부재명을 `MemberName` 프로퍼티와 라벨에 심는다. 종전엔 `elements["beam"]` 을 읽는 코드가
+      **아예 없어서** `category=beam` 레코드가 빌드 단계에서 조용히 사라졌다(그래서 보를
+      `slab + overrides.ifc_type=Beam` 으로 우회했고, 그건 얇고 긴 폴리곤을 `IfcType="Slab"` 로
+      태그하면 IFC exporter 가 조용히 누락시키는 지뢰 옆이었다). 레거시 경로는 하위호환으로 유지.
+      축선→footprint 규칙은 `geom_contract.beam_rings()` 단독 — preview 는 `gcBeamRings` 로 주입받는다.
+      소비자 3종 동기화: `freecad_builder`(빌드) · `preview`(렌더) · `boq_export`(부재명별 연장·물량).
+      실측: 부재 225개 → `IfcBeam: 225`, 형상오류 0, `RAG11B`=400×1800·`SB0`=100×200(춤×폭 표기 정정 반영).
 - [ ] **Phase 3 — `stack_build.py` + `stack.json`**: 선언적 층 조립(일회성 스크립트 제거).
       offset 해결기에 가드 3개(모호성 마진 / 증거 하한 ≥3축 / 하부층 bbox 포함).
 - [ ] **Phase 5 — 스킬** `add-floor` / `verify-model` / `map-layers`.

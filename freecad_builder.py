@@ -550,6 +550,67 @@ def build_slabs(doc, slabs, params):
     return objs, src_els
 
 
+def build_beams(doc, beams, params):
+    """[D3b] elements["beam"] → Arch Structure(IfcType="Beam").
+
+    종전에 elements["beam"] 을 읽는 코드가 **아예 없었다** — layer_map 에
+    category=beam 을 쓰면 레코드가 빌드 단계에서 조용히 사라졌다. 그래서 보를
+    `slab + overrides.ifc_type=Beam` 으로 우회해 왔는데, 그건 build_slabs:537 의
+    경고("얇고 긴 폴리곤에 IfcType=Slab 이면 IFC exporter 가 조용히 누락")가
+    가리키는 지뢰 바로 옆이다. 여기서 정식 경로를 만든다.
+
+    두 형태를 모두 받는다:
+      · 열린 폴리라인(축선) — `from=dim` + 일람표 조인 산출물. 구간마다 폭 b 의
+        사각 footprint 를 만들어 춤 h 만큼 압출한다. 축+단면이지 가짜 닫힌
+        폴리곤이 아니므로 감김 문제가 원천적으로 없다.
+      · 닫힌 폴리라인(외곽선) — footprint 를 그대로 쓴다(슬래브와 같은 경로).
+
+    z 규약은 slab 과 같은 'top': z_base 가 보 **상단**이고 아래로 춤만큼 내려간다
+    (실무 규약: 콘크리트 보 상단 = 슬래브 상단, 춤은 슬래브 두께를 포함).
+    """
+    objs, src_els = [], []
+    n_nosec = 0
+    for i, el in enumerate(beams):
+        if el.get("kind") != "polyline":
+            continue
+        z0, z1 = GC.z_range("beam", el, params)
+        depth = z1 - z0
+        if depth <= 0:
+            print(f"  [warn] Beam_{i} 춤이 0 이하({depth}) — 건너뜀")
+            continue
+        # 일람표 미매칭 등으로 단면을 모르는 보는 기본단면으로 세우되 **세어서 보고**한다.
+        # 안 세우면 부재가 통째로 사라지고, 조용히 세우면 틀린 치수가 납품된다.
+        if el.get("needs_review") or el.get("schedule_match") in ("unmatched", "size_unparsed"):
+            n_nosec += 1
+
+        # 축선→footprint 규칙은 geom_contract 가 단독 소유(preview 도 같은 식을 주입받는다)
+        for j, ring in enumerate(GC.beam_rings(el, params)):
+            base = make_wire(GC.ccw(ring), True)
+            if base is None:
+                continue
+            base.Label = f"BeamBase_{i}_{j}"
+            try:
+                bm = Arch.makeStructure(base, height=depth)
+            except Exception as _be:
+                print(f"  [warn] Beam_{i}_{j} 생성 실패: {_be}")
+                continue
+            bm.IfcType = "Beam"
+            bm.Normal = App.Vector(0, 0, 1)   # 감김 무관하게 +Z 압출
+            bm.Placement.Base.z = z0
+            nm = el.get("member_name")
+            bm.Label = f"Beam_{i}_{j}" + (f"_{nm}" if nm else "")
+            bm.addProperty("App::PropertyString", "DxfId", "Metadata", "Original DXF Handle")
+            bm.DxfId = el.get("handle") or f"BEAM_{i}_{j}"
+            if nm:
+                bm.addProperty("App::PropertyString", "MemberName", "Metadata", "부재명(일람표)")
+                bm.MemberName = str(nm)
+            objs.append(bm)
+            src_els.append(el)
+    if n_nosec:
+        print(f"  [!] 단면 미상 보 {n_nosec}개 — 기본단면으로 세움(일람표 매칭 필요)")
+    return objs, src_els, n_nosec
+
+
 def build_spaces(doc, zones, params):
     """zone 닫힌 폴리라인 → Arch.makeSpace 방 객체. IFC Space 태깅."""
     objs = []
@@ -771,13 +832,15 @@ def _main_impl():
     walls, wall_idx_map, wall_src = build_walls(doc, el.get("wall", []), params)
     print(f"  → {len(walls)}개 벽체 ({_time.time()-_t0:.1f}s)")
 
-    print("[4/8] 기둥/슬래브/공간/MEP 빌드")
+    print("[4/8] 기둥/슬래브/보/공간/MEP 빌드")
     _t1 = _time.time()
     cols,   col_src   = build_columns(doc, el.get("column", []), params)
     slabs,  slab_src  = build_slabs(doc, el.get("slab", []), params)
+    beams, beam_src, n_nosec = build_beams(doc, el.get("beam", []), params)
     spaces, space_src = build_spaces(doc, el.get("zone", []), params)
     mep_objs          = build_mep(doc, el)
-    print(f"  → cols={len(cols)} slabs={len(slabs)} spaces={len(spaces)} mep={len(mep_objs)} ({_time.time()-_t1:.1f}s)")
+    print(f"  → cols={len(cols)} slabs={len(slabs)} beams={len(beams)}"
+          f" spaces={len(spaces)} mep={len(mep_objs)} ({_time.time()-_t1:.1f}s)")
 
     print("[5/8] recompute")
     _t2 = _time.time()
@@ -842,14 +905,16 @@ def _main_impl():
         fw  = _at_floor(walls,   wall_src,  fz, fi)
         fc  = _at_floor(cols,    col_src,   fz, fi)
         fs  = _at_floor(slabs,   slab_src,  fz, fi)
+        fb  = _at_floor(beams,   beam_src,  fz, fi)
         fsp = _at_floor(spaces,  space_src, fz, fi)
         fm  = _in_story(mep_objs, mep_src, fi)
         try:
-            fl = Arch.makeFloor(fw + fc + fs + fsp + fm)
+            fl = Arch.makeFloor(fw + fc + fs + fb + fsp + fm)
             fl.Label = flbl
             fl.Placement.Base.z = fz
             floor_containers.append(fl)
             print(f"  {flbl}: walls={len(fw)} cols={len(fc)} slabs={len(fs)}"
+                  + (f" beams={len(fb)}" if fb else "")
                   + (f" mep={len(fm)}" if fm else ""))
         except Exception as _fe:
             print(f"  [warn] makeFloor 실패({flbl}): {_fe}")
@@ -873,7 +938,7 @@ def _main_impl():
     print("[7/8] 문/창 3D (사각형 void + 문짝/창틀) + clash 검사")
     n_voids, n_leaf = build_openings(doc, el.get("opening", []), wall_idx_map, params)
     print(f"  개구부 void={n_voids}개, 문짝/창틀={n_leaf}개")
-    struct_objs = walls + cols + slabs
+    struct_objs = walls + cols + slabs + beams
     clashes = check_clashes(struct_objs, mep_objs)
     if clashes:
         print(f"  [CLASH] 간섭 {len(clashes)}건")
@@ -890,7 +955,8 @@ def _main_impl():
     _n_hidden = 0
     for _o in doc.Objects:
         _lbl = getattr(_o, "Label", "")
-        if _lbl.startswith(("WallAxis", "SlabBase", "ColBase", "SpaceShape", "_wall_")):
+        if _lbl.startswith(("WallAxis", "SlabBase", "ColBase", "BeamBase",
+                            "SpaceShape", "_wall_")):
             try:
                 _o.Visibility = False
                 _n_hidden += 1
@@ -928,7 +994,7 @@ def _main_impl():
     # 닫힌 폴리선 벽은 Arch.makeStructure 라 IfcWall 이 아니고, 보는 slab 버킷에
     # 있지만 IfcType=Beam 이다. 원본 수로 세면 정상 빌드가 불일치로 걸린다.
     _by_ifctype = {}
-    for _o in (walls + cols + slabs):
+    for _o in (walls + cols + slabs + beams):
         _t = str(getattr(_o, "IfcType", "") or "").strip().lower().replace(" ", "")
         if _t:
             _by_ifctype[_t] = _by_ifctype.get(_t, 0) + 1
@@ -939,8 +1005,9 @@ def _main_impl():
                    "beam": _by_ifctype.get("beam", 0)},
         "ifctype_counts": _by_ifctype,
         "built": {"walls": len(walls), "columns": len(cols), "slabs": len(slabs),
-                  "spaces": len(spaces), "mep": len(mep_objs),
+                  "beams": len(beams), "spaces": len(spaces), "mep": len(mep_objs),
                   "floors": len(floor_containers)},
+        "beams_without_section": n_nosec,
         "floor_orphans": len(_orphans), "floor_dups": len(_dups),
         "floor_orphan_detail": [{"label": l, "z_base": z} for l, z in _orphans[:20]],
         "invalid_shapes": n_err,
@@ -1070,8 +1137,9 @@ def _main_impl():
                         os.path.abspath(ifc))
 
     print(f"빌드 완료: floors={len(floor_containers)} walls={len(walls)}"
-          f" columns={len(cols)} slabs={len(slabs)} spaces={len(spaces)}"
-          f" mep={len(mep_objs)}"
+          f" columns={len(cols)} slabs={len(slabs)}"
+          + (f" beams={len(beams)}" if beams else "")
+          + f" spaces={len(spaces)} mep={len(mep_objs)}"
           + (f" openings_void={n_voids}" if n_voids else "")
           + (f" clashes={len(clashes)}" if clashes else ""))
     # 실제로 그 경로에 있는 것만 산출물로 보고한다.
