@@ -258,7 +258,10 @@ def build_walls(doc, walls, params):
         if flagged and not base_el.get("needs_review"):
             chain_el = dict(base_el)
             chain_el["needs_review"] = True
-            chain_el["review_reason"] = flagged[0].get("review_reason") or "chained"
+            # 사유에 'chained:' 를 붙인다. 안 붙이면 검토자가 "thin_pair 인데 폭이
+            # 200mm?" 로 읽는다 — 폭은 체인 대표 것이고 얇은 건 다른 멤버다.
+            _why = flagged[0].get("review_reason") or "needs_review"
+            chain_el["review_reason"] = f"chained:{_why}"
         width = GC.width_of(base_el, params, "wall")
         z_base, _z1 = GC.z_range("wall", base_el, params)
         height = _z1 - z_base
