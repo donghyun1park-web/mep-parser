@@ -1,4 +1,4 @@
-pattern,category,width,height,thickness
+pattern,category,width,height,thickness,opts
 # 선매칭 우선(first-match-wins): 좁은/제외 패턴을 넓은 패턴보다 위에 둘 것.
 # 예) 배수판_벽체 는 '벽'을 포함하므로 WALL|벽|CON 아래에 두면 영원히 가려진다.
 # 주의) 패턴 주석 처리 시 alternation 은 첫 가지만 죽는다 — '#WALL|벽|CON' 은 여전히 '벽','CON'에 매칭됨.

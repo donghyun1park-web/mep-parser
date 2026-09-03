@@ -235,3 +235,35 @@ def test_member_re_narrows_selection():
     assert dp.entity_to_record(_FakeDim("RAB1D"), 1.0, o) is not None
     assert dp.entity_to_record(_FakeDim("Hu1"), 1.0, o) is None
     assert dp.entity_to_record(_FakeDim("Lt"), 1.0, o) is None
+
+
+# ── 헤더/컬럼 정합 ─────────────────────────────────────────────────────────
+def test_extra_field_without_header_column_is_rejected():
+    """배포된 layer_map.csv 헤더가 5컬럼이라 opts 를 적어도 조용히 버려졌다.
+
+    DictReader 는 헤더보다 많은 필드를 None 키에 담고 넘어간다 — opts 설계가
+    막으려던 바로 그 '조용한 무시'가 파일 헤더 쪽에 남아 있었다.
+    """
+    p = write_csv("pattern,category,width,height,thickness\n"
+                  "^A-CON$,wall,200,2800,,pair_min=100\n")
+    try:
+        dp.load_layer_map(p)
+    except dp.LayerMapError as e:
+        assert "헤더" in str(e), e
+        return
+    raise AssertionError("헤더에 없는 컬럼이 조용히 통과했다")
+
+
+def test_opts_reach_the_rule_when_the_header_has_the_column():
+    p = write_csv("pattern,category,width,height,thickness,opts\n"
+                  "^A-CON$,wall,200,2800,,pair_min=100;pair_max=600\n")
+    _pat, _cat, attrs = dp.load_layer_map(p)[0]
+    assert attrs["_opts"] == {"pair_min": 100.0, "pair_max": 600.0}
+
+
+def test_shipped_layer_map_has_the_opts_column():
+    """저장소가 배포하는 파일이 그 함정에 다시 빠지지 않게 고정한다."""
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(here, "layer_map.csv"), encoding="utf-8") as f:
+        header = f.readline().strip()
+    assert header.endswith(",opts"), header

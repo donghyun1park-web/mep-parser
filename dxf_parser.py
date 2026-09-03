@@ -164,6 +164,14 @@ def load_layer_map(csv_path):
                     except ValueError:
                         raise LayerMapError(
                             f"{os.path.basename(csv_path)} {lineno}행: {k}={v!r} 는 숫자가 아니다")
+            # DictReader 는 헤더보다 필드가 많은 행의 나머지를 None 키에 담고 조용히 넘어간다.
+            # 배포된 layer_map.csv 헤더가 5컬럼이던 시절, opts 를 적으면 아무 일도
+            # 일어나지 않았다 — opts 설계가 막으려던 바로 그 '조용한 무시'다.
+            if row.get(None):
+                raise LayerMapError(
+                    f"{os.path.basename(csv_path)} {lineno}행: 헤더에 없는 컬럼이 있다 "
+                    f"({row[None]}). 헤더를 "
+                    f"'pattern,category,width,height,thickness,opts' 로 고칠 것")
             opts = _parse_opts(row.get("opts"), csv_path, lineno)
             if opts:
                 attrs["_opts"] = opts        # '_' 접두 = 파서 전용, 빌더로 새지 않는다
