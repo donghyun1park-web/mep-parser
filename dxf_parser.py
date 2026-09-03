@@ -105,6 +105,11 @@ WALL_PAIR_MIN_MM = 1.0        # 벽 두께 최소. 1mm → 밀착 철골(A-STEEL
 WALL_PAIR_MAX_MM = 500.0      # 벽 두께 최대(이보다 멀면 무관한 선)
 WALL_PAIR_OVERLAP_RATIO = 0.3 # 투영 겹침 최소 비율. 0.5→0.3: 세그먼트 길이 불일치로
                                # 페어링 실패하던 88개 중 상당수 구제.
+# 얇은 오결합 판정 — 레이어 두께 중앙값 대비. 절대값이 아니라 상대값이라
+# '전체가 얇은 레이어'(A-STEEL 30mm 등)는 스스로 통과한다.
+THIN_PAIR_RATIO = 1.0 / 3.0   # 중앙값의 이 비율 미만이면 검토 대상
+THIN_PAIR_MIN_SAMPLES = 5     # 표본이 이보다 적으면 중앙값을 신뢰하지 않는다
+
 WALL_PAIR_CLAIM_FRAC = 0.6    # [interval-greedy] 겹침구간이 이 비율 이상 이미 점유됐으면
                                # 스킵. 가까운 쌍이 구간 선점(거짓 원거리쌍 방지) + 1:N 면선의
                                # 잔여 구간은 다음 파트너가 차지(긴 면선↔짧은 면선 다수 해결).
@@ -2190,6 +2195,43 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
     single = sum(1 for w in result["elements"]["wall"] if w.get("pairing") == "single")
     offset = sum(1 for w in result["elements"]["wall"] if w.get("pairing") == "single_offset")
     result["wall_pairing"] = {"paired": paired, "single": single, "single_offset": offset}
+    # ── 얇은 오결합 감지: 레이어 중앙값 대비 지나치게 얇은 paired 벽 ─────
+    # 페어링은 수직거리가 가까운 쌍부터 구간을 선점한다. 그래서 벽면 옆의
+    # 마감선과 이룬 '가짜 얇은 쌍' 이 먼저 구간을 먹고 진짜 두께를 막는다.
+    # 실측(지하3층): A-CON 에서 두께 50mm 짜리 55개가 paired·confidence 0.9·
+    # needs_review=False 로 조용히 나갔다. 참값은 250~450mm 였다.
+    #
+    # ★ 절대 임계가 아니라 **레이어 중앙값 대비**로 본다. 그래야 자기보정된다 —
+    #   A-STEEL 처럼 레이어 전체가 얇으면(전부 30mm) 중앙값도 30이라 하나도 안 걸리고,
+    #   A-CON 처럼 250mm 사이에 50mm 가 섞여 있을 때만 걸린다.
+    _thin_by_layer: dict = {}
+    _w_by_layer: dict = {}
+    for _w in result["elements"]["wall"]:
+        if _w.get("pairing") == "paired" and _w.get("width_detected"):
+            _w_by_layer.setdefault(_w.get("layer", ""), []).append(_w)
+    for _ly, _ws in _w_by_layer.items():
+        if len(_ws) < THIN_PAIR_MIN_SAMPLES:
+            continue                      # 표본이 적으면 중앙값을 못 믿는다
+        _vals = sorted(float(x["width_detected"]) for x in _ws)
+        _med = _vals[len(_vals) // 2]
+        _limit = _med * THIN_PAIR_RATIO
+        for _w in _ws:
+            if float(_w["width_detected"]) < _limit:
+                _w["needs_review"] = True
+                _w["review_reason"] = "thin_pair"
+                _thin_by_layer[_ly] = _thin_by_layer.get(_ly, 0) + 1
+    if _thin_by_layer:
+        result["thin_pairs"] = _thin_by_layer
+        for _ly, _cnt in sorted(_thin_by_layer.items()):
+            _med = sorted(float(x["width_detected"]) for x in _w_by_layer[_ly])[
+                len(_w_by_layer[_ly]) // 2]
+            _msg = (f"[얇은 오결합] 레이어 '{_ly}': 두께가 중앙값 {_med:.0f}mm 의 "
+                    f"{THIN_PAIR_RATIO:.0%} 미만인 벽 {_cnt}개. 벽면 옆 마감선과 짝지은 "
+                    f"것일 수 있다 — layer_map 에 opts 'pair_min={_med / 3:.0f}' 를 주면 "
+                    "진짜 두께가 통과한다.")
+            result["warnings"].append(_msg)
+            print("  " + _msg)
+
     # [자기검증 QA] 원본 면선 대비 최종 벽 회수율 + 누락 의심 리스트
     _qa = build_qa(_qa_face_segs, result["elements"]["wall"], params)
     if _qa:

@@ -44,7 +44,7 @@ python -c "import dxf_parser as P,collections; r=P.load_layer_map('layer_map.csv
 
 ## 남은 것
 
-### A. 가짜 얇은 쌍이 정답 쌍을 선점한다 ★ 코드 아님, 매핑 문제
+### A. 가짜 얇은 쌍이 정답 쌍을 선점한다 — **감지는 자동, 조치는 매핑**
 
 `paired` 중 두께 60mm 미만이 83개다.
 
@@ -70,6 +70,11 @@ python -c "import dxf_parser as P,collections; r=P.load_layer_map('layer_map.csv
 | pair_min=80 | **30** | 200×156, 250×124, **450×41**, 400×33, 30×24 |
 
 50mm 벽 55개가 450/250mm 로 정정된다 — 물량에 직접 영향이다.
+
+**파서가 이제 스스로 잡는다**(2026-09): 레이어 두께 중앙값의 1/3 미만이면
+`needs_review` + `review_reason="thin_pair"` 로 올리고, 경고문에 넣을 `pair_min`
+값까지 계산해 준다(`result["thin_pairs"]`). 중앙값 대비라 A-STEEL(전부 30mm)은
+오탐하지 않는다. 종전엔 confidence 0.9 로 조용히 나갔다.
 **전역 상수로 올리지 않는다**: `WALL_PAIR_MIN_MM=1.0` 은 A-STEEL 을 위해 일부러 낮춘 값이고,
 실제로 50~100mm 경량벽체는 존재한다. 도면마다 판단할 일이라 layer_map 에 적는다.
 
