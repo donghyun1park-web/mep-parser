@@ -1121,6 +1121,12 @@ def _merge_two_segments(seg1, seg2):
               "pairing": rec1.get("pairing", "single"),
               "needs_review": bool(rec1.get("needs_review") or rec2.get("needs_review")),
               "z_base": rec1.get("z_base", 0.0),  # [4b]
+              # 레코드를 새로 만들면서 layer/seg_length 를 떨어뜨리고 있었다.
+              # 결과: 병합된 벽은 레이어가 빈 문자열이 되어 "이 벽 어느 레이어냐" 를
+              # 물을 수 없었고(실측 single_offset 158개 중 115개), seg_length 가
+              # 갱신되지 않아 총연장 비교로 병합 튜닝을 판단할 수도 없었다.
+              "layer": rec1.get("layer") or rec2.get("layer", ""),
+              "seg_length": round(math.hypot(b[0] - a[0], b[1] - a[1]), 1),
               "_sigs": rec1.get("_sigs", []) + rec2.get("_sigs", []),
               **({"overrides": ov} if ov else {})}
     return {"c1": a, "c2": b, "rec": merged}
