@@ -36,6 +36,8 @@ CHECKS = {
     "V102": ("error", "층 소속 — 어느 Floor 에도 안 들어간 객체 / 두 Floor 에 들어간 객체"),
     "V103": ("error", "형상 검증 실패(isValid=False) 객체"),
     "V104": ("error", "모델 bbox 가 입력 bbox 대비 비정상적으로 큼(폭주 솔리드)"),
+    "V105": ("warn",  "IFC 에 QA 속성(Pset_MEPParser)이 실리지 않음 — 뷰어에서 "
+                      "부재명·EID·needs_review 를 못 본다"),
 }
 
 # 'beam' 은 정식 카테고리다(layer_map 의 category=beam). 빠져 있으면 보의
@@ -300,6 +302,20 @@ _IFC_CAT_MAP = {
 }
 
 
+def count_ifc_psets(ifc_path, name="Pset_MEPParser"):
+    """지정 PropertySet 을 가진 IFC 객체 수. ifcopenshell 없으면 평문으로 센다.
+
+    `addProperty("App::PropertyString", …)` 는 FreeCAD 문서 안에만 남고 IFC 로는
+    안 나간다. 실제로 그 상태로 오래 나갔고 아무도 몰랐다 — 형상은 멀쩡하니
+    기존 검사가 전부 통과했기 때문이다. 그래서 별도 검사가 필요하다."""
+    try:
+        with open(ifc_path, "r", encoding="utf-8", errors="ignore") as fh:
+            txt = fh.read()
+    except Exception:
+        return 0
+    return len(re.findall(r"IFCPROPERTYSET\('[^']*',#\d+,'" + re.escape(name) + r"'", txt))
+
+
 def count_ifc_entities(ifc_path):
     """IFC STEP 텍스트에서 엔티티 수를 센다. ifcopenshell 있으면 그걸 쓰고,
     없으면 평문 파싱(STEP 은 텍스트라 정직하게 셀 수 있다)."""
@@ -360,6 +376,17 @@ def verify_build(data, build_stats, ifc_path=None, policy=None):
                 F.append(Finding("V104", _sev("V104", policy),
                                  f"모델 bbox {got:.0f}mm 가 입력 {want:.0f}mm 의 2배 초과 — 폭주 솔리드 의심",
                                  {"model": got, "input": want}))
+
+    # V105 QA 속성 왕복 — 형상만 맞고 속성이 빠지면 뷰어 검수가 통째로 무의미해진다
+    if ifc_path and os.path.exists(ifc_path):
+        n_built = sum(int(v) for k, v in (st.get("built") or {}).items()
+                      if k in ("walls", "columns", "slabs", "beams"))
+        n_pset = count_ifc_psets(ifc_path)
+        if n_built and not n_pset:
+            F.append(Finding("V105", _sev("V105", policy),
+                             f"IFC 에 Pset_MEPParser 가 0개 — 객체 {n_built}개를 만들었는데 "
+                             "부재명·EID·needs_review 가 하나도 안 실렸다",
+                             {"built": n_built, "psets": 0}))
 
     # V101 IFC 대조
     if ifc_path and os.path.exists(ifc_path):

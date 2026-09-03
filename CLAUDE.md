@@ -184,6 +184,19 @@ python preview.py sample_plan.dxf -m layer_map.csv -b block_map.csv  # DXF 즉�
 python dxf_parser.py plan.dxf -m layer_map.csv -o geometry.json --edits edits.json
 ```
 
+### 6.5 Blender 로 보기 (렌더·4D 공정·간섭 검토)
+**새로 만들지 않는다.** [Bonsai](https://bonsaibim.org/)(구 BlenderBIM)가 IFC 네이티브로
+4D 시공 시퀀스(`IfcTask`)·clash detection·QTO 를 전부 한다. 우리는 IFC4 를 이미 내보낸다.
+```
+Blender > Preferences > Get Extensions > "Bonsai" 설치 → File > Import > IFC
+```
+빌더가 `Pset_MEPParser` 로 QA 속성을 함께 내보내므로 뷰어에서 부재를 클릭하면
+`EID` · `Layer` · `MemberName` · `Section` · `Pairing` · `WidthDetected` ·
+`NeedsReview` · `ReviewReason` 이 보인다. **`NeedsReview=True` 로 필터하면 얇은
+오결합이 그대로 잡힌다.** `EID` 는 `edits.json` 으로 되돌리는 열쇠다.
+(주: `App::PropertyString` 는 FreeCAD 문서에만 남고 IFC 로 안 나간다 —
+반드시 `set_ifc_props()` 를 거칠 것. V105 가 이걸 검사한다.)
+
 ### 7. 단일 .exe 빌드 (현장 PC = Python 불필요)
 개발 PC(Python 3.11 권장)에서 1회 빌드 → 현장 PC 더블클릭 실행.
 ```

@@ -249,3 +249,37 @@ def test_every_check_has_catalog_entry():
                             "verify.py"), encoding="utf-8").read()
     used = set(re.findall(r'Finding\("(V\d+)"', src))
     assert used <= set(V.CHECKS), f"카탈로그에 없는 검사 id: {used - set(V.CHECKS)}"
+
+
+# ── V105: IFC 에 QA 속성이 실렸는가 ────────────────────────────────────────
+def _ifc_with(psets, path=None):
+    import tempfile
+    p = path or os.path.join(tempfile.gettempdir(), "_v105.ifc")
+    body = "\n".join(
+        f"#{100+i}=IFCPROPERTYSET('0abc{i}',#5,'Pset_MEPParser',$,(#9));"
+        for i in range(psets))
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("ISO-10303-21;\nDATA;\n" + body + "\nENDSEC;\nEND-ISO-10303-21;\n")
+    return p
+
+
+def test_v105_fires_when_no_qa_properties_reached_the_ifc():
+    """형상만 맞고 속성이 빠지면 뷰어 검수가 통째로 무의미해진다.
+    실제로 오래 그 상태였는데 형상 검사가 전부 통과해서 아무도 몰랐다."""
+    rep = V.verify_build({"elements": {}},
+                              {"built": {"walls": 3, "columns": 4, "slabs": 1}},
+                              _ifc_with(0))
+    assert any(f.id == "V105" for f in rep.findings), rep.text()
+
+
+def test_v105_silent_when_properties_are_present():
+    rep = V.verify_build({"elements": {}},
+                              {"built": {"walls": 3, "columns": 4, "slabs": 1}},
+                              _ifc_with(8))
+    assert not any(f.id == "V105" for f in rep.findings), rep.text()
+
+
+def test_count_ifc_psets_counts_only_our_pset():
+    p = _ifc_with(3)
+    assert V.count_ifc_psets(p) == 3
+    assert V.count_ifc_psets(p, "Pset_Other") == 0

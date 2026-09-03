@@ -150,6 +150,14 @@ def test_end_to_end_build_of_the_sample_plan():
     # 마커를 찍었으면 그 경로에 파일이 실제로 있어야 한다.
     assert "FCSTD_DST:" in log and "IFC_DST:" in log, log[-400:]
     assert os.path.exists(base + ".FCStd") and os.path.exists(base + ".ifc")
+    # QA 속성이 IFC 로 나가는지. 형상만 맞고 이게 빠지면 뷰어(Bonsai) 검수가
+    # 통째로 무의미해지는데, 형상 검사는 전부 통과하므로 따로 봐야 한다.
+    import verify as V
+    n_pset = V.count_ifc_psets(base + ".ifc")
+    assert n_pset == st["built"]["walls"] + st["built"]["columns"] + st["built"]["slabs"],         f"Pset_MEPParser {n_pset}개 (객체 수와 불일치)"
+    with open(base + ".ifc", encoding="utf-8", errors="ignore") as f:
+        ifc = f.read()
+    assert "'EID'" in ifc and "'Layer'" in ifc, "EID/Layer 가 IFC 에 없다"
 
 
 def test_gate_withholds_output_when_a_record_has_no_floor():

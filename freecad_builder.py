@@ -38,6 +38,43 @@ def vec(p, z=0.0):
     return App.Vector(p[0], p[1], z)
 
 
+_PSET = "Pset_MEPParser"
+
+
+def set_ifc_props(obj, rec):
+    """레코드의 QA 정보를 **IFC 로 나가는** 속성으로 심는다.
+
+    `addProperty("App::PropertyString", …)` 는 FreeCAD 문서 안에만 남고 IFC 로는
+    나가지 않는다 — 실측: 생성된 .ifc 의 IFCPROPERTYSET 이 0 이었다. 그래서 Bonsai
+    (Blender)로 열면 형상만 보이고 부재명·EID·needs_review 가 전부 없었다.
+    검수·간섭 검토를 IFC 뷰어에서 하려면 알맹이가 같이 가야 한다.
+
+    FreeCAD 내보내기 규약(importers.exportIFC.getPropertyData):
+        obj.IfcProperties = {"이름": "pset;;타입;;값"}
+    값이 빈 문자열이면 exporter 가 그 속성을 버리므로, 없는 항목은 아예 안 넣는다.
+    """
+    sec = rec.get("section") or {}
+    vals = [
+        # EID 는 Bonsai 에서 찾은 문제를 edits.json 으로 되돌리는 열쇠다.
+        ("EID",           "IfcIdentifier", rec.get("eid")),
+        ("Layer",         "IfcLabel",      rec.get("layer")),
+        ("Level",         "IfcLabel",      rec.get("level")),
+        ("MemberName",    "IfcLabel",      sec.get("name") or rec.get("member_name")),
+        ("Section",       "IfcLabel",      sec.get("size")),
+        ("Pairing",       "IfcLabel",      rec.get("pairing")),
+        ("WidthDetected", "IfcReal",       rec.get("width_detected")),
+        # 이 둘이 핵심이다 — 뷰어에서 NeedsReview 로 필터하면 얇은 오결합이 잡힌다.
+        ("NeedsReview",   "IfcBoolean",    bool(rec.get("needs_review"))),
+        ("ReviewReason",  "IfcLabel",      rec.get("review_reason")
+                                           or rec.get("schedule_match")),
+    ]
+    props = {k: f"{_PSET};;{t};;{v}" for k, t, v in vals if v not in (None, "")}
+    try:
+        obj.IfcProperties = props
+    except Exception as _pe:                      # IfcProperties 없는 객체(Part::Feature 등)
+        print(f"  [warn] IFC 속성 부여 실패({getattr(obj, 'Label', '?')}): {_pe}")
+
+
 def make_wire(points, closed, doc=None, label="_wall_base"):
     """Part.makePolygon → Part::Feature 베이스라인 생성.
     개별 직선 세그먼트(2점) 용. self-intersecting 없음."""
@@ -186,6 +223,7 @@ def build_walls(doc, walls, params):
             struct.Label = f"ClosedWall_{i}"
             struct.addProperty("App::PropertyString", "DxfId", "Metadata", "")
             struct.DxfId = dxf_id
+            set_ifc_props(struct, el)
             objs.append(struct)
             src_els.append(el)
             idx_map[i] = struct
@@ -210,6 +248,17 @@ def build_walls(doc, walls, params):
     for c_idx, (base_el, chain_pts, chain_ids) in enumerate(chains):
         if len(chain_pts) < 2:
             continue
+        # 체인의 검토 플래그는 **멤버 전체를 OR** 한다. 대표 레코드만 보면 얇은
+        # 오결합이 정상 벽과 한 체인에 묶이는 순간 조용히 사라진다
+        # (실측: geometry.json 의 thin_pair 55개 중 IFC 에 15개만 남았다).
+        # 파서의 merge_collinear_walls 도 같은 규칙으로 needs_review 를 OR 한다.
+        chain_el = base_el
+        members = [open_walls[k] for k in chain_ids]
+        flagged = [m for m in members if m.get("needs_review")]
+        if flagged and not base_el.get("needs_review"):
+            chain_el = dict(base_el)
+            chain_el["needs_review"] = True
+            chain_el["review_reason"] = flagged[0].get("review_reason") or "chained"
         width = GC.width_of(base_el, params, "wall")
         z_base, _z1 = GC.z_range("wall", base_el, params)
         height = _z1 - z_base
@@ -234,6 +283,7 @@ def build_walls(doc, walls, params):
                 wall.Placement.Base.z = z_base
                 wall.addProperty("App::PropertyString", "DxfId", "Metadata", "")
                 wall.DxfId = base_el.get("handle") or f"WALL_CHAIN_{c_idx}"
+                set_ifc_props(wall, chain_el)
                 objs.append(wall)
                 src_els.append(base_el)
                 if s_idx == 0:
@@ -449,6 +499,7 @@ def build_columns(doc, columns, params):
         # [라운드트립 기반] DXF Handle 주입
         col.addProperty("App::PropertyString", "DxfId", "Metadata", "Original DXF Handle")
         col.DxfId = el.get("handle") or f"COLUMN_{i}"
+        set_ifc_props(col, el)
         
         objs.append(col)
         src_els.append(el)
@@ -482,6 +533,7 @@ def build_slabs(doc, slabs, params):
         # [라운드트립 기반] DXF Handle 주입
         slab.addProperty("App::PropertyString", "DxfId", "Metadata", "Original DXF Handle")
         slab.DxfId = el.get("handle") or f"SLAB_{i}"
+        set_ifc_props(slab, el)
         
         objs.append(slab)
         src_els.append(el)
@@ -539,6 +591,7 @@ def build_beams(doc, beams, params):
             bm.Label = f"Beam_{i}_{j}" + (f"_{nm}" if nm else "")
             bm.addProperty("App::PropertyString", "DxfId", "Metadata", "Original DXF Handle")
             bm.DxfId = el.get("handle") or f"BEAM_{i}_{j}"
+            set_ifc_props(bm, el)
             if nm:
                 bm.addProperty("App::PropertyString", "MemberName", "Metadata", "부재명(일람표)")
                 bm.MemberName = str(nm)
