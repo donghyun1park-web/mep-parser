@@ -703,38 +703,74 @@ def _equip_solid(pts, elev, default_h=1000.0):
     return face.extrude(App.Vector(0, 0, default_h))
 
 
+# MEP 카테고리 → FreeCAD IfcType 문자열(ArchIFC.IfcTypes 의 표기 그대로).
+# 이게 없으면 exporter 가 전부 IfcBuildingElementProxy 로 내보낸다 — 실측:
+# 지하3층 IFC 의 MEP 6개가 전부 Proxy 였고, 뷰어는 그게 배관인지 알 수 없었다.
+_MEP_IFC_TYPE = {
+    "pipe":      "Pipe Segment",            # → IfcPipeSegment
+    "duct":      "Duct Segment",            # → IfcDuctSegment
+    "tray":      "Cable Carrier Segment",   # → IfcCableCarrierSegment
+    # 도면의 블록만 보고 펌프인지 냉동기인지 알 수 없다. 일반 배급요소가 정직하다.
+    "equipment": "Distribution Element",    # → IfcDistributionElement
+}
+
+
 def build_mep(doc, mep_elements):
-    """MEP 중심선 → 3D 솔리드 Part::Feature. 구조 빌드와 분리(clash 검사용)."""
-    objs = []
+    """MEP 중심선 → Arch 컴포넌트. **IFC MEP 타입을 달아서** 내보낸다.
+
+    종전에는 Part::Feature 로만 만들어 IFC 에서 전부 IfcBuildingElementProxy 가 됐다.
+    형상은 맞지만 뷰어(Bonsai/Navisworks)가 배관인지 덕트인지 모르니 시스템 필터도,
+    카테고리별 물량도, 의미 있는 간섭 리포트도 안 나온다. MEP 가 이 프로젝트의
+    차별점인데 정작 IFC 에서 정체불명이었다.
+
+    배관은 `Arch.makePipe` 가 축선을 따라 원형 단면을 스윕한다 — 다점 폴리라인을
+    한 객체로 처리하고 코너도 마이터로 잇는다(실측: 직선합 대비 체적 오차 0.07%).
+    직접 원통을 fuse 하던 것보다 형상도 낫고 IfcType 도 공짜다.
+    덕트/트레이/장비는 Arch 전용 생성자가 없으므로 기존 솔리드를 Arch 컴포넌트로
+    감싸고 IfcType 만 지정한다.
+    """
+    objs, src = [], []
     for cat in ("pipe", "duct", "tray", "equipment"):
         for i, el in enumerate(mep_elements.get(cat, [])):
             elev = float(el.get("elevation", 0.0))
-            pts = el.get("points", [])
+            pts = el.get("centerline") or el.get("points") or []
             if len(pts) < 2:
                 continue
+            label = f"{cat.capitalize()}_{i}"
             try:
+                obj = None
                 if cat == "pipe":
-                    r = float(el.get("diameter") or 100.0) / 2.0
-                    shape = _pipe_solid(pts, r, elev)
-                elif cat in ("duct", "tray"):
-                    w = float(el.get("width_mm") or 400.0)
-                    h = float(el.get("height_mm") or (300.0 if cat == "duct" else 100.0))
-                    shape = _rect_solid(pts, w, h, elev)
-                elif cat == "equipment":
-                    if not el.get("closed") or len(pts) < 3:
+                    ax = make_wire([[p[0], p[1]] for p in pts], False, doc=doc,
+                                   label=f"PipeAxis_{i}")
+                    if ax is None:
                         continue
-                    shape = _equip_solid(pts, elev)
+                    ax.Placement.Base.z = elev
+                    obj = Arch.makePipe(ax, diameter=float(el.get("diameter") or 100.0))
                 else:
+                    if cat in ("duct", "tray"):
+                        w = float(el.get("width_mm") or 400.0)
+                        h = float(el.get("height_mm")
+                                  or (300.0 if cat == "duct" else 100.0))
+                        shape = _rect_solid(pts, w, h, elev)
+                    else:                                   # equipment
+                        if not el.get("closed") or len(pts) < 3:
+                            continue
+                        shape = _equip_solid(pts, elev)
+                    if shape is None or not shape.isValid():
+                        print(f"[warn] MEP {label} 형상 오류")
+                        continue
+                    feat = doc.addObject("Part::Feature", f"MepShape_{cat}_{i}")
+                    feat.Shape = shape
+                    obj = Arch.makeComponent(feat)
+                if obj is None:
                     continue
-                if shape is None or not shape.isValid():
-                    print(f"[warn] MEP {cat}_{i} 형상 오류")
-                    continue
-                feat = doc.addObject("Part::Feature", f"{cat.capitalize()}_{i}")
-                feat.Shape = shape
-                feat.Label = f"{cat.capitalize()}_{i}"
-                objs.append(feat)
+                obj.IfcType = _MEP_IFC_TYPE[cat]
+                obj.Label = label
+                set_ifc_props(obj, el)
+                objs.append(obj)
+                src.append(el)
             except Exception as e:
-                print(f"[warn] MEP {cat}_{i}: {e}")
+                print(f"[warn] MEP {label}: {e}")
     return objs
 
 
@@ -950,6 +986,7 @@ def _main_impl():
     for _o in doc.Objects:
         _lbl = getattr(_o, "Label", "")
         if _lbl.startswith(("WallAxis", "SlabBase", "ColBase", "BeamBase",
+                            "PipeAxis", "MepShape",
                             "SpaceShape", "_wall_")):
             try:
                 _o.Visibility = False

@@ -186,3 +186,35 @@ def test_gate_withholds_output_when_a_record_has_no_floor():
     assert not os.path.exists(base + ".FCStd"), "산출물이 나갔다"
     assert st["verify"]["status"] == "failed", st["verify"]
     assert any(f["id"] == "V102" for f in st["verify"]["findings"]), st["verify"]
+
+
+def test_mep_gets_real_ifc_types_not_proxies():
+    """MEP 를 Part::Feature 로만 만들면 IFC 에서 전부 IfcBuildingElementProxy 가 된다.
+
+    형상은 맞지만 뷰어가 배관인지 덕트인지 모르니 시스템 필터도, 카테고리별 물량도,
+    의미 있는 간섭 리포트도 안 나온다. MEP 가 이 프로젝트의 차별점인데 정작 IFC 에서
+    정체불명이었다(실측: 지하3층 MEP 6개 전부 Proxy)."""
+    if not _skip_if_no_freecad():
+        return
+    import contextlib
+    import io
+    import dxf_parser as dp
+    rules = dp.load_layer_map(os.path.join(ROOT, "layer_map.csv"))
+    blocks = dp.load_layer_map(os.path.join(ROOT, "block_map.csv"))
+    with contextlib.redirect_stdout(io.StringIO()):
+        data = dp.parse(os.path.join(ROOT, "sample_mep.dxf"), rules, blocks)
+    geom = os.path.join(ROOT, "_t_mep.json")
+    with open(geom, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    base = os.path.join(tempfile.mkdtemp(prefix="mepifc_"), "out")
+    try:
+        _log, st = _build(geom, base)
+    finally:
+        os.remove(geom)
+    assert st["built"]["mep"] == 6, st["built"]
+    with open(base + ".ifc", encoding="utf-8", errors="ignore") as f:
+        ifc = f.read()
+    for want in ("IFCPIPESEGMENT", "IFCDUCTSEGMENT", "IFCCABLECARRIERSEGMENT",
+                 "IFCDISTRIBUTIONELEMENT"):
+        assert want in ifc, f"{want} 가 IFC 에 없다"
+    assert "IFCBUILDINGELEMENTPROXY" not in ifc, "MEP 가 아직 Proxy 로 나간다"

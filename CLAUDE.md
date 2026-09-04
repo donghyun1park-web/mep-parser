@@ -190,6 +190,9 @@ python dxf_parser.py plan.dxf -m layer_map.csv -o geometry.json --edits edits.js
 ```
 Blender > Preferences > Get Extensions > "Bonsai" 설치 → File > Import > IFC
 ```
+MEP 는 `IfcPipeSegment`/`IfcDuctSegment`/`IfcCableCarrierSegment`/`IfcDistributionElement`
+로 나가므로 뷰어에서 계통별 필터·물량이 된다(종전엔 전부 `IfcBuildingElementProxy` 였다).
+배관은 `Arch.makePipe` 가 축선을 스윕한다 — 다점 폴리라인 한 객체, 코너는 마이터.
 빌더가 `Pset_MEPParser` 로 QA 속성을 함께 내보내므로 뷰어에서 부재를 클릭하면
 `EID` · `Layer` · `MemberName` · `Section` · `Pairing` · `WidthDetected` ·
 `NeedsReview` · `ReviewReason` 이 보인다. **`NeedsReview=True` 로 필터하면 얇은
