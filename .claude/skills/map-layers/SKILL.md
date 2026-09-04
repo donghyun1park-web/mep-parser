@@ -34,7 +34,7 @@ python schedule_table.py <도면.dxf> --layer BEAM_SCHEDULE    # 일람표만 �
 | 벽이 `single` 로 떨어진다 | 간격이 `pair_max`(기본 500mm)를 넘음 → `opts: pair_max=…` |
 | 보/거더가 안 잡힌다 | 외곽선 간격이 500~2500mm. `opts: pair_max=1800` |
 | **`[얇은 오결합]` 경고** | 파서가 레이어 중앙값 대비로 자동 감지해 `needs_review` 로 올린다. 경고문에 적힌 `pair_min` 값을 그대로 layer_map 에 넣으면 된다 |
-| 벽 두께가 말이 안 되게 얇다(50mm 콘크리트 벽) | 마감선과 오결합. 페어링은 **가까운 쌍이 구간을 먼저 선점**하므로 가짜 얇은 쌍이 정답을 막는다 → `opts: pair_min=80`. 실측에서 50mm 벽 55개가 450/250mm 로 정정됐다 |
+| 벽 두께가 말이 안 되게 얇다(50mm 콘크리트 벽) | 대개 **같은 벽을 건축(A-WALL)과 구조(A-CON)가 각자 그려 50mm 어긋난 것**이다. 파서가 같은 레이어 쌍을 먼저 선점하게 돼 있어 자동으로 풀린다. 그래도 남으면 `opts: pair_min=80` |
 | 보가 선 몇 개로만 있다 | 축선이 DIMENSION 이다 → `opts: from=dim`. 끝점은 `defpoint2`→`defpoint3` |
 | `from=dim` 인데 부재가 너무 많다 | 상세도 기호까지 잡힌 것. `opts: member_re=^R[AS]` 로 좁힌다 |
 | 보 치수가 다 똑같다 | 일람표를 안 붙였다 → `opts: schedule=<일람표레이어>` + 그 레이어는 `ignore` |

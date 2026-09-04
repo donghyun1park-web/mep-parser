@@ -867,7 +867,19 @@ def _find_wall_pairs(segs):
             if min_len == 0 or overlap < WALL_PAIR_OVERLAP_RATIO * min_len:
                 continue
             candidates.append((perp, overlap, i, j, center, min_len, ta, tb))
-    candidates.sort(key=lambda c: c[0])  # 가까운 쌍 우선 → 구간 선점
+    # 정렬: **같은 레이어 쌍 먼저**, 그 다음 가까운 쌍.
+    #
+    # 실무 도면은 같은 벽을 건축(A-WALL)과 구조(A-CON/상부골조)가 각자 그리고,
+    # 두 표현이 50mm 안팎으로 어긋난다. 거리만으로 정렬하면 그 **레이어 간 오프셋**이
+    # 제일 가까워서 구간을 먼저 먹고, 정작 같은 레이어의 진짜 두께(200~450mm) 쌍을
+    # 막는다. 실측(지하3층): 50mm 짝 55개가 450mm 짝 41개를 가로채고 있었다.
+    #   면A(A-WALL,1470) ↔ 면B(A-CON,2270) = 50mm  ← 채택됨
+    #   같은 면A 가 맺을 수 있었던 다른 짝 = 200mm  ← 막힘
+    # 레이어를 가로지르는 쌍은 벽 두께가 아니라 작도 오프셋을 재는 것이다.
+    # 금지가 아니라 **후순위**다 — 같은 레이어 짝이 없으면 여전히 채택된다
+    # (한쪽 면만 다른 레이어에 그린 도면도 있다).
+    candidates.sort(key=lambda c: ((segs[c[2]].get("layer") or "")
+                                   != (segs[c[3]].get("layer") or ""), c[0]))
     cov = [[] for _ in segs]             # 세그먼트별 점유 t-구간
     pairs = []
     for perp, overlap, i, j, center, min_len, ta, tb in candidates:

@@ -32,53 +32,53 @@
   },
   "지하3층_건축평면": {
     "bbox": [
-      -4009,
+      -3844,
       -63273,
       132233,
-      607
+      772
     ],
     "counts": {
       "column": 93,
       "equipment": 6,
       "opening": 288,
       "slab": 8,
-      "wall": 678
+      "wall": 682
     },
-    "eid_count": 1073,
-    "eid_hash": "4faf15054aed",
+    "eid_count": 1077,
+    "eid_hash": "e1c40635fb06",
     "face_coverage_pct": 95,
     "floors": [
       0
     ],
     "member_schedule": {},
-    "needs_review": 210,
+    "needs_review": 180,
     "thin_pairs": {
-      "A-CON": 35,
+      "A-CON": 21,
       "A-WALL": 1,
-      "상부골조": 19
+      "상부골조": 4
     },
     "wall_pairing": {
-      "paired": 485,
+      "paired": 490,
       "single": 0,
-      "single_offset": 155
+      "single_offset": 154
     },
     "wall_thickness_10mm": {
       "0": 4,
       "150": 1,
       "20": 3,
-      "200": 311,
+      "200": 310,
       "220": 1,
-      "250": 120,
+      "250": 123,
       "30": 24,
       "300": 34,
       "350": 2,
       "400": 33,
       "420": 1,
-      "450": 10,
+      "450": 41,
       "460": 2,
       "470": 1,
       "480": 2,
-      "50": 55,
+      "50": 26,
       "500": 35,
       "70": 1
     }
