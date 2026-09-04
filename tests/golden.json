@@ -22,6 +22,8 @@
       "unmatched": 0
     },
     "needs_review": 0,
+    "openings_dims_assumed": {},
+    "small_openings_dropped": 0,
     "thin_pairs": {},
     "wall_pairing": {
       "paired": 0,
@@ -52,6 +54,11 @@
     ],
     "member_schedule": {},
     "needs_review": 180,
+    "openings_dims_assumed": {
+      "height": 44,
+      "sill": 44
+    },
+    "small_openings_dropped": 244,
     "thin_pairs": {
       "A-CON": 21,
       "A-WALL": 1,

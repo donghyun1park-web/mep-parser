@@ -41,6 +41,7 @@ python schedule_table.py <도면.dxf> --layer BEAM_SCHEDULE    # 일람표만 �
 | 일람표 조인 0건 | 레이어명 오타. `schedule_table.py --layer` 로 표가 잡히는지 먼저 본다 |
 | 보가 납작하다 | 표기 관례가 뒤집혔다. `section.notation` 확인 (`H 800x300`=춤×폭, `350x1100`=폭×춤) |
 | 도면엔 있는데 모델에 넣기 싫다 | `category=ignore`. 세고 버린다(`result["ignored"]`) |
+| **개구부 치수가 다 똑같다** | 평면도에는 창 높이·문턱이 **없다**(입면도/창호일람표에 있다). `dims_assumed` 가 어느 값이 추정인지 말해준다. 채우려면 `--schedule <창호일람.xlsx>` |
 | **개구부가 수백 개** | 문 하나가 문짝선·스윙호·철물로 여러 엔티티다. 파서가 50mm 미만 조각을 버리고 `small_openings_dropped` 로 센다. 진짜 문은 대개 블록 INSERT 안에 있다 |
 | 참조/xref 배경 (`$0$`, `(하부층)`) | `ignore`. `$0$` 는 xref bind 흔적이라 사실상 100% 신뢰 |
 

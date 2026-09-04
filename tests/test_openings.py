@@ -54,3 +54,40 @@ def test_nothing_dropped_returns_empty_report():
     els = {"opening": [_circle(450.0)]}
     assert dp.drop_tiny_openings(els) == {}
     assert len(els["opening"]) == 1
+
+
+# ── 실측 치수와 가정 치수를 구분한다 ──────────────────────────────────────
+def test_measured_width_is_not_marked_assumed():
+    """반지름이 실제 크기면 width 는 도면에서 잰 값이다."""
+    els = {"opening": [_circle(450.0)]}
+    dp.link_openings_to_walls(els, {})
+    op = els["opening"][0]
+    assert op["width"] == 900.0
+    assert "width" not in (op.get("dims_assumed") or [])
+
+
+def test_height_and_sill_are_always_assumed_from_a_plan():
+    """★ 평면도는 창의 높이·문턱을 **보여주지 않는다**(입면도/창호일람표에 있다).
+
+    종전에는 기본값 1200/900 을 넣고 실측과 구분 없이 내보냈다 — 실측 도면
+    288개가 전부 같은 1200/900 이었고 아무도 그게 가정인 줄 몰랐다."""
+    els = {"opening": [_circle(450.0)]}
+    dp.link_openings_to_walls(els, {})
+    assumed = els["opening"][0].get("dims_assumed") or []
+    assert "height" in assumed and "sill" in assumed, assumed
+
+
+def test_supplied_dimensions_are_left_alone():
+    """창호일람표나 사용자가 준 값은 가정으로 표시하지 않는다."""
+    op = _circle(450.0)
+    op.update({"height": 2400.0, "sill": 0.0, "subtype": "door"})
+    els = {"opening": [op]}
+    dp.link_openings_to_walls(els, {})
+    assert els["opening"][0]["height"] == 2400.0
+    assert not (els["opening"][0].get("dims_assumed") or [])
+
+
+def test_zero_radius_marks_width_assumed_too():
+    els = {"opening": [{"kind": "circle", "center": [0, 0], "radius": 0.4}]}
+    dp.link_openings_to_walls(els, {})
+    assert "width" in (els["opening"][0].get("dims_assumed") or [])

@@ -1508,14 +1508,27 @@ def link_openings_to_walls(elements, params):
             else:
                 op["radius"] = 50.0
         op.setdefault("subtype", None)
+        # ★ 어떤 치수가 '실측' 이고 어떤 게 '가정' 인지 기록한다.
+        #   평면도는 창의 높이·문턱을 **보여주지 않는다**(입면도나 창호일람표에 있다).
+        #   그런데 종전에는 기본값 1200/900 을 넣고 실측과 구분 없이 내보냈다 —
+        #   실측 도면 288개 전부가 같은 1200/900 이었고 아무도 그게 가정인 줄 몰랐다.
+        #   치수가 조용히 틀린 부재가 이 저장소에서 가장 비쌌던 실패다.
+        assumed = []
         if "width" not in op or op.get("width") is None:
             r0 = float(op.get("radius", 50.0))
-            op["width"] = round(r0 * 2, 1) if r0 > 1 else (
-                900.0 if op.get("subtype") == "door" else 1200.0)
+            if r0 > 1:
+                op["width"] = round(r0 * 2, 1)          # 도면에서 잰 값
+            else:
+                op["width"] = 900.0 if op.get("subtype") == "door" else 1200.0
+                assumed.append("width")
         if op.get("height") is None:
             op["height"] = 2100.0 if op.get("subtype") == "door" else 1200.0
+            assumed.append("height")
         if op.get("sill") is None:
             op["sill"] = 0.0 if op.get("subtype") == "door" else 900.0
+            assumed.append("sill")
+        if assumed:
+            op["dims_assumed"] = assumed
     if not openings or not walls:
         return
     default_w = float(params.get("wall", {}).get("width", 200.0))
@@ -2257,6 +2270,19 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         print(f"  [개구부] 조각 {sum(_tiny.values())}개 드롭(<{OPENING_MIN_SIZE_MM:.0f}mm): "
               + ", ".join(f"{k}({v})" for k, v in sorted(_tiny.items())[:4]))
     link_openings_to_walls(result["elements"], params)
+    # 가정 치수를 요약해 알린다 — 개별 레코드의 dims_assumed 는 IFC 속성으로도 나간다.
+    _asm = {}
+    for _op in result["elements"].get("opening", []):
+        for _k in _op.get("dims_assumed") or []:
+            _asm[_k] = _asm.get(_k, 0) + 1
+    if _asm:
+        result["openings_dims_assumed"] = _asm
+        _msg = ("개구부 치수 가정: "
+                + ", ".join(f"{k} {v}개" for k, v in sorted(_asm.items()))
+                + " — 평면도에는 높이·문턱이 없다. 창호일람표(--schedule)나 "
+                  "입면도에서 채우지 않으면 이 값은 추정치다.")
+        result["warnings"].append(_msg)
+        print("  [개구부] " + _msg)
     paired = sum(1 for w in result["elements"]["wall"] if w.get("pairing") == "paired")
     single = sum(1 for w in result["elements"]["wall"] if w.get("pairing") == "single")
     offset = sum(1 for w in result["elements"]["wall"] if w.get("pairing") == "single_offset")

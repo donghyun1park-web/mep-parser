@@ -55,6 +55,9 @@ def digest(data):
         "wall_pairing": data.get("wall_pairing") or {},
         "wall_thickness_10mm": dict(sorted(thick.items(), key=lambda kv: int(kv[0]))),
         "thin_pairs": dict(sorted((data.get("thin_pairs") or {}).items())),
+        # 가정 치수가 늘어나는 것도 회귀다 — 조용히 더 추정하기 시작하면 잡힌다.
+        "openings_dims_assumed": dict(sorted((data.get("openings_dims_assumed") or {}).items())),
+        "small_openings_dropped": sum((data.get("small_openings_dropped") or {}).values()),
         "needs_review": sum(1 for recs in el.values() for r in recs
                             if r.get("needs_review")),
         "face_coverage_pct": round(qa.get("face_coverage_pct", 0)),
