@@ -110,6 +110,14 @@ WALL_PAIR_OVERLAP_RATIO = 0.3 # 투영 겹침 최소 비율. 0.5→0.3: 세그�
 THIN_PAIR_RATIO = 1.0 / 3.0   # 중앙값의 이 비율 미만이면 검토 대상
 THIN_PAIR_MIN_SAMPLES = 5     # 표본이 이보다 적으면 중앙값을 신뢰하지 않는다
 
+# 개구부 최소 크기(mm). 이보다 작으면 개구부일 수 없다 — 세고 버린다.
+# 실측(지하3층 A-DOOR): 개구부 288개 중 244개가 0.1~12.5mm 였다. 문 하나가
+# 문짝선·스윙호·철물로 여러 엔티티로 그려지는데 그 조각들이 각각 개구부로
+# 잡힌 것이다(진짜 문은 블록 INSERT 안에 있었다). 크기 분포가 이봉이라
+# 200~600mm 구간이 통째로 비어 있고, 그 골 아래를 자른다.
+# 배관 슬리브(50~200mm)는 살린다 — MEP 도면에서 그건 진짜 개구부다.
+OPENING_MIN_SIZE_MM = 50.0
+
 WALL_PAIR_CLAIM_FRAC = 0.6    # [interval-greedy] 겹침구간이 이 비율 이상 이미 점유됐으면
                                # 스킵. 가까운 쌍이 구간 선점(거짓 원거리쌍 방지) + 1:N 면선의
                                # 잔여 구간은 다음 파트너가 차지(긴 면선↔짧은 면선 다수 해결).
@@ -1442,6 +1450,42 @@ def _pt_to_seg_dist(px, py, x1, y1, x2, y2):
     return math.hypot(x1 + t * dx - px, y1 + t * dy - py)
 
 
+def _opening_extent(op):
+    """개구부의 평면상 최대 치수(mm). 원은 지름, 폴리라인은 bbox 긴 변."""
+    if op.get("kind") == "circle" and op.get("radius"):
+        return float(op["radius"]) * 2.0
+    pts = op.get("points") or []
+    if len(pts) < 2:
+        return 0.0
+    x0, y0, x1, y1 = _bbox(pts)
+    return max(x1 - x0, y1 - y0)
+
+
+def drop_tiny_openings(elements, min_size=None):
+    """개구부일 수 없는 크기의 레코드를 버린다. 반환 {레이어: 개수}.
+
+    문 하나는 문짝선 + 스윙호 + 철물로 여러 엔티티가 되는데, 레이어 규칙이
+    `DOOR|WIND|문|창 → opening` 이면 그 조각이 **각각** 개구부 레코드가 된다.
+    실측(지하3층): 288개 중 244개가 0.1~12.5mm 짜리 조각이었고, 그것들이
+    벽에 링크되지 못해 개구부 링크율을 24% 로 끌어내리고 있었다.
+    (진짜 문 18개는 블록 INSERT 안에 있었다 — explode 경로로 정상 처리된다.)
+
+    치수가 아니라 **크기**로 자른다. 크기 분포가 이봉이고 200~600mm 구간이
+    통째로 비어 있어서, 그 골 아래는 개구부가 아니라고 단정할 수 있다.
+    """
+    lim = OPENING_MIN_SIZE_MM if min_size is None else float(min_size)
+    ops = elements.get("opening", [])
+    keep, dropped = [], {}
+    for op in ops:
+        if _opening_extent(op) < lim:
+            k = op.get("layer") or "(블록)"
+            dropped[k] = dropped.get(k, 0) + 1
+        else:
+            keep.append(op)
+    elements["opening"] = keep
+    return dropped
+
+
 def link_openings_to_walls(elements, params):
     """각 opening이 교차하는 벽 index 목록을 opening["wall_indices"]에 기록.
     판정: opening 중심→벽 중심선 수직거리 < opening 반경 + 벽두께/2 + 10mm 여유."""
@@ -2202,6 +2246,16 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         print(f"  [창호배치] 벽 끊김에서 창/문 {_n_new_op}개 생성(폭 매칭)")
 
     # [Phase 4a] opening → 교차 벽 연결 (builder boolean void 전처리)
+    # 개구부 조각(문짝선·스윙호·철물)을 먼저 버린다 — 링크 판정을 흐린다.
+    _tiny = drop_tiny_openings(result["elements"])
+    if _tiny:
+        result["small_openings_dropped"] = _tiny
+        result["warnings"].append(
+            f"개구부로 보기엔 너무 작은 레코드 {sum(_tiny.values())}개 드롭"
+            f"(<{OPENING_MIN_SIZE_MM:.0f}mm): "
+            + ", ".join(f"{k}({v})" for k, v in sorted(_tiny.items())[:4]))
+        print(f"  [개구부] 조각 {sum(_tiny.values())}개 드롭(<{OPENING_MIN_SIZE_MM:.0f}mm): "
+              + ", ".join(f"{k}({v})" for k, v in sorted(_tiny.items())[:4]))
     link_openings_to_walls(result["elements"], params)
     paired = sum(1 for w in result["elements"]["wall"] if w.get("pairing") == "paired")
     single = sum(1 for w in result["elements"]["wall"] if w.get("pairing") == "single")
@@ -2339,7 +2393,8 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
     # (보 페어링이 안 되던 시절, 모듈 전역을 런타임에 덮어써서 우회했고
     #  그 사실이 산출물 어디에도 남지 않았다.)
     _eff = {"defaults": {"pair_min": WALL_PAIR_MIN_MM, "pair_max": WALL_PAIR_MAX_MM,
-                         "angle_tol_deg": WALL_ANGLE_TOL_DEG}}
+                         "angle_tol_deg": WALL_ANGLE_TOL_DEG,
+                         "opening_min_size": OPENING_MIN_SIZE_MM}}
     _per_layer = {}
     for _pat, _cat, _at in rules:
         if _at.get("_opts"):

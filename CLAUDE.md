@@ -64,6 +64,7 @@
   "floors": [{"z": 0.0, "label": "Level_1"}],
   "ignored": {"배수판_벽체": 128},
   "thin_pairs": {"A-CON": 35},
+  "small_openings_dropped": {"A-DOOR": 244},
   "shadowed_layer_rules": [{"rule": "...", "category": "ignore", "shadowed_by": [...]}],
   "tolerances_effective": {"defaults": {"pair_max": 500.0}, "per_layer": {"^00-보$": {"pair_max": 2500.0}}},
   "member_schedule": {"layers": ["BEAM_SCHEDULE"], "tables": 8, "members": 77, "matched": 225, "unmatched": 0, "names_unmatched": {}},

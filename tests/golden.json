@@ -40,12 +40,12 @@
     "counts": {
       "column": 93,
       "equipment": 6,
-      "opening": 288,
+      "opening": 44,
       "slab": 8,
       "wall": 682
     },
-    "eid_count": 1077,
-    "eid_hash": "e1c40635fb06",
+    "eid_count": 833,
+    "eid_hash": "4a6d18990359",
     "face_coverage_pct": 95,
     "floors": [
       0
