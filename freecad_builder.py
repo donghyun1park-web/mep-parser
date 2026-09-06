@@ -45,6 +45,7 @@ _PSET = "Pset_MEPParser"
 # 그 위에 얹히므로 조용히 틀린 재질은 형상 오류보다 오래 살아남는다.
 _MATERIALS = {}          # (문서명, 재질명) → Arch Material. 부재마다 새로 만들지 않는다
 MATERIALS_APPLIED = {}   # 재질명 → 부여된 객체 수(build.json 으로 자기보고)
+WALLS_UNBUILT = {}       # {count, of} — 객체를 못 만든 벽 레코드 수. 0 이어야 한다
 
 
 def _material(obj, name):
@@ -213,6 +214,17 @@ def _chain_wall_segments(walls):
     return chains
 
 
+def _is_closed_solid(el):
+    """①(solid extrusion) 대상인가. ②는 **정확히 이것의 여집합**이어야 한다.
+
+    두 분기의 조건이 어긋나면 그 사이로 벽이 조용히 사라진다. 실측: 닫힘 표시가
+    붙은 2점 레코드 36개가 ①(≥3점 필요)에도 ②(pairing=="closed" 제외)에도
+    안 걸려 IFC 에서 통째로 증발했다 — 형상오류 0, 검사 전부 통과."""
+    return (el.get("kind") == "polyline"
+            and (el.get("closed", False) or el.get("pairing") == "closed")
+            and len(el.get("centerline") or el.get("points") or []) >= 3)
+
+
 def build_walls(doc, walls, params):
     objs = []
     src_els = []
@@ -221,13 +233,9 @@ def build_walls(doc, walls, params):
 
     # ── ① 닫힌 폴리선(pairing="closed"): solid extrusion ────────────────────────
     for i, el in enumerate(walls):
-        if not (el.get("closed", False) or el.get("pairing") == "closed"):
-            continue
-        if el["kind"] != "polyline":
+        if not _is_closed_solid(el):
             continue
         baseline = el.get("centerline") or el.get("points", [])
-        if len(baseline) < 3:
-            continue
         z_base, _z1 = GC.z_range("wall", el, params)
         height = _z1 - z_base
         dxf_id = el.get("handle") or f"CLOSEDWALL_{i}"
@@ -261,10 +269,8 @@ def build_walls(doc, walls, params):
     open_walls = []
     open_wall_global_indices = []
     for i, el in enumerate(walls):
-        if el.get("closed") or el.get("pairing") == "closed":
-            continue
-        if el.get("kind") != "polyline":
-            continue
+        if _is_closed_solid(el) or el.get("kind") != "polyline":
+            continue                      # ①의 여집합 — 사이에 틈이 없다
         open_walls.append(el)
         open_wall_global_indices.append(i)
         
@@ -324,6 +330,20 @@ def build_walls(doc, walls, params):
     if n_folds:
         print(f"  [fix] 되꺾인 벽 체인 {n_folds}건 분할 (깨진 형상 방지)")
 
+    # ★ 어떤 객체도 만들지 못한 벽 레코드. 체이닝은 여럿→하나라서 수가 줄어드는
+    # 것은 정상이지만, idx_map 에 아예 안 들어온 레코드는 IFC 에 존재하지 않는다.
+    # 이 숫자가 없던 동안 벽 72개가 아무 경고 없이 빠진 채로 납품될 수 있었다.
+    unbuilt = [i for i in range(len(walls)) if i not in idx_map]
+    if unbuilt:
+        _why = {}
+        for i in unbuilt:
+            el = walls[i]
+            k = (f"kind={el.get('kind')}" if el.get("kind") != "polyline" else
+                 f"pairing={el.get('pairing')} 점{len(el.get('centerline') or el.get('points') or [])}개")
+            _why[k] = _why.get(k, 0) + 1
+        print(f"  [!] 벽 레코드 {len(unbuilt)}개가 객체를 못 만들었다 — IFC 에 없다: {_why}")
+    WALLS_UNBUILT.clear()
+    WALLS_UNBUILT.update({"count": len(unbuilt), "of": len(walls)})
     return objs, idx_map, src_els
 
 
@@ -1066,6 +1086,7 @@ def _main_impl():
                   "floors": len(floor_containers)},
         "beams_without_section": n_nosec,
         "materials": dict(MATERIALS_APPLIED),
+        "walls_unbuilt": dict(WALLS_UNBUILT),
         "floor_orphans": len(_orphans), "floor_dups": len(_dups),
         "floor_orphan_detail": [{"label": l, "z_base": z} for l, z in _orphans[:20]],
         "invalid_shapes": n_err,

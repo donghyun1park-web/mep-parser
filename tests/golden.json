@@ -44,11 +44,11 @@
       "equipment": 6,
       "opening": 44,
       "slab": 8,
-      "wall": 682
+      "wall": 718
     },
-    "eid_count": 833,
-    "eid_hash": "4a6d18990359",
-    "face_coverage_pct": 95,
+    "eid_count": 869,
+    "eid_hash": "c08b58d518c2",
+    "face_coverage_pct": 98,
     "floors": [
       0
     ],

@@ -42,6 +42,37 @@ def test_merged_wall_keeps_its_material():
     assert out[0]["overrides"].get("material") == "콘크리트", out[0].get("overrides")
 
 
+def _closed_box(x0, y0, s=600.0):
+    pts = [[x0, y0], [x0 + s, y0], [x0 + s, y0 + s], [x0, y0 + s]]
+    return {"kind": "polyline", "closed": True, "layer": "A-CON",
+            "points": pts, "centerline": pts, "width_detected": None,
+            "pairing": "closed", "confidence": 0.7, "z_base": 0.0}
+
+
+def test_closed_polygons_are_not_flattened_by_the_merger():
+    """★ 벽 72개가 IFC 에서 증발한 원인.
+
+    이 병합기는 레코드를 `centerline[0] → centerline[-1]` **한 세그먼트로만** 본다.
+    폴리곤에 그 짓을 하면 닫힘변 하나짜리 2점 레코드가 되고, 빌더의 닫힘 분기
+    (≥3점 필요)와 열림 분기(pairing=="closed" 제외) 사이로 조용히 사라진다.
+    형상오류 0, 검사 전부 통과, 산출물에만 없다."""
+    boxes = [_closed_box(0, 0), _closed_box(0, 700), _closed_box(700, 0)]
+    out = dp.merge_collinear_walls(boxes, {})
+    assert len(out) == 3, f"닫힌 폴리선이 병합됐다: {len(out)}"
+    for w in out:
+        assert len(w["points"]) == 4, f"폴리곤이 {len(w['points'])}점으로 납작해졌다"
+        assert w.get("closed") is True and w.get("pairing") == "closed"
+
+
+def test_open_walls_still_merge_next_to_closed_ones():
+    """닫힘 제외가 열린 벽의 병합까지 막아 버리면 원래 목적을 잃는다."""
+    out = dp.merge_collinear_walls(
+        [_wall(0, 1000), _closed_box(5000, 5000), _wall(1010, 3000)], {})
+    assert len(out) == 2, out
+    assert sum(1 for w in out if w.get("pairing") == "closed") == 1
+    assert any(w.get("seg_length") == 3000.0 for w in out), "열린 벽이 안 붙었다"
+
+
 def test_unmerged_walls_are_untouched():
     """갭이 크면 병합하지 않는다 — 그때도 원본 필드는 그대로여야 한다."""
     out = dp.merge_collinear_walls([_wall(0, 1000), _wall(9000, 10000)], {})

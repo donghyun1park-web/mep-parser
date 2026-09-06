@@ -127,6 +127,10 @@ WALL_PAIR_CLAIM_FRAC = 0.6    # [interval-greedy] 겹침구간이 이 비율 이
 COLLINEAR_ANGLE_TOL_DEG = 2.0  # 같은 직선 판정 사이각(도) — 벽 짝보다 빡빡
 COLLINEAR_DIST_TOL_MM = 10.0   # 같은 직선 판정 수직오프셋 허용(mm)
 COLLINEAR_GAP_TOL_MM = 500.0   # 끝-끝 간격 이 이하면 한 벽으로 연쇄 병합(mm)
+# collinear 병합에서 제외할 pairing — 이들은 '쪼개진 LINE' 이 아니다.
+# 병합기는 레코드를 첫점→끝점 한 세그먼트로만 보므로 여기 없는 pairing 이
+# 다점 형상을 가지면 그 형상이 조용히 납작해진다.
+NO_MERGE_PAIRINGS = ("axis", "closed")
                                 # 실무 도면: T/십자 교차점 틈 = 벽두께(100~400mm)
                                 # 문 개구부 ≥800mm 이므로 500mm 는 안전
 CORNER_SNAP_TOL_MM = 50.0      # 끝점 이 거리 이내면 centroid로 스냅(mm)
@@ -1188,17 +1192,25 @@ def _merge_two_segments(seg1, seg2):
 def merge_collinear_walls(wall_records, params):
     """같은 직선 위 끝-끝이 가까운 벽 세그먼트를 한 벽으로 재병합(O(N log N)).
 
-    ★ DIMENSION 유래 부재(pairing="axis")는 병합 대상에서 제외한다.
-      쪼개진 LINE 을 잇는 것이 이 함수의 목적인데, 부재표 도면에서는 같은 직선 위의
-      연속 구간이 **서로 다른 부재**(RAB1D 13개 등)다. 병합하면 148개가 21개로
-      뭉개지고 부재명·수량이 사라진다."""
+    ★ 다음 pairing 은 병합 대상이 아니다(NO_MERGE_PAIRINGS). 이 함수는 **쪼개진
+      LINE 을 잇는 것**이 목적인데, 아래 둘은 애초에 쪼개진 선이 아니다.
+      · "axis"   — DIMENSION 유래 부재. 부재표 도면에서는 같은 직선 위의 연속
+        구간이 **서로 다른 부재**(RAB1D 13개 등)다. 병합하면 148개가 21개로
+        뭉개지고 부재명·수량이 사라진다.
+      · "closed" — 닫힌 폴리선. 이 함수는 레코드를 `centerline[0] → centerline[-1]`
+        **한 세그먼트로만** 본다. 폴리곤에 그 짓을 하면 닫힘변 하나짜리 2점
+        레코드로 납작해지고, 빌더의 닫힘 분기(≥3점 필요)와 열림 분기
+        (pairing=="closed" 제외) 사이로 **조용히 사라진다**.
+        실측(지하3층 건축평면): 닫힌 벽 74개 → 병합 후 38개(그중 36개가 2점) →
+        IFC 에 2개만 남았다. 형상오류 0, 검사 전부 통과, 벽 72개 증발."""
     if not wall_records:
         return wall_records
-    axis_recs = [r for r in wall_records if r.get("pairing") == "axis"]
-    if axis_recs:
+    keep = [r for r in wall_records if r.get("pairing") in NO_MERGE_PAIRINGS]
+    if keep:
         merged = merge_collinear_walls(
-            [r for r in wall_records if r.get("pairing") != "axis"], params)
-        return list(merged) + axis_recs
+            [r for r in wall_records
+             if r.get("pairing") not in NO_MERGE_PAIRINGS], params)
+        return list(merged) + keep
     items = []
     for rec in wall_records:
         cl = rec.get("centerline") or rec.get("points")

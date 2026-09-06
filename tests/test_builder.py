@@ -163,6 +163,9 @@ def test_end_to_end_build_of_the_sample_plan():
     # 형상 검사는 전부 통과하고 뷰어에서 기둥 물량만 부풀었다.
     assert ifc.count("IFCWALL(") == st["built"]["walls"], "벽이 IfcWall 로 안 나갔다"
     assert ifc.count("IFCCOLUMN(") == st["built"]["columns"], "기둥 수가 안 맞는다"
+    # 어떤 객체도 못 만든 벽 레코드 = IFC 에 없는 벽. 체이닝으로 수가 주는 것은
+    # 정상이지만 이건 다르다 — 경고도 없이 빠진 채로 납품된다(실측 72개).
+    assert st["walls_unbuilt"]["count"] == 0, st["walls_unbuilt"]
 
 
 def test_material_is_written_only_when_the_layer_map_says_so():
