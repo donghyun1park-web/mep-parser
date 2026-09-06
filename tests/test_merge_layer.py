@@ -5,6 +5,7 @@
 레이어냐" 를 물을 수 없으니 오분류 진단이 막혔고, seg_length 가 갱신되지 않아
 병합 허용치를 총연장으로 판단할 수도 없었다.
 """
+import math
 import os
 import sys
 
@@ -71,6 +72,32 @@ def test_open_walls_still_merge_next_to_closed_ones():
     assert len(out) == 2, out
     assert sum(1 for w in out if w.get("pairing") == "closed") == 1
     assert any(w.get("seg_length") == 3000.0 for w in out), "열린 벽이 안 붙었다"
+
+
+# ── 코너 스냅 ──────────────────────────────────────────────────────────────
+def _seg(a, b):
+    return {"kind": "polyline", "closed": False, "layer": "A-CON",
+            "points": [a, b], "centerline": [a, b],
+            "pairing": "paired", "width_detected": 200.0, "z_base": 0.0}
+
+
+def test_snap_does_not_annihilate_a_wall_shorter_than_the_tolerance():
+    """★ 벽 길이 < snap_tol 이면 **양 끝점이 서로 tol 안**이라 한 클러스터로 묶여
+    둘 다 같은 centroid 가 된다 → 길이 0 → 빌더의 make_wire 에서 조용히 탈락.
+    실측(지하3층 A-CON): 50mm 벽 1개가 정확히 이렇게 IFC 에서 사라졌다."""
+    out = dp.snap_wall_corners([_seg([0, 0], [40, 0]),
+                                _seg([1000, 0], [2000, 0])], snap_tol=50.0)
+    a, b = out[0]["centerline"][0], out[0]["centerline"][-1]
+    assert math.dist(a, b) == 40.0, f"짧은 벽이 길이 {math.dist(a, b)} 로 뭉개졌다"
+    assert out[0]["points"] == [[0, 0], [40, 0]], out[0]["points"]
+
+
+def test_normal_corner_snap_still_works():
+    """가드가 정상 T자 스냅까지 막으면 [4.1] 의 목적을 잃는다."""
+    out = dp.snap_wall_corners([_seg([0, 0], [1000, 0]),
+                                _seg([1005, 3], [1005, 1000])], snap_tol=50.0)
+    assert out[0]["centerline"][-1] == out[1]["centerline"][0], out
+    assert out[0]["centerline"][-1] == [1002.5, 1.5], out[0]["centerline"]
 
 
 def test_unmerged_walls_are_untouched():

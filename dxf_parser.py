@@ -1262,11 +1262,13 @@ def snap_wall_corners(wall_records, snap_tol=None):
 
     # [x, y, rec_idx, ep_idx(0=c1,1=c2)]
     eps = []
+    ep_of = {}                       # (rec_idx, ep_idx) → eps 인덱스
     for i, rec in enumerate(wall_records):
         cl = rec.get("centerline") or rec.get("points", [])
         if len(cl) >= 2:
-            eps.append([float(cl[0][0]),  float(cl[0][1]),  i, 0])
-            eps.append([float(cl[-1][0]), float(cl[-1][1]), i, 1])
+            for e_i, p in ((0, cl[0]), (1, cl[-1])):
+                ep_of[(i, e_i)] = len(eps)
+                eps.append([float(p[0]), float(p[1]), i, e_i])
 
     if not eps:
         return wall_records
@@ -1326,9 +1328,24 @@ def snap_wall_corners(wall_records, snap_tol=None):
     if not new_pos:
         return wall_records
 
+    # ★ 자기 자신을 지우는 스냅은 하지 않는다.
+    # 길이가 snap_tol 보다 짧은 벽은 **두 끝점이 서로 tol 안에** 있으므로 같은
+    # 클러스터로 묶여 둘 다 같은 centroid 가 된다 → 길이 0. 그 레코드는 빌더의
+    # make_wire 에서 조용히 탈락하고 IFC 에 존재하지 않게 된다.
+    # 실측(지하3층 A-CON): 50mm 벽 1개가 정확히 이렇게 사라졌다(snap_tol=50).
+    degenerate = set()
+    for i, rec in enumerate(wall_records):
+        cl = rec.get("centerline") or rec.get("points", [])
+        if len(cl) < 2:
+            continue
+        a = new_pos.get(ep_of.get((i, 0), -1), cl[0])
+        b = new_pos.get(ep_of.get((i, 1), -1), cl[-1])
+        if math.dist(a, b) < 1.0 <= math.dist(cl[0], cl[-1]):
+            degenerate.add(i)
+
     out = copy.deepcopy(wall_records)
     for k, ep in enumerate(eps):
-        if k not in new_pos:
+        if k not in new_pos or ep[2] in degenerate:
             continue
         ri, ei = ep[2], ep[3]
         rec = out[ri]
@@ -1340,6 +1357,9 @@ def snap_wall_corners(wall_records, snap_tol=None):
                 lst[0] = new_pos[k]
             else:
                 lst[-1] = new_pos[k]
+    if degenerate:
+        print(f"  [코너스냅] 길이 0 이 될 뻔한 벽 {len(degenerate)}개는 스냅하지 않음 "
+              f"(길이 < {snap_tol:.0f}mm 이라 양 끝이 같은 클러스터로 묶인다)")
     return out
 
 

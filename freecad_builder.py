@@ -343,7 +343,15 @@ def build_walls(doc, walls, params):
             _why[k] = _why.get(k, 0) + 1
         print(f"  [!] 벽 레코드 {len(unbuilt)}개가 객체를 못 만들었다 — IFC 에 없다: {_why}")
     WALLS_UNBUILT.clear()
-    WALLS_UNBUILT.update({"count": len(unbuilt), "of": len(walls)})
+    WALLS_UNBUILT.update({
+        "count": len(unbuilt), "of": len(walls),
+        "why": _why if unbuilt else {},
+        # 수만 보고는 못 쫓는다 — EID 로 preview 에서 바로 찾을 수 있게 몇 개 남긴다.
+        "detail": [{"eid": walls[i].get("eid"), "layer": walls[i].get("layer"),
+                    "pairing": walls[i].get("pairing"),
+                    "seg_length": walls[i].get("seg_length"),
+                    "points": walls[i].get("centerline") or walls[i].get("points")}
+                   for i in unbuilt[:10]]})
     return objs, idx_map, src_els
 
 
