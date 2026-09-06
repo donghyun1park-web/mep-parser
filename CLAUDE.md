@@ -23,6 +23,7 @@
 | `layer_map.csv` | 레이어명 정규식 → 카테고리·치수 매핑 |
 | `block_map.csv` | **블록(INSERT)명 정규식 → 카테고리·치수 매핑** (Phase 2) |
 | `freecad_builder.py` | geometry.json → FreeCAD .FCStd + .ifc |
+| `ifc_4d.py` | **공정표(CSV) → IFC 공정.** 이미 만들어진 `.ifc` 에 `IfcWorkSchedule`/`IfcTask` 를 얹고 층별로 부재를 연결한다. 4D 재생은 Bonsai 가 하고 **"이 공정이 이 층의 부재들"** 이라는 연결만 우리가 만든다. `ifcopenshell` 필요(선택 의존성 — Bonsai 안에 이미 있다) |
 | `element_id.py` | **EID(원본 raw 좌표 기반 식별자) + 수정 사이드카 라운드트립** — 파라미터 변경에 불변, grouping 변경 시에만 EID 변경. `apply_edits()`로 재파싱 후 수정 보존. |
 | `preview.py` | **FreeCAD 없는 즉석 3D 미리보기** — geometry.json/DXF → 자립 `*_preview.html`(three.js). 카테고리·신뢰도 색 오버레이 + 요소 클릭 수정→`edits.json` 다운로드(EID 기반). |
 | `mep_gui.py` | **현장용 GUI** (Phase 2.5): 파일선택→스캔→파싱→**3D 미리보기(브라우저)**→needs_review 수정→3D빌드 (tkinter, 무의존) |
@@ -201,6 +202,16 @@ MEP 는 `IfcPipeSegment`/`IfcDuctSegment`/`IfcCableCarrierSegment`/`IfcDistribut
 오결합이 그대로 잡힌다.** `EID` 는 `edits.json` 으로 되돌리는 열쇠다.
 (주: `App::PropertyString` 는 FreeCAD 문서에만 남고 IFC 로 안 나간다 —
 반드시 `set_ifc_props()` 를 거칠 것. V105 가 이걸 검사한다.)
+
+**4D 공정**은 Bonsai 가 재생만 할 뿐 "이 공정이 이 층의 부재들" 이라는 연결은 모른다.
+그것만 `ifc_4d.py` 가 얹는다(부재 594개를 손으로 고르지 않게):
+```
+python ifc_4d.py out_model.ifc schedule.csv -o out_4d.ifc
+# schedule.csv: task,level,start,finish  ← level 은 IfcBuildingStorey.Name(우리 stack.json 의 label)
+# → Bonsai > Sequence > Visualise Work Schedule Date Range
+```
+`level` 을 비우면 건물 전체. **IFC 에 없는 층 이름은 `[!]` 로 실제 층 목록과 함께 보고한다**
+— 오타 한 번에 연결 0건인 채로 성공처럼 끝나는 것을 막는 유일한 신호다.
 
 ### 7. 단일 .exe 빌드 (현장 PC = Python 불필요)
 개발 PC(Python 3.11 권장)에서 1회 빌드 → 현장 PC 더블클릭 실행.
