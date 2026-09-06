@@ -158,6 +158,54 @@ def test_end_to_end_build_of_the_sample_plan():
     with open(base + ".ifc", encoding="utf-8", errors="ignore") as f:
         ifc = f.read()
     assert "'EID'" in ifc and "'Layer'" in ifc, "EID/Layer 가 IFC 에 없다"
+    # ★ IFC 의 실제 클래스 수 = 빌드한 수. 닫힌 폴리선 벽은 Arch.makeStructure 의
+    # IfcType 기본값이 "Column" 이라 조용히 기둥으로 나갔다(실측 IfcWall 2/IfcColumn 5).
+    # 형상 검사는 전부 통과하고 뷰어에서 기둥 물량만 부풀었다.
+    assert ifc.count("IFCWALL(") == st["built"]["walls"], "벽이 IfcWall 로 안 나갔다"
+    assert ifc.count("IFCCOLUMN(") == st["built"]["columns"], "기둥 수가 안 맞는다"
+
+
+def test_material_is_written_only_when_the_layer_map_says_so():
+    """재질은 `opts: material=` 에 적힌 것만. 카테고리로 추정하지 않는다.
+
+    슬래브에는 일부러 안 적어 둔다 — wall/column 에만 붙고 slab 에는 안 붙는 것이
+    '추정하지 않는다' 의 실제 증거다."""
+    if not _skip_if_no_freecad():
+        return
+    import contextlib
+    import io
+    import dxf_parser as dp
+    d = tempfile.mkdtemp(prefix="mepmat_")
+    lm = os.path.join(d, "lm.csv")
+    with open(lm, "w", encoding="utf-8") as f:
+        f.write("pattern,category,width,height,thickness,opts\n"
+                "A-WALL,wall,200,2800,,material=콘크리트\n"
+                "A-COLS,column,,3000,,material=콘크리트\n"
+                "A-SLAB,slab,,,200,\n")          # 재질 없음 → 안 붙어야 한다
+    geom = os.path.join(d, "g.json")
+    with contextlib.redirect_stdout(io.StringIO()):
+        data = dp.parse(os.path.join(ROOT, "sample_plan.dxf"), dp.load_layer_map(lm), [])
+    with open(geom, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    _log, st = _build(geom, os.path.join(d, "out"))
+
+    n = st["built"]["walls"] + st["built"]["columns"]
+    assert st["materials"] == {"콘크리트": n}, st["materials"]
+    with open(os.path.join(d, "out.ifc"), encoding="utf-8", errors="ignore") as f:
+        ifc = f.read()
+    # 재질 객체는 이름당 1개(부재마다 새로 만들면 IFC 가 부풀고 뷰어 필터가 깨진다).
+    assert ifc.count("IFCMATERIAL(") == 1, ifc.count("IFCMATERIAL(")
+    assert ifc.count("IFCRELASSOCIATESMATERIAL") == 1
+    try:
+        import ifcopenshell
+    except ImportError:                       # 선택 의존성 — 여기까지도 충분히 증거다
+        print("  [skip] ifcopenshell 없음 — 재질 연결 대상 검사만 건너뜀")
+        return
+    rel = ifcopenshell.open(os.path.join(d, "out.ifc")).by_type(
+        "IfcRelAssociatesMaterial")[0]
+    assert rel.RelatingMaterial.Name == "콘크리트"
+    assert len(rel.RelatedObjects) == n, len(rel.RelatedObjects)
+    assert not any(o.is_a("IfcSlab") for o in rel.RelatedObjects), "슬래브에 재질이 추정됐다"
 
 
 def test_gate_withholds_output_when_a_record_has_no_floor():

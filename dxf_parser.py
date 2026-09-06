@@ -190,6 +190,11 @@ def load_layer_map(csv_path):
             opts = _parse_opts(row.get("opts"), csv_path, lineno)
             if opts:
                 attrs["_opts"] = opts        # '_' 접두 = 파서 전용, 빌더로 새지 않는다
+                if "material" in opts:
+                    # 재질은 빌더가 읽어야 하므로 공개 attr 로도 둔다 → overrides 를
+                    # 타고 나간다. 벽은 병합·체이닝을 거치는데 그 경로가 보존하는
+                    # 필드가 overrides 다(새 최상위 필드를 만들면 거기서 사라진다).
+                    attrs["material"] = opts["material"]
             rules.append((pat, cat, attrs))
     return rules
 
@@ -205,6 +210,8 @@ OPT_SPEC = {
     "member_re": ("str",   "from=dim 일 때 부재명으로 인정할 정규식. 미지정이면 "
                            "'측정값 표시가 아닌 텍스트' 전부. 철근 상세도처럼 기호 라벨이 "
                            "섞인 도면에서 '^R[AS]' 같이 좁힐 때 쓴다"),
+    "material":  ("str",   "IfcMaterial 이름. **적힌 것만 붙는다** — 카테고리로 "
+                           "추정하지 않는다(wall→콘크리트는 조적벽에서 바로 틀린다)"),
 }
 
 

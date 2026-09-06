@@ -31,6 +31,17 @@ def test_merged_wall_recomputes_seg_length():
     assert out[0]["seg_length"] == 3000.0, out[0]["seg_length"]
 
 
+def test_merged_wall_keeps_its_material():
+    """재질은 overrides 를 타고 빌더로 간다 — 병합이 overrides 를 버리면 사라진다.
+    형상은 멀쩡하고 물량·내화 산정만 조용히 틀리는, 제일 오래 사는 종류의 오류다."""
+    a, b = _wall(0, 1000), _wall(1010, 3000)
+    for w in (a, b):
+        w["overrides"] = {"width": 200.0, "material": "콘크리트"}
+    out = dp.merge_collinear_walls([a, b], {})
+    assert len(out) == 1, out
+    assert out[0]["overrides"].get("material") == "콘크리트", out[0].get("overrides")
+
+
 def test_unmerged_walls_are_untouched():
     """갭이 크면 병합하지 않는다 — 그때도 원본 필드는 그대로여야 한다."""
     out = dp.merge_collinear_walls([_wall(0, 1000), _wall(9000, 10000)], {})

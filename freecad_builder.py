@@ -40,6 +40,19 @@ def vec(p, z=0.0):
 
 _PSET = "Pset_MEPParser"
 
+# 재질은 **layer_map 의 opts `material=` 에 적힌 것만** 붙는다. 카테고리로 추정하지
+# 않는다 — wall→콘크리트는 조적벽에서 바로 틀리고, 물량·내화·열관류 계산이 전부
+# 그 위에 얹히므로 조용히 틀린 재질은 형상 오류보다 오래 살아남는다.
+_MATERIALS = {}          # (문서명, 재질명) → Arch Material. 부재마다 새로 만들지 않는다
+MATERIALS_APPLIED = {}   # 재질명 → 부여된 객체 수(build.json 으로 자기보고)
+
+
+def _material(obj, name):
+    key = (obj.Document.Name, name)
+    if key not in _MATERIALS:
+        _MATERIALS[key] = Arch.makeMaterial(name=name)
+    return _MATERIALS[key]
+
 
 def set_ifc_props(obj, rec):
     """레코드의 QA 정보를 **IFC 로 나가는** 속성으로 심는다.
@@ -73,6 +86,14 @@ def set_ifc_props(obj, rec):
         obj.IfcProperties = props
     except Exception as _pe:                      # IfcProperties 없는 객체(Part::Feature 등)
         print(f"  [warn] IFC 속성 부여 실패({getattr(obj, 'Label', '?')}): {_pe}")
+
+    mat = (rec.get("overrides") or {}).get("material")
+    if mat and hasattr(obj, "Material"):
+        try:
+            obj.Material = _material(obj, str(mat))
+            MATERIALS_APPLIED[str(mat)] = MATERIALS_APPLIED.get(str(mat), 0) + 1
+        except Exception as _me:
+            print(f"  [warn] 재질 '{mat}' 부여 실패({getattr(obj, 'Label', '?')}): {_me}")
 
 
 def make_wire(points, closed, doc=None, label="_wall_base"):
@@ -220,6 +241,11 @@ def build_walls(doc, walls, params):
             feat = doc.addObject("Part::Feature", f"ClosedWall_{i}")
             feat.Shape = solid
             struct = Arch.makeStructure(feat)
+            # ★ Arch.makeStructure 의 IfcType 기본값은 "Column" 이다. 안 적으면
+            # 닫힌 폴리선 벽이 전부 IfcColumn 으로 나간다(실측: sample_plan 의
+            # walls=3 이 IFC 에서 IfcWall 2 + IfcColumn 5 였다). 형상은 맞아서
+            # 검사도 통과하고, 뷰어에서 기둥 물량만 부풀어 오른다.
+            struct.IfcType = "Wall"
             struct.Label = f"ClosedWall_{i}"
             struct.addProperty("App::PropertyString", "DxfId", "Metadata", "")
             struct.DxfId = dxf_id
@@ -1039,6 +1065,7 @@ def _main_impl():
                   "beams": len(beams), "spaces": len(spaces), "mep": len(mep_objs),
                   "floors": len(floor_containers)},
         "beams_without_section": n_nosec,
+        "materials": dict(MATERIALS_APPLIED),
         "floor_orphans": len(_orphans), "floor_dups": len(_dups),
         "floor_orphan_detail": [{"label": l, "z_base": z} for l, z in _orphans[:20]],
         "invalid_shapes": n_err,

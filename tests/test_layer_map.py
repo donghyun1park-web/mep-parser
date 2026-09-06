@@ -167,6 +167,26 @@ def test_opts_do_not_leak_into_overrides():
     assert dp._pub_attrs(attrs) == {"width": 200.0}
 
 
+def test_material_reaches_the_builder_through_overrides():
+    """★ 재질만은 예외로 overrides 를 탄다 — 빌더가 읽어야 하기 때문이다.
+
+    최상위 필드로 만들면 벽의 병합·페어링·체이닝을 지나며 조용히 사라진다
+    (그 경로가 보존하는 것은 overrides 다). 나머지 opts 는 파서 전용 그대로다."""
+    HEAD6 = "pattern,category,width,height,thickness,opts\n"
+    r = dp.load_layer_map(write_csv(
+        HEAD6 + "WALL,wall,200,2800,,material=콘크리트;pair_max=600\n"))
+    attrs = r[0][2]
+    assert attrs["_opts"]["material"] == "콘크리트"
+    pub = dp._pub_attrs(attrs)
+    assert pub == {"width": 200.0, "height": 2800.0, "material": "콘크리트"}, pub
+
+
+def test_material_is_never_guessed_from_category():
+    """적힌 것만 붙는다. wall→콘크리트 추정은 조적벽에서 바로 틀린다."""
+    r = dp.load_layer_map(write_csv(HEAD + "WALL,wall,200,2800,\n"))
+    assert "material" not in dp._pub_attrs(r[0][2])
+
+
 def test_pair_bounds_takes_min_across_layers():
     """교차 레이어 쌍은 min — 양쪽 모두 허용해야 넓힌다.
     안 그러면 느슨한 보 레이어가 옆 벽선을 빨아들인다."""
