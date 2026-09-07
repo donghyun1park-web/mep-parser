@@ -131,6 +131,8 @@ COLLINEAR_GAP_TOL_MM = 500.0   # 끝-끝 간격 이 이하면 한 벽으로 연�
 # 병합기는 레코드를 첫점→끝점 한 세그먼트로만 보므로 여기 없는 pairing 이
 # 다점 형상을 가지면 그 형상이 조용히 납작해진다.
 NO_MERGE_PAIRINGS = ("axis", "closed")
+# 좌표까지 같아 버려진 닫힌 벽 폴리곤 {레이어: 개수}. detect_wall_pairs 가 채운다.
+CLOSED_WALL_DUPS = {}
                                 # 실무 도면: T/십자 교차점 틈 = 벽두께(100~400mm)
                                 # 문 개구부 ≥800mm 이므로 500mm 는 안전
 CORNER_SNAP_TOL_MM = 50.0      # 끝점 이 거리 이내면 centroid로 스냅(mm)
@@ -977,7 +979,20 @@ def detect_wall_pairs(wall_records, params):
                     **({"overrides": s["overrides"]} if s["overrides"] else {})})
 
     # ② 닫힌 폴리선: 원본 레코드 그대로 추가 (pairing="closed" 마킹만)
+    #    ★ 같은 폴리곤이 여러 레이어에 겹쳐 그려진다(실측: A-CON ∥ 상부골조 36쌍이
+    #    좌표까지 동일). 열린 벽은 면선 페어링이 이 중복을 흡수하지만 닫힌
+    #    폴리곤은 그 경로를 안 탄다 — 그대로 두면 IFC 에 같은 벽이 두 개 쌓이고
+    #    물량이 두 배가 된다. 기하가 완전히 같은 것만 버린다(추정 아님).
+    CLOSED_WALL_DUPS.clear()
+    _seen = {}
     for r in closed_recs:
+        key = tuple(sorted((round(p[0], 1), round(p[1], 1))
+                           for p in (r.get("points") or [])))
+        if key in _seen:
+            CLOSED_WALL_DUPS[r.get("layer", "")] = \
+                CLOSED_WALL_DUPS.get(r.get("layer", ""), 0) + 1
+            continue
+        _seen[key] = True
         nr = copy.deepcopy(r)
         nr["pairing"] = "closed"
         nr.setdefault("confidence", 0.7)
@@ -2240,6 +2255,10 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
     _qa_face_segs = _wall_segments(result["elements"]["wall"])
     # [Phase 1] 평행선 쌍 → 벽 중심선+두께 (zone 귀속 전에 재구성)
     result["elements"]["wall"] = detect_wall_pairs(result["elements"]["wall"], params)
+    if CLOSED_WALL_DUPS:
+        result["closed_wall_dups"] = dict(CLOSED_WALL_DUPS)
+        print(f"  [닫힌벽] 좌표까지 같은 중복 폴리곤 {sum(CLOSED_WALL_DUPS.values())}개 "
+              f"드롭: {dict(CLOSED_WALL_DUPS)} — 같은 벽이 두 레이어에 그려져 있다")
     # [Phase 4.0] 같은 직선 위 쪼개진 세그먼트 재병합(코너 틈은 제외)
     _n_before = len(result["elements"]["wall"])
     result["elements"]["wall"] = merge_collinear_walls(result["elements"]["wall"], params)

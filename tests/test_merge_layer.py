@@ -74,6 +74,29 @@ def test_open_walls_still_merge_next_to_closed_ones():
     assert any(w.get("seg_length") == 3000.0 for w in out), "열린 벽이 안 붙었다"
 
 
+def test_identical_closed_polygons_on_two_layers_are_deduped():
+    """같은 벽이 두 레이어에 그려진다(실측: A-CON ∥ 상부골조 36쌍, 좌표까지 동일).
+
+    열린 벽은 면선 페어링이 이 중복을 흡수하지만 닫힌 폴리곤은 그 경로를 안 탄다.
+    그대로 두면 IFC 에 같은 벽이 두 개 쌓이고 물량이 두 배가 된다."""
+    pts = [[0, 0], [600, 0], [600, 600], [0, 600]]
+    def box(layer):
+        return {"kind": "polyline", "closed": True, "layer": layer,
+                "points": [list(p) for p in pts], "z_base": 0.0}
+    out = dp.detect_wall_pairs([box("A-CON"), box("상부골조")], {})
+    assert len(out) == 1, f"중복이 남았다: {[w.get('layer') for w in out]}"
+    assert dp.CLOSED_WALL_DUPS == {"상부골조": 1}, dp.CLOSED_WALL_DUPS
+
+
+def test_different_closed_polygons_are_both_kept():
+    """기하가 다르면 남긴다 — '같은 레이어 쌍' 이 아니라 **좌표**로 판단한다."""
+    def box(x):
+        return {"kind": "polyline", "closed": True, "layer": "A-CON", "z_base": 0.0,
+                "points": [[x, 0], [x + 600, 0], [x + 600, 600], [x, 600]]}
+    out = dp.detect_wall_pairs([box(0), box(5000)], {})
+    assert len(out) == 2, out
+
+
 # ── 코너 스냅 ──────────────────────────────────────────────────────────────
 def _seg(a, b):
     return {"kind": "polyline", "closed": False, "layer": "A-CON",
