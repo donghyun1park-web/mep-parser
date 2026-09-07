@@ -32,6 +32,51 @@ def test_merged_wall_recomputes_seg_length():
     assert out[0]["seg_length"] == 3000.0, out[0]["seg_length"]
 
 
+# ── 병합 가드: 합치면 한쪽이 조용히 사라지는 속성 ──────────────────────────
+# 병합기는 합친 뒤 한쪽 레코드의 값을 그대로 쓴다 — 아래 속성이 서로 다른데도
+# 합치면 그중 하나가 없어진다. 형상은 멀쩡하고 검사도 통과한다.
+# (pascalorg/editor 의 wallsCanMerge 가 같은 이유로 height·material 을 본다.)
+def _ov(x0, x1, z=0.0, **ov):
+    r = _wall(x0, x1)
+    r["z_base"] = z
+    if ov:
+        r["overrides"] = ov
+    return r
+
+
+def test_walls_on_different_storeys_do_not_merge():
+    """★ 위층 벽이 아래층 벽에 흡수되어 통째로 사라진다.
+    한 DXF 안에 여러 표고가 있으면([4b] 가 지원하는 경우) 바로 도달한다."""
+    out = dp.merge_collinear_walls([_ov(0, 3000, z=0.0), _ov(0, 3000, z=4200.0)], {})
+    assert len(out) == 2, out
+    assert sorted(w["z_base"] for w in out) == [0.0, 4200.0]
+    # 끝-끝으로 이어지는 경우도 마찬가지
+    out = dp.merge_collinear_walls([_ov(0, 1000, z=0.0), _ov(1010, 3000, z=4200.0)], {})
+    assert len(out) == 2, out
+
+
+def test_walls_of_different_height_do_not_merge():
+    """4000mm 파라펫이 2800mm 벽에 붙으면 파라펫이 2800 이 된다.
+    layer_map 은 패턴별로 height 를 주므로 정상 사용에서 바로 나온다."""
+    out = dp.merge_collinear_walls(
+        [_ov(0, 1000, height=2800.0), _ov(1010, 3000, height=4000.0)], {})
+    assert sorted(w["overrides"]["height"] for w in out) == [2800.0, 4000.0], out
+
+
+def test_walls_of_different_material_do_not_merge():
+    """조적벽이 콘크리트벽에 붙으면 물량·내화가 조용히 틀린다."""
+    out = dp.merge_collinear_walls(
+        [_ov(0, 1000, material="콘크리트"), _ov(1010, 3000, material="조적")], {})
+    assert sorted(w["overrides"]["material"] for w in out) == ["조적", "콘크리트"], out
+
+
+def test_same_storey_within_tolerance_still_merges():
+    """가드가 정상 병합까지 막으면 [4.0] 의 목적을 잃는다.
+    z 는 층 감지와 **같은 허용치**(FLOOR_TOL_MM)로 양자화한다."""
+    out = dp.merge_collinear_walls([_ov(0, 1000, z=0.0), _ov(1010, 3000, z=50.0)], {})
+    assert len(out) == 1 and out[0]["seg_length"] == 3000.0, out
+
+
 def test_merged_wall_keeps_its_material():
     """재질은 overrides 를 타고 빌더로 간다 — 병합이 overrides 를 버리면 사라진다.
     형상은 멀쩡하고 물량·내화 산정만 조용히 틀리는, 제일 오래 사는 종류의 오류다."""

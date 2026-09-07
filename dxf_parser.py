@@ -127,6 +127,7 @@ WALL_PAIR_CLAIM_FRAC = 0.6    # [interval-greedy] 겹침구간이 이 비율 이
 COLLINEAR_ANGLE_TOL_DEG = 2.0  # 같은 직선 판정 사이각(도) — 벽 짝보다 빡빡
 COLLINEAR_DIST_TOL_MM = 10.0   # 같은 직선 판정 수직오프셋 허용(mm)
 COLLINEAR_GAP_TOL_MM = 500.0   # 끝-끝 간격 이 이하면 한 벽으로 연쇄 병합(mm)
+FLOOR_TOL_MM = 100.0           # 이 안에 들면 같은 층(z_base 양자화). 층 감지와 병합이 같은 값을 쓴다
 # collinear 병합에서 제외할 pairing — 이들은 '쪼개진 LINE' 이 아니다.
 # 병합기는 레코드를 첫점→끝점 한 세그먼트로만 보므로 여기 없는 pairing 이
 # 다점 형상을 가지면 그 형상이 조용히 납작해진다.
@@ -1242,6 +1243,25 @@ def _merge_two_segments(seg1, seg2):
     return {"c1": a, "c2": b, "rec": merged}
 
 
+def _merge_compat_key(rec):
+    """병합해도 **같은 벽 하나**라고 말할 수 있는 속성. 다르면 합치지 않는다.
+
+    병합기는 합친 뒤 한쪽 레코드의 값을 그대로 쓴다 — 즉 여기 없는 속성이 서로
+    다르면 그중 하나가 조용히 사라진다. 실측(합성 케이스로 재현):
+      · z_base   4200 층 벽이 0 층 벽과 합쳐져 **위층 벽이 사라졌다**
+      · height   4000mm 파라펫이 2800mm 벽과 합쳐져 **파라펫이 사라졌다**
+      · material 조적벽이 콘크리트벽과 합쳐져 **조적이 콘크리트가 됐다**
+    셋 다 형상은 멀쩡하고 검사도 통과한다 — 물량·내화·층만 틀린다.
+
+    z_base 는 층 감지와 **같은 허용치**(FLOOR_TOL_MM)로 양자화한다. 값이 다르면
+    다른 층이라는 판단을 두 곳이 따로 내리지 않게 하기 위함이다."""
+    ov = rec.get("overrides") or {}
+    z = rec.get("z_base")
+    return (round(float(z) / FLOOR_TOL_MM) if z is not None else None,
+            ov.get("height"),
+            ov.get("material"))
+
+
 def merge_collinear_walls(wall_records, params):
     """같은 직선 위 끝-끝이 가까운 벽 세그먼트를 한 벽으로 재병합(O(N log N)).
 
@@ -1270,7 +1290,8 @@ def merge_collinear_walls(wall_records, params):
         if not cl or len(cl) < 2:
             return wall_records  # 비정형 → 보수적으로 원본 유지
         items.append({"c1": cl[0], "c2": cl[-1], "rec": rec})
-    # 버킷 키: 방향(각도) + 원점 수직오프셋 + 두께 + pairing (모두 양자화)
+    # 버킷 키: 방향(각도) + 원점 수직오프셋 + 두께 + pairing + 병합해도 되는 속성
+    # (모두 양자화). 다른 버킷이면 애초에 비교되지 않으므로 쌍별 검사보다 싸다.
     buckets = {}
     for it in items:
         d = _get_normalized_direction(it["c1"], it["c2"])
@@ -1280,7 +1301,7 @@ def merge_collinear_walls(wall_records, params):
         key = (round(ang / COLLINEAR_ANGLE_TOL_DEG),
                round(off / COLLINEAR_DIST_TOL_MM),
                round(w, 1) if w is not None else None,
-               it["rec"].get("pairing", "single"))
+               it["rec"].get("pairing", "single")) + _merge_compat_key(it["rec"])
         buckets.setdefault(key, []).append(it)
     out = []
     for key in sorted(buckets, key=lambda k: (k[0], k[1], k[3], k[2] or -1)):
@@ -2477,7 +2498,7 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
                   f"(앞선 {ex['by_rule']!r} 가 {ex['layer']} 를 가져감). "
                   f"제외/좁은 규칙을 넓은 규칙 위로 올릴 것")
     # [Phase 4b] 층 감지: structural z_base 값 수집 → 100mm tol 양자화 → floors 목록
-    _FLOOR_TOL = 100.0
+    _FLOOR_TOL = FLOOR_TOL_MM     # 벽 병합의 층 판정과 같은 값을 써야 한다
     _z_vals = set()
     for _cat in ("wall", "column", "slab", "zone"):
         for _el in result["elements"].get(_cat, []):
