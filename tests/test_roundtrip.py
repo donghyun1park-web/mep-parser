@@ -139,3 +139,46 @@ def test_review_resolved_is_not_re_flagged_by_the_machine():
         if rec.get("review_resolved") and rec.get("needs_review"):
             rec["needs_review"] = False
     assert els["wall"][0]["needs_review"] is False
+
+
+# ── 2D 평면 탭이 만드는 기하 편집 ──────────────────────────────────────────
+# 이동·분할·결합은 **새 동사를 만들지 않는다** — 전부 delete + add 다.
+# apply_edits 가 이미 그 둘을 알고, 파서·빌더·미리보기가 네 번째 동사를 배울
+# 필요가 없다. 아래는 그 표현이 실제로 파이프라인을 통과하는지 본다.
+def _manual(eid, a, b):
+    return {"added": True, "category": "wall", "record": {
+        "kind": "polyline", "closed": False, "points": [a, b], "centerline": [a, b],
+        "pairing": "manual", "layer": "A-WALL", "z_base": 0.0, "confidence": 1,
+        "needs_review": False, "source": "manual_preview",
+        "overrides": {"width": 200.0, "height": 2800.0}, "eid": eid}}
+
+
+def test_split_is_expressed_as_delete_plus_two_adds():
+    els = {"wall": [{"eid": "w:orig", "kind": "polyline", "closed": False,
+                     "points": [[0, 0], [4000, 0]],
+                     "centerline": [[0, 0], [4000, 0]]}]}
+    rep = apply_edits(els, {
+        "w:orig": {"deleted": True},
+        "wm:a": _manual("wm:a", [0, 0], [2000, 0]),
+        "wm:b": _manual("wm:b", [2000, 0], [4000, 0])})
+    assert rep["added"] == ["wm:a", "wm:b"], rep
+    eids = sorted(r["eid"] for r in els["wall"])
+    assert eids == ["wm:a", "wm:b"], eids
+    assert all(r["pairing"] == "manual" for r in els["wall"])
+
+
+def test_manual_walls_are_not_touched_by_wall_post_processing():
+    """★ '사용자 편집이 항상 이긴다' 의 근거 — 주입이 후처리 **뒤**라서,
+    수동 레코드는 병합·스냅·치유 흐름에 애초에 들어가지 않는다.
+    (여기서는 그 함수들에 직접 먹여도 좌표가 안 변하는지까지 확인한다.)"""
+    import dxf_parser as dp
+    rec = _manual("wm:x", [0, 0], [3000, 0])["record"]
+    near = {"kind": "polyline", "closed": False, "layer": "A-CON",
+            "points": [[3010, 0], [6000, 0]], "centerline": [[3010, 0], [6000, 0]],
+            "width_detected": 200.0, "pairing": "paired", "z_base": 0.0,
+            "seg_length": 2990.0}
+    before = [list(p) for p in rec["centerline"]]
+    out = dp.merge_collinear_walls([dict(rec), near], {})
+    kept = [w for w in out if w.get("eid") == "wm:x"]
+    assert kept, "수동 벽이 병합돼 사라졌다"
+    assert kept[0]["centerline"] == before, f"수동 벽 좌표가 움직였다: {kept[0]['centerline']}"

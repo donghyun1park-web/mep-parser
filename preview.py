@@ -191,6 +191,25 @@ _TEMPLATE = r"""<!DOCTYPE html>
   #dl:hover{background:#34a05b}
   .badge{display:inline-block;padding:1px 6px;border-radius:3px;font-size:11px;margin-left:6px}
   #err{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;color:#ff8080;display:none}
+#tabs{position:absolute;left:8px;top:40px;z-index:5;display:flex;gap:4px;align-items:center;
+      flex-wrap:wrap;max-width:calc(100% - 16px)}
+#tabs button{background:#2a2f38;color:#cfd6e4;border:1px solid #3a4150;border-radius:4px;
+      padding:3px 9px;cursor:pointer;font-size:12px}
+#tabs button.on{background:#4b7bd5;color:#fff;border-color:#4b7bd5}
+#tools2d{display:none;gap:4px;align-items:center}
+#tools2d.on{display:flex}
+#hint2d{font-size:11px;margin-left:4px}
+#view2d{display:none;position:absolute;inset:0;width:100%;height:100%;background:#12151a}
+#view2d.on{display:block}
+#view2d .w{stroke:#6f9fe0;fill:none;stroke-linecap:butt}
+#view2d .w.sel{stroke:#ffd24a}
+#view2d .w.rev{stroke:#e07b7b}
+#view2d .w.man{stroke:#5fd08a}
+#view2d .w.del{stroke:#555;stroke-dasharray:6 6}
+#view2d .col{fill:#c060c0;opacity:.75}
+#view2d .op{fill:#e08040;opacity:.85}
+#view2d .hnd{fill:#ffd24a;stroke:#000;stroke-width:1;cursor:grab}
+#view2d .snap{fill:none;stroke:#5fd08a;stroke-width:2}
 .why{margin:3px 0;padding:4px 6px;background:#20242b;border-left:2px solid #556;
      border-radius:2px;font-size:12px;line-height:1.45}
 #warnbox{max-height:150px;overflow:auto;font-size:12px;line-height:1.5}
@@ -208,6 +227,18 @@ _TEMPLATE = r"""<!DOCTYPE html>
       <button id="bwire">와이어</button>
       <button id="bplace">창호 배치: OFF</button>
     </div>
+    <div id="tabs">
+      <button id="t3d" class="on">3D 보기</button>
+      <button id="t2d">평면 편집</button>
+      <span id="tools2d">
+        <button data-m="select" class="on">선택/이동</button>
+        <button data-m="split">분할</button>
+        <button data-m="join">결합</button>
+        <button data-m="draw">벽 그리기</button>
+        <span id="hint2d" class="muted"></span>
+      </span>
+    </div>
+    <svg id="view2d"><g id="g2d"></g></svg>
     <div id="legend"></div>
     <div id="err">three.js 로드 실패. (CDN 모드면 인터넷 필요 · 오프라인 모드면 vendor/ 동봉 확인)</div>
   </div>
@@ -227,6 +258,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
       <div class="row"><label>높이/두께 (mm)</label><input id="e_h" type="number"/></div>
       <div class="row"><label><input type="checkbox" id="e_del" style="width:auto"/> 삭제</label></div>
       <button id="apply">수정 적용</button>
+      <div id="bulk"></div>
     </div>
     <h3>창호 배치 (반자동)</h3>
     <div id="schedwrap">
@@ -465,11 +497,20 @@ renderer.domElement.addEventListener('click', ev=>{
 function select(m){
   if(selected) selected.material.emissive?.setHex(0x000000);
   selected=m;
-  const eb=document.getElementById('editbox'), ns=document.getElementById('noSel');
-  if(!m){ eb.style.display='none'; ns.style.display='block'; return; }
+  if(!m){ fillPanel(null, null); return; }
   m.material.emissive?.setHex(0x333300);
+  fillPanel(m.userData.rec, m.userData.cat);
+}
+
+// 3D 와 2D 평면 탭이 **같은 패널을 공유**한다. 뷰마다 인스펙터를 따로 두면
+// 필드가 어긋나기 시작하고, 그게 이 저장소가 반복해 밟은 종류의 버그다.
+let selRec=null, selCat=null;
+function fillPanel(rec, cat){
+  const eb=document.getElementById('editbox'), ns=document.getElementById('noSel');
+  selRec=rec; selCat=cat;
+  if(!rec){ eb.style.display='none'; ns.style.display='block'; return; }
   eb.style.display='block'; ns.style.display='none';
-  const rec=m.userData.rec, cat=m.userData.cat, eid=rec.eid||'(eid 없음)';
+  const eid=rec.eid||'(eid 없음)';
   document.getElementById('e_eid').textContent=eid;
   document.getElementById('e_layer').textContent=rec.layer||'-';
   document.getElementById('e_conf').textContent=(rec.confidence!=null?rec.confidence:'-')+(rec.pairing?' / '+rec.pairing:'');
@@ -478,7 +519,35 @@ function select(m){
   document.getElementById('e_h').value=edits[eid]?.overrides?.height ?? rec.overrides?.height ?? rec.overrides?.thickness ?? '';
   document.getElementById('e_del').checked=!!edits[eid]?.deleted;
   document.getElementById('e_why').innerHTML=whyHtml(rec, cat);
+  document.getElementById('bulk').innerHTML=bulkHtml(rec, cat);
 }
+
+// 일괄 수정은 **규칙**이다 — 개별 EID 41개가 아니라 layer_map 한 줄이어야 한다.
+// 그래야 도면이 바뀌어도 계속 적용되고, diff 에 남고, 고아가 되지 않는다.
+// 자동으로 쓰지 않는다: 붙여 넣을 줄을 만들어 줄 뿐이다("사람이 CSV 를 쓴다").
+function bulkHtml(rec, cat){
+  if(!rec || cat!=='wall' || !rec.layer) return '';
+  const w=rec.width_detected;
+  if(w==null) return '';
+  const same=(DATA.elements.wall||[]).filter(r=>
+    r.layer===rec.layer && Math.abs((r.width_detected||-1)-w)<0.5);
+  if(same.length<2) return '';
+  const esc=t=>String(t).replace(new RegExp('[.*+?^${}()|[\\]]','g'), m=>'\\'+m);
+  const row=esc(rec.layer)+',wall,'+Math.round(w)+','
+          +Math.round(gcDim('wall','height',rec,P))+',,';
+  return '<div class="why">같은 조건(<b>'+rec.layer+'</b> · 실측 '+Math.round(w)
+    +'mm)인 벽이 <b>'+same.length+'</b>개입니다. 개별 수정 대신 layer_map 에'
+    + ' 이 줄을 넣으면 규칙으로 남습니다:'
+    + '<div style="margin-top:4px"><code id="bulkrow">'+row+'</code> '
+    + '<button id="bulkcopy" style="width:auto;padding:2px 8px">복사</button></div></div>';
+}
+document.getElementById('bulk').addEventListener('click', ev=>{
+  if(ev.target.id!=='bulkcopy') return;
+  const t=document.getElementById('bulkrow').textContent;
+  navigator.clipboard?.writeText(t);
+  ev.target.textContent='복사됨';
+  setTimeout(()=>{ ev.target.textContent='복사'; }, 1200);
+});
 
 // 이 부재가 왜 이 모양인지. 파서가 아는 것을 사용자가 보는 자리로 가져온다.
 function whyHtml(rec, cat){
@@ -503,9 +572,9 @@ function whyHtml(rec, cat){
   return out.length?out.map(x=>'<div class="why">'+x+'</div>').join(''):'';
 }
 document.getElementById('apply').addEventListener('click', ()=>{
-  if(!selected) return; const rec=selected.userData.rec, eid=rec.eid; if(!eid){alert('이 요소는 EID가 없어 수정 저장 불가');return;}
+  const rec=selRec; if(!rec) return; const eid=rec.eid; if(!eid){alert('이 요소는 EID가 없어 수정 저장 불가');return;}
   const e=edits[eid]={}; const cat=sel.value;
-  if(cat!==selected.userData.cat) e.category=cat;
+  if(cat!==selCat) e.category=cat;
   const w=parseFloat(document.getElementById('e_w').value), h=parseFloat(document.getElementById('e_h').value);
   const ov={}; if(!isNaN(w)) ov.width=w; if(!isNaN(h)){ (cat==='slab')?ov.thickness=h:ov.height=h; }
   if(Object.keys(ov).length) e.overrides=ov;
@@ -559,7 +628,18 @@ function refreshEditsOnly(){
   const el=document.getElementById('editlist');
   el.innerHTML = n? Object.entries(edits).map(([k,v])=>{
     if(v.added){ const r=v.record||{};
-      return `<div class="kv"><span>➕ ${r.mark||'창호'} ${Math.round(r.width||0)}×${Math.round(r.height||0)}</span>`
+      // 추가된 것이 창호만은 아니다 — 2D 탭이 벽도 만든다(이동·분할·결합은 전부
+      // delete+add 다). 종전엔 전부 '창호 0×0' 으로 찍혀 무엇을 만들었는지 몰랐다.
+      let lbl;
+      if((v.category||'opening')==='wall'){
+        const cl=r.centerline||r.points||[];
+        const L=cl.length>1?Math.hypot(cl[cl.length-1][0]-cl[0][0],
+                                       cl[cl.length-1][1]-cl[0][1]):0;
+        lbl='벽 '+Math.round(L)+'mm · 두께 '+Math.round(r.overrides?.width||0);
+      } else {
+        lbl=(r.mark||'창호')+' '+Math.round(r.width||0)+'×'+Math.round(r.height||0);
+      }
+      return `<div class="kv"><span>➕ ${lbl}</span>`
            + `<span><a href="#" class="rm" data-eid="${k}" style="color:#ff8080">✕ 제거</a></span></div>`; }
     const tag=v.deleted?'🗑삭제':(v.category?('→'+v.category):'')+(v.overrides?(' '+JSON.stringify(v.overrides)):'');
     return `<div class="kv"><span>${k}</span><span>${tag}</span></div>`;
@@ -572,11 +652,260 @@ function removeAdded(eid){
     const m=meshes[i]; scene.remove(m); m.geometry.dispose(); m.material.dispose(); meshes.splice(i,1); } }
   // 데이터 모델에서 제거
   if(DATA.elements.opening) DATA.elements.opening=DATA.elements.opening.filter(o=>o.eid!==eid);
+  if(typeof sel2!=='undefined'){ sel2=sel2.filter(x=>x!==eid); if(typeof render2==='function') render2(); }
   refreshEdits(); applyEditVisuals();
 }
 document.getElementById('editlist').addEventListener('click', ev=>{
   const a=ev.target.closest('a.rm'); if(a){ ev.preventDefault(); removeAdded(a.dataset.eid); }
 });
+// ── 2D 평면 편집 ───────────────────────────────────────────────────────────
+// 기하 편집은 여기서만 한다. 3D 는 보기 전용이다 — 원근 투사에서는 끝점을 정확히
+// 집을 수 없고, 건축 편집은 본래 평면이 정확하다(스냅·직각·치수).
+//
+// 이동·분할·결합은 **새 동사를 만들지 않는다**. 전부 delete + add 로 표현한다:
+//   이동 = 원본 삭제 + 옮긴 좌표로 추가
+//   분할 = 원본 삭제 + 두 조각 추가
+//   결합 = 두 원본 삭제 + 하나 추가
+// apply_edits 가 이미 그 둘을 안다. 네 번째 동사를 만들면 파서·빌더·미리보기가
+// 전부 그걸 배워야 한다.
+const SVG2NS='http://www.w3.org/2000/svg';
+const svg2=document.getElementById('view2d'), g2=document.getElementById('g2d');
+let mode2='select', sel2=[], vb=null, dragging=null, drawFrom=null;
+const SNAP_PX=12;          // 스냅은 화면 기준(집기 편하게)
+const JOIN_TOL_MM=600;     // 결합은 실치수 기준(줌과 무관해야 한다)
+const HINT2={select:'벽을 클릭 → 끝점을 끌어 옮깁니다. Delete 로 삭제.',
+             split:'벽 위의 나눌 지점을 클릭합니다.',
+             join:'이어 붙일 벽 2개를 차례로 클릭합니다.',
+             draw:'시작점과 끝점을 클릭해 벽을 그립니다.'};
+
+function wallsAll(){
+  const out=(DATA.elements.wall||[]).map(r=>r);
+  for(const [k,v] of Object.entries(edits))
+    if(v.added && (v.category||'wall')==='wall' && v.record) out.push(v.record);
+  return out;
+}
+function clOf(r){ return r.centerline || r.points || []; }
+function isDel(r){ return !!(edits[r.eid] && edits[r.eid].deleted); }
+function recByEid(eid){ return wallsAll().find(r=>r.eid===eid); }
+
+function fitView(){
+  const b=DATA.bbox; if(!b) return;
+  const pad=(b[2]-b[0]+b[3]-b[1])*0.03+500;
+  vb={x:b[0]-pad, y:b[1]-pad, w:(b[2]-b[0])+pad*2, h:(b[3]-b[1])+pad*2};
+  applyVB();
+}
+function applyVB(){
+  // y 를 뒤집는다 — 도면은 위가 +y, SVG 는 아래가 +y.
+  svg2.setAttribute('viewBox', vb.x+' '+(-(vb.y+vb.h))+' '+vb.w+' '+vb.h);
+  g2.setAttribute('transform','scale(1,-1)');
+}
+function px2world(){ const r=svg2.getBoundingClientRect(); return vb.w/Math.max(1,r.width); }
+function evtWorld(ev){
+  const r=svg2.getBoundingClientRect();
+  return [vb.x+(ev.clientX-r.left)*(vb.w/Math.max(1,r.width)),
+          vb.y+(r.height-(ev.clientY-r.top))*(vb.h/Math.max(1,r.height))];
+}
+function mk2(t,a){ const e=document.createElementNS(SVG2NS,t);
+  for(const k in a) e.setAttribute(k,a[k]); return e; }
+
+function render2(){
+  if(!vb) fitView();
+  while(g2.firstChild) g2.removeChild(g2.firstChild);
+  for(const r of (DATA.elements.slab||[]))
+    if((r.points||[]).length>2) g2.appendChild(mk2('polygon',
+      {points:r.points.map(p=>p[0]+','+p[1]).join(' '), fill:'#1b2029', stroke:'#2b3240'}));
+  for(const r of (DATA.elements.column||[])){
+    if(r.kind==='circle') g2.appendChild(mk2('circle',
+      {cx:r.center[0],cy:r.center[1],r:r.radius,class:'col'}));
+    else if((r.points||[]).length>2) g2.appendChild(mk2('polygon',
+      {points:r.points.map(p=>p[0]+','+p[1]).join(' '), class:'col'}));
+  }
+  for(const r of (DATA.elements.opening||[])){
+    const c=r.center;
+    if(c) g2.appendChild(mk2('circle',
+      {cx:c[0],cy:c[1],r:Math.max(120,r.radius||150),class:'op'}));
+  }
+  for(const rec of wallsAll()){
+    const cl=clOf(rec); if(cl.length<2) continue;
+    const w=Math.max(30, gcWidthOf(rec,P,'wall'));
+    const cls=['w'];
+    if(isDel(rec)) cls.push('del');
+    else if(sel2.indexOf(rec.eid)>=0) cls.push('sel');
+    else if(rec.pairing==='manual') cls.push('man');
+    else if(rec.needs_review) cls.push('rev');
+    const e=mk2('polyline',{points:cl.map(p=>p[0]+','+p[1]).join(' '),
+                            class:cls.join(' '),'stroke-width':w});
+    e.dataset.eid=rec.eid; g2.appendChild(e);
+  }
+  const k=px2world();
+  for(const rec of wallsAll()){
+    if(sel2.indexOf(rec.eid)<0 || isDel(rec)) continue;
+    const cl=clOf(rec);
+    for(const i of [0, cl.length-1]){
+      const h=mk2('circle',{cx:cl[i][0],cy:cl[i][1],r:SNAP_PX*k*0.6,class:'hnd'});
+      h.dataset.eid=rec.eid; h.dataset.i=i; g2.appendChild(h);
+    }
+  }
+  document.getElementById('hint2d').textContent = HINT2[mode2] || '';
+}
+
+function hashId2(str){ let h=0;
+  for(let i=0;i<str.length;i++){ h=(h*31+str.charCodeAt(i))|0; }
+  return (h>>>0).toString(16).padStart(8,'0'); }
+
+function manualWall(a, b, src){
+  const rec={kind:'polyline', closed:false,
+    points:[a.slice(),b.slice()], centerline:[a.slice(),b.slice()],
+    pairing:'manual', layer:(src&&src.layer)||'(수동)',
+    z_base:(src&&src.z_base)||0, confidence:1, needs_review:false,
+    source:'manual_preview',
+    overrides:Object.assign({}, src&&src.overrides,
+      {width:Math.round(src?gcWidthOf(src,P,'wall'):((P.wall&&P.wall.width)||200))})};
+  rec.eid='wm:'+hashId2(a.map(Math.round).join('_')+'|'+b.map(Math.round).join('_'));
+  return rec;
+}
+function addWall(rec){ edits[rec.eid]={added:true, category:'wall', record:rec}; }
+function delWall(rec){
+  if(edits[rec.eid] && edits[rec.eid].added) delete edits[rec.eid];
+  else edits[rec.eid]=Object.assign({}, edits[rec.eid], {deleted:true});
+}
+
+// 끝점 스냅 — 수동 벽은 파서의 코너 스냅·junction 치유를 건너뛴다(주입이 그 뒤라서).
+// 그래서 여기서 사람이 **보면서** 붙인다. 파서가 나중에 몰래 옮기는 것보다 낫다.
+function snapPoint(pt, skipEid){
+  const tol=SNAP_PX*px2world(); let best=null, bd=tol;
+  for(const rec of wallsAll()){
+    if(rec.eid===skipEid || isDel(rec)) continue;
+    for(const q of clOf(rec)){
+      const d=Math.hypot(q[0]-pt[0], q[1]-pt[1]);
+      if(d<bd){ bd=d; best=[q[0],q[1]]; }
+    }
+  }
+  return best || pt;
+}
+
+function splitWall(rec, pt){
+  const cl=clOf(rec); if(cl.length<2) return;
+  const a=cl[0], b=cl[cl.length-1];
+  const dx=b[0]-a[0], dy=b[1]-a[1], L2=dx*dx+dy*dy; if(L2<1) return;
+  let t=((pt[0]-a[0])*dx+(pt[1]-a[1])*dy)/L2;
+  t=Math.max(0.02, Math.min(0.98, t));
+  const m=[a[0]+dx*t, a[1]+dy*t];
+  const w1=manualWall(a,m,rec), w2=manualWall(m,b,rec);
+  delWall(rec); addWall(w1); addWall(w2); sel2=[w1.eid,w2.eid];
+  refreshEdits(); fillPanel(w1,'wall'); render2();
+}
+
+function joinWalls(r1, r2){
+  sel2=[];
+  if(!r1 || !r2 || r1===r2){ render2(); return; }
+  const A=clOf(r1), B=clOf(r2);
+  const ends=[[A[0],A[A.length-1]],[B[0],B[B.length-1]]];
+  let best=null, bd=Infinity;
+  for(let i=0;i<2;i++) for(let j=0;j<2;j++){
+    const d=Math.hypot(ends[0][i][0]-ends[1][j][0], ends[0][i][1]-ends[1][j][1]);
+    if(d<bd){ bd=d; best=[i,j]; }
+  }
+  // 멀면 붙이지 않는다 — 조용히 엉뚱한 벽을 만드느니 안 되는 게 낫다.
+  // 허용치는 **화면 배율과 무관한 실치수**다. 픽셀 기준으로 두면 같은 조작이
+  // 줌에 따라 다르게 동작한다(멀리서 보면 6m 떨어진 벽도 붙었다).
+  if(bd > JOIN_TOL_MM){
+    document.getElementById('hint2d').textContent='끝점이 '+Math.round(bd)+'mm 떨어져 있어 결합하지 않았습니다(허용 '+JOIN_TOL_MM+'mm).';
+    render2(); return;
+  }
+  const nw=manualWall(ends[0][1-best[0]], ends[1][1-best[1]], r1);
+  delWall(r1); delWall(r2); addWall(nw); sel2=[nw.eid];
+  refreshEdits(); fillPanel(nw,'wall'); render2();
+}
+
+svg2.addEventListener('pointerdown', ev=>{
+  const t=ev.target;
+  if(t.classList && t.classList.contains('hnd')){
+    dragging={eid:t.dataset.eid, i:+t.dataset.i};
+    svg2.setPointerCapture(ev.pointerId); ev.preventDefault(); return;
+  }
+  const eid=(t.dataset && t.dataset.eid) || null;
+  const pt=evtWorld(ev);
+  if(mode2==='draw'){
+    const p=snapPoint(pt,null);
+    if(!drawFrom){ drawFrom=p;
+      document.getElementById('hint2d').textContent='끝점을 클릭하세요 (Esc 취소).'; }
+    else { addWall(manualWall(drawFrom,p,null)); drawFrom=null;
+      refreshEdits(); render2(); }
+    return;
+  }
+  if(!eid){ if(mode2!=='join'){ sel2=[]; fillPanel(null,null); render2(); } return; }
+  const rec=recByEid(eid); if(!rec) return;
+  if(mode2==='split'){ splitWall(rec, pt); return; }
+  if(mode2==='join'){
+    if(sel2.indexOf(eid)<0) sel2.push(eid);
+    if(sel2.length===2) joinWalls(recByEid(sel2[0]), recByEid(sel2[1]));
+    render2(); return;
+  }
+  sel2=[eid]; fillPanel(rec,'wall'); render2();
+});
+
+svg2.addEventListener('pointermove', ev=>{
+  if(!dragging) return;
+  const rec=recByEid(dragging.eid); if(!rec) return;
+  const cl=clOf(rec).map(p=>p.slice());
+  cl[dragging.i]=snapPoint(evtWorld(ev), rec.eid);
+  dragging.preview=cl;
+  for(const e of g2.querySelectorAll('polyline.w'))
+    if(e.dataset.eid===dragging.eid) e.setAttribute('points', cl.map(p=>p[0]+','+p[1]).join(' '));
+});
+
+svg2.addEventListener('pointerup', ()=>{
+  if(!dragging) return;
+  const rec=recByEid(dragging.eid), cl=dragging.preview;
+  dragging=null;
+  if(!rec || !cl){ return; }
+  const old=clOf(rec), n=cl.length-1, m=old.length-1;
+  if(Math.hypot(cl[0][0]-old[0][0], cl[0][1]-old[0][1])<1 &&
+     Math.hypot(cl[n][0]-old[m][0], cl[n][1]-old[m][1])<1){ render2(); return; }
+  const nw=manualWall(cl[0], cl[n], rec);
+  delWall(rec); addWall(nw); sel2=[nw.eid];
+  refreshEdits(); fillPanel(nw,'wall'); render2();
+});
+
+svg2.addEventListener('wheel', ev=>{
+  ev.preventDefault();
+  const k=ev.deltaY>0?1.15:0.87, c=evtWorld(ev);
+  vb={x:c[0]-(c[0]-vb.x)*k, y:c[1]-(c[1]-vb.y)*k, w:vb.w*k, h:vb.h*k};
+  applyVB(); render2();
+}, {passive:false});
+
+window.addEventListener('keydown', ev=>{
+  if(!svg2.classList.contains('on')) return;
+  if(ev.key==='Delete' && sel2.length){
+    for(const eid of sel2){ const r=recByEid(eid); if(r) delWall(r); }
+    sel2=[]; refreshEdits(); fillPanel(null,null); render2();
+  }
+  if(ev.key==='Escape'){ drawFrom=null; sel2=[]; fillPanel(null,null); render2(); }
+});
+
+for(const b of document.querySelectorAll('#tools2d button'))
+  b.addEventListener('click', ()=>{
+    mode2=b.dataset.m; drawFrom=null;
+    // 결합은 '지금부터 고르는 2개' 다. 이전 선택을 물고 들어가면 사용자가
+    // 한 번만 클릭했는데 엉뚱한 벽과 붙는다.
+    sel2 = (mode2==='join') ? [] : sel2.slice(0,1);
+    for(const x of document.querySelectorAll('#tools2d button'))
+      x.classList.toggle('on', x===b);
+    render2();
+  });
+
+function setTab(two){
+  document.getElementById('t2d').classList.toggle('on', two);
+  document.getElementById('t3d').classList.toggle('on', !two);
+  document.getElementById('tools2d').classList.toggle('on', two);
+  svg2.classList.toggle('on', two);
+  renderer.domElement.style.display = two ? 'none' : '';
+  if(two){ if(!vb) fitView(); render2(); }
+}
+document.getElementById('t2d').addEventListener('click', ()=>setTab(true));
+document.getElementById('t3d').addEventListener('click', ()=>setTab(false));
+
 function applyEditVisuals(){
   for(const m of meshes){
     const eid=m.userData.rec.eid; const e=eid&&edits[eid];
