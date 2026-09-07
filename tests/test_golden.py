@@ -65,6 +65,11 @@ def digest(data):
             for k, v in sorted((data.get("duplicate_geometry_dropped") or {}).items())},
         # 실측≠선언 두께. 늘면 빌드가 실측을 더 많이 무시하고 있다는 뜻이다.
         "width_conflicts": sum(c["count"] for c in (data.get("width_conflicts") or [])),
+        # ★ EID 가 부재를 특정하지 못하면 수동 수정이 엉뚱한 데 걸린다.
+        # 남는 중복은 좌표까지 같은 진짜 중복 부재뿐이어야 한다(실측 263 → 10).
+        "eid_collisions": {c: len(v) - len({r["eid"] for r in v if r.get("eid")})
+                           for c, v in sorted(el.items())
+                           if v and len(v) != len({r["eid"] for r in v if r.get("eid")})},
         "needs_review": sum(1 for recs in el.values() for r in recs
                             if r.get("needs_review")),
         "face_coverage_pct": round(qa.get("face_coverage_pct", 0)),

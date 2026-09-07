@@ -59,12 +59,23 @@ def apply_edits(elements, edits):
        또는 신규 추가: {eid: {"added": true, "category": <cat>, "record": {...}}}
          (preview.py 반자동 창호 배치 — DXF에 없는 사용자 생성 요소).
     반환: report(적용/고아/추가/현재EID목록)."""
-    present = {}
+    present, ambiguous, legacy = {}, set(), {}
     for cat, items in elements.items():
         for rec in items:
-            present[rec["eid"]] = (cat, rec)
+            eid = rec["eid"]
+            if eid in present:
+                # 같은 EID 를 두 레코드가 쓴다 = 어느 쪽을 고칠지 알 수 없다.
+                # 종전에는 마지막 것이 조용히 이겼고, 그래서 사용자가 A 를 고치면
+                # B 가 바뀌었다. 이제는 적용하지 않고 보고한다.
+                ambiguous.add(eid)
+            present[eid] = (cat, rec)
+            v1 = rec.get("eid_v1")
+            if v1 and v1 != eid:
+                # 옛 공식으로 만든 ID → 구 edits.json 이어받기. 둘 이상이 같은 옛
+                # ID 를 가리키면 그 수정이 어느 벽 것이었는지 파일에 없다 — 포기한다.
+                legacy[v1] = None if v1 in legacy else (cat, rec)
 
-    applied, orphans, added = [], [], []
+    applied, orphans, added, migrated = [], [], [], []
     move_ops = []
     for eid, edit in edits.items():
         # 신규 추가 요소: DXF 재파싱과 무관하게 elements 에 주입(멱등 — 이미 있으면 스킵).
@@ -79,10 +90,17 @@ def apply_edits(elements, edits):
             present[eid] = (cat, rec)
             added.append(eid)
             continue
-        if eid not in present:
+        if eid in ambiguous:
+            orphans.append(eid)          # 모호한 것은 손대지 않는다
+            continue
+        if eid in present:
+            cat, rec = present[eid]
+        elif legacy.get(eid):
+            cat, rec = legacy[eid]
+            migrated.append(eid)
+        else:
             orphans.append(eid)
             continue
-        cat, rec = present[eid]
         if edit.get("overrides"):
             rec.setdefault("overrides", {}).update(edit["overrides"])
         if edit.get("review_resolved"):
@@ -107,6 +125,8 @@ def apply_edits(elements, edits):
         "applied": sorted(applied),
         "orphaned": sorted(orphans),
         "added": sorted(added),
+        "migrated": sorted(migrated),
+        "ambiguous": sorted(ambiguous),
         "current_eids": sorted(present),
     }
 

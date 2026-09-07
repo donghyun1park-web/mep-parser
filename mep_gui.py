@@ -50,7 +50,10 @@ def user_csv(name):
     return dst
 
 
-CATEGORIES = ["wall", "column", "slab", "zone", "opening", "pipe", "duct", "tray"]
+# dxf_parser.VALID_CATEGORIES 와 같아야 한다. 빠진 카테고리는 편집기에서
+# 표현조차 안 되고, 저장 시 그 규칙이 사라진다.
+CATEGORIES = ["wall", "column", "slab", "beam", "zone", "opening",
+              "pipe", "duct", "tray", "equipment", "ignore"]
 
 
 def find_freecadcmd():
@@ -66,37 +69,54 @@ def find_freecadcmd():
 
 # ── Layer Map CSV helpers ─────────────────────────────────────────────────────
 
+CSV_FIELDS = ["pattern", "category", "width", "height", "thickness", "opts"]
+
+
 def _read_csv_rows(csv_path):
-    """Read layer_map.csv -> list of dicts {pattern, category, width, height, thickness}."""
-    rows = []
+    """layer_map.csv → [{...CSV_FIELDS, "_before": [원문 주석줄]}]
+
+    ★ `opts` 와 주석을 **반드시 왕복**시킨다. 종전 구현은 5컬럼만 읽고 5컬럼만 써서,
+    편집기에서 '저장' 을 누르면 `pair_max`·`pair_min`·`from=dim`·`member_re`·
+    `schedule=`·`material=` 과 주석이 통째로 사라졌다 — 사용자가 알 방법이 없었다.
+    (파서가 이번에 넣은 `row.get(None) → LayerMapError` 가드도 이건 못 잡는다.
+     쓰기가 자기 일관적이라 5컬럼 파일로 조용히 로드되기 때문이다.)
+
+    주석은 **바로 뒤 규칙에 붙여** 두었다가 저장 시 그 앞에 다시 쓴다 — 주석은
+    보통 다음 규칙을 설명하므로 그게 의미를 지킨다.
+    """
+    rows, pending, seen_header = [], [], False
     if not os.path.exists(csv_path):
         return rows
     with open(csv_path, encoding="utf-8") as f:
-        for row in csv.DictReader(filter(lambda l: not l.startswith("# "), f)):
-            rows.append({
-                "pattern": row.get("pattern", "").strip(),
-                "category": row.get("category", "").strip(),
-                "width": row.get("width", "").strip(),
-                "height": row.get("height", "").strip(),
-                "thickness": row.get("thickness", "").strip(),
-            })
+        for ln in f.read().splitlines():
+            t = ln.strip()
+            if not t or t.startswith("#"):
+                pending.append(ln)
+                continue
+            vals = next(csv.reader([ln]))
+            if not seen_header:
+                seen_header = True          # 헤더 줄
+                continue
+            r = {k: (vals[i].strip() if i < len(vals) else "")
+                 for i, k in enumerate(CSV_FIELDS)}
+            r["_before"], pending = pending, []
+            rows.append(r)
+    if pending and rows:                    # 파일 끝 주석
+        rows[-1]["_after"] = pending
     return rows
 
 
 def _write_csv_rows(csv_path, rows):
-    """Write rows back to layer_map.csv (overwrites, keeps header comment)."""
-    header_comment = (
-        "# layer_map.csv  --  layer pattern -> category/parameter mapping\n"
-        "# pattern: regex (case-insensitive) / "
-        "category: wall|column|slab|zone|opening|pipe|duct|tray\n"
-        "# width/height/thickness: mm (leave blank to use param defaults)\n"
-    )
+    """rows → layer_map.csv. `opts`·주석을 읽은 그대로 되돌려 놓는다."""
     with open(csv_path, "w", encoding="utf-8", newline="") as f:
-        f.write(header_comment)
-        writer = csv.DictWriter(f, fieldnames=["pattern", "category", "width", "height", "thickness"])
-        writer.writeheader()
+        w = csv.writer(f)
+        w.writerow(CSV_FIELDS)
         for r in rows:
-            writer.writerow(r)
+            for c in r.get("_before") or []:
+                print(c, file=f)
+            w.writerow([r.get(k, "") for k in CSV_FIELDS])
+            for c in r.get("_after") or []:
+                print(c, file=f)
 
 
 # ── Layer Map Editor Window ───────────────────────────────────────────────────
@@ -122,9 +142,9 @@ class LayerMapEditor:
         top = ttk.LabelFrame(self.win, text="Current layer rules (editable)")
         top.pack(fill="both", expand=True, padx=8, pady=6)
 
-        cols = ("pattern", "category", "width", "height", "thickness")
+        cols = tuple(CSV_FIELDS)
         self.tree = ttk.Treeview(top, columns=cols, show="headings", height=10)
-        col_widths = (220, 90, 70, 70, 80)
+        col_widths = (200, 85, 60, 60, 70, 200)
         for c, w in zip(cols, col_widths):
             self.tree.heading(c, text=c)
             self.tree.column(c, width=w, anchor="w")
@@ -141,14 +161,15 @@ class LayerMapEditor:
         mid = ttk.LabelFrame(self.win, text="Add new rule")
         mid.pack(fill="x", padx=8, pady=4)
 
-        fields = [("Pattern (regex)", 28), ("Category", 12), ("Width mm", 8),
-                  ("Height mm", 8), ("Thickness mm", 10)]
+        fields = [("Pattern (regex)", 24), ("Category", 12), ("Width mm", 7),
+                  ("Height mm", 7), ("Thickness mm", 9), ("opts (k=v;k=v)", 24)]
         self.v_pat = tk.StringVar()
         self.v_cat = tk.StringVar(value="column")
         self.v_wid = tk.StringVar()
         self.v_hei = tk.StringVar()
         self.v_thk = tk.StringVar()
-        vars_ = [self.v_pat, self.v_cat, self.v_wid, self.v_hei, self.v_thk]
+        self.v_opt = tk.StringVar()
+        vars_ = [self.v_pat, self.v_cat, self.v_wid, self.v_hei, self.v_thk, self.v_opt]
 
         for col, ((lbl, w), var) in enumerate(zip(fields, vars_)):
             ttk.Label(mid, text=lbl).grid(row=0, column=col, padx=4, sticky="w")
@@ -195,8 +216,7 @@ class LayerMapEditor:
         self.tree.delete(*self.tree.get_children())
         for i, r in enumerate(self.rows):
             self.tree.insert("", "end", iid=str(i),
-                             values=(r["pattern"], r["category"],
-                                     r["width"], r["height"], r["thickness"]))
+                             values=tuple(r.get(k, "") for k in CSV_FIELDS))
 
     def _on_tree_select(self, _evt):
         sel = self.tree.selection()
@@ -219,6 +239,7 @@ class LayerMapEditor:
         self.v_wid.set("")
         self.v_hei.set("")
         self.v_thk.set("")
+        self.v_opt.set("")
         self.status.config(text=f"Pre-filled: {layer} -> {cat}. Adjust and click [Add row].")
 
     def _add_row(self):
@@ -238,6 +259,7 @@ class LayerMapEditor:
             "width": self.v_wid.get().strip(),
             "height": self.v_hei.get().strip(),
             "thickness": self.v_thk.get().strip(),
+            "opts": self.v_opt.get().strip(),
         })
         self._refresh_tree()
         # clear inputs

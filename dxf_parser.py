@@ -88,6 +88,7 @@ WINDOW_WIDTH_MATCH_TOL_MM = 200.0
 ELEMENT_EID_PREFIX = {
     "wall": "w", "column": "c", "slab": "s", "zone": "z", "opening": "o",
     "pipe": "p", "duct": "d", "tray": "t", "equipment": "e",
+    "beam": "bm",
 }
 DEFAULT_PARAMS = {
     "wall": {"width": 200.0, "height": 2800.0},
@@ -406,6 +407,26 @@ def _bulge_points(x1, y1, x2, y2, bulge):
         a1 -= 2 * math.pi
     return [(ccx + r * math.cos(a0 + (a1 - a0) * i / n),
              ccy + r * math.sin(a0 + (a1 - a0) * i / n)) for i in range(n + 1)]
+
+
+def _span_sig(pts):
+    """이 레코드가 원본 면선에서 **실제로 차지한 구간**의 시그니처.
+
+    같은 면선 한 쌍이 N개 벽으로 잘리면 `_sigs` 는 N개가 전부 같다 — 그래서
+    EID 도 같아지고, `apply_edits` 의 `present` dict 에서 마지막 하나만 남아
+    사용자가 A 를 고치면 B 가 바뀌었다(실측: 벽 682개 중 357개, 52%).
+    그 N개를 가르는 유일한 근거가 각자의 구간이다.
+
+    ★ 반드시 **레코드 생성 시점**에 붙일 것. `points` 는 생성 직후에는 raw 면선의
+      투영이라 선언 폭과 무관하지만, `_merge_two_segments`·`snap_wall_corners`·
+      `heal_wall_junctions` 가 나중에 centerline 값으로 덮어쓴다. 그 뒤에 읽으면
+      선언 폭에 따라 움직인다(실측: 폭 200→400 에서 219개 이동).
+      생성 시점 값은 폭을 바꿔도 완전히 불변임을 확인했다(1952개 전부 일치).
+    """
+    if not pts or len(pts) < 2:
+        return None
+    return raw_entity_sig({"kind": "polyline", "closed": False,
+                           "points": [list(pts[0]), list(pts[-1])]})
 
 
 def _tag_sig(rec):
@@ -1012,6 +1033,7 @@ def detect_wall_pairs(wall_records, params):
                     "layer": segs[i].get("layer", ""),
                     "seg_length": round(seg_len, 1),
                     "_sigs": segs[i].get("sigs", []) + segs[j].get("sigs", []),
+                    "_span_sigs": [_span_sig(fclip)],
                     **({"overrides": ov} if ov else {})})
     for k, s in enumerate(segs):
         if k in matched:
@@ -1026,6 +1048,7 @@ def detect_wall_pairs(wall_records, params):
                     "layer": s.get("layer", ""),
                     "seg_length": round(seg_len, 1),
                     "_sigs": list(s.get("sigs", [])),
+                    "_span_sigs": [_span_sig([s["p1"], s["p2"]])],
                     **({"overrides": s["overrides"]} if s["overrides"] else {})})
 
     # ② 닫힌 폴리선: 원본 레코드 그대로 추가 (pairing="closed" 마킹만)
@@ -1099,6 +1122,7 @@ def repair_single_walls(wall_records, params):
                     "layer": segs[i].get("layer", ""),
                     "seg_length": round(seg_len, 1),
                     "_sigs": segs[i].get("sigs", []) + segs[j].get("sigs", []),
+                    "_span_sigs": [_span_sig(fclip)],
                     **({"overrides": ov} if ov else {})})
 
     # face-style 여부: 기존 paired + 2차 페어링으로 생긴 paired 합으로 판단
@@ -1145,6 +1169,7 @@ def repair_single_walls(wall_records, params):
                         "layer": s.get("layer", ""),
                         "seg_length": round(s["len"], 1),
                         "_sigs": list(s.get("sigs", [])),
+                        "_span_sigs": [_span_sig([s["p1"], s["p2"]])],
                         **({"overrides": ov} if ov else {})})
             continue
         ux, uy = s["dir"]
@@ -1174,6 +1199,7 @@ def repair_single_walls(wall_records, params):
                     "layer": s.get("layer", ""),
                     "seg_length": round(s["len"], 1),
                     "_sigs": list(s.get("sigs", [])),
+                    "_span_sigs": [_span_sig([s["p1"], s["p2"]])],
                     **({"overrides": ov} if ov else {})})
     return out
 
@@ -1244,6 +1270,8 @@ def _merge_two_segments(seg1, seg2):
               "layer": rec1.get("layer") or rec2.get("layer", ""),
               "seg_length": round(math.hypot(b[0] - a[0], b[1] - a[1]), 1),
               "_sigs": rec1.get("_sigs", []) + rec2.get("_sigs", []),
+              # 구간도 합친다 — 안 합치면 병합된 벽이 EID 판별자를 잃는다
+              "_span_sigs": (rec1.get("_span_sigs") or []) + (rec2.get("_span_sigs") or []),
               **({"overrides": ov} if ov else {})}
     return {"c1": a, "c2": b, "rec": merged}
 
@@ -2312,6 +2340,7 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
             "z_base": recs[0].get("z_base", 0.0),
             "overrides": recs[0].get("overrides", {}),
             "_sigs": [sig for r in recs for sig in r.get("_sigs", [])],
+            "_span_sigs": [x for r in recs for x in (r.get("_span_sigs") or [])],
         }
         new_cols.append(merged)
 
@@ -2593,8 +2622,15 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         prefix = ELEMENT_EID_PREFIX.get(_cat, _cat[:1])
         for _rec in _recs:
             sigs = _rec.pop("_sigs", None) or [raw_entity_sig(_rec)]
+            span = [x for x in (_rec.pop("_span_sigs", None) or []) if x]
             _rec.pop("_parse_opts", None)      # 파서 전용 — 출력에는 싣지 않는다
-            _rec["eid"] = element_eid(prefix, sigs)
+            if _rec.get("eid"):
+                continue          # 수동 레코드(edits 주입) — 사용자 ID 를 덮지 않는다
+            _rec["eid"] = element_eid(prefix, sigs + span)
+            if span:
+                # 옛 공식(_sigs 만)으로 만든 ID. 구 edits.json 을 이어받는 데만 쓰고
+                # 다음 릴리스에서 지운다. 없는 카테고리는 애초에 충돌이 없었다.
+                _rec["eid_v1"] = element_eid(prefix, sigs)
 
     # 실제 적용된 튜닝값을 파일이 스스로 기록한다 — 몽키패치 방지 장치.
     # (보 페어링이 안 되던 시절, 모듈 전역을 런타임에 덮어써서 우회했고

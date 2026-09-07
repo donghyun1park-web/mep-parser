@@ -63,3 +63,62 @@ def test_grouping_change_orphans_the_edit_instead_of_dropping_it():
     report = apply_edits(changed, edits)
     assert eid in report["orphaned"]
     assert suggest_relink(report["orphaned"], edits, changed), "재연결 후보를 제안하지 않았다"
+
+
+# ── 한 면선 쌍이 N개로 잘릴 때 (실측: 벽 682개 중 357개가 이 상태였다) ──────
+def _split_records(n, sigs):
+    """같은 면선 쌍에서 나온 N개 세그먼트. `_sigs` 는 전부 같고 구간만 다르다."""
+    import dxf_parser as dp
+    out = []
+    for i in range(n):
+        pts = [[i * 1000, 0], [(i + 1) * 1000, 0]]
+        out.append({"eid": element_eid("w", sigs + [dp._span_sig(pts)]),
+                    "kind": "polyline", "points": pts, "needs_review": False})
+    return {"wall": out}
+
+
+def test_split_segments_get_distinct_eids():
+    """★ 이게 깨지면 사용자가 A 를 고쳤는데 B 가 바뀐다.
+
+    긴 면선 한 쌍이 여러 세그먼트로 잘리면 `_sigs` 가 전부 같아 EID 도 같아졌다.
+    실측(지하3층): 벽 682개 / 고유 EID 419 — 357개(52%)가 다른 벽과 ID 를 공유했고,
+    `apply_edits` 의 dict 에서 마지막 하나만 남아 임의의 벽에 적용됐다."""
+    sigs = [raw_entity_sig(RAW["wall1_faceA"]), raw_entity_sig(RAW["wall1_faceB"])]
+    eids = [r["eid"] for r in _split_records(3, sigs)["wall"]]
+    assert len(set(eids)) == 3, f"3분할인데 고유 EID {len(set(eids))}개: {eids}"
+
+
+def test_span_does_not_move_with_declared_width():
+    """구간은 **원본 면선 좌표**에서만 나온다 — 선언 폭이 바뀌어도 그대로여야 한다.
+    (실측으로도 확인: 폭 200→400 재파싱에서 벽 EID 672개 전부 유지, 사라짐 0.)"""
+    import dxf_parser as dp
+    assert dp._span_sig([[0, 0], [1000, 0]]) == dp._span_sig([[0, 0], [1000, 0]])
+    assert dp._span_sig([[0, 0], [1000, 0]]) == dp._span_sig([[1000, 0], [0, 0]])  # 방향 무관
+    assert dp._span_sig([[0, 0], [1000, 0]]) != dp._span_sig([[1000, 0], [2000, 0]])
+
+
+def test_ambiguous_eid_is_reported_not_silently_applied():
+    """좌표까지 같은 진짜 중복 벽은 ID 를 공유하는 게 옳다. 다만 그때 수정을
+    **아무 쪽에나 걸면 안 된다** — 종전에는 dict 라 마지막 것이 조용히 이겼다."""
+    rec = {"eid": "w:dead", "kind": "polyline", "points": [[0, 0], [1, 0]]}
+    els = {"wall": [dict(rec), dict(rec)]}
+    rep = apply_edits(els, {"w:dead": {"overrides": {"width": 999}}})
+    assert rep["ambiguous"] == ["w:dead"], rep
+    assert rep["applied"] == [] and rep["orphaned"] == ["w:dead"], rep
+    assert all("overrides" not in r for r in els["wall"]), "모호한데 적용해 버렸다"
+
+
+def test_old_edits_are_carried_over_through_eid_v1():
+    """EID 공식이 바뀌어도 **모호하지 않았던** 옛 수정은 이어받는다.
+    모호했던 것(옛 ID 를 여러 벽이 공유)은 어느 벽 것인지 파일에 없으므로 고아다."""
+    els = {"wall": [
+        {"eid": "w:new1", "eid_v1": "w:old1", "kind": "polyline", "points": [[0, 0], [1, 0]]},
+        {"eid": "w:new2", "eid_v1": "w:dupe", "kind": "polyline", "points": [[2, 0], [3, 0]]},
+        {"eid": "w:new3", "eid_v1": "w:dupe", "kind": "polyline", "points": [[4, 0], [5, 0]]},
+    ]}
+    rep = apply_edits(els, {"w:old1": {"overrides": {"width": 150}},
+                            "w:dupe": {"overrides": {"width": 150}}})
+    assert rep["migrated"] == ["w:old1"], rep
+    assert rep["orphaned"] == ["w:dupe"], rep
+    assert els["wall"][0]["overrides"] == {"width": 150}
+    assert all("overrides" not in r for r in els["wall"][1:]), "모호한 옛 ID 를 적용했다"
