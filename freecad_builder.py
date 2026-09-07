@@ -13,6 +13,7 @@ geometry.json 을 읽어 FreeCAD Arch(BIM) 객체를 생성하고
 - 결정론적. LLM 호출 없음. (LLM 은 실패 케이스 보조용으로만 차후 연결)
 """
 import json
+import math
 import os
 import shutil
 import sys
@@ -225,6 +226,57 @@ def _is_closed_solid(el):
     return (el.get("kind") == "polyline"
             and (el.get("closed", False) or el.get("pairing") == "closed")
             and len(el.get("centerline") or el.get("points") or []) >= 3)
+
+
+def repair_null_walls(objs):
+    """Arch 오프셋이 실패해 **형상이 비어버린** 벽을 축선+폭 압출로 되살린다.
+
+    `Arch.makeWall(align="Center")` 은 중심선을 폭의 절반씩 양쪽으로 오프셋하는데,
+    긴 다점 체인에서 그 오프셋이 자기교차하면 결과가 null 이 된다(실측: 길이 20m ·
+    폭 250mm 벽 하나. 폭 200mm 일 때는 통과했고 실측 두께로 바꾸자 무너졌다).
+    **null 은 isValid()==True 라 형상 검사를 통과하고**, IFC 에는 형상 없는
+    IfcWall 로 실린다 — Bonsai 에서 IfcWall 398개 중 397개만 형상이 있었다.
+
+    되살리는 규칙은 `geom_contract.beam_footprint` 단독이다(축선 한 구간 + 폭 →
+    사각 footprint). 구간별 상자를 fuse 하므로 오프셋 자기교차가 원천적으로 없다.
+    Base 와이어의 Edge 에서 좌표를 읽으므로 순서에 의존하지 않는다.
+
+    ★ recompute **이후**, build_openings **이전**에 호출해야 한다. 이후 recompute
+      하면 파라메트릭 재계산이 다시 null 로 덮는다(개구부 cut 과 같은 제약)."""
+    n = 0
+    for obj in objs:
+        s = getattr(obj, "Shape", None)
+        if s is None or not s.isNull():
+            continue
+        bs = getattr(getattr(obj, "Base", None), "Shape", None)
+        w = getattr(getattr(obj, "Width", None), "Value", 0.0)
+        h = getattr(getattr(obj, "Height", None), "Value", 0.0)
+        if bs is None or bs.isNull() or w <= 0 or h <= 0:
+            continue
+        z = obj.Placement.Base.z
+        solid = None
+        for e in bs.Edges:
+            v = e.Vertexes
+            if len(v) != 2:
+                continue
+            ring = GC.beam_footprint([v[0].X, v[0].Y], [v[1].X, v[1].Y], w)
+            if not ring:
+                continue
+            wire = Part.makePolygon(
+                [App.Vector(p[0], p[1], z) for p in ring]
+                + [App.Vector(ring[0][0], ring[0][1], z)])
+            part = Part.Face(wire).extrude(App.Vector(0, 0, h))
+            solid = part if solid is None else solid.fuse(part)
+        if solid is None:
+            continue
+        try:
+            obj.Shape = solid
+            n += 1
+            print(f"  [fix] 빈 형상 벽 복구: {obj.Label} "
+                  f"(폭 {w:.0f}mm · 축선 {bs.Length:.0f}mm — Arch 오프셋 실패)")
+        except Exception as e:
+            print(f"  [warn] {getattr(obj, 'Label', '?')} 복구 실패: {e}")
+    return n
 
 
 def build_walls(doc, walls, params):
@@ -500,6 +552,9 @@ def build_openings(doc, openings, wall_idx_map, params):
         for wi in op.get("wall_indices", []):
             wobj = wall_idx_map.get(wi)
             if wobj is None:
+                # 링크는 됐는데 그 벽의 객체가 없다 = 구멍이 안 뚫린 채 지나간다.
+                # 다른 분기는 전부 로그를 남기는데 여기만 조용했다.
+                log += f"[warn] opening_{oi}: 벽 {wi} 객체 없음 — void 건너뜀\n"
                 continue
             try:
                 cut = wobj.Shape.cut(cutter)
@@ -1022,6 +1077,9 @@ def _main_impl():
     except Exception as _be:
         print(f"  [warn] makeBuilding/recompute: {_be}")
 
+    # recompute 직후·개구부 cut 직전. 빈 형상은 cut 도 못 하므로 순서가 중요하다.
+    _n_fixed = repair_null_walls(walls)
+
     print("[7/8] 문/창 3D (사각형 void + 문짝/창틀) + clash 검사")
     n_voids, n_leaf = build_openings(doc, el.get("opening", []), wall_idx_map, params)
     print(f"  개구부 void={n_voids}개, 문짝/창틀={n_leaf}개")
@@ -1057,8 +1115,19 @@ def _main_impl():
     # 종전에는 saveAs/IFC export 이후에 세고 경고만 했다 — 깨진 형상이 이미
     # 디스크에 쓰인 뒤였고 아무도 그 경고에 반응하지 않았다.
     try:
-        n_err = sum(1 for o in doc.Objects if _shape_ok(o) is False)
-    except Exception:
+        _bad = [o for o in doc.Objects if _shape_ok(o) is False]
+        n_err = len(_bad)
+        # 개수만으로는 못 쫓는다 — 어느 객체가 왜 깨졌는지 이름과 함께 말한다.
+        for _o in _bad[:10]:
+            _s = getattr(_o, "Shape", None)
+            _bl = getattr(getattr(_o, "Base", None), "Shape", None)
+            print(f"  [!] 형상 실패 {getattr(_o, 'Label', '?')} "
+                  f"(IfcType={getattr(_o, 'IfcType', '?')}, "
+                  f"null={None if _s is None else _s.isNull()}, "
+                  f"Width={getattr(getattr(_o, 'Width', None), 'Value', None)}, "
+                  f"base_len={None if _bl is None else round(_bl.Length, 1)})")
+    except Exception as _ee:
+        print(f"  [warn] 형상 검사 실패: {_ee}")
         n_err = 0
 
     _bbox = None
@@ -1097,6 +1166,7 @@ def _main_impl():
                   "floors": len(floor_containers)},
         "beams_without_section": n_nosec,
         "materials": dict(MATERIALS_APPLIED),
+        "null_walls_repaired": _n_fixed,
         # 카테고리별 '객체를 못 만든 레코드'. 전부 0 이어야 정상이다.
         "unbuilt": {c: {"count": len(v), "detail": v[:10]}
                     for c, v in sorted(UNBUILT.items())},
@@ -1258,11 +1328,19 @@ def _write_json(path, obj):
 
 
 def _shape_ok(o):
-    """Shape 유효성 검사. 예외 발생 시 None 반환."""
+    """Shape 유효성 검사. 예외 발생 시 None 반환.
+
+    ★ **null shape 은 isValid()==True 다**(빈 것은 공허하게 유효하다). 그래서
+    형상이 아예 없는 객체가 검사를 통과해 '벽 398개' 중 하나로 IFC 에 실렸다.
+    실측: 두께를 실측값으로 바꾸자 Arch.makeWall(align="Center") 오프셋이 벽
+    하나를 null 로 만들었고, 그 벽은 개구부 cut 에서 'Null input shape' 로만
+    존재를 드러냈다(그 경고가 없었다면 아무도 몰랐다)."""
     try:
         s = getattr(o, "Shape", None)
         if s is None:
             return None
+        if s.isNull():
+            return False
         return s.isValid()
     except Exception:
         return None

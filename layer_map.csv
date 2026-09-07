@@ -6,7 +6,10 @@ pattern,category,width,height,thickness,opts
 배수판_벽체|배수판,ignore,,,
 A-CEN$|A-CEN-SUB,ignore,,,
 A-HAT,ignore,,,
-WALL|벽|CON,wall,200,2800,
+# width 를 비우면 면선 페어링 실측(width_detected)이 쓰인다. 이 도면은 한 레이어에
+# 200·250·300·400·450mm 가 섞여 있어(width_conflicts 280개) 하나로 못 적는다.
+# 믿을 수 없는 실측(thin_pair)은 geom_contract 가 걸러 params 기본값으로 떨어뜨린다.
+WALL|벽|CON,wall,,2800,
 COL|기둥|Block_C,column,,3000,
 SLAB|FLOOR|바닥|슬래브,slab,,,200
 ZONE|ROOM|실|구역,zone,,,

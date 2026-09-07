@@ -95,14 +95,28 @@ def height_of(rec, params=None, category="wall"):
     return _dim(category, "height", rec, params)
 
 
+# 파서가 스스로 '잘못 잰 값' 으로 표시한 사유. 이런 실측은 쓰지 않는다.
+UNTRUSTED_WIDTH_REASONS = ("thin_pair",)
+
+
 def width_of(rec, params=None, category="wall"):
-    """평면상 폭. 벽은 width_detected 를 우선 신뢰한다(실측값)."""
+    """평면상 폭. 우선순위: layer_map 선언 → **믿을 수 있는** 실측 → params 기본값.
+
+    ★ 적어 준 값이 이긴다(stack 레벨 height 와 같은 규약). 레이어 기본값 대신
+      실측을 쓰고 싶으면 layer_map 의 width 를 **비운다** — 그러면 여기로 떨어진다.
+      어긋나는 경우는 파서가 `width_conflicts` 로 보고한다.
+
+    ★ 실측이라고 다 믿지 않는다. 파서가 `review_reason="thin_pair"` 로 표시한 것은
+      벽면 옆 마감선과 짝지어 나온 값이라 두께가 아니다(실측: A-CON 중앙값 250mm
+      옆에 50mm 21개). 종전에는 선언값 200mm 이 이걸 우연히 가려 주고 있었으므로,
+      선언을 비우는 순간 50mm 벽이 세워진다 — 그 함정을 여기서 막는다.
+    """
     if category == "wall":
         ov = (rec.get("overrides") or {}).get("width")
         if ov is not None:
             return float(ov)
         wd = rec.get("width_detected")
-        if wd:
+        if wd and rec.get("review_reason") not in UNTRUSTED_WIDTH_REASONS:
             return float(wd)
     return _dim(category, "width", rec, params)
 
