@@ -125,6 +125,43 @@
 (300행은 선언 우선, 539행은 실측 우선, 둘 다 `thin_pair` 를 모른다). `js_constants()` 로
 주입받도록 고쳐야 한다 — 미수정.
 
+### ★ 수동 수정 라운드트립 — 주입 위치가 설계의 전부다
+`parse(..., edits=<dict>)` 가 사용자 수정을 **개구부 링크 직전**에 주입한다.
+그 앞에서 벽 후처리(중복제거·페어링·병합·single 정합·코너스냅·junction 치유)가 전부
+끝나므로 **수동 레코드는 애초에 그 흐름에 들어가지 않는다** — 병합·스냅·오프셋되지
+않는다. 후처리 함수마다 `source=="manual"` 검사를 넣을 필요가 없는 이유가 그것이다.
+개구부 링크보다 앞이어야 하는 이유는 `wall_indices` 가 위치 인덱스라, 삭제·카테고리
+이동으로 목록이 밀린 **뒤에** 링크해야 제 벽을 가리키기 때문이다(종전엔 파싱이 끝난
+뒤 `main()` 에서 적용해, 벽 하나를 지우면 그 뒤 개구부가 엉뚱한 벽을 뚫었다).
+
+EID 부여는 주입보다 **먼저** 한다(`apply_edits` 가 EID 로 찾으므로). 산정 입력인
+`_sigs`·`_span_sigs` 는 레코드 생성 시점에 붙으므로 값은 달라지지 않는다.
+
+| `edits.json` 키 | 뜻 |
+|---|---|
+| `overrides` | 치수·재질. `geom_contract.width_of` 1순위로 들어간다 |
+| `category` | 카테고리 이동(리스트 간 이동) |
+| `deleted` | 제거 |
+| `added` + `record` | DXF 에 없는 사용자 생성 요소. **이동·분할·결합은 전부 delete+add 로 표현한다** — 새 동사를 만들지 않는다 |
+| `review_resolved` | "봤고 괜찮다". 주입 뒤에 도는 `thin_pair` 등이 다시 켜므로 파서가 마지막에 되돌린다 |
+
+`apply_edits` 보고: `applied` · `migrated`(옛 `eid_v1` 에서 이어받음) · `added` ·
+`orphaned` · **`ambiguous`**(같은 EID 를 여러 부재가 공유 → **적용하지 않는다**).
+
+### ★ EID — 부재를 특정하는 열쇠
+`element_eid(prefix, _sigs + _span_sigs)`.
+- `_sigs` = 이 부재를 만든 **원본 엔티티** 시그니처 → 파라미터 변경에 불변.
+- `_span_sigs` = 그 레코드가 원본 면선에서 차지한 **구간**, **생성 시점에** 부착.
+  없으면 긴 면선 한 쌍에서 잘린 N개 세그먼트가 전부 같은 EID 를 받는다
+  (실측: 벽 682개 중 357개, 52%). **반드시 생성 시점 값이어야 한다** — `points` 는
+  나중에 `_merge_two_segments`·`snap_wall_corners`·`heal_wall_junctions` 가
+  centerline 값으로 덮어쓰고, `single_offset` 의 centerline 은 `±선언폭/2` 오프셋이라
+  선언 폭을 따라 움직인다(실측: 폭 200→400 에서 219개 이동).
+- `closed`(폴리곤 1:1)·`axis`(DIMENSION 부재)는 잘리지 않으므로 구간을 안 붙인다 —
+  불필요한 EID 변경은 그 자체가 고아를 만든다.
+- 실측: 벽 EID 중복 263 → 10(남은 10개는 좌표까지 같은 진짜 중복 벽). 골든의
+  `eid_collisions` 가 감시한다.
+
 ### ★ z 기준면(datum) — 규약의 유일한 출처는 `geom_contract.py`
 **이 표를 코드에 다시 구현하지 말 것.** 소비자는 `geom_contract.z_range(cat, rec, params)` 만 호출한다.
 규약이 4곳에 흩어져 있다가 preview 가 슬래브를 '하단' 으로 읽어 보/슬래브가 한 두께 떠 보였고,

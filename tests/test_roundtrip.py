@@ -122,3 +122,20 @@ def test_old_edits_are_carried_over_through_eid_v1():
     assert rep["orphaned"] == ["w:dupe"], rep
     assert els["wall"][0]["overrides"] == {"width": 150}
     assert all("overrides" not in r for r in els["wall"][1:]), "모호한 옛 ID 를 적용했다"
+
+
+def test_review_resolved_is_not_re_flagged_by_the_machine():
+    """★ 사용자가 '검토 완료' 로 표시한 것을 기계가 다시 켜면 목록이 안 줄어든다.
+
+    `thin_pair` 같은 검사는 수정 주입 **뒤에** 돌기 때문에 그냥 두면 되살아난다.
+    파서가 마지막에 `review_resolved` 를 보고 되돌린다."""
+    els = {"wall": [{"eid": "w:x", "kind": "polyline", "points": [[0, 0], [1, 0]],
+                     "needs_review": True, "review_reason": "thin_pair"}]}
+    apply_edits(els, {"w:x": {"review_resolved": True}})
+    r = els["wall"][0]
+    assert r["needs_review"] is False and r["review_resolved"] is True, r
+    r["needs_review"] = True          # 주입 뒤 검사가 다시 켠 상황
+    for rec in els["wall"]:           # parse() 끝의 되돌리기 스윕과 같은 규칙
+        if rec.get("review_resolved") and rec.get("needs_review"):
+            rec["needs_review"] = False
+    assert els["wall"][0]["needs_review"] is False

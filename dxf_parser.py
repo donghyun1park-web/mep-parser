@@ -2132,7 +2132,7 @@ def apply_member_schedule(msp, layers, elements):
 
 def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAMS,
           use_ai=False, use_vision=False, api_key=None, ai_threshold=0.8,
-          ext_schedule=None, member_schedule=None):
+          ext_schedule=None, member_schedule=None, edits=None):
     """DXF → geometry.json dict.
     use_ai: 텍스트 LLM 분류 + 고신뢰 자동적용. use_vision: Vision 폴백.
     ai_threshold: best_classification confidence 이 값 초과면 자동 카테고리 적용.
@@ -2441,6 +2441,55 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
             + ", ".join(f"{k}({v})" for k, v in sorted(_tiny.items())[:4]))
         print(f"  [개구부] 조각 {sum(_tiny.values())}개 드롭(<{OPENING_MIN_SIZE_MM:.0f}mm): "
               + ", ".join(f"{k}({v})" for k, v in sorted(_tiny.items())[:4]))
+    # [라운드트립] 각 요소에 EID 부여 — 원본 raw 엔티티 시그니처 기반(element_id.py).
+    # 파라미터(폭/높이 등) 변경에 불변, grouping이 실제로 바뀔 때만 EID 변경.
+    for _cat, _recs in result["elements"].items():
+        prefix = ELEMENT_EID_PREFIX.get(_cat, _cat[:1])
+        for _rec in _recs:
+            sigs = _rec.pop("_sigs", None) or [raw_entity_sig(_rec)]
+            span = [x for x in (_rec.pop("_span_sigs", None) or []) if x]
+            _rec.pop("_parse_opts", None)      # 파서 전용 — 출력에는 싣지 않는다
+            if _rec.get("eid"):
+                continue          # 수동 레코드(edits 주입) — 사용자 ID 를 덮지 않는다
+            _rec["eid"] = element_eid(prefix, sigs + span)
+            if span:
+                # 옛 공식(_sigs 만)으로 만든 ID. 구 edits.json 을 이어받는 데만 쓰고
+                # 다음 릴리스에서 지운다. 없는 카테고리는 애초에 충돌이 없었다.
+                _rec["eid_v1"] = element_eid(prefix, sigs)
+
+    # EID 는 수정 주입보다 **먼저** 부여한다 — `apply_edits` 가 EID 로 찾기 때문.
+    # 산정 입력(_sigs·_span_sigs)은 레코드 생성 시점에 붙으므로 여기서 계산해도
+    # 값은 같다. 주입된 수동 레코드는 자기 EID 를 갖고 오므로 위 루프가 건너뛴다.
+
+    # [라운드트립] 사용자 수정을 여기서 주입한다 — 개구부 링크 **직전**.
+    #
+    # ★ 이 위치가 "사용자 편집이 항상 이긴다" 의 전부다. 벽 후처리(중복제거·
+    #   페어링·병합·single 정합·코너스냅·junction 치유)는 전부 위에서 끝났으므로,
+    #   수동 레코드는 애초에 그 흐름에 들어가지 않는다 — 병합되거나 스냅되거나
+    #   오프셋되지 않는다. 후처리 함수들에 `source=="manual"` 검사를 넣을 필요가
+    #   없는 이유가 그것이다(넣었다면 여섯 곳이 서로 어긋날 자리가 됐다).
+    #
+    # ★ 개구부 링크보다 **앞**이어야 한다. `wall_indices` 는 위치 인덱스라,
+    #   삭제·카테고리 이동으로 벽 목록이 밀린 뒤에 링크해야 제 벽을 가리킨다.
+    #   종전에는 파싱이 다 끝난 뒤 main() 에서 적용해서, 벽 하나를 지우면 그 뒤
+    #   개구부들이 엉뚱한 벽에 구멍을 뚫었다(경고 없음).
+    if edits:
+        from element_id import apply_edits
+        result["edits_report"] = _rep = apply_edits(result["elements"], edits)
+        _n = {k: len(_rep.get(k) or []) for k in
+              ("applied", "migrated", "added", "orphaned", "ambiguous")}
+        print(f"  [edits] 적용 {_n['applied']}건 · 옛 ID 에서 이어받음 {_n['migrated']}건 "
+              f"· 추가 {_n['added']}건 · 고아 {_n['orphaned']}건")
+        if _n["ambiguous"]:
+            print(f"    [!] 같은 EID 를 여러 부재가 공유해 적용하지 않은 것 "
+                  f"{_n['ambiguous']}건 — 좌표까지 같은 중복 부재다")
+        for _oid in (_rep.get("orphaned") or [])[:10]:
+            _e = edits.get(_oid) or {}
+            _at = _e.get("_at")
+            print(f"    [고아] {_oid}"
+                  + (f" @({_at[0]:.0f}, {_at[1]:.0f})" if _at else "")
+                  + f" — {', '.join(sorted(k for k in _e if not k.startswith('_'))) or '내용 없음'}")
+
     link_openings_to_walls(result["elements"], params)
     # 가정 치수를 요약해 알린다 — 개별 레코드의 dims_assumed 는 IFC 속성으로도 나간다.
     _asm = {}
@@ -2616,21 +2665,17 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
                 f"[계단 의심] 레이어 '{_ly}': 짧은 벽 {_cnt}개 (<{int(_STAIR_LEN_THRESHOLD)}mm). "
                 "계단/장식선이면 layer_map.csv 에서 카테고리를 'slab' 으로 변경하세요.")
 
-    # [라운드트립] 각 요소에 EID 부여 — 원본 raw 엔티티 시그니처 기반(element_id.py).
-    # 파라미터(폭/높이 등) 변경에 불변, grouping이 실제로 바뀔 때만 EID 변경.
-    for _cat, _recs in result["elements"].items():
-        prefix = ELEMENT_EID_PREFIX.get(_cat, _cat[:1])
-        for _rec in _recs:
-            sigs = _rec.pop("_sigs", None) or [raw_entity_sig(_rec)]
-            span = [x for x in (_rec.pop("_span_sigs", None) or []) if x]
-            _rec.pop("_parse_opts", None)      # 파서 전용 — 출력에는 싣지 않는다
-            if _rec.get("eid"):
-                continue          # 수동 레코드(edits 주입) — 사용자 ID 를 덮지 않는다
-            _rec["eid"] = element_eid(prefix, sigs + span)
-            if span:
-                # 옛 공식(_sigs 만)으로 만든 ID. 구 edits.json 을 이어받는 데만 쓰고
-                # 다음 릴리스에서 지운다. 없는 카테고리는 애초에 충돌이 없었다.
-                _rec["eid_v1"] = element_eid(prefix, sigs)
+    # 사용자가 "검토 완료" 로 표시한 것은 기계가 다시 켜지 않는다.
+    # thin_pair·width_conflict 같은 검사는 주입 뒤에 돌기 때문에, 여기서 한 번
+    # 되돌린다. 안 그러면 검토 목록이 영원히 안 줄어들어 루프가 무의미해진다.
+    _n_res = 0
+    for _recs in result["elements"].values():
+        for _r in _recs:
+            if _r.get("review_resolved") and _r.get("needs_review"):
+                _r["needs_review"] = False
+                _n_res += 1
+    if _n_res:
+        print(f"  [edits] 검토 완료 표시로 needs_review 해제 {_n_res}건")
 
     # 실제 적용된 튜닝값을 파일이 스스로 기록한다 — 몽키패치 방지 장치.
     # (보 페어링이 안 되던 시절, 모듈 전역을 런타임에 덮어써서 우회했고
@@ -3057,37 +3102,24 @@ def main():
         print(f"  [창호일람] DXF '{os.path.basename(args.schedule_dxf)}' {len(_sdxf)}행 추출")
 
     # use_ai/use_vision: parse() 내부에서 분류·자동적용(요소 합류 후 wall 후처리 보장)
+    _edits = None
+    if args.edits:
+        if os.path.exists(args.edits):
+            with open(args.edits, encoding="utf-8") as f:
+                _edits = json.load(f)
+        else:
+            print(f"  [edits] 파일 없음: {args.edits} (스킵)")
+
     data = parse(args.dxf, rules, block_rules,
                  use_ai=args.llm, use_vision=args.vision,
                  ai_threshold=args.ai_threshold, ext_schedule=_ext_sched,
-                 member_schedule=args.member_schedule)
+                 member_schedule=args.member_schedule, edits=_edits)
 
     # 추출/병합된 창호일람을 Excel 양식으로 저장(검토·수정용)
     if args.schedule_out:
         from schedule_io import export_schedule_xlsx
         export_schedule_xlsx(data.get("window_schedule", []), args.schedule_out)
         print(f"  [창호일람] Excel 양식 저장 → {args.schedule_out}")
-
-    # [라운드트립] EID 기반 수정 사이드카 적용 (preview.py 가 만든 edits.json).
-    # 재파싱으로 새로 산정된 elements 에, 저장된 사용자 수정을 EID 로 재적용한다.
-    if args.edits:
-        if os.path.exists(args.edits):
-            with open(args.edits, encoding="utf-8") as f:
-                _edits = json.load(f)
-            from element_id import apply_edits
-            _rep = apply_edits(data["elements"], _edits)
-            data["edits_report"] = _rep
-            # 반자동 배치로 추가된 opening 은 host 벽 링크(wall_indices/host_dir)를
-            # 현재 파싱 기준으로 재계산해야 빌더 void cut 이 정확하다.
-            if _rep.get("added"):
-                link_openings_to_walls(data["elements"], data.get("params", DEFAULT_PARAMS))
-                print(f"  [edits] 신규 추가 {len(_rep['added'])}건(반자동 배치) → host 벽 재링크")
-            print(f"  [edits] 적용 {len(_rep['applied'])}건, "
-                  f"고아(요소 사라짐) {len(_rep['orphaned'])}건")
-            for _oid in _rep["orphaned"]:
-                print(f"    [고아] {_oid} — grouping 변경으로 매칭 실패(검토 필요)")
-        else:
-            print(f"  [edits] 파일 없음: {args.edits} (스킵)")
 
     if args.auto_map and args.map and data.get("suggestions"):
         appended_count = 0

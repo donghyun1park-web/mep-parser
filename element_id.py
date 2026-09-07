@@ -105,6 +105,10 @@ def apply_edits(elements, edits):
             rec.setdefault("overrides", {}).update(edit["overrides"])
         if edit.get("review_resolved"):
             rec["needs_review"] = False
+            # 레코드에 남긴다 — 주입 뒤에 도는 검사(thin_pair 등)가 다시 켜므로,
+            # 파서가 마지막에 이 표시를 보고 되돌린다. 사용자가 봤다는 사실 자체가
+            # 데이터이기도 하다(IFC 속성으로도 나간다).
+            rec["review_resolved"] = True
         if edit.get("deleted"):
             rec["_deleted"] = True
         new_cat = edit.get("category")

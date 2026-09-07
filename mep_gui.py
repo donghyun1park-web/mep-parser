@@ -308,6 +308,7 @@ class App:
         self.v_vision = tk.BooleanVar(value=False)  # Vision 폴백(실험적, 기본 OFF)
         self.v_connect = tk.BooleanVar(value=True)  # IFC 표준 벽 접합(코너 마이터)
         self.v_schedule = tk.StringVar()  # 외부 창호일람 Excel 경로(선택)
+        self.v_edits = tk.StringVar()     # preview 에서 받은 edits.json 경로(선택)
 
         self._build_file_row()
         self._build_buttons()
@@ -339,6 +340,8 @@ class App:
                    command=self._do_diag).pack(side="left", padx=4)
         ttk.Button(f, text="(3) 3D 미리보기(브라우저)",
                    command=self._do_preview).pack(side="left", padx=4)
+        ttk.Button(f, text="edits.json 불러오기",
+                   command=self._pick_edits).pack(side="left", padx=4)
         self.btn_ifc = ttk.Button(f, text="(4) IFC 빌드 (FreeCAD 불필요)",
                                   command=self._do_ifc_build)
         self.btn_ifc.pack(side="left", padx=4)
@@ -470,6 +473,25 @@ class App:
                     self._set_buttons("!disabled")))
         threading.Thread(target=run, daemon=True).start()
 
+    def _pick_edits(self):
+        """preview.html 에서 내려받은 edits.json 을 지정한다.
+
+        종전엔 이 버튼이 아예 없어서, 미리보기가 "재파싱 시 --edits 로 적용됨" 이라
+        안내해 놓고 GUI 는 그 인자를 쓰지 않았다 — 수정 루프가 GUI 안에서 닫히지
+        않았고, 재파싱은 그냥 덮어썼다."""
+        p = filedialog.askopenfilename(title="edits.json 선택",
+                                       filetypes=[("edits.json", "*.json"),
+                                                  ("All", "*.*")])
+        if not p:
+            return
+        self.v_edits.set(p)
+        try:
+            with open(p, encoding="utf-8") as f:
+                n = len(json.load(f))
+            self._log(f"[edits] {n}건 지정: {p}  → (2) 파싱 시 적용됩니다")
+        except Exception as e:
+            self._log(f"[edits] 읽기 실패: {e}")
+
     def _do_parse(self):
         dxf = self._ensure_dxf()
         if not dxf:
@@ -481,6 +503,23 @@ class App:
             self._log("  [AI] 텍스트 분류 + 고신뢰 자동적용 활성")
         if use_vision:
             self._log("  [Vision] 저신뢰 레이어 이미지 분류 폴백 활성")
+        # 재파싱은 geometry.json 을 통째로 덮어쓴다. 저장된 검토 수정이 있으면
+        # 먼저 알린다 — 헤더 주석이 약속만 하고 없던 대화상자다.
+        if self.data and not self.v_edits.get().strip():
+            n_ov = sum(1 for recs in (self.data.get("elements") or {}).values()
+                       for r in recs if r.get("overrides"))
+            if n_ov and not messagebox.askyesno(
+                    "재파싱 확인",
+                    chr(10).join([
+                        f"현재 결과에 치수 수정이 {n_ov}건 있습니다.",
+                        "재파싱하면 덮어써집니다.",
+                        "",
+                        "수정을 지키려면 취소하고 'edits.json 불러오기' 로",
+                        "지정한 뒤 다시 파싱하세요.",
+                        "",
+                        "그래도 재파싱할까요?"])):
+                self._log("재파싱 취소")
+                return
         self._log("Parsing...")
         self._set_buttons("disabled")
 
@@ -495,11 +534,24 @@ class App:
             except Exception as e:
                 self._log(f"  [창호일람] Excel 로드 실패(무시): {e}")
 
+        edits = None
+        ep = self.v_edits.get().strip()
+        if ep:
+            if os.path.exists(ep):
+                try:
+                    with open(ep, encoding="utf-8") as f:
+                        edits = json.load(f)
+                    self._log(f"  [edits] {len(edits)}건 로드: {os.path.basename(ep)}")
+                except Exception as e:
+                    self._log(f"  [edits] 로드 실패(무시): {e}")
+            else:
+                self._log(f"  [edits] 파일 없음: {ep}")
+
         def run():
             try:
                 data = P.parse(dxf, rules, brules,
                                use_ai=use_ai, use_vision=use_vision,
-                               ext_schedule=ext_sched)
+                               ext_schedule=ext_sched, edits=edits)
                 self.root.after(0, lambda: self._parse_done(data, dxf))
             except Exception as e:
                 msg = str(e)

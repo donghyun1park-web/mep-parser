@@ -151,7 +151,12 @@ def build_stack(spec, base_dir=".", dry_run=False):
         rules = (dp.load_layer_map(os.path.join(base_dir, lv["layer_map"]))
                  if lv.get("layer_map") else dp.DEFAULT_LAYER_RULES)
         print(f"\n[{lid}] {os.path.basename(src)}")
-        data = dp.parse(src, rules, member_schedule=lv.get("member_schedule"))
+        _ed = lv.get("edits")
+        if _ed and not isinstance(_ed, dict):
+            with open(os.path.join(base_dir, _ed), encoding="utf-8") as _f:
+                _ed = json.load(_f)
+        data = dp.parse(src, rules, member_schedule=lv.get("member_schedule"),
+                        edits=_ed)
         parsed[lid] = (src, data)
 
         dx, dy = lv.get("offset", [0.0, 0.0])
@@ -175,11 +180,20 @@ def build_stack(spec, base_dir=".", dry_run=False):
         if not out["params"]:
             out["params"] = data.get("params", {})
         n_ov = 0
+        # ★ `wall_indices` 는 **그 층 안에서의** 위치다. 층을 이어붙이면 같은 숫자가
+        #   아래층 벽을 가리키게 되어, 위층 문이 아래층 벽에 구멍을 뚫는다 —
+        #   형상은 멀쩡하고 검사도 통과한다. 이어붙인 만큼 밀어 준다.
+        _wall_base = len(out["elements"].get("wall", []))
+        for r in data["elements"].get("opening", []):
+            if r.get("wall_indices"):
+                r["wall_indices"] = [i + _wall_base for i in r["wall_indices"]]
         for cat, recs in data["elements"].items():
             for r in recs:
                 n_ov += _shift(r, cat, dx, dy, float(lv["z"]), lv.get("height"))
                 r["level"] = lid
                 r["eid"] = f"{lid}:{r['eid']}"      # 같은 DXF 를 두 층에 쓰면 충돌한다
+                if r.get("eid_v1"):
+                    r["eid_v1"] = f"{lid}:{r['eid_v1']}"
                 out["elements"].setdefault(cat, []).append(r)
         if n_ov:
             print(f"  층고 {lv['height']}mm 가 레이어 높이를 덮음: {n_ov}개")

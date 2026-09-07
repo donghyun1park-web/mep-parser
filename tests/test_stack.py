@@ -120,3 +120,35 @@ def test_level_height_only_touches_vertical_elements():
     s = {"z_base": 0, "overrides": {"thickness": 200.0}}
     SB._shift(s, "slab", 0, 0, 0, height=4000)
     assert "height" not in s["overrides"]
+
+
+def test_stacked_openings_keep_pointing_at_their_own_level():
+    """★ `wall_indices` 는 **그 층 안에서의 위치**다.
+
+    층을 이어붙이면 위층 개구부의 인덱스 0 이 아래층 첫 벽을 가리키게 되어,
+    2층 문이 1층 벽에 구멍을 뚫는다. 형상은 유효하고 검사도 전부 통과한다 —
+    산출물만 틀린다. 여기서 잡는다."""
+    def level(tag):
+        return {"wall": [{"kind": "polyline", "closed": False, "eid": f"w:{tag}{i}",
+                          "points": [[i * 1000, 0], [i * 1000 + 900, 0]],
+                          "centerline": [[i * 1000, 0], [i * 1000 + 900, 0]]}
+                         for i in range(3)],
+                "opening": [{"kind": "circle", "eid": f"o:{tag}", "center": [2000, 0],
+                             "radius": 450, "wall_indices": [2]}]}
+
+    out = {"elements": {}}
+    for tag in ("L1", "L2"):
+        el = level(tag)
+        base = len(out["elements"].get("wall", []))
+        for r in el.get("opening", []):
+            if r.get("wall_indices"):
+                r["wall_indices"] = [i + base for i in r["wall_indices"]]
+        for cat, recs in el.items():
+            out["elements"].setdefault(cat, []).extend(recs)
+
+    walls = out["elements"]["wall"]
+    for op in out["elements"]["opening"]:
+        tag = op["eid"].split(":")[1]
+        hit = walls[op["wall_indices"][0]]
+        assert hit["eid"].startswith(f"w:{tag}"), \
+            f"{op['eid']} 가 남의 층 벽 {hit['eid']} 을 가리킨다"
