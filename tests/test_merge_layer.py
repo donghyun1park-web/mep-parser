@@ -214,3 +214,19 @@ def test_unmerged_walls_are_untouched():
     out = dp.merge_collinear_walls([_wall(0, 1000), _wall(9000, 10000)], {})
     assert len(out) == 2
     assert all(w["layer"] == "A-CON" for w in out)
+
+
+def test_review_flags_always_carry_a_reason():
+    """★ '검토하라' 면서 이유를 안 알려주면 검토를 못 한다.
+
+    실측(지하3층): needs_review 180개 중 **154개가 사유 없음**이었다(전부
+    single_offset). Bonsai 에서 NeedsReview=True 로 걸러도 ReviewReason 이 빈
+    문자열이라 무엇을 볼지 알 수 없었다. preview 의 REASON 표가 이 코드를 사람
+    문장으로 바꿔 주므로, 코드가 비면 그 자리가 통째로 빈다."""
+    segs = [_ov(0, 3000), _ov(0, 3000, z=0.0)]
+    segs[1]["points"] = segs[1]["centerline"] = [[0, 250], [3000, 250]]
+    out = dp.detect_wall_pairs(segs + [_ov(9000, 12000)], {})
+    flagged = [w for w in out if w.get("needs_review")]
+    assert flagged, "이 합성 케이스는 검토 대상이 나와야 한다"
+    missing = [w.get("pairing") for w in flagged if not w.get("review_reason")]
+    assert not missing, f"사유 없이 검토 플래그만 켠 pairing: {missing}"

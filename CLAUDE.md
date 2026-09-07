@@ -121,9 +121,9 @@
 (280 → 4). 신뢰 판정은 `paired` 이고 `thin_pair` 가 아닌 것 — `single_offset` 은 중심선
 자체가 추정이라 두께도 추정이다.
 
-**주의: `preview.py` 는 이 규칙을 JS 로 재구현해 두었고 두 곳의 순서가 서로 다르다**
-(300행은 선언 우선, 539행은 실측 우선, 둘 다 `thin_pair` 를 모른다). `js_constants()` 로
-주입받도록 고쳐야 한다 — 미수정.
+`preview.py` 는 `js_constants()` 가 주입하는 **`gcWidthOf`** 로 같은 값을 쓴다
+(종전엔 두 곳에서 서로 다른 순서로 재구현해, `thin_pair` 벽이 **화면 50mm / 빌드 200mm**
+였다). 규칙을 JS 로 다시 쓰지 말 것.
 
 ### ★ 수동 수정 라운드트립 — 주입 위치가 설계의 전부다
 `parse(..., edits=<dict>)` 가 사용자 수정을 **개구부 링크 직전**에 주입한다.
@@ -161,6 +161,22 @@ EID 부여는 주입보다 **먼저** 한다(`apply_edits` 가 EID 로 찾으므
   불필요한 EID 변경은 그 자체가 고아를 만든다.
 - 실측: 벽 EID 중복 263 → 10(남은 10개는 좌표까지 같은 진짜 중복 벽). 골든의
   `eid_collisions` 가 감시한다.
+
+### ★ 미리보기는 "왜 이렇게 나왔는지" 를 말한다
+`build_html` 페이로드에 `warnings`·`thin_pairs`·`width_conflicts`·`qa`·`edits_report`
+가 실린다. 선택 패널의 `whyHtml()` 이 부재별로 검토 사유·실측 대 선언 두께·추정치
+(`dims_assumed`)·일람표 미매칭을 띄우고, `REASON` 표가 코드 한 단어를 **조치까지 담은
+한 문장**으로 바꾼다. 종전엔 형상만 보냈다 — 사용자가 고칠 대상을 보고 있는 유일한
+화면에 판단 근거가 하나도 없었다.
+
+그래서 `needs_review` 를 켜는 자리는 **반드시 `review_reason` 을 같이 남긴다**
+(실측: 180개 중 154개가 사유 없음이었고 전부 `single_offset` 이었다).
+테스트 `test_review_flags_always_carry_a_reason` 이 이걸 고정한다.
+
+편집은 브라우저에 **자동 저장**된다(`localStorage`, 도면별 키) — 새로고침 한 번에
+오후 작업이 날아가지 않게. `Ctrl+Z` 는 편집 스냅샷 스택을 되감고, **한 동작 = 한 단계**다
+(무동작은 쌓지 않는다). 수정을 적용하면 `review_resolved` 가 함께 기록되어 이미 고친
+부재가 `NeedsReview=True` 로 IFC 까지 나가지 않는다.
 
 ### ★ z 기준면(datum) — 규약의 유일한 출처는 `geom_contract.py`
 **이 표를 코드에 다시 구현하지 말 것.** 소비자는 `geom_contract.z_range(cat, rec, params)` 만 호출한다.

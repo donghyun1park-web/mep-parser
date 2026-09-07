@@ -104,6 +104,13 @@ def build_html(data):
         "source": data.get("source", ""),
         "wall_pairing": data.get("wall_pairing", {}),
         "window_schedule": data.get("window_schedule", []),
+        # ★ '왜 이렇게 나왔는지' 를 함께 싣는다. 종전엔 형상만 보냈고, 사용자가
+        #   고칠 대상을 보고 있는 유일한 화면에 판단 근거가 하나도 없었다.
+        "warnings": data.get("warnings", []),
+        "thin_pairs": data.get("thin_pairs", {}),
+        "width_conflicts": data.get("width_conflicts", []),
+        "qa": data.get("qa", {}),
+        "edits_report": data.get("edits_report", {}),
     }
     data_json = json.dumps(payload, ensure_ascii=False)
     # JS 안전: </script> 분리
@@ -184,6 +191,10 @@ _TEMPLATE = r"""<!DOCTYPE html>
   #dl:hover{background:#34a05b}
   .badge{display:inline-block;padding:1px 6px;border-radius:3px;font-size:11px;margin-left:6px}
   #err{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;color:#ff8080;display:none}
+.why{margin:3px 0;padding:4px 6px;background:#20242b;border-left:2px solid #556;
+     border-radius:2px;font-size:12px;line-height:1.45}
+#warnbox{max-height:150px;overflow:auto;font-size:12px;line-height:1.5}
+#warnbox div{margin:2px 0;padding:3px 5px;background:#20242b;border-radius:2px}
 </style>
 </head>
 <body>
@@ -209,6 +220,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
       <div class="kv"><span>EID</span><span id="e_eid"></span></div>
       <div class="kv"><span>레이어</span><span id="e_layer"></span></div>
       <div class="kv"><span>신뢰도</span><span id="e_conf"></span></div>
+      <div id="e_why"></div>
       <div class="row"><label>카테고리</label>
         <select id="e_cat"></select></div>
       <div class="row"><label>폭/지름 (mm)</label><input id="e_w" type="number"/></div>
@@ -222,6 +234,8 @@ _TEMPLATE = r"""<!DOCTYPE html>
         <select id="sched"></select></div>
       <div class="muted" id="placehint">‘창호 배치’ 켠 뒤 벽을 클릭하면 그 위치에 배치됩니다.</div>
     </div>
+    <h3>이 도면에서 파서가 말한 것 (<span id="nwarn">0</span>)</h3>
+    <div id="warnbox" class="muted">없음</div>
     <h3>수정 목록 (<span id="nedits">0</span>)</h3>
     <div id="editlist" class="muted">없음</div>
     <button id="dl">edits.json 다운로드</button>
@@ -297,7 +311,7 @@ function addMesh(geo, cat, rec, z, opts={}){
 // z 범위는 gcZRange(주입된 geom_contract 규약)만 사용한다.
 function buildWall(rec){
   const cl = rec.centerline || rec.points; if(!cl||cl.length<2) return;
-  const w = (rec.overrides?.width ?? rec.width_detected ?? (P.wall?.width) ?? 200)*S;
+  const w = gcWidthOf(rec, P, 'wall')*S;   // 규약은 geom_contract 단독
   const zr = gcZRange('wall', rec, P);
   const z0 = zr[0]*S, h = (zr[1]-zr[0])*S;
   for(let i=0;i<cl.length-1;i++){
@@ -420,6 +434,18 @@ function topView(){
 // ── 선택/수정 ──────────────────────────────────────────────
 const ray=new THREE.Raycaster(), mouse=new THREE.Vector2();
 let selected=null;
+// 검토 사유 → 사람이 읽을 수 있는 한 줄 + 조치. 코드 한 단어만 보여 주면
+// 사용자는 무엇을 볼지 모른다(실측: 검토 대상 180개 중 154개가 사유 없음이었다).
+const REASON = {
+  'thin_pair': '두께가 이 레이어 중앙값의 1/3 미만 — 벽면 옆 마감선과 짝지었을 수 있다. '
+             + '실제 두께가 맞으면 layer_map 에 opts pair_min 을 주면 통과한다.',
+  'single': '반대편 면선을 못 찾아 이 선 하나를 중심선으로 썼다 — 두께는 기본값이다.',
+  'single_offset': '반대편 면선이 없어 중심선을 폭의 절반만큼 밀어 추정했다 — '
+                 + '위치·두께 둘 다 추정치다.',
+  'closed': '닫힌 폴리선을 그대로 압출했다(면선 페어링을 거치지 않음).',
+  'axis': '치수선(DIMENSION)에서 뽑은 축선이다 — 단면은 부재일람표에서 온다.',
+};
+
 const edits = {};   // eid -> {category?, overrides?, deleted?}
 const CATS=['wall','column','slab','beam','zone','opening','pipe','duct','tray','equipment'];
 const sel=document.getElementById('e_cat'); CATS.forEach(c=>{const o=document.createElement('option');o.value=o.textContent=c;sel.appendChild(o);});
@@ -451,6 +477,30 @@ function select(m){
   document.getElementById('e_w').value=edits[eid]?.overrides?.width ?? rec.overrides?.width ?? rec.width_detected ?? rec.width ?? '';
   document.getElementById('e_h').value=edits[eid]?.overrides?.height ?? rec.overrides?.height ?? rec.overrides?.thickness ?? '';
   document.getElementById('e_del').checked=!!edits[eid]?.deleted;
+  document.getElementById('e_why').innerHTML=whyHtml(rec, cat);
+}
+
+// 이 부재가 왜 이 모양인지. 파서가 아는 것을 사용자가 보는 자리로 가져온다.
+function whyHtml(rec, cat){
+  const out=[];
+  if(rec.needs_review){
+    const r=rec.review_reason||'';
+    out.push('<b style="color:#e66">검토 필요</b> '+(REASON[r]||r||
+      '사유가 기록되지 않았다'));
+  }
+  if(rec.review_resolved) out.push('<span style="color:#6a6">검토 완료로 표시됨</span>');
+  const wd=rec.width_detected, ov=rec.overrides?.width;
+  if(wd!=null&&ov!=null&&Math.abs(wd-ov)>Math.max(20,ov*0.15))
+    out.push('두께: 도면 실측 <b>'+Math.round(wd)+'</b>mm ≠ layer_map 선언 <b>'
+      +Math.round(ov)+'</b>mm → <b>'+Math.round(gcWidthOf(rec,P,cat))+'</b>mm 로 세워진다');
+  else if(wd!=null) out.push('실측 두께 '+Math.round(wd)+'mm');
+  if(rec.dims_assumed?.length)
+    out.push('<b style="color:#e93">추정치</b> '+rec.dims_assumed.join(', ')
+      +' — 평면도에 없는 값이라 기본값을 넣었다');
+  if(rec.section?.size) out.push('일람표 단면 '+rec.section.name+' '+rec.section.size);
+  if(rec.schedule_match&&rec.schedule_match!=='ok')
+    out.push('<b style="color:#e66">일람표 미매칭</b> '+rec.schedule_match);
+  return out.length?out.map(x=>'<div class="why">'+x+'</div>').join(''):'';
 }
 document.getElementById('apply').addEventListener('click', ()=>{
   if(!selected) return; const rec=selected.userData.rec, eid=rec.eid; if(!eid){alert('이 요소는 EID가 없어 수정 저장 불가');return;}
@@ -460,10 +510,51 @@ document.getElementById('apply').addEventListener('click', ()=>{
   const ov={}; if(!isNaN(w)) ov.width=w; if(!isNaN(h)){ (cat==='slab')?ov.thickness=h:ov.height=h; }
   if(Object.keys(ov).length) e.overrides=ov;
   if(document.getElementById('e_del').checked) e.deleted=true;
-  if(!Object.keys(e).length) delete edits[eid];
+  // 사용자가 손을 댔으면 '봤다' 는 뜻이다. 이걸 안 남기면 이미 고친 부재가
+  // NeedsReview=True 로 IFC 까지 나가고, 검토 목록이 줄지 않는다.
+  if(rec.needs_review && !e.deleted) e.review_resolved=true;
+  // 어디를 고쳤는지 좌표를 남긴다 — 나중에 grouping 이 바뀌어 고아가 됐을 때
+  // '어느 벽이었나' 를 되찾는 유일한 단서다(해시만으로는 못 찾는다).
+  const _cl=rec.centerline||rec.points; if(_cl&&_cl.length) e._at=[_cl[0][0],_cl[0][1]];
+  if(!Object.keys(e).filter(k=>k[0]!=='_').length) delete edits[eid];
   refreshEdits(); applyEditVisuals();
 });
+// 되돌리기 — edits 는 평평한 객체라 스냅샷 스택 하나면 충분하다.
+// 시간 디바운스가 아니라 '한 동작 = 한 단계' 다. 무동작(값이 같음)은 쌓지 않는다.
+const UNDO=[]; let _lastSnap=JSON.stringify(edits);
+function pushUndo(){
+  const cur=JSON.stringify(edits);
+  if(cur===_lastSnap) return;            // 바뀐 게 없으면 단계를 만들지 않는다
+  UNDO.push(_lastSnap); _lastSnap=cur;
+  if(UNDO.length>100) UNDO.shift();
+}
+function undo(){
+  if(!UNDO.length) return;
+  const prev=UNDO.pop();
+  for(const k of Object.keys(edits)) delete edits[k];
+  Object.assign(edits, JSON.parse(prev));
+  _lastSnap=prev; saveEdits(); refreshEditsOnly(); applyEditVisuals();
+}
+window.addEventListener('keydown', ev=>{
+  if((ev.ctrlKey||ev.metaKey) && ev.key.toLowerCase()==='z'){ ev.preventDefault(); undo(); }
+});
+
+// 브라우저 새로고침·크래시로 오후 작업이 날아가지 않게. 도면별로 따로 둔다.
+const LSKEY='mepEdits:'+(DATA.source||'');
+function saveEdits(){ try{ localStorage.setItem(LSKEY, JSON.stringify(edits)); }catch(e){} }
+function loadEdits(){
+  try{
+    const raw=localStorage.getItem(LSKEY); if(!raw) return 0;
+    const o=JSON.parse(raw); let n=0;
+    for(const [k,v] of Object.entries(o)){ edits[k]=v; n++; }
+    return n;
+  }catch(e){ return 0; }
+}
+
 function refreshEdits(){
+  pushUndo(); saveEdits(); refreshEditsOnly();
+}
+function refreshEditsOnly(){
   const n=Object.keys(edits).length; document.getElementById('nedits').textContent=n;
   const el=document.getElementById('editlist');
   el.innerHTML = n? Object.entries(edits).map(([k,v])=>{
@@ -536,7 +627,7 @@ function placeWindow(wallMesh, hitVec){
   t = Math.max(0, Math.min(1, t));
   const cx=a[0]+t*dx, cy=a[1]+t*dy;
   const len=Math.hypot(dx,dy)||1, ux=dx/len, uy=dy/len;
-  const ww = (rec.width_detected ?? rec.overrides?.width ?? (P.wall?.width) ?? 200);
+  const ww = gcWidthOf(rec, P, 'wall');    // 빌드와 같은 값이어야 한다
   const half=s.width/2;
   const orec = {kind:'polyline', closed:false,
     points:[[cx-ux*half,cy-uy*half],[cx+ux*half,cy+uy*half]],
@@ -563,6 +654,39 @@ document.getElementById('bwire').onclick=e=>{wire=!wire; e.target.classList.togg
 
 // ── 패널 정보 ──────────────────────────────────────────────
 document.getElementById('src').textContent = (DATA.source||'').split(/[\\/]/).pop();
+const _restored = loadEdits();
+if(_restored){
+  _lastSnap=JSON.stringify(edits);
+  refreshEditsOnly(); applyEditVisuals();
+}
+renderWarnings();
+if(_restored){
+  const b=document.getElementById('warnbox');
+  b.insertAdjacentHTML('afterbegin',
+    '<div style="background:#2a3a2a">이 브라우저에 저장돼 있던 수정 '+_restored
+    +'건을 복원했습니다 (Ctrl+Z 로 되돌리기).</div>');
+}
+
+// 파서가 낸 경고·통계를 화면에 옮긴다. 종전엔 CLI 로그에만 있었고, 3D 를 보는
+// 사람은 무엇이 의심스러운지 알 수 없었다.
+function renderWarnings(){
+  const w=[...(DATA.warnings||[])];
+  for(const c of (DATA.width_conflicts||[]).slice(0,6))
+    w.push('두께 불일치: '+c.layer+' 선언 '+Math.round(c.declared)
+           +' != 실측 '+Math.round(c.detected)+'mm x '+c.count+'개');
+  const q=DATA.qa||{};
+  if(q.face_coverage_pct!=null)
+    w.push('면선 회수율 '+Math.round(q.face_coverage_pct)+'% '
+           +(q.face_coverage_pct<90?'— 낮으면 페어링 실패(opts pair_max 확인)':''));
+  const er=DATA.edits_report||{};
+  if((er.orphaned||[]).length)
+    w.push('이전 수정 중 붙일 곳을 못 찾은 것 '+er.orphaned.length+'건');
+  if((er.ambiguous||[]).length)
+    w.push('같은 EID 를 여러 부재가 공유해 적용 못 한 수정 '+er.ambiguous.length+'건');
+  document.getElementById('nwarn').textContent=w.length;
+  document.getElementById('warnbox').innerHTML =
+    w.length ? w.map(x=>'<div>'+String(x).replace(/</g,'&lt;')+'</div>').join('') : '없음';
+}
 const E=DATA.elements; const cnt=Object.entries(E).filter(([,v])=>v.length).map(([k,v])=>`${k} ${v.length}`).join(' · ');
 document.getElementById('counts').innerHTML=`<div class="muted">${cnt||'요소 없음'}</div>`;
 const wp=DATA.wall_pairing||{};
