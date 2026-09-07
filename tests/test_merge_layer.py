@@ -88,6 +88,39 @@ def test_identical_closed_polygons_on_two_layers_are_deduped():
     assert dp.CLOSED_WALL_DUPS == {"상부골조": 1}, dp.CLOSED_WALL_DUPS
 
 
+def test_duplicate_geometry_is_dropped_for_any_category():
+    """기둥·슬래브는 벽과 달리 페어링·병합을 안 거쳐 중복을 흡수할 기회가 없다.
+    실측: 같은 기둥 블록이 같은 자리에 두 번 들어가 IfcColumn 93 중 13개가 유령."""
+    def col(x, layer="A-CON"):
+        return {"kind": "polyline", "closed": True, "layer": layer, "z_base": 0.0,
+                "points": [[x, 0], [x + 400, 0], [x + 400, 400], [x, 400]]}
+    kept, dropped = dp.drop_duplicate_geometry([col(0), col(0), col(9000)])
+    assert len(kept) == 2, kept
+    assert dropped == {"A-CON": 1}, dropped
+
+
+def test_duplicate_geometry_keeps_different_storeys_apart():
+    """다층 조립에서 같은 x·y 의 위층 기둥은 **다른 기둥**이다 — z 를 무시하면 층이 사라진다."""
+    def col(z):
+        return {"kind": "polyline", "closed": True, "layer": "A-CON", "z_base": z,
+                "points": [[0, 0], [400, 0], [400, 400], [0, 400]]}
+    kept, dropped = dp.drop_duplicate_geometry([col(0.0), col(4200.0)])
+    assert len(kept) == 2 and dropped == {}, (kept, dropped)
+
+
+def test_duplicate_geometry_respects_detected_thickness():
+    """★ 축선이 같아도 두께가 다르면 같은 부재가 아니다.
+    실측: 같은 벽을 A-CON 은 450mm, 상부골조는 400mm 로 그렸다 — 어느 쪽이 맞는지는
+    도면을 봐야 알고, 여기서 조용히 하나를 고를 문제가 아니다."""
+    def w(width, layer):
+        return {"kind": "polyline", "closed": False, "layer": layer, "z_base": 0.0,
+                "points": [[0, 0], [3000, 0]], "width_detected": width}
+    kept, _ = dp.drop_duplicate_geometry([w(450.0, "A-CON"), w(400.0, "상부골조")])
+    assert len(kept) == 2, "두께가 다른데 같은 것으로 뭉갰다"
+    kept2, _ = dp.drop_duplicate_geometry([w(450.0, "A-CON"), w(450.0, "상부골조")])
+    assert len(kept2) == 1
+
+
 def test_different_closed_polygons_are_both_kept():
     """기하가 다르면 남긴다 — '같은 레이어 쌍' 이 아니라 **좌표**로 판단한다."""
     def box(x):

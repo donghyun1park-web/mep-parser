@@ -65,6 +65,8 @@
   "floors": [{"z": 0.0, "label": "Level_1"}],
   "ignored": {"배수판_벽체": 128},
   "thin_pairs": {"A-CON": 35},
+  "closed_wall_dups": {"A-CON": 36},
+  "duplicate_geometry_dropped": {"column": {"A-CON": 13}},
   "small_openings_dropped": {"A-DOOR": 244},
   "openings_dims_assumed": {"height": 44, "sill": 44},
   "shadowed_layer_rules": [{"rule": "...", "category": "ignore", "shadowed_by": [...]}],
@@ -73,6 +75,21 @@
   "warnings": ["미매핑 레이어: ..."]
 }
 ```
+
+### ★ 중복 부재 — 실무 도면은 같은 것을 두 번 그린다
+같은 블록을 같은 자리에 두 번 넣거나(실측 기둥 13개), 골조 레이어와 건축 레이어에
+각각 그린다(실측 닫힌 벽 36쌍, `A-CON` ∥ `상부골조`). **형상은 멀쩡해 보여 어떤 검사에도
+안 걸리고 물량만 조용히 부푼다.** `drop_duplicate_geometry()` 가 `_geom_key`(좌표·반지름·
+`z_base`·`width_detected`)로 **완전히 같은 것만** 버린다 — 0.1mm 라도 다르면 남긴다.
+적용 대상은 `column`/`slab`/`beam`/`equipment` + 닫힌 벽. 결과는
+`duplicate_geometry_dropped`·`closed_wall_dups` 로 자기보고한다.
+
+**면선 페어링을 거친 열린 벽에는 쓰지 않는다.** 축선이 같은 28쌍 중 12쌍은 두께가 다르다
+(450 vs 400mm — 두 레이어가 벽면을 다른 자리에 그렸다). 어느 쪽이 맞는지는 도면을 봐야
+알므로 여기서 조용히 고르지 않는다.
+
+빌더는 카테고리별로 **객체를 못 만든 레코드**를 `build.json` 의 `unbuilt` 에 남긴다.
+전부 0 이어야 한다 — 이 카운터가 없던 동안 벽 72개가 경고 없이 빠진 채 납품될 수 있었다.
 
 ### ★ z 기준면(datum) — 규약의 유일한 출처는 `geom_contract.py`
 **이 표를 코드에 다시 구현하지 말 것.** 소비자는 `geom_contract.z_range(cat, rec, params)` 만 호출한다.

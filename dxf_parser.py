@@ -133,6 +133,50 @@ COLLINEAR_GAP_TOL_MM = 500.0   # 끝-끝 간격 이 이하면 한 벽으로 연�
 NO_MERGE_PAIRINGS = ("axis", "closed")
 # 좌표까지 같아 버려진 닫힌 벽 폴리곤 {레이어: 개수}. detect_wall_pairs 가 채운다.
 CLOSED_WALL_DUPS = {}
+
+
+def _geom_key(rec):
+    """좌표만으로 만든 동일성 열쇠. 레이어·이름은 **일부러** 넣지 않는다 —
+    같은 물건이 두 레이어에 그려지는 것이 실무에서 흔하고, 그게 잡으려는 것이다.
+    z_base 는 넣는다. 다층 조립에서 같은 x·y 의 위층 기둥은 다른 기둥이다.
+    width_detected 도 넣는다 — 넣지 않으면 축선만 같고 두께가 다른 것을 같다고
+    본다(실측: 같은 벽을 A-CON 은 450mm, 상부골조는 400mm 로 그렸다)."""
+    pts = rec.get("points") or []
+    c = rec.get("center") or []
+    _w = rec.get("width_detected")
+    return (rec.get("kind"),
+            round(float(rec.get("radius") or 0.0), 1),
+            tuple(round(float(v), 1) for v in c[:2]),
+            tuple(sorted((round(float(p[0]), 1), round(float(p[1]), 1)) for p in pts)),
+            round(float(rec.get("z_base") or 0.0), 1),
+            None if _w is None else round(float(_w), 1))
+
+
+def drop_duplicate_geometry(records):
+    """좌표가 **완전히** 같은 레코드를 하나만 남긴다. → (남은 것, {레이어: 버린 수})
+
+    실무 도면은 같은 부재를 두 번 그린다 — 같은 블록을 같은 자리에 두 번 넣거나
+    (실측: 기둥 13개), 골조 레이어와 건축 레이어에 각각 그리거나(실측: 닫힌 벽
+    36쌍, A-CON ∥ 상부골조). 그대로 두면 IFC 에 부재가 겹쳐 쌓이고 물량이 그만큼
+    부풀지만 형상은 멀쩡해 보여 검사에 안 걸린다.
+
+    유사도로 추정하지 않는다 — 0.1mm 라도 다르면 다른 부재로 남긴다.
+
+    ★ **면선 페어링을 거친 벽에는 쓰지 말 것.** 실측: 축선이 완전히 같은 벽 28쌍이
+      A-CON ∥ 상부골조 에 있는데 그중 12쌍은 두께가 다르다(450 vs 400mm) — 두
+      레이어가 벽면을 다른 자리에 그린 것이다. 어느 쪽이 맞는지는 도면을 봐야
+      알고, 여기서 조용히 고를 문제가 아니다. 닫힌 폴리곤은 외곽선 자체가
+      좌표라서 이 모호함이 없다."""
+    seen, out, dropped = set(), [], {}
+    for r in records:
+        k = _geom_key(r)
+        if k in seen:
+            lay = r.get("layer", "")
+            dropped[lay] = dropped.get(lay, 0) + 1
+            continue
+        seen.add(k)
+        out.append(r)
+    return out, dropped
                                 # 실무 도면: T/십자 교차점 틈 = 벽두께(100~400mm)
                                 # 문 개구부 ≥800mm 이므로 500mm 는 안전
 CORNER_SNAP_TOL_MM = 50.0      # 끝점 이 거리 이내면 centroid로 스냅(mm)
@@ -984,15 +1028,9 @@ def detect_wall_pairs(wall_records, params):
     #    폴리곤은 그 경로를 안 탄다 — 그대로 두면 IFC 에 같은 벽이 두 개 쌓이고
     #    물량이 두 배가 된다. 기하가 완전히 같은 것만 버린다(추정 아님).
     CLOSED_WALL_DUPS.clear()
-    _seen = {}
-    for r in closed_recs:
-        key = tuple(sorted((round(p[0], 1), round(p[1], 1))
-                           for p in (r.get("points") or [])))
-        if key in _seen:
-            CLOSED_WALL_DUPS[r.get("layer", "")] = \
-                CLOSED_WALL_DUPS.get(r.get("layer", ""), 0) + 1
-            continue
-        _seen[key] = True
+    _kept, _dropped = drop_duplicate_geometry(closed_recs)
+    CLOSED_WALL_DUPS.update(_dropped)
+    for r in _kept:
         nr = copy.deepcopy(r)
         nr["pairing"] = "closed"
         nr.setdefault("confidence", 0.7)
@@ -2250,6 +2288,23 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
     
     result["elements"]["column"] = new_cols
     # --------------------------------------
+
+    # 좌표까지 같은 중복 부재 제거. 기둥·슬래브는 벽과 달리 페어링·병합을 안 거쳐
+    # 중복을 흡수할 기회가 없다 — 실측: 같은 기둥 블록이 같은 자리에 두 번 들어가
+    # 13개가 겹쳐 있었고(A-CON), IfcColumn 93 중 13개가 유령이었다.
+    _dup_report = {}
+    for _cat in ("column", "slab", "beam", "equipment"):
+        _recs = result["elements"].get(_cat)
+        if not _recs:
+            continue
+        _kept, _dropped = drop_duplicate_geometry(_recs)
+        if _dropped:
+            result["elements"][_cat] = _kept
+            _dup_report[_cat] = _dropped
+            print(f"  [{_cat}] 좌표까지 같은 중복 {sum(_dropped.values())}개 드롭: "
+                  f"{_dropped} (남은 것 {len(_kept)}개)")
+    if _dup_report:
+        result["duplicate_geometry_dropped"] = _dup_report
 
     # [자기검증 QA] 후처리 전 원본 벽 면선 스냅샷 (최종 회수율 측정 기준)
     _qa_face_segs = _wall_segments(result["elements"]["wall"])

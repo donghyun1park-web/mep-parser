@@ -45,7 +45,9 @@ _PSET = "Pset_MEPParser"
 # 그 위에 얹히므로 조용히 틀린 재질은 형상 오류보다 오래 살아남는다.
 _MATERIALS = {}          # (문서명, 재질명) → Arch Material. 부재마다 새로 만들지 않는다
 MATERIALS_APPLIED = {}   # 재질명 → 부여된 객체 수(build.json 으로 자기보고)
-WALLS_UNBUILT = {}       # {count, of} — 객체를 못 만든 벽 레코드 수. 0 이어야 한다
+# 카테고리 → 객체를 못 만든 레코드 목록. **비어 있어야 한다.**
+# 벽에서 이 카운터가 없던 동안 72개가 아무 경고 없이 빠진 채 납품될 수 있었다.
+UNBUILT = {}
 
 
 def _material(obj, name):
@@ -332,26 +334,14 @@ def build_walls(doc, walls, params):
 
     # ★ 어떤 객체도 만들지 못한 벽 레코드. 체이닝은 여럿→하나라서 수가 줄어드는
     # 것은 정상이지만, idx_map 에 아예 안 들어온 레코드는 IFC 에 존재하지 않는다.
-    # 이 숫자가 없던 동안 벽 72개가 아무 경고 없이 빠진 채로 납품될 수 있었다.
-    unbuilt = [i for i in range(len(walls)) if i not in idx_map]
-    if unbuilt:
-        _why = {}
-        for i in unbuilt:
-            el = walls[i]
-            k = (f"kind={el.get('kind')}" if el.get("kind") != "polyline" else
-                 f"pairing={el.get('pairing')} 점{len(el.get('centerline') or el.get('points') or [])}개")
-            _why[k] = _why.get(k, 0) + 1
-        print(f"  [!] 벽 레코드 {len(unbuilt)}개가 객체를 못 만들었다 — IFC 에 없다: {_why}")
-    WALLS_UNBUILT.clear()
-    WALLS_UNBUILT.update({
-        "count": len(unbuilt), "of": len(walls),
-        "why": _why if unbuilt else {},
-        # 수만 보고는 못 쫓는다 — EID 로 preview 에서 바로 찾을 수 있게 몇 개 남긴다.
-        "detail": [{"eid": walls[i].get("eid"), "layer": walls[i].get("layer"),
-                    "pairing": walls[i].get("pairing"),
-                    "seg_length": walls[i].get("seg_length"),
-                    "points": walls[i].get("centerline") or walls[i].get("points")}
-                   for i in unbuilt[:10]]})
+    for i in range(len(walls)):
+        if i in idx_map:
+            continue
+        el = walls[i]
+        UNBUILT.setdefault("wall", []).append(
+            {"i": i, "eid": el.get("eid"), "layer": el.get("layer"),
+             "why": f"pairing={el.get('pairing')} "
+                    f"점{len(el.get('centerline') or el.get('points') or [])}개"})
     return objs, idx_map, src_els
 
 
@@ -545,6 +535,10 @@ def build_columns(doc, columns, params):
         elif el["kind"] == "polyline" and el.get("closed"):
             base = make_wire(GC.ccw(el["points"]), True)
         else:
+            # 조용히 넘기지 않는다 — 벽에서 이렇게 72개가 사라졌다.
+            UNBUILT.setdefault("column", []).append(
+                {"i": i, "eid": el.get("eid"), "layer": el.get("layer"),
+                 "why": f"kind={el.get('kind')} closed={el.get('closed')}"})
             continue
         base.Label = f"ColBase_{i}"
         col = Arch.makeStructure(base, height=height)
@@ -568,6 +562,9 @@ def build_slabs(doc, slabs, params):
     src_els = []
     for i, el in enumerate(slabs):
         if el["kind"] != "polyline" or not el.get("closed"):
+            UNBUILT.setdefault("slab", []).append(
+                {"i": i, "eid": el.get("eid"), "layer": el.get("layer"),
+                 "why": f"kind={el.get('kind')} closed={el.get('closed')}"})
             continue
         cat = "beam" if (el.get("overrides", {}).get("ifc_type") == "Beam") else "slab"
         z0, z1 = GC.z_range(cat, el, params)
@@ -925,6 +922,12 @@ def _main_impl():
     mep_objs          = build_mep(doc, el)
     print(f"  → cols={len(cols)} slabs={len(slabs)} beams={len(beams)}"
           f" spaces={len(spaces)} mep={len(mep_objs)} ({_time.time()-_t1:.1f}s)")
+    for _c, _v in sorted(UNBUILT.items()):
+        _n = {}
+        for _e in _v:
+            _n[_e["why"]] = _n.get(_e["why"], 0) + 1
+        print(f"  [!] {_c} 레코드 {len(_v)}개가 객체를 못 만들었다 — IFC 에 없다: {_n}")
+        print(f"      EID: {[e['eid'] for e in _v[:6]]}")
 
     print("[5/8] recompute")
     _t2 = _time.time()
@@ -1094,7 +1097,9 @@ def _main_impl():
                   "floors": len(floor_containers)},
         "beams_without_section": n_nosec,
         "materials": dict(MATERIALS_APPLIED),
-        "walls_unbuilt": dict(WALLS_UNBUILT),
+        # 카테고리별 '객체를 못 만든 레코드'. 전부 0 이어야 정상이다.
+        "unbuilt": {c: {"count": len(v), "detail": v[:10]}
+                    for c, v in sorted(UNBUILT.items())},
         "floor_orphans": len(_orphans), "floor_dups": len(_dups),
         "floor_orphan_detail": [{"label": l, "z_base": z} for l, z in _orphans[:20]],
         "invalid_shapes": n_err,
