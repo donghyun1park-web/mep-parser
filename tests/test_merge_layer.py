@@ -70,6 +70,14 @@ def test_walls_of_different_material_do_not_merge():
     assert sorted(w["overrides"]["material"] for w in out) == ["조적", "콘크리트"], out
 
 
+def test_walls_of_different_declared_width_do_not_merge():
+    """overrides 는 '빌더가 쓸 치수' 다 — 다르면 다른 벽이다.
+    height·material 만 열거하면 width·thickness 가 이 구멍으로 새므로 통째로 본다."""
+    out = dp.merge_collinear_walls(
+        [_ov(0, 1000, width=200.0), _ov(1010, 3000, width=300.0)], {})
+    assert sorted(w["overrides"]["width"] for w in out) == [200.0, 300.0], out
+
+
 def test_same_storey_within_tolerance_still_merges():
     """가드가 정상 병합까지 막으면 [4.0] 의 목적을 잃는다.
     z 는 층 감지와 **같은 허용치**(FLOOR_TOL_MM)로 양자화한다."""

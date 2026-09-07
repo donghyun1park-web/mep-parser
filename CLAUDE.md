@@ -67,6 +67,7 @@
   "thin_pairs": {"A-CON": 35},
   "closed_wall_dups": {"A-CON": 36},
   "duplicate_geometry_dropped": {"column": {"A-CON": 13}},
+  "width_conflicts": [{"layer": "A-CON", "declared": 200.0, "detected": 450.0, "count": 40}],
   "small_openings_dropped": {"A-DOOR": 244},
   "openings_dims_assumed": {"height": 44, "sill": 44},
   "shadowed_layer_rules": [{"rule": "...", "category": "ignore", "shadowed_by": [...]}],
@@ -90,6 +91,25 @@
 
 빌더는 카테고리별로 **객체를 못 만든 레코드**를 `build.json` 의 `unbuilt` 에 남긴다.
 전부 0 이어야 한다 — 이 카운터가 없던 동안 벽 72개가 경고 없이 빠진 채 납품될 수 있었다.
+
+### ★ 벽 병합은 '합치면 한쪽이 사라지는 속성' 을 먼저 본다
+`merge_collinear_walls` 는 합친 뒤 **한쪽 레코드의 값을 그대로 쓴다.** 그래서
+`_merge_compat_key`(= `z_base` 를 `FLOOR_TOL_MM` 으로 양자화한 값 + `overrides` **전체**)가
+버킷 키에 들어간다. 다르면 애초에 비교되지 않으므로 쌍별 검사보다 싸고, 연쇄 사슬도
+안 끊긴다. 합성 케이스로 재현한 것: 위층 벽이 아래층에 흡수돼 소멸 · 4000mm 파라펫이
+2800mm 로 · 조적이 콘크리트로. **셋 다 형상은 멀쩡하고 검사도 통과한다.**
+`overrides` 를 항목별로 열거하지 않는 이유는, 항목이 늘 때마다 여기를 고쳐야 하고
+안 고치면 그게 다음 버그이기 때문이다.
+
+### ★ 실측 두께 vs 선언 두께 (`width_conflicts`)
+`layer_map` 의 `width` 는 **레이어에 한 번 적는 기본값**이고 `width_detected` 는 그 벽에서
+잰 값이다. `geom_contract.width_of` 는 **선언값을 먼저 쓴다**(적어 준 값이 이기는 것은
+stack 레벨 `height` 와 같은 규약). 그래서 둘이 어긋나면 실측값이 버려지는데, 실측(지하3층
+건축평면) **벽 280개**가 200mm 로 선언된 채 도면에서는 250·300·400·450mm 로 재졌다.
+바꾼 것은 '어느 쪽을 쓰는가' 가 아니라 '말을 하는가' 다 — `(레이어, 선언, 실측)` 별로
+묶어 보고한다(280개가 6줄로 나온다). 실측을 쓰고 싶으면 **레이어를 두께별로 나누거나
+선언 `width` 를 비운다.** 신뢰할 수 있는 실측만 본다: `paired` 이고 `thin_pair` 가 아닌 것
+(`single_offset` 은 중심선 자체가 추정이라 두께도 추정이다).
 
 ### ★ z 기준면(datum) — 규약의 유일한 출처는 `geom_contract.py`
 **이 표를 코드에 다시 구현하지 말 것.** 소비자는 `geom_contract.z_range(cat, rec, params)` 만 호출한다.

@@ -6,9 +6,11 @@
       570754,
       670400
     ],
+    "closed_wall_dups": 0,
     "counts": {
       "beam": 225
     },
+    "duplicate_geometry_dropped": {},
     "eid_count": 225,
     "eid_hash": "7a32b0a74e2f",
     "face_coverage_pct": 0,
@@ -30,7 +32,8 @@
       "single": 0,
       "single_offset": 0
     },
-    "wall_thickness_10mm": {}
+    "wall_thickness_10mm": {},
+    "width_conflicts": 0
   },
   "지하3층_건축평면": {
     "bbox": [
@@ -39,12 +42,16 @@
       132233,
       772
     ],
+    "closed_wall_dups": 36,
     "counts": {
       "column": 80,
       "equipment": 6,
       "opening": 44,
       "slab": 8,
       "wall": 682
+    },
+    "duplicate_geometry_dropped": {
+      "column": 13
     },
     "eid_count": 820,
     "eid_hash": "3775fd22c48e",
@@ -88,6 +95,7 @@
       "50": 26,
       "500": 35,
       "70": 1
-    }
+    },
+    "width_conflicts": 280
   }
 }

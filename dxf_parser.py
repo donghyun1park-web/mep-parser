@@ -109,6 +109,11 @@ WALL_PAIR_OVERLAP_RATIO = 0.3 # 투영 겹침 최소 비율. 0.5→0.3: 세그�
 # '전체가 얇은 레이어'(A-STEEL 30mm 등)는 스스로 통과한다.
 THIN_PAIR_RATIO = 1.0 / 3.0   # 중앙값의 이 비율 미만이면 검토 대상
 THIN_PAIR_MIN_SAMPLES = 5     # 표본이 이보다 적으면 중앙값을 신뢰하지 않는다
+# 실측 두께가 layer_map 선언 두께와 이보다 벌어지면 '불일치' 로 보고한다.
+# 둘 다 넘어야 하는 게 아니라 둘 중 **큰 쪽**을 허용치로 쓴다 — 얇은 벽은 상대오차가,
+# 두꺼운 벽은 절대오차가 먼저 커지기 때문.
+WIDTH_CONFLICT_ABS_MM = 20.0
+WIDTH_CONFLICT_REL = 0.15
 
 # 개구부 최소 크기(mm). 이보다 작으면 개구부일 수 없다 — 세고 버린다.
 # 실측(지하3층 A-DOOR): 개구부 288개 중 244개가 0.1~12.5mm 였다. 문 하나가
@@ -1254,12 +1259,16 @@ def _merge_compat_key(rec):
     셋 다 형상은 멀쩡하고 검사도 통과한다 — 물량·내화·층만 틀린다.
 
     z_base 는 층 감지와 **같은 허용치**(FLOOR_TOL_MM)로 양자화한다. 값이 다르면
-    다른 층이라는 판단을 두 곳이 따로 내리지 않게 하기 위함이다."""
+    다른 층이라는 판단을 두 곳이 따로 내리지 않게 하기 위함이다.
+
+    overrides 는 **통째로** 본다. height·material 만 열거하면 width·thickness 가
+    다른 두 레이어가 합쳐지며 한쪽 치수가 사라진다 — overrides 는 정확히
+    '빌더가 쓸 치수' 이므로 다르면 다른 벽이다. 열거하면 항목이 늘 때마다
+    여기를 고쳐야 하고, 안 고치면 그게 다음 버그다."""
     ov = rec.get("overrides") or {}
     z = rec.get("z_base")
     return (round(float(z) / FLOOR_TOL_MM) if z is not None else None,
-            ov.get("height"),
-            ov.get("material"))
+            tuple(sorted((k, repr(v)) for k, v in ov.items())))
 
 
 def merge_collinear_walls(wall_records, params):
@@ -2457,6 +2466,44 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
                     "진짜 두께가 통과한다.")
             result["warnings"].append(_msg)
             print("  " + _msg)
+
+    # ── 실측폭 vs 선언폭 교차검증 ───────────────────────────────────────────
+    # layer_map 의 width 는 **레이어 하나에 한 번 적는 기본값**이고, width_detected
+    # 는 그 벽에서 실제로 잰 값이다. 둘이 어긋나면 도면이 레이어 기본값과 다른
+    # 두께의 벽을 갖고 있다는 뜻인데, geom_contract.width_of 는 선언값을 먼저
+    # 쓰므로 **실측값이 조용히 버려진다**. 어느 쪽을 쓸지는 바꾸지 않는다 —
+    # 적어 준 값이 이기는 것은 stack 레벨 height 와 같은 규약이다. 다만 그
+    # 불일치를 말하지 않는 것은 다른 문제다.
+    #
+    # 신뢰할 수 있는 실측만 본다: paired(두 면을 실제로 재서 나온 값)이고
+    # thin_pair 로 이미 걸러지지 않은 것. single_offset 은 중심선 자체가 추정이라
+    # 두께도 추정이므로 제외한다.
+    _wconf: dict = {}
+    for _w in result["elements"]["wall"]:
+        if _w.get("pairing") != "paired" or _w.get("review_reason") == "thin_pair":
+            continue
+        _wd = _w.get("width_detected")
+        _ov = (_w.get("overrides") or {}).get("width")
+        if not _wd or _ov is None:
+            continue
+        if abs(float(_wd) - float(_ov)) <= max(WIDTH_CONFLICT_ABS_MM,
+                                               float(_ov) * WIDTH_CONFLICT_REL):
+            continue
+        _k = (_w.get("layer", ""), float(_ov), float(_wd))
+        _wconf[_k] = _wconf.get(_k, 0) + 1
+    if _wconf:
+        result["width_conflicts"] = [
+            {"layer": _l, "declared": _o, "detected": _d, "count": _n}
+            for (_l, _o, _d), _n in sorted(_wconf.items(), key=lambda kv: -kv[1])]
+        _tot = sum(_wconf.values())
+        _msg = (f"[두께 불일치] 벽 {_tot}개의 실측 두께가 layer_map 선언값과 다르다 — "
+                f"빌드에는 **선언값이 쓰인다**(실측값은 IFC 의 WidthDetected 속성에만 남는다). "
+                "도면이 맞다면 레이어를 두께별로 나누거나 선언 width 를 비울 것.")
+        result["warnings"].append(_msg)
+        print("  " + _msg)
+        for _e in result["width_conflicts"][:6]:
+            print(f"      {_e['layer']:10s} 선언 {_e['declared']:.0f} ≠ 실측 "
+                  f"{_e['detected']:.0f}mm  x{_e['count']}")
 
     # [자기검증 QA] 원본 면선 대비 최종 벽 회수율 + 누락 의심 리스트
     _qa = build_qa(_qa_face_segs, result["elements"]["wall"], params)

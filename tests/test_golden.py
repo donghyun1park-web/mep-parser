@@ -58,6 +58,13 @@ def digest(data):
         # 가정 치수가 늘어나는 것도 회귀다 — 조용히 더 추정하기 시작하면 잡힌다.
         "openings_dims_assumed": dict(sorted((data.get("openings_dims_assumed") or {}).items())),
         "small_openings_dropped": sum((data.get("small_openings_dropped") or {}).values()),
+        # 좌표까지 같아 버린 중복 부재. 늘면 도면이 달라졌거나 판정이 헐거워진 것이다.
+        "closed_wall_dups": sum((data.get("closed_wall_dups") or {}).values()),
+        "duplicate_geometry_dropped": {
+            k: sum(v.values())
+            for k, v in sorted((data.get("duplicate_geometry_dropped") or {}).items())},
+        # 실측≠선언 두께. 늘면 빌드가 실측을 더 많이 무시하고 있다는 뜻이다.
+        "width_conflicts": sum(c["count"] for c in (data.get("width_conflicts") or [])),
         "needs_review": sum(1 for recs in el.values() for r in recs
                             if r.get("needs_review")),
         "face_coverage_pct": round(qa.get("face_coverage_pct", 0)),
