@@ -24,6 +24,7 @@ stack.json:
 import argparse
 import json
 import os
+import copy
 
 import dxf_parser as dp
 import geom_contract as GC
@@ -116,12 +117,12 @@ def resolve_offset(ref_dxf, mov_dxf, ref_data, mov_data):
 
 # ── 이동 / 병합 ────────────────────────────────────────────────────────────
 def _shift(rec, cat, dx, dy, z, height=None):
-    for p in (rec.get("points") or []):
-        p[0] += dx
-        p[1] += dy
-    for p in (rec.get("centerline") or []):
-        p[0] += dx
-        p[1] += dy
+    seen = set()
+    for p in (rec.get('points') or []) + (rec.get('centerline') or []):
+        if id(p) not in seen:
+            p[0] += dx
+            p[1] += dy
+            seen.add(id(p))
     if rec.get("center"):
         rec["center"][0] += dx
         rec["center"][1] += dy
@@ -138,9 +139,70 @@ def _shift(rec, cat, dx, dy, z, height=None):
     return False
 
 
+def _edit_transform(edit, level, local_eid, to_world):
+    out = copy.deepcopy(edit)
+    lid = str(level['id'])
+    dx, dy = level.get('offset') or [0, 0]
+    z = float(level.get('z', 0))
+    sign = 1 if to_world else -1
+    if out.get('_at'):
+        out['_at'][0] += sign * dx
+        out['_at'][1] += sign * dy
+    from element_id import category_from_eid
+    for key in ('record', '_source'):
+        rec = out.get(key)
+        if not rec:
+            continue
+        rec = out[key] = copy.deepcopy(rec)
+        cat = rec.get('category') or out.get('category') or category_from_eid(local_eid)
+        if cat not in GC.Z_DATUM:
+            raise StackError(f'{lid}:{local_eid}: 카테고리를 확인할 수 없습니다')
+        _shift(rec, cat, sign * dx, sign * dy, sign * z)
+        if to_world:
+            rec['level'] = lid
+            if rec.get('eid'):
+                rec['eid'] = lid + ':' + rec['eid']
+        else:
+            rec.pop('level', None)
+            if str(rec.get('eid', '')).startswith(lid + ':'):
+                rec['eid'] = rec['eid'][len(lid) + 1:]
+    return out
+
+
+def edits_to_local(flat_edits, levels):
+    """Preview world EIDs/coordinates → per-floor source-local sidecars."""
+    by_level = {str(lv['id']): lv for lv in levels}
+    out = {lid: {} for lid in by_level}
+    for eid, edit in flat_edits.items():
+        matches = [lid for lid in by_level if eid.startswith(lid + ':')]
+        if len(matches) != 1:
+            raise StackError(f'{eid}: 수정의 층을 유일하게 찾을 수 없습니다')
+        lid = matches[0]
+        local_eid = eid[len(lid) + 1:]
+        if ':' not in local_eid:
+            raise StackError(f'{eid}: 원본 EID가 없습니다')
+        out[lid][local_eid] = _edit_transform(edit, by_level[lid], local_eid, False)
+    return out
+
+
+def edits_to_world(edits_by_floor, levels):
+    """Stored local sidecars → preview coordinates, without modifying stored data."""
+    by_level = {str(lv['id']): lv for lv in levels}
+    out = {}
+    for lid, edits in edits_by_floor.items():
+        if lid not in by_level:
+            raise StackError(f'{lid}: 저장된 수정의 층이 프로젝트에 없습니다')
+        for eid, edit in edits.items():
+            out[lid + ':' + eid] = _edit_transform(edit, by_level[lid], eid, True)
+    return out
+
+
 def build_stack(spec, base_dir=".", dry_run=False):
     """stack.json dict → 병합 geometry.json dict (dry_run 이면 offset 리포트만)."""
-    parsed, report = {}, []
+    parsed, report, local_edits = {}, [], {}
+    ids = [lv['id'] for lv in spec['levels']]
+    if len(ids) != len(set(ids)) or any(not lid or ':' in lid for lid in ids):
+        raise StackError('층 ID는 비어 있거나 중복되거나 콜론을 포함할 수 없습니다')
     out = {"source": spec.get("project", "stack"), "units": "mm",
            "scale_applied": 1.0, "params": {}, "elements": {}, "warnings": [],
            "contract": GC.contract_block(), "stack": {"levels": []}}
@@ -155,8 +217,15 @@ def build_stack(spec, base_dir=".", dry_run=False):
         if _ed and not isinstance(_ed, dict):
             with open(os.path.join(base_dir, _ed), encoding="utf-8") as _f:
                 _ed = json.load(_f)
-        data = dp.parse(src, rules, member_schedule=lv.get("member_schedule"),
-                        edits=_ed)
+        local_edits[lid] = _ed or {}
+        blocks = (dp.load_layer_map(os.path.join(base_dir, lv['block_map']))
+                  if lv.get('block_map') else dp.DEFAULT_BLOCK_RULES)
+        options = dict(lv.get('options') or {})
+        if lv.get('member_schedule') is not None:
+            options['member_schedule'] = lv['member_schedule']
+        if lv.get('height') is not None:
+            options['level_height'] = lv['height']
+        data = dp.parse(src, rules, blocks, edits=_ed, **options)
         parsed[lid] = (src, data)
 
         dx, dy = lv.get("offset", [0.0, 0.0])
@@ -179,7 +248,7 @@ def build_stack(spec, base_dir=".", dry_run=False):
 
         if not out["params"]:
             out["params"] = data.get("params", {})
-        n_ov = 0
+        n_ov = data.get('level_height_overrode', 0)
         # ★ `wall_indices` 는 **그 층 안에서의** 위치다. 층을 이어붙이면 같은 숫자가
         #   아래층 벽을 가리키게 되어, 위층 문이 아래층 벽에 구멍을 뚫는다 —
         #   형상은 멀쩡하고 검사도 통과한다. 이어붙인 만큼 밀어 준다.
@@ -189,7 +258,7 @@ def build_stack(spec, base_dir=".", dry_run=False):
                 r["wall_indices"] = [i + _wall_base for i in r["wall_indices"]]
         for cat, recs in data["elements"].items():
             for r in recs:
-                n_ov += _shift(r, cat, dx, dy, float(lv["z"]), lv.get("height"))
+                _shift(r, cat, dx, dy, float(lv['z']))
                 r["level"] = lid
                 r["eid"] = f"{lid}:{r['eid']}"      # 같은 DXF 를 두 층에 쓰면 충돌한다
                 if r.get("eid_v1"):
@@ -199,10 +268,20 @@ def build_stack(spec, base_dir=".", dry_run=False):
             print(f"  층고 {lv['height']}mm 가 레이어 높이를 덮음: {n_ov}개")
             rep["height_overrode"] = n_ov
         out["warnings"] += [f"[{lid}] {w}" for w in data.get("warnings", [])]
+        if data.get('edits_report'):
+            aggregate = out.setdefault('edits_report', {})
+            for key in ('applied', 'orphaned', 'added', 'migrated', 'ambiguous', 'stale_reviews'):
+                aggregate.setdefault(key, []).extend(lid + ':' + eid
+                    for eid in data['edits_report'].get(key, []))
 
     # floors[] 를 선언에서 직접 만든다 → z 클러스터링이 없으니 층 고아가 불가능하다.
     out["floors"] = [{"z": float(lv["z"]), "label": lv.get("label", lv["id"])}
-                     for lv in spec["levels"]]
+                      for lv in spec["levels"]]
+    if not dry_run and out.get('edits_report'):
+        from element_id import suggest_relink
+        world_edits = edits_to_world(local_edits, report)
+        out['edits_report']['relink_suggestions'] = suggest_relink(
+            out['edits_report'].get('orphaned', []), world_edits, out['elements'])
     return (report if dry_run else out)
 
 

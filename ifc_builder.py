@@ -22,6 +22,10 @@ import json
 import math
 import os
 import sys
+import copy
+import tempfile
+import geom_contract as GC
+import artifact_validation as AV
 
 from geom_contract import poly_area as _poly_area
 
@@ -39,6 +43,7 @@ try:
     import ifcopenshell.api.type
     import ifcopenshell.api.pset
     import ifcopenshell.util.shape_builder
+    import ifcopenshell.util.element
 except ImportError as e:
     print(f"[ERROR] 의존성 필요: pip install ifcopenshell numpy  ({e})", file=sys.stderr)
     sys.exit(1)
@@ -204,9 +209,17 @@ def _build_elements(model, body, sb, sto, data, z_offset=0.0, connect=False,
     if type_cache is None:
         type_cache = {}
 
-    def container(prod):
+    def container(prod, rec):
+        prod.Name = sto.Name + ":" + prod.Name
         ifcopenshell.api.spatial.assign_container(
             model, relating_structure=sto, products=[prod])
+        pset = ifcopenshell.api.pset.add_pset(model, product=prod, name="Pset_MEPParser")
+        values = AV.qa_values(rec, data["_build_provenance"])
+        values["EID"] = model.create_entity("IfcText", values["EID"])
+        values["SourceEIDs"] = model.create_entity("IfcText", values["SourceEIDs"])
+        ifcopenshell.api.pset.edit_pset(model, pset=pset, properties=values)
+        data.setdefault("_expected_products", []).append({"name": prod.Name, "source_eids": AV.source_eids(rec),
+                                                          "qa": AV.qa_values(rec, data["_build_provenance"])})
 
     # ── 벽 ───────────────────────────────────────────────────────────
     for i, w in enumerate(el.get("wall", [])):
@@ -214,20 +227,21 @@ def _build_elements(model, body, sb, sto, data, z_offset=0.0, connect=False,
         if len(cl) < 2:
             stats["skip"] += 1
             continue
-        width = float(w.get("width_detected") or w.get("overrides", {}).get("width", pw))
-        height = float(w.get("overrides", {}).get("height", ph))
-        zb = z_offset + float(w.get("z_base", 0.0))
+        width = GC.width_of(w, params)
+        z0, z1 = GC.z_range("wall", w, params)
+        height = z1 - z0
+        zb = z_offset + z0
         # 폐합 벽(closed)은 둘레 벽 여러 장이 아니라 솔리드(기둥형)로 세운다.
         # dxf_parser 가 pairing="closed" 로 표시한 원래 의도이며, boq_export 의
         # 집계(단면적×높이)와도 일치한다. 둘레 분해 시 물량이 어긋난다(교차 대조로 발견).
-        if w.get("closed") and len(cl) >= 3:
+        if (w.get("closed") or w.get("pairing") == "closed") and len(cl) >= 3:
             pts = [(p[0], p[1]) for p in cl]
             if len(pts) > 2 and pts[0] == pts[-1]:
                 pts = pts[:-1]
             solid = _extrude_polygon(model, body, sb, pts, height, zb,
                                      "IfcWall", f"Wall_{i}")
             if solid:
-                container(solid)
+                container(solid, w)
                 if qto:
                     area = _poly_area(pts)
                     _add_qto(model, solid, "Qto_WallBaseQuantities", {
@@ -256,6 +270,9 @@ def _build_elements(model, body, sb, sto, data, z_offset=0.0, connect=False,
                     ifcopenshell.api.type.assign_type(
                         model, related_objects=[wall],
                         relating_type=_wall_type(model, width, type_cache))
+                    usage = ifcopenshell.util.element.get_material(wall)
+                    if usage and usage.is_a("IfcMaterialLayerSetUsage"):
+                        usage.OffsetFromReferenceLine = -width / MM / 2
                     ifcopenshell.api.geometry.create_2pt_wall(
                         model, element=wall, context=body,
                         p1=(p1[0] / MM, p1[1] / MM), p2=(p2[0] / MM, p2[1] / MM),
@@ -271,10 +288,10 @@ def _build_elements(model, body, sb, sto, data, z_offset=0.0, connect=False,
                     model, product=wall, matrix=_placement_matrix(p1, p2, zb))
                 rep = ifcopenshell.api.geometry.add_wall_representation(
                     model, context=body, length=L / MM,
-                    height=height / MM, thickness=width / MM)
+                    height=height / MM, thickness=width / MM, offset=-width / MM / 2)
                 ifcopenshell.api.geometry.assign_representation(
                     model, product=wall, representation=rep)
-            container(wall)
+            container(wall, w)
             if qto:
                 _add_qto(model, wall, "Qto_WallBaseQuantities", {
                     "Length": L / MM, "Width": width / MM, "Height": height / MM,
@@ -289,23 +306,32 @@ def _build_elements(model, body, sb, sto, data, z_offset=0.0, connect=False,
 
     # ── 기둥 ─────────────────────────────────────────────────────────
     for i, c in enumerate(el.get("column", [])):
-        zb = z_offset + float(c.get("z_base", 0.0))
-        h = float(c.get("overrides", {}).get("height", pcol_h))
+        z0, z1 = GC.z_range("column", c, params)
+        zb = z_offset + z0
+        h = z1 - z0
         coords = None
+        col = None
         if c.get("kind") == "circle":
             cx, cy = c.get("center", [0, 0])
             r = float(c.get("radius", 200.0))
-            coords = [(cx - r, cy - r), (cx + r, cy - r), (cx + r, cy + r), (cx - r, cy + r)]
+            profile = model.create_entity("IfcCircleProfileDef", ProfileType="AREA", Radius=r / MM)
+            col = ifcopenshell.api.root.create_entity(model, ifc_class="IfcColumn", name=f"Col_{i}")
+            matrix = np.eye(4)
+            matrix[:3, 3] = [cx / MM, cy / MM, zb / MM]
+            ifcopenshell.api.geometry.edit_object_placement(model, product=col, matrix=matrix)
+            rep = ifcopenshell.api.geometry.add_profile_representation(model, context=body, profile=profile, depth=h / MM)
+            ifcopenshell.api.geometry.assign_representation(model, product=col, representation=rep)
         elif c.get("kind") == "polyline" and c.get("closed") and len(c.get("points", [])) >= 3:
             coords = [(p[0], p[1]) for p in c["points"]]
-        if not coords:
+        if not coords and col is None:
             stats["skip"] += 1
             continue
-        col = _extrude_polygon(model, body, sb, coords, h, zb, "IfcColumn", f"Col_{i}")
+        if col is None:
+            col = _extrude_polygon(model, body, sb, coords, h, zb, "IfcColumn", f"Col_{i}")
         if col:
-            container(col)
+            container(col, c)
             if qto:
-                area = _poly_area(coords)
+                area = math.pi * r * r if c.get("kind") == "circle" else _poly_area(coords)
                 _add_qto(model, col, "Qto_ColumnBaseQuantities", {
                     "Length": h / MM,
                     "CrossSectionArea": area / MM ** 2,
@@ -323,12 +349,13 @@ def _build_elements(model, body, sb, sto, data, z_offset=0.0, connect=False,
         pts = s.get("points", [])
         if len(pts) < 3:
             continue
-        zb = z_offset + float(s.get("z_base", 0.0))
-        thk = float(s.get("overrides", {}).get("thickness", pslab_t))
+        z0, z1 = GC.z_range("slab", s, params)
+        zb = z_offset + z1
+        thk = z1 - z0
         coords = [(p[0], p[1]) for p in pts]
         slab = _extrude_polygon(model, body, sb, coords, thk, zb - thk, "IfcSlab", f"Slab_{i}")
         if slab:
-            container(slab)
+            container(slab, s)
             if qto:
                 area = _poly_area(coords)
                 peri = sum(math.hypot(coords[(j + 1) % len(coords)][0] - coords[j][0],
@@ -357,16 +384,88 @@ def build(geom_path, ifc_path, storey="Level", z_base=0.0, connect=False,
     connect=True 면 맞닿는 벽을 IFC 표준으로 연결해 코너를 마이터 처리."""
     with open(geom_path, encoding="utf-8") as f:
         data = json.load(f)
-    model = ifcopenshell.api.project.create_file()  # IFC4
+    return _build_verified(data, ifc_path, storey, z_base, connect, qto)
+
+
+def _build_verified(original, ifc_path, storey="Level", z_base=0.0, connect=False, qto=True):
+    from verify import verify_geometry, verify_build
+    prov = AV.provenance(original)
+    prov.update({"builder_path": os.path.abspath(__file__), "builder_sha256": AV.file_hash(__file__)})
+    dst = os.path.abspath(ifc_path)
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    report_path = os.path.splitext(dst)[0] + ".build.json"
+    # Invalidate any old receipt before preflight, unsupported-category checks,
+    # dependency/geometry creation, or export can fail.
+    initial = {"schema_version": 2, "provenance": prov, "status": "failed",
+               "runtime_errors": ["Build has not completed; see the raised build error"],
+               "artifacts": {"ifc": {"status": "failed", "path": None, "provenance": prov}}}
+    with open(report_path, "w", encoding="utf-8") as stream:
+        json.dump(initial, stream, ensure_ascii=False, indent=2)
+    unsupported = [c for c, rows in original.get("elements", {}).items()
+                   if rows and c not in ("wall", "column", "slab")]
+    if unsupported:
+        raise ValueError("Simple IFC does not support " + ", ".join(unsupported) +
+                         "; use the FreeCAD build for these categories")
+    pre = verify_geometry(original)
+    if pre.failed:
+        raise ValueError("Geometry preflight failed: " + pre.text())
+    for rec in original.get("elements", {}).get("slab", []):
+        if (rec.get("overrides") or {}).get("ifc_type", "Slab") != "Slab":
+            raise ValueError("Simple IFC slab type override is unsupported; use FreeCAD")
+    data = copy.deepcopy(original)
+    AV.prepare_records(data)
+    data["_build_provenance"] = prov
+    data["_expected_products"] = []
+    model = ifcopenshell.api.project.create_file()
     body, bld = _setup_project(model)
     if connect:
         _axis_context(model)
-    sto = _add_storey(model, bld, storey, z_base)
     sb = ifcopenshell.util.shape_builder.ShapeBuilder(model)
-    stats = _build_elements(model, body, sb, sto, data, z_offset=z_base,
-                            connect=connect, qto=qto)
-    model.write(ifc_path)
-    return stats
+    floors = original.get("floors") or [{"label": storey, "z": z_base}]
+    total = {"wall": 0, "column": 0, "slab": 0, "skip": 0, "qto": 0}
+    for fi, floor in enumerate(floors):
+        name = floor.get("label") or floor.get("storey") or f"Level_{fi+1}"
+        z = float(floor.get("z", 0))
+        sto = _add_storey(model, bld, name, z)
+        subset = dict(data)
+        if original.get("floors"):
+            subset["elements"] = {c: [r for r in rows if abs(GC.base_z(c, r)-z) < 100 and
+                                     (not r.get("level") or r["level"] in (floor.get("id"), name))]
+                                  for c, rows in data["elements"].items() if c in ("wall", "column", "slab")}
+        partial = _build_elements(model, body, sb, sto, subset,
+                    z_offset=0 if original.get("floors") else z_base, connect=connect, qto=qto)
+        for key, value in partial.items():
+            total[key] = total.get(key, 0) + value
+    products = {product.Name: product for product in model.by_type("IfcProduct")}
+    for expected in data["_expected_products"]:
+        expected["bbox_mm"] = AV.ifc_product_bounds(products[expected["name"]])
+    total.update({"schema_version": 2, "provenance": prov, "preflight": pre.to_dict(),
+                  "intent": {c: total[c] for c in ("wall", "column", "slab")},
+                  "built": {"walls": total["wall"], "columns": total["column"], "slabs": total["slab"]},
+                  "floor_orphans": 0, "floor_dups": 0, "invalid_shapes": 0, "bbox": None,
+                  "unbuilt": {"records": {"count": total["skip"]}} if total["skip"] else {},
+                  "expected_products": data["_expected_products"],
+                  "artifacts": {"ifc": {"status": "failed", "path": None, "provenance": prov}}})
+    try:
+        with tempfile.TemporaryDirectory(prefix="mep_ifc_", dir=os.path.dirname(dst)) as temp_dir:
+            temp_ifc = os.path.join(temp_dir, "model.ifc")
+            model.write(temp_ifc)
+            report = verify_build(original, total, temp_ifc, stage="post_export")
+            total["verify"] = report.to_dict()
+            total["verify_ifc"] = report.to_dict()
+            if report.failed:
+                raise ValueError("IFC artifact verification failed: " + report.text())
+            os.replace(temp_ifc, dst)
+            total["artifacts"]["ifc"] = AV.artifact_receipt(dst, prov)
+            total["status"] = "verified"
+        return total
+    except Exception as exc:
+        total["status"] = "failed"
+        total["runtime_errors"] = [str(exc)]
+        raise
+    finally:
+        with open(report_path, "w", encoding="utf-8") as stream:
+            json.dump(total, stream, ensure_ascii=False, indent=2)
 
 
 def build_multi(floors, ifc_path, connect=False, qto=True):
@@ -374,30 +473,32 @@ def build_multi(floors, ifc_path, connect=False, qto=True):
     → 층별 IfcBuildingStorey 를 가진 단일 IFC. 반환: 층별 stats 리스트.
 
     z 를 생략하면 이전 층 z + 이전 층 벽 param 높이로 자동 누적."""
-    model = ifcopenshell.api.project.create_file()
-    body, bld = _setup_project(model)
-    if connect:
-        _axis_context(model)
-    sb = ifcopenshell.util.shape_builder.ShapeBuilder(model)
-    type_cache = {}                 # 층 간 벽타입 공유(중복 생성 방지)
-    all_stats = []
+    merged = {"contract": GC.contract_block(), "floors": [], "elements": {}}
     z_auto = 0.0
-    for i, fl in enumerate(floors):
-        gp = fl["geometry"]
-        with open(gp, encoding="utf-8") as f:
-            data = json.load(f)
-        name = fl.get("storey") or f"Level_{i + 1}"
-        z = float(fl["z"]) if fl.get("z") is not None else z_auto
-        sto = _add_storey(model, bld, name, z)
-        stats = _build_elements(model, body, sb, sto, data, z_offset=z,
-                                connect=connect, type_cache=type_cache, qto=qto)
-        stats["storey"] = name
-        stats["z"] = z
-        all_stats.append(stats)
-        ph = float(data.get("params", {}).get("wall", {}).get("height", 2800.0))
-        z_auto = z + ph   # 다음 층 자동 레벨(명시 z 없을 때)
-    model.write(ifc_path)
-    return all_stats
+    for i, floor in enumerate(floors):
+        with open(floor["geometry"], encoding="utf-8") as stream:
+            data = json.load(stream)
+        from verify import verify_geometry
+        preflight = verify_geometry(data)
+        if preflight.failed:
+            raise ValueError("Geometry preflight failed: " + preflight.text())
+        z = float(floor["z"]) if floor.get("z") is not None else z_auto
+        name = floor.get("storey") or f"Level_{i+1}"
+        merged["floors"].append({"z": z, "label": name})
+        AV.prepare_records(data)
+        for cat, _, rec in AV.records(data):
+            rec["eid"] = name + ":" + rec["eid"]
+            rec["level"] = name
+            rec["z_base"] = GC.base_z(cat, rec) + z
+            rec["overrides"] = dict(rec.get("overrides") or {})
+            for dim in GC.DEFAULT_DIMS.get(cat, {}):
+                rec["overrides"].setdefault(dim, GC._dim(cat, dim, rec, data.get("params")))
+            if cat == "wall":
+                rec["overrides"]["width"] = GC.width_of(rec, data.get("params"))
+            merged["elements"].setdefault(cat, []).append(rec)
+        z_auto = z + GC.height_of({}, data.get("params"))
+    stats = _build_verified(merged, ifc_path, connect=connect, qto=qto)
+    return [dict(stats, storey=f["label"], z=f["z"]) for f in merged["floors"]]
 
 
 def _extrude_polygon(model, body, sb, coords_mm, depth_mm, z_mm, ifc_class, name):

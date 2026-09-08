@@ -24,6 +24,8 @@ import geom_contract as GC
 
 # 검사 카탈로그 — id: (기본 severity, 한 줄 설명)
 CHECKS = {
+    "V106": ("error", "필수 빌드 증거 누락 또는 미생성 요소"),
+    "V107": ("error", "현재 실행 IFC 형상/식별자/층/속성 검증 실패"),
     "V001": ("error", "floors[] 에 매칭되지 않는 구조 요소(빌드 시 어느 층에도 안 들어가 IFC 에서 누락)"),
     "V002": ("error", "두 개 이상의 floors[] 에 동시 매칭되는 요소(중복 삽입)"),
     "V003": ("error", "계약 위반 — 알 수 없는 카테고리 버킷, 계약 버전 불일치"),
@@ -32,6 +34,7 @@ CHECKS = {
     "V006": ("warn",  "되꺾인 벽 — baseline 이 180° 반전(빌더가 분할하지만 원인은 데이터)"),
     "V007": ("warn",  "미해결 — needs_review, single 페어링 비율, 미매핑 레이어"),
     "V008": ("warn",  "면선 커버리지 부족"),
+    "V009": ("error", "미적용 수정, 모호한 식별자 또는 수정 충돌"),
     "V101": ("error", "IFC 대조 — 카테고리별 레코드 수 대비 IFC 엔티티 수"),
     "V102": ("error", "층 소속 — 어느 Floor 에도 안 들어간 객체 / 두 Floor 에 들어간 객체"),
     "V103": ("error", "형상 검증 실패(isValid=False) 객체"),
@@ -115,6 +118,13 @@ def verify_geometry(data, policy=None):
     el = data.get("elements") or {}
     params = data.get("params")
     floors = data.get("floors") or []
+    edits_report = data.get("edits_report") or {}
+    unresolved = {key: edits_report[key] for key in ("orphaned", "ambiguous", "conflicts") if edits_report.get(key)}
+    for key in ("edit_conflicts", "conflicts"):
+        if data.get(key):
+            unresolved[key] = data[key]
+    if unresolved:
+        F.append(Finding("V009", "error", "Unresolved edits or ambiguous/conflicting identities must be resolved before verified export", unresolved))
 
     # V003 계약
     for issue in GC.check_contract(data):
@@ -131,6 +141,8 @@ def verify_geometry(data, policy=None):
             for i, rec in enumerate(el.get(cat) or []):
                 z = GC.base_z(cat, rec)
                 hits = [k for k, v in enumerate(fz) if abs(z - v) < _FLOOR_TOL]
+                if rec.get("level"):
+                    hits = [k for k in hits if rec["level"] in (floors[k].get("id"), floors[k].get("label"), floors[k].get("storey"))]
                 if not hits:
                     orphan.append({"cat": cat, "index": i, "z_base": z,
                                    "layer": rec.get("layer")})
@@ -169,7 +181,11 @@ def verify_geometry(data, policy=None):
         for i, rec in enumerate(el.get(cat) or []):
             pts = _pts(rec)
             why = None
-            if len(pts) < 2:
+            if cat == "column" and rec.get("kind") == "circle":
+                center = rec.get("center") or []
+                if len(center) < 2 or not all(math.isfinite(v) for v in center[:2]) or not math.isfinite(rec.get("radius", 0)) or rec.get("radius", 0) <= 0:
+                    why = "잘못된 원형 기둥 중심/반지름"
+            elif len(pts) < 2:
                 why = "정점 2개 미만"
             elif rec.get("closed") and len(pts) < 3:
                 why = "닫힌 폴리곤인데 정점 3개 미만"
@@ -317,18 +333,8 @@ def count_ifc_psets(ifc_path, name="Pset_MEPParser"):
 
 
 def count_ifc_entities(ifc_path):
-    """IFC STEP 텍스트에서 엔티티 수를 센다. ifcopenshell 있으면 그걸 쓰고,
-    없으면 평문 파싱(STEP 은 텍스트라 정직하게 셀 수 있다)."""
+    """Lightweight catalog count only; strict verification uses inspect_ifc."""
     counts = {}
-    try:
-        import ifcopenshell
-        f = ifcopenshell.open(ifc_path)
-        for key, names in _IFC_CAT_MAP.items():
-            counts[key] = sum(len(f.by_type(n.replace("IFC", "Ifc").replace("STANDARDCASE", "StandardCase")))
-                              for n in names)
-        return counts
-    except Exception:
-        pass
     try:
         with open(ifc_path, "r", encoding="utf-8", errors="ignore") as fh:
             txt = fh.read()
@@ -339,13 +345,65 @@ def count_ifc_entities(ifc_path):
     return counts
 
 
-def verify_build(data, build_stats, ifc_path=None, policy=None):
+def verify_build(data, build_stats, ifc_path=None, policy=None, stage=None):
     """build_stats: freecadcmd 쪽에서 생산하는 순수 dict.
       {intent:{wall,column,slab,beam}, built:{...}, floor_orphans:int,
        floor_dups:int, invalid_shapes:int, bbox:[x0,y0,z0,x1,y1,z1], clashes:[...]}"""
     policy = policy or (data.get("verify") or {}).get("severity") or {}
     F = []
     st = build_stats or {}
+    stage = stage or ("post_export" if ifc_path else "pre_export")
+    if stage not in ("catalog", "pre_export", "post_export"):
+        raise ValueError(f"Unknown validation stage: {stage}")
+    required = ("intent", "built", "floor_orphans", "floor_dups", "invalid_shapes", "bbox")
+    missing = [key for key in required if key not in st]
+    if missing and (stage != "catalog" or not st):
+        F.append(Finding("V106", "error", "Missing required build statistics", {"missing": missing}))
+    unbuilt = {c: v for c, v in (st.get("unbuilt") or {}).items()
+               if (v.get("count", 0) if isinstance(v, dict) else len(v))}
+    if unbuilt:
+        F.append(Finding("V106", "error", "Input records were not built", unbuilt))
+    if stage != "catalog":
+        F.extend(verify_geometry(data).findings)
+        from artifact_validation import input_hash
+        prov = st.get("provenance") or {}
+        if not prov.get("run_id") or prov.get("input_sha256") != input_hash(data):
+            F.append(Finding("V106", "error", "Missing or stale input/run provenance"))
+        if st.get("runtime_errors"):
+            F.append(Finding("V106", "error", "Runtime failed", {"errors": st["runtime_errors"]}))
+        # 개구부 판정은 세 갈래다. 종전에는 셋을 한 줄로 묶어 전부 error 로 올려,
+        # 붙일 벽이 없는 개구부 하나만 있어도 건물 전체가 납품 불가가 됐다.
+        for opening in st.get("opening_results") or []:
+            hosts = opening.get("requested_hosts") or []
+            cut = opening.get("cut_host_eids") or []
+            if hosts and not cut:
+                # 호스트를 지정해 놓고 하나도 못 뚫었다 = 약속한 구멍이 없다.
+                F.append(Finding("V106", "error", "Opening cut nothing", opening))
+            elif opening.get("failed_hosts"):
+                # 일부만 못 맞혔다. 링크는 후보 목록이라 정상적으로도 생길 수 있으니
+                # 납품을 막지는 않되, 조용히 넘기지도 않는다.
+                F.append(Finding("V106", "warn", "Opening missed some hosts", opening))
+        # 붙일 벽을 아예 못 찾은 개구부. 빌더가 못 한 일이 아니라 링크가 못 찾은
+        # 것이므로 납품을 막지 않는다 — 다만 **한 줄로 묶어서** 반드시 말한다.
+        # 개구부마다 하나씩 올리면(실측 15건) 보고서가 그걸로 덮인다.
+        _no_host = [o.get("eid") for o in (st.get("opening_results") or [])
+                    if not (o.get("requested_hosts") or [])]
+        if _no_host:
+            F.append(Finding("V106", "warn", "Openings found no host wall",
+                             {"count": len(_no_host), "eids": _no_host[:20]}))
+    if ifc_path and not os.path.isfile(ifc_path):
+        F.append(Finding("V107", "error", "IFC output is missing"))
+    if stage == "post_export":
+        try:
+            if not ifc_path or not os.path.isfile(ifc_path) or os.path.getsize(ifc_path) == 0:
+                raise ValueError("IFC output is missing or empty")
+            from artifact_validation import inspect_ifc
+            errors, mapping = inspect_ifc(data, st, ifc_path)
+            st["eid_map"] = mapping
+            for error in errors:
+                F.append(Finding("V107", "error", error))
+        except Exception as exc:
+            F.append(Finding("V107", "error", f"IFC verifier failed: {exc}"))
 
     # V102 층 소속
     orph, dup = int(st.get("floor_orphans", 0)), int(st.get("floor_dups", 0))
@@ -378,7 +436,7 @@ def verify_build(data, build_stats, ifc_path=None, policy=None):
                                  {"model": got, "input": want}))
 
     # V105 QA 속성 왕복 — 형상만 맞고 속성이 빠지면 뷰어 검수가 통째로 무의미해진다
-    if ifc_path and os.path.exists(ifc_path):
+    if stage == "catalog" and ifc_path and os.path.exists(ifc_path):
         n_built = sum(int(v) for k, v in (st.get("built") or {}).items()
                       if k in ("walls", "columns", "slabs", "beams"))
         n_pset = count_ifc_psets(ifc_path)
@@ -389,7 +447,7 @@ def verify_build(data, build_stats, ifc_path=None, policy=None):
                              {"built": n_built, "psets": 0}))
 
     # V101 IFC 대조
-    if ifc_path and os.path.exists(ifc_path):
+    if stage == "catalog" and ifc_path and os.path.exists(ifc_path):
         got = count_ifc_entities(ifc_path)
         intent = st.get("intent") or {}
         for cat, n_want in intent.items():
@@ -430,9 +488,9 @@ def main():
     print("[빌드 전 검사]")
     print(rep.text())
 
-    if a.build_stats and os.path.exists(a.build_stats):
-        st = json.load(open(a.build_stats, encoding="utf-8"))
-        rep2 = verify_build(data, st, a.ifc)
+    if a.build_stats or a.ifc:
+        st = json.load(open(a.build_stats, encoding="utf-8")) if a.build_stats and os.path.exists(a.build_stats) else {}
+        rep2 = verify_build(data, st, a.ifc, stage="post_export")
         print("[빌드 후 검사]")
         print(rep2.text())
         rep.findings += rep2.findings

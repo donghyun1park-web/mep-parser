@@ -14,12 +14,19 @@ datas = [
     ('layer_map.csv', '.'),
     ('block_map.csv', '.'),
     ('freecad_builder.py', '.'),     # freecadcmd 가 외부 프로세스로 읽음(있을 때만)
+    ('geom_contract.py', '.'),
+    ('verify.py', '.'),
+    ('artifact_validation.py', '.'),
     ('sample_plan.dxf', '.'),        # --selftest 스모크용
     ('vendor/three.module.js', 'vendor'),
     ('vendor/OrbitControls.js', 'vendor'),
+    ('vendor/edit_geometry.js', 'vendor'),
+    ('frontend/built', 'frontend/built'),
 ]
 binaries = []
 hiddenimports = ['preview', 'dxf_parser', 'element_id']
+hiddenimports += ['edit_review', 'project_store', 'project_server', 'freecad_runner']
+hiddenimports += ['source_drawing']
 
 # ezdxf/shapely 는 동적 import·바이너리(GEOS) 의존 → 전체 수집
 for _pkg in ('ezdxf', 'shapely'):

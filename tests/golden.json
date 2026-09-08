@@ -49,16 +49,15 @@
       "equipment": 6,
       "opening": 44,
       "slab": 8,
-      "wall": 682
+      "wall": 672
     },
     "duplicate_geometry_dropped": {
-      "column": 13
-    },
-    "eid_collisions": {
+      "column": 13,
       "wall": 10
     },
-    "eid_count": 820,
-    "eid_hash": "673801e19bc5",
+    "eid_collisions": {},
+    "eid_count": 810,
+    "eid_hash": "8dc781ab0661",
     "face_coverage_pct": 98,
     "floors": [
       0
@@ -76,7 +75,7 @@
       "상부골조": 4
     },
     "wall_pairing": {
-      "paired": 490,
+      "paired": 480,
       "single": 0,
       "single_offset": 154
     },
@@ -97,7 +96,7 @@
       "470": 1,
       "480": 2,
       "50": 26,
-      "500": 35,
+      "500": 25,
       "70": 1
     },
     "width_conflicts": 4

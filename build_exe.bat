@@ -11,11 +11,13 @@ cd /d "%~dp0"
 REM Python 3.11 우선, 없으면 기본 python
 py -3.11 -V >nul 2>&1 && (set "PY=py -3.11") || (set "PY=python")
 echo [1/3] 빌드 의존성 설치 (%PY%)
-%PY% -m pip install --upgrade ezdxf shapely pyinstaller || goto :err
+%PY% -m pip install --upgrade ezdxf shapely pyinstaller pytest || goto :err
 
 REM 깨진 .exe 를 만들지 않는다 — CI 없이 이 한 줄로 같은 효과를 낸다.
+REM 게이트는 pytest 로 돌린다. `run_all.py` 는 픽스처를 못 주어 테스트 48개를
+REM 건너뛰므로 게이트로 쓰기엔 반쪽이다(그것도 이제 스스로 실패로 끝난다).
 echo [2/3] 테스트
-%PY% testsun_all.py || goto :testerr
+%PY% -m pytest tests -q || goto :testerr
 
 echo [3/3] PyInstaller 빌드
 %PY% -m PyInstaller mep_parser.spec --noconfirm || goto :err

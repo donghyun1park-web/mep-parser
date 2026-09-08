@@ -17,6 +17,8 @@ import math
 import os
 import shutil
 import sys
+import tempfile
+import copy
 
 # Windows 한글 출력 크래시 방지
 if hasattr(sys.stdout, 'encoding') and sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
@@ -33,6 +35,7 @@ import Arch
 # z 기준면 규약은 geom_contract 에만 존재한다. 여기서 재구현하지 말 것.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import geom_contract as GC
+import artifact_validation as AV
 
 
 def vec(p, z=0.0):
@@ -49,6 +52,10 @@ MATERIALS_APPLIED = {}   # 재질명 → 부여된 객체 수(build.json 으로 
 # 카테고리 → 객체를 못 만든 레코드 목록. **비어 있어야 한다.**
 # 벽에서 이 카운터가 없던 동안 72개가 아무 경고 없이 빠진 채 납품될 수 있었다.
 UNBUILT = {}
+PROVENANCE = {}
+BUILT_RECORDS = {}
+OPENING_RESULTS = []
+OPENING_LEAVES = []
 
 
 def _material(obj, name):
@@ -73,7 +80,12 @@ def set_ifc_props(obj, rec):
     sec = rec.get("section") or {}
     vals = [
         # EID 는 Bonsai 에서 찾은 문제를 edits.json 으로 되돌리는 열쇠다.
-        ("EID",           "IfcIdentifier", rec.get("eid")),
+        ("EID",           "IfcText", rec.get("eid")),
+        ("SourceEIDs",    "IfcText", json.dumps(AV.source_eids(rec), ensure_ascii=False)),
+        ("RunId",         "IfcText", PROVENANCE.get("run_id")),
+        ("InputSHA256",   "IfcText", PROVENANCE.get("input_sha256")),
+        ("ProjectId",     "IfcText", str(PROVENANCE.get("project_id") or "")),
+        ("Revision",      "IfcText", str(PROVENANCE.get("revision") if PROVENANCE.get("revision") is not None else "")),
         ("Layer",         "IfcLabel",      rec.get("layer")),
         ("Level",         "IfcLabel",      rec.get("level")),
         ("MemberName",    "IfcLabel",      sec.get("name") or rec.get("member_name")),
@@ -88,6 +100,7 @@ def set_ifc_props(obj, rec):
     props = {k: f"{_PSET};;{t};;{v}" for k, t, v in vals if v not in (None, "")}
     try:
         obj.IfcProperties = props
+        BUILT_RECORDS[obj.Name] = rec
     except Exception as _pe:                      # IfcProperties 없는 객체(Part::Feature 등)
         print(f"  [warn] IFC 속성 부여 실패({getattr(obj, 'Label', '?')}): {_pe}")
 
@@ -149,6 +162,10 @@ def _chain_wall_segments(walls):
     def pt_key(p):
         return (round(p[0] / _CHAIN_SNAP), round(p[1] / _CHAIN_SNAP))
 
+    def compatible(a, b):
+        return (GC.width_of(a) == GC.width_of(b) and GC.z_range("wall", a) == GC.z_range("wall", b)
+                and a.get("level") == b.get("level"))
+
     # 열린 벽만 체이닝 대상
     open_idx = [i for i, w in enumerate(walls)
                 if not (w.get("closed") or w.get("pairing") == "closed")
@@ -180,7 +197,7 @@ def _chain_wall_segments(walls):
         while True:
             tail = chain_pts[-1]
             candidates = [x for x in ep_map.get(pt_key(tail), [])
-                          if x[0] not in visited]
+                          if x[0] not in visited and compatible(walls[start], walls[x[0]])]
             if not candidates:
                 break
             j, end = candidates[0]
@@ -198,7 +215,7 @@ def _chain_wall_segments(walls):
         while True:
             head = chain_pts[0]
             candidates = [x for x in ep_map.get(pt_key(head), [])
-                          if x[0] not in visited]
+                          if x[0] not in visited and compatible(walls[start], walls[x[0]])]
             if not candidates:
                 break
             j, end = candidates[0]
@@ -338,7 +355,7 @@ def build_walls(doc, walls, params):
         # 오결합이 정상 벽과 한 체인에 묶이는 순간 조용히 사라진다
         # (실측: geometry.json 의 thin_pair 55개 중 IFC 에 15개만 남았다).
         # 파서의 merge_collinear_walls 도 같은 규칙으로 needs_review 를 OR 한다.
-        chain_el = base_el
+        chain_el = dict(base_el)
         members = [open_walls[k] for k in chain_ids]
         flagged = [m for m in members if m.get("needs_review")]
         if flagged and not base_el.get("needs_review"):
@@ -354,10 +371,11 @@ def build_walls(doc, walls, params):
         # [실측] 겹치는 동일선상 벽이 체이닝되면 baseline 이 180° 되꺾여(A→B→A방향)
         # Arch.makeWall(align="Center") 의 오프셋이 폭주 → 좌표 1e7 규모의 깨진 솔리드 생성
         # (isValid()=True 라 탐지도 안 됨). 되꺾임 지점에서 잘라 각각 별도 벽으로 만든다.
-        subchains = _split_folded_chain(chain_pts)
+        subchains = _split_source_members(chain_pts, members)
+        created_before = len(objs)
         if len(subchains) > 1:
             n_folds += 1
-        for s_idx, sub_pts in enumerate(subchains):
+        for s_idx, (sub_pts, sub_eids) in enumerate(subchains):
             if len(sub_pts) < 2:
                 continue
             label = f"Wall_{c_idx}" if len(subchains) == 1 else f"Wall_{c_idx}_{s_idx}"
@@ -372,15 +390,21 @@ def build_walls(doc, walls, params):
                 wall.Placement.Base.z = z_base
                 wall.addProperty("App::PropertyString", "DxfId", "Metadata", "")
                 wall.DxfId = base_el.get("handle") or f"WALL_CHAIN_{c_idx}"
-                set_ifc_props(wall, chain_el)
+                part_el = dict(chain_el, eid=sub_eids[0], _artifact_source_eids=sub_eids)
+                part_el["needs_review"] = any(m.get("needs_review") for m in members if m["eid"] in sub_eids)
+                set_ifc_props(wall, part_el)
                 objs.append(wall)
                 src_els.append(base_el)
-                if s_idx == 0:
-                    for cid in chain_ids:
+                for cid in chain_ids:
+                    if open_walls[cid]["eid"] in sub_eids:
                         global_i = open_wall_global_indices[cid]
-                        idx_map[global_i] = wall
+                        idx_map.setdefault(global_i, []).append(wall)
             except Exception as e:
                 print(f"[warn] {label} 체인 생성 실패: {e}")
+        if len(objs) - created_before != len(subchains):
+            for member in members:
+                UNBUILT.setdefault("wall", []).append({"eid": member["eid"],
+                    "why": "One or more wall split pieces failed to build"})
     if n_folds:
         print(f"  [fix] 되꺾인 벽 체인 {n_folds}건 분할 (깨진 형상 방지)")
 
@@ -395,6 +419,26 @@ def build_walls(doc, walls, params):
              "why": f"pairing={el.get('pairing')} "
                     f"점{len(el.get('centerline') or el.get('points') or [])}개"})
     return objs, idx_map, src_els
+
+
+def _split_source_members(chain_pts, members):
+    """Preserve ordered segment ownership through reversals, including one source
+    split across several solids. Geometry overlap does not imply shared identity."""
+    owners = []
+    for member in members:
+        pts = member.get("centerline") or member.get("points") or []
+        owners.extend([member["eid"]] * sum(math.dist(a[:2], b[:2]) > 1e-6 for a, b in zip(pts, pts[1:])))
+    out, offset = [], 0
+    for pts in _split_folded_chain(chain_pts):
+        count = len(pts) - 1
+        eids = sorted(set(owners[offset:offset+count]))
+        if not eids:
+            raise ValueError("Wall split lost source segment ownership")
+        out.append((pts, eids))
+        offset += count
+    if offset != len(owners):
+        raise ValueError("Wall chain segment/source counts differ")
+    return out
 
 
 def _split_folded_chain(pts, cos_tol=-0.99):
@@ -482,7 +526,7 @@ def _opening_solids(op, params):
     return cutter, leaf, subtype
 
 
-def _add_leaf_feature(doc, leaf_shape, subtype, tag):
+def _add_leaf_feature(doc, leaf_shape, subtype, tag, return_object=False):
     """창틀/문짝 Part::Feature 추가 + IfcType 태깅. 라벨 반환."""
     feat = doc.addObject("Part::Feature",
                          f"{'Door' if subtype == 'door' else 'Window'}_{tag}")
@@ -498,7 +542,7 @@ def _add_leaf_feature(doc, leaf_shape, subtype, tag):
             target.IfcType = "Door" if subtype == "door" else "Window"
     except Exception:
         pass
-    return target.Label
+    return target if return_object else target.Label
 
 
 def cut_window_into_wall(doc, wall_obj, op, params, tag="live", add_leaf=True):
@@ -536,46 +580,110 @@ def build_openings(doc, openings, wall_idx_map, params):
     - subtype 없음     : 사각 void 만(기존 동작 보강). radius 없을 때 원통 폴백.
     recompute 이후·saveAs 이전 호출(비파라메트릭 cut). returns (n_void, n_leaf).
     좌표·솔리드 계산은 _opening_solids 로 cut_window_into_wall(라이브 단건)과 공유."""
-    if not openings:
-        return (0, 0)
-    n_void = 0
-    n_leaf = 0
-    log = ""
+    n_void = n_leaf = 0
+    applied = {}          # obj.Name â ì§ê¸ê¹ì§ ê·¸ ë²½ì ì ì©ë ì»¤í°ë¤ì í©
     for oi, op in enumerate(openings):
+        result = {"eid": op["eid"], "requested_hosts": op.get("wall_indices", []),
+                  "cut_host_eids": [], "failed_hosts": [], "cuts": [],
+                  "already_void": [], "leaf_built": False}
+        OPENING_RESULTS.append(result)
         try:
             cutter, leaf, subtype = _opening_solids(op, params)
-        except Exception as e:
-            print(f"[warn] opening_{oi} cutter 실패: {e}")
+        except Exception as exc:
+            result["failed_hosts"].append(str(exc))
             continue
-
-        # 벽 cut (개구부가 교차하는 모든 벽)
+        seen = set()
         for wi in op.get("wall_indices", []):
-            wobj = wall_idx_map.get(wi)
-            if wobj is None:
-                # 링크는 됐는데 그 벽의 객체가 없다 = 구멍이 안 뚫린 채 지나간다.
-                # 다른 분기는 전부 로그를 남기는데 여기만 조용했다.
-                log += f"[warn] opening_{oi}: 벽 {wi} 객체 없음 — void 건너뜀\n"
-                continue
-            try:
-                cut = wobj.Shape.cut(cutter)
-                if cut.isValid():
-                    wobj.Shape = cut
+            objects = wall_idx_map.get(wi, [])
+            if not isinstance(objects, list):
+                objects = [objects]
+            if not objects:
+                result["failed_hosts"].append({"wall_index": wi, "error": "host not built"})
+            changed = False
+            gaps = []
+            for obj in objects:
+                if obj.Name in seen:
+                    changed = True
+                    continue
+                try:
+                    before = obj.Shape.Volume
+                    overlap = obj.Shape.common(cutter).Volume
+                    if overlap <= 1e-6:
+                        # ì¬ë£ê° ìë¤ë ê²ì ë ê°ì§ë¤: ì ë¿ìê±°ë, **ì´ë¯¸ ëë ¸ê±°ë.**
+                        # ì¤ë¬´ ëë©´ì ê°ì ë¬¸ì ë ì´ì´ë§ë¤ ê·¸ë ¤ ê°êµ¬ë¶ê° ê²¹ì¹ë¤(ì¤ì¸¡: ë²½
+                        # íëì í­ 868Â·874Â·874mm ê°êµ¬ë¶ê° 44mm ê°ê²©ì¼ë¡ 3ê°). ë¨¼ì  ì¨ ì»¤í°ê°
+                        # ê·¸ ìë¦¬ë¥¼ ì´ë¯¸ ë¹ì ì¼ë©´ void ë **ì¡´ì¬íë¤** â ì¤í¨ë¡ ì¬ë¦¬ë©´
+                        # V106 ì´ ë©ì¤¦í ê±´ë¬¼ì ë©í ë¶ê°ë¡ ë§ë ë¤.
+                        prev = applied.get(obj.Name)
+                        if prev is not None and prev.common(cutter).Volume > 1e-6:
+                            result["already_void"].append(
+                                {"host_name": obj.Label,
+                                 "host_eids": AV.source_eids(BUILT_RECORDS[obj.Name])})
+                            result["cut_host_eids"].extend(
+                                AV.source_eids(BUILT_RECORDS[obj.Name]))
+                            seen.add(obj.Name)
+                            changed = True
+                            continue
+                        hb, cb = obj.Shape.BoundBox, cutter.BoundBox
+                        # ì ì ë¿ìëì§ë¥¼ ì«ìë¡ ë¨ê¸´ë¤. gap ì´ ììì¸ ì¶ì´ ë¨ì´ì§ ì¶ì´ê³ ,
+                        # ì ë¤ ììì¸ë° dist>0 ì´ë©´ bbox ë§ ê²ì¹ë ê¸°ì¸ì´ì§ ë²½ì´ë¤.
+                        gaps.append({"host": obj.Label,
+                            "dist_mm": round(obj.Shape.distToShape(cutter)[0], 2),
+                            "gap_mm": [
+                            round(max(cb.XMin - hb.XMax, hb.XMin - cb.XMax), 1),
+                            round(max(cb.YMin - hb.YMax, hb.YMin - cb.YMax), 1),
+                            round(max(cb.ZMin - hb.ZMax, hb.ZMin - cb.ZMax), 1)]})
+                        continue
+                    cut = obj.Shape.cut(cutter)
+                    if cut.isNull() or not cut.isValid() or before - cut.Volume <= 1e-6:
+                        raise ValueError("cut invalid or did not remove host volume")
+                    # Arch exporters regenerate wall solids from the baseline. A
+                    # Shape assignment alone loses the opening during IFC export.
+                    # Persist the cutter in Arch's subtraction graph instead.
+                    void = doc.addObject("Part::Feature", f"OpeningVoid_{oi}_{wi}")
+                    void.Shape = cutter
+                    obj.Subtractions = list(obj.Subtractions) + [void]
+                    doc.recompute()
+                    void.Visibility = False
+                    cut = obj.Shape
+                    if cut.isNull() or not cut.isValid() or before - cut.Volume <= 1e-6:
+                        raise ValueError("Arch subtraction failed to remove host volume")
+                    applied[obj.Name] = (cutter if obj.Name not in applied
+                                         else applied[obj.Name].fuse(cutter))
+                    seen.add(obj.Name)
+                    changed = True
                     n_void += 1
-                else:
-                    log += f"[warn] opening void 형상 오류: Wall_{wi}\n"
-            except Exception as e:
-                log += f"[warn] opening void 실패 Wall_{wi}: {e}\n"
-
-        # 문짝/창틀 솔리드 (개구부당 1회) — IfcType 태깅
+                    host_eids = AV.source_eids(BUILT_RECORDS[obj.Name])
+                    result["cut_host_eids"].extend(host_eids)
+                    result["cuts"].append({"host_name": obj.Label, "host_eids": host_eids,
+                        "before_volume_mm3": before, "after_volume_mm3": cut.Volume,
+                        "removed_volume_mm3": before-cut.Volume})
+                except Exception as exc:
+                    result["failed_hosts"].append({"wall_index": wi, "error": str(exc)})
+            if objects and not changed:
+                # 왜 안 닿았는지를 축별 간격으로 남긴다 — 양수인 축이 떨어진 축이고,
+                # 셋 다 음수면 bbox 는 겁치는데 솔리드가 안 닿은 것이다(벽 배향/두께).
+                result["failed_hosts"].append({"wall_index": wi,
+                    "error": "cutter did not intersect host", "gaps": gaps})
+        result["cut_host_eids"] = sorted(set(result["cut_host_eids"]))
         if leaf is not None:
             try:
-                _add_leaf_feature(doc, leaf, subtype, oi)
+                leaf_obj = _add_leaf_feature(doc, leaf, subtype, oi, return_object=True)
+                # Changing an Equipment's IfcType installs expressions before its
+                # Shape exists; FreeCAD 1.1 retains -inf IFC dimensions. Bind the
+                # known opening dimensions explicitly, in the native mm units.
+                for key, value in (("OverallHeight", float(op.get("height") or (2100 if subtype == "door" else 1200))),
+                                   ("OverallWidth", float(op.get("width") or float(op.get("radius", 450))*2))):
+                    if hasattr(leaf_obj, key):
+                        leaf_obj.setExpression(key, None)
+                        setattr(leaf_obj, key, value)
+                set_ifc_props(leaf_obj, op)
+                OPENING_LEAVES.append((leaf_obj, op))
+                result["leaf_built"] = True
                 n_leaf += 1
-            except Exception as e:
-                log += f"[warn] {subtype}_{oi} leaf 실패: {e}\n"
-    if log:
-        print(log, end="")
-    return (n_void, n_leaf)
+            except Exception as exc:
+                result["failed_hosts"].append({"error": "leaf: " + str(exc)})
+    return n_void, n_leaf
 
 
 def build_columns(doc, columns, params):
@@ -670,6 +778,7 @@ def build_beams(doc, beams, params):
     objs, src_els = [], []
     n_nosec = 0
     for i, el in enumerate(beams):
+        created_before = len(objs)
         if el.get("kind") != "polyline":
             continue
         z0, z1 = GC.z_range("beam", el, params)
@@ -683,7 +792,8 @@ def build_beams(doc, beams, params):
             n_nosec += 1
 
         # 축선→footprint 규칙은 geom_contract 가 단독 소유(preview 도 같은 식을 주입받는다)
-        for j, ring in enumerate(GC.beam_rings(el, params)):
+        rings = GC.beam_rings(el, params)
+        for j, ring in enumerate(rings):
             base = make_wire(GC.ccw(ring), True)
             if base is None:
                 continue
@@ -706,6 +816,9 @@ def build_beams(doc, beams, params):
                 bm.MemberName = str(nm)
             objs.append(bm)
             src_els.append(el)
+        if len(objs) - created_before != len(rings) or not rings:
+            UNBUILT.setdefault("beam", []).append({"eid": el.get("eid"),
+                "why": "One or more beam segments failed to build"})
     if n_nosec:
         print(f"  [!] 단면 미상 보 {n_nosec}개 — 기본단면으로 세움(일람표 매칭 필요)")
     return objs, src_els, n_nosec
@@ -738,6 +851,7 @@ def build_spaces(doc, zones, params):
             space = Arch.makeSpace([feat])
             space.Label = f"Space_{i}"
             space.IfcType = "Space"
+            set_ifc_props(space, el)
             objs.append(space)
             src_els.append(el)
         except Exception as e:
@@ -932,13 +1046,50 @@ def check_clashes(struct_objs, mep_objs, vol_tol=1.0):
 
 
 def main():
-    import traceback as _tb
+    import traceback
+    import io
+    class Tee:
+        def __init__(self, target):
+            self.target, self.buffer = target, io.StringIO()
+        def write(self, value):
+            self.buffer.write(value)
+            return self.target.write(value)
+        def flush(self):
+            self.target.flush()
+    oldout, olderr = sys.stdout, sys.stderr
+    out, err = Tee(oldout), Tee(olderr)
+    sys.stdout, sys.stderr = out, err
+    code, failure = 0, None
     try:
         _main_impl()
-    except Exception as _fatal:
-        print("[FATAL] 빌드 중 예외 발생:")
-        _tb.print_exc()
-        sys.exit(1)
+    except BaseException as exc:
+        code = int(exc.code or 0) if isinstance(exc, SystemExit) else 1
+        if code:
+            failure = str(exc)
+            traceback.print_exc()
+    finally:
+        sys.stdout, sys.stderr = oldout, olderr
+        base = os.environ.get("MEP_OUT") or (sys.argv[2] if len(sys.argv) > 2 else "out_model")
+        path = os.path.abspath(base + ".build.json")
+        stats = {}
+        try:
+            with open(path, encoding="utf-8") as stream:
+                previous = json.load(stream)
+            if previous.get("provenance", {}).get("run_id") == PROVENANCE.get("run_id") and PROVENANCE:
+                stats = previous
+        except (OSError, ValueError):
+            pass
+        stats.setdefault("provenance", dict(PROVENANCE))
+        stats.setdefault("artifacts", {k: {"status": "failed", "path": None} for k in ("fcstd", "ifc")})
+        stats["runtime"] = {"exit_code": code, "stdout": out.buffer.getvalue(), "stderr": err.buffer.getvalue()}
+        if failure:
+            stats.setdefault("runtime_errors", []).append(failure)
+            stats["status"] = "failed"
+        _write_json(path, stats)
+        if code:
+            print(f"BUILD_FAILED:{path}", flush=True)
+    if code:
+        raise SystemExit(code)
 
 
 def _main_impl():
@@ -951,6 +1102,26 @@ def _main_impl():
     print(f"[1/8] JSON 로드: {geom_path}")
     with open(geom_path, "r", encoding="utf-8") as f:
         data = json.load(f)
+    global PROVENANCE
+    PROVENANCE = AV.provenance(data)
+    if os.environ.get("MEP_BUILD_RUN_ID"):
+        PROVENANCE["run_id"] = os.environ["MEP_BUILD_RUN_ID"]
+    PROVENANCE.update({"builder_path": os.path.abspath(__file__), "builder_sha256": AV.file_hash(__file__)})
+    original_data = copy.deepcopy(data)
+    UNBUILT.clear()
+    BUILT_RECORDS.clear()
+    OPENING_RESULTS.clear()
+    OPENING_LEAVES.clear()
+    import verify as V
+    preflight = V.verify_geometry(data)
+    allow_errors = os.environ.get("MEP_ALLOW_ERRORS", "").strip().lower() not in ("", "0", "false")
+    if preflight.failed and not allow_errors:
+        _write_json(os.path.abspath(out_base + ".build.json"), {
+            "schema_version": 2, "provenance": PROVENANCE, "preflight": preflight.to_dict(),
+            "verify": preflight.to_dict(), "status": "failed", "artifacts": {
+                k: {"status": "failed", "path": None, "provenance": PROVENANCE} for k in ("fcstd", "ifc")}})
+        raise ValueError("Geometry preflight failed: " + preflight.text())
+    AV.prepare_records(data)
     params = data.get("params", {})
     el = data["elements"]
     print(f"  walls={len(el.get('wall',[]))} cols={len(el.get('column',[]))}"
@@ -1009,7 +1180,9 @@ def _main_impl():
             zb = float(el_r.get("z_base", el_r.get("elevation", 0.0)) or 0.0)
             _meta.setdefault(id(obj), (getattr(obj, "Label", "?"), zb))
             _hits.setdefault(id(obj), [])
-            if abs(zb - fz) < _FLOOR_TOL:
+            floor_match = not el_r.get("level") or el_r["level"] in (
+                floors_info[fi].get("id"), floors_info[fi].get("label"), floors_info[fi].get("storey"))
+            if abs(zb - fz) < _FLOOR_TOL and floor_match:
                 _hits[id(obj)].append(fi)
                 out.append(obj)
         return out
@@ -1024,8 +1197,13 @@ def _main_impl():
             _meta.setdefault(id(obj), (getattr(obj, "Label", "?"), elev))
             _hits.setdefault(id(obj), [])
             below = [k for k, z in enumerate(_fz_list) if z <= elev + _FLOOR_TOL]
-            owner = max(below, key=lambda k: _fz_list[k]) if below else \
-                min(range(len(_fz_list)), key=lambda k: abs(_fz_list[k] - elev))
+            if el_r.get("level"):
+                named = [k for k, floor in enumerate(floors_info) if el_r["level"] in
+                         (floor.get("id"), floor.get("label"), floor.get("storey"))]
+                owner = named[0] if len(named) == 1 else None
+            else:
+                owner = max(below, key=lambda k: _fz_list[k]) if below else \
+                    min(range(len(_fz_list)), key=lambda k: abs(_fz_list[k] - elev))
             if owner == fi:
                 _hits[id(obj)].append(fi)
                 out.append(obj)
@@ -1033,12 +1211,7 @@ def _main_impl():
 
     # MEP 도 그룹핑 대상에 넣는다 — 지금까지 src_els 가 없어 구조적으로 제외돼
     # IFC 에서 항상 누락됐다. elevation 을 z_base 자리에 넣어 동일하게 다룬다.
-    mep_src = []
-    for _cat in ("pipe", "duct", "tray", "equipment"):
-        for _r in el.get(_cat, []):
-            mep_src.append(_r)
-    if len(mep_src) != len(mep_objs):
-        mep_src = [{"elevation": 0.0}] * len(mep_objs)   # 개수 불일치 시 안전 폴백
+    mep_src = [BUILT_RECORDS[o.Name] for o in mep_objs]
 
     floor_containers = []
     for fi, finfo in enumerate(floors_info):
@@ -1082,6 +1255,14 @@ def _main_impl():
 
     print("[7/8] 문/창 3D (사각형 void + 문짝/창틀) + clash 검사")
     n_voids, n_leaf = build_openings(doc, el.get("opening", []), wall_idx_map, params)
+    if OPENING_LEAVES:
+        leaf_objs = [obj for obj, rec in OPENING_LEAVES]
+        leaf_src = [dict(rec, elevation=GC.base_z("opening", rec)) for obj, rec in OPENING_LEAVES]
+        for fi, floor in enumerate(floor_containers):
+            floor.Group = list(floor.Group) + _in_story(leaf_objs, leaf_src, fi)
+        doc.recompute()
+        _orphans = [_meta[k] for k, v in _hits.items() if not v]
+        _dups = [_meta[k] for k, v in _hits.items() if len(v) > 1]
     print(f"  개구부 void={n_voids}개, 문짝/창틀={n_leaf}개")
     struct_objs = walls + cols + slabs + beams
     clashes = check_clashes(struct_objs, mep_objs)
@@ -1115,7 +1296,8 @@ def _main_impl():
     # 종전에는 saveAs/IFC export 이후에 세고 경고만 했다 — 깨진 형상이 이미
     # 디스크에 쓰인 뒤였고 아무도 그 경고에 반응하지 않았다.
     try:
-        _bad = [o for o in doc.Objects if _shape_ok(o) is False]
+        _bad = [o for o in doc.Objects if _shape_ok(o) is False or
+                (o.Name in BUILT_RECORDS and _shape_ok(o) is not True)]
         n_err = len(_bad)
         # 개수만으로는 못 쫓는다 — 어느 객체가 왜 깨졌는지 이름과 함께 말한다.
         for _o in _bad[:10]:
@@ -1128,7 +1310,7 @@ def _main_impl():
                   f"base_len={None if _bl is None else round(_bl.Length, 1)})")
     except Exception as _ee:
         print(f"  [warn] 형상 검사 실패: {_ee}")
-        n_err = 0
+        raise RuntimeError("Shape verification failed") from _ee
 
     _bbox = None
     try:
@@ -1155,7 +1337,20 @@ def _main_impl():
         _t = str(getattr(_o, "IfcType", "") or "").strip().lower().replace(" ", "")
         if _t:
             _by_ifctype[_t] = _by_ifctype.get(_t, 0) + 1
+    built_eids = {eid for rec in BUILT_RECORDS.values() for eid in AV.source_eids(rec)}
+    for cat, i, rec in AV.records(data):
+        if cat == "opening":
+            continue
+        if rec["eid"] not in built_eids and not any(r.get("eid") == rec["eid"] for r in UNBUILT.get(cat, [])):
+            UNBUILT.setdefault(cat, []).append({"i": i, "eid": rec["eid"], "why": "No product built"})
     build_stats = {
+        "schema_version": 2, "provenance": dict(PROVENANCE), "preflight": preflight.to_dict(),
+        "expected_products": [{"name": doc.getObject(name).Label, "source_eids": AV.source_eids(rec),
+                               "volume_mm3": doc.getObject(name).Shape.Volume,
+                               "bbox_mm": _world_bounds(doc.getObject(name)),
+                               "qa": AV.qa_values(rec, PROVENANCE)}
+                              for name, rec in BUILT_RECORDS.items()],
+        "opening_results": list(OPENING_RESULTS),
         "intent": {"wall": _by_ifctype.get("wall", 0),
                    "column": _by_ifctype.get("column", 0),
                    "slab": _by_ifctype.get("slab", 0),
@@ -1179,141 +1374,104 @@ def _main_impl():
                      "volume_mm3": c.get("volume_mm3")} for c in (clashes or [])],
     }
 
-    # ── 게이트 ①: 저장 전 검사 ───────────────────────────────────────────────
-    # 실패하면 마커를 출력하지 않는다. GUI(mep_gui._build_done)와 MCP(build_freecad)는
-    # 둘 다 FCSTD_DST 마커가 있어야만 파일을 옮기므로, 마커를 withhold 하는 것만으로
-    # 소비자 코드 변경 없이 fail-closed 가 된다.
-    _allow = os.environ.get("MEP_ALLOW_ERRORS", "").strip() not in ("", "0", "false")
-    _rep = None
-    try:
-        import verify as _V
-        _rep = _V.verify_build(data, build_stats, None)
-    except Exception as _ve:
-        print(f"  [warn] 검증 모듈 로드 실패(게이트 미작동): {_ve}")
-
-    print("[8/8] 저장")
-    _HERE_B = os.path.dirname(os.path.abspath(__file__))
-    _stats_path = os.path.abspath(f"{out_base}.build.json")
-    if _rep is not None and _rep.failed and not _allow:
-        build_stats["verify"] = _rep.to_dict()
+    _stats_path = os.path.abspath(out_base + ".build.json")
+    build_stats["artifacts"] = {key: {"status": "failed", "path": None, "provenance": dict(PROVENANCE)}
+                                for key in ("fcstd", "ifc")}
+    _rep = V.verify_build(original_data, build_stats, stage="pre_export")
+    build_stats["verify"] = _rep.to_dict()
+    if _rep.failed and not allow_errors:
         _write_json(_stats_path, build_stats)
-        print("  [게이트] 저장 전 검사 실패 — 산출물을 내보내지 않는다:")
-        print(_rep.text())
-        print(f"BUILD_FAILED:{_stats_path}", flush=True)
-        print("  (검사를 무시하고 강제 저장하려면 MEP_ALLOW_ERRORS=1)")
-        sys.exit(2)
-    if _rep is not None and _rep.failed and _allow:
-        print("  [게이트] 검사 실패했으나 MEP_ALLOW_ERRORS=1 로 강제 진행:")
-        print(_rep.text())
-        build_stats["verify_status"] = "failed_override"
-
-    # ── saveAs: ASCII 임시경로 저장 → 호출자가 최종경로로 이동 ────────────────
-    # FreeCAD C++ saveAs 는 한글/공백 경로에서 조용히 실패하거나 빈 파일 생성.
-    # 임시파일명에 pid+시각을 넣어 동시 빌드 충돌을 막는다.
-    _tag = f"{os.getpid()}.{int(_time.time())}"
-    _tmp_fcstd = os.path.join(_HERE_B, f"_mep_tmp_out.{_tag}.FCStd")
-    _tmp_ifc   = os.path.join(_HERE_B, f"_mep_tmp_out.{_tag}.ifc")
-    print(f"  saveAs → {_tmp_fcstd}")
-    _saved_fcstd = False
-    try:
-        doc.saveAs(_tmp_fcstd)
-        _saved_fcstd = os.path.exists(_tmp_fcstd) and os.path.getsize(_tmp_fcstd) > 0
-        print(f"  파일 크기: {os.path.getsize(_tmp_fcstd) if _saved_fcstd else 0} bytes")
-    except Exception as _se:
-        print(f"[ERROR] saveAs 실패: {_se}")
-        import traceback as _tb2; _tb2.print_exc()
-
-    if _saved_fcstd:
-        print(f"FCSTD_TMP:{_tmp_fcstd}", flush=True)
-        print(f"FCSTD_DST:{os.path.abspath(fcstd)}", flush=True)
-    else:
-        print(f"[ERROR] FCStd 저장 실패 — 파일 없음: {_tmp_fcstd}", flush=True)
-
-    # IFC 내보내기 (임시 ASCII 경로 → 이동)
-    _exporter = None
-    for _imp in ("importers.exportIFC", "exportIFC", "importIFC"):
+        raise ValueError("Pre-export verification failed: " + _rep.text())
+    diagnostic = _rep.failed
+    # Writable unique directory, never the read-only installation/source directory.
+    os.makedirs(os.path.dirname(os.path.abspath(out_base)), exist_ok=True)
+    temp_parent = os.path.dirname(os.path.abspath(out_base))
+    with tempfile.TemporaryDirectory(prefix="mep_build_", dir=temp_parent if temp_parent.isascii() else None) as tmpdir:
+        tmp_fc = os.path.join(tmpdir, "model.FCStd")
+        tmp_ifc = os.path.join(tmpdir, "model.ifc")
         try:
-            mod = __import__(_imp, fromlist=["export"])
-            if hasattr(mod, "export"):
-                _exporter = mod
-                break
-        except Exception:
-            continue
-    _ifc_ok = False
-    _ifc_withheld = False       # 게이트가 IFC 를 보류했는가 — 이동 대상에서 제외
-    try:
-        if _exporter is None:
-            raise ImportError("IFC exporter 모듈을 찾지 못함")
-        _exporter.export([building], _tmp_ifc)
-        _ifc_ok = os.path.exists(_tmp_ifc)
-    except Exception as e:
-        print("[warn] IFC export 실패:", e, flush=True)
-
-    # ── 게이트 ②: IFC 는 별도 게이팅 ────────────────────────────────────────
-    # 전부-아니면-전무보다 낫다. 멀쩡한 FCStd 는 남기고 IFC 만 사유와 함께 보류한다.
-    if _ifc_ok:
-        _rep2 = None
+            doc.saveAs(tmp_fc)
+            if not os.path.isfile(tmp_fc) or os.path.getsize(tmp_fc) == 0:
+                raise ValueError("FCStd output missing or empty")
+            # FCStd is a zip: verify the persisted document, not just saveAs success.
+            import zipfile
+            with zipfile.ZipFile(tmp_fc) as archive:
+                if archive.testzip() or "Document.xml" not in archive.namelist():
+                    raise ValueError("Invalid FCStd archive")
+            validation_copy = os.path.join(tmpdir, "reopen.FCStd")
+            shutil.copy2(tmp_fc, validation_copy)
+            build_stats["fcstd_validation"] = _validate_saved_document(validation_copy, doc, build_stats["expected_products"])
+            dst = os.path.abspath(out_base + (".diagnostic" if diagnostic else "") + ".FCStd")
+            os.replace(tmp_fc, dst)
+            status = "diagnostic_nonverified" if diagnostic else "verified"
+            build_stats["artifacts"]["fcstd"] = AV.artifact_receipt(dst, PROVENANCE, status)
+            if not diagnostic:
+                print(f"FCSTD_DST:{dst}", flush=True)
+        except Exception as exc:
+            build_stats["artifacts"]["fcstd"]["error"] = str(exc)
         try:
-            import verify as _V2
-            _rep2 = _V2.verify_build(data, build_stats, _tmp_ifc)
-        except Exception:
-            pass
-        if _rep2 is not None and _rep2.failed and not _allow:
-            build_stats["verify_ifc"] = _rep2.to_dict()
-            print("  [게이트] IFC 검사 실패 — IFC 를 내보내지 않는다:")
-            print(_rep2.text())
-            print(f"IFC_FAILED:{_stats_path}", flush=True)
-            _ifc_withheld = True
-        else:
-            if _rep2 is not None:
-                build_stats["verify_ifc"] = _rep2.to_dict()
-                if _rep2.failed:
-                    print("  [게이트] IFC 검사 실패했으나 MEP_ALLOW_ERRORS=1 로 진행")
-            print(f"IFC_TMP:{_tmp_ifc}", flush=True)
-            print(f"IFC_DST:{os.path.abspath(ifc)}", flush=True)
-
-    if _rep is not None:
-        build_stats.setdefault("verify", _rep.to_dict())
+            exporter = None
+            for module_name in ("importers.exportIFC", "exportIFC", "importIFC"):
+                try:
+                    module = __import__(module_name, fromlist=["export"])
+                    if hasattr(module, "export"):
+                        exporter = module
+                        break
+                except ImportError:
+                    continue
+            if exporter is None:
+                raise ImportError("IFC exporter is unavailable")
+            # FreeCAD's fallback default is 1 metre after scaling; a 100 mm
+            # pipe became a four-sided prism (36% volume loss). Set a local
+            # 0.01 mm chord tolerance without changing the user's preferences.
+            original_representation = getattr(exporter, "getRepresentation", None)
+            original_attributes = getattr(exporter, "exportIfcAttributes", None)
+            if original_attributes:
+                def dimension_attributes(obj, kwargs, scale=0.001):
+                    attributes = original_attributes(obj, kwargs, scale)
+                    # 1.1's general attribute exporter only scales Elevation;
+                    # door/window positive length attributes also need IFC units.
+                    for key in ("OverallHeight", "OverallWidth"):
+                        if key in attributes and hasattr(obj, key):
+                            attributes[key] = float(getattr(obj, key).Value) * scale
+                    return attributes
+                exporter.exportIfcAttributes = dimension_attributes
+            if original_representation:
+                def precise_representation(*args, **kwargs):
+                    kwargs["tessellation"] = 0.00001
+                    if kwargs.get("preferences"):
+                        kwargs["preferences"] = dict(kwargs["preferences"], SERIALIZE=True)
+                    return original_representation(*args, **kwargs)
+                exporter.getRepresentation = precise_representation
+            try:
+                exporter.export([building], tmp_ifc)
+            finally:
+                if original_representation:
+                    exporter.getRepresentation = original_representation
+                if original_attributes:
+                    exporter.exportIfcAttributes = original_attributes
+            report = V.verify_build(original_data, build_stats, tmp_ifc, stage="post_export")
+            build_stats["verify_ifc"] = report.to_dict()
+            if report.failed and not allow_errors:
+                raise ValueError("IFC verification failed: " + report.text())
+            diagnostic_ifc = diagnostic or report.failed
+            dst = os.path.abspath(out_base + (".diagnostic" if diagnostic_ifc else "") + ".ifc")
+            os.replace(tmp_ifc, dst)
+            status = "diagnostic_nonverified" if diagnostic_ifc else "verified"
+            build_stats["artifacts"]["ifc"] = AV.artifact_receipt(dst, PROVENANCE, status)
+            if not diagnostic_ifc:
+                print(f"IFC_DST:{dst}", flush=True)
+        except Exception as exc:
+            build_stats["artifacts"]["ifc"]["error"] = str(exc)
+            import traceback
+            traceback.print_exc()
+            print(f"IFC_FAILED:{_stats_path}: {exc}", flush=True)
+    verified = all(a["status"] == "verified" for a in build_stats["artifacts"].values())
+    build_stats["status"] = "verified" if verified else "failed"
     _write_json(_stats_path, build_stats)
-
-    # ── 임시파일 → 최종경로 이동 ────────────────────────────────────────────
-    # 임시 ASCII 경로는 FreeCAD C++ saveAs 가 한글/공백 경로에서 조용히 실패하기
-    # 때문이고, 파이썬 이동은 그 제약이 없다. 종전엔 이동을 호출자(GUI/MCP)에만
-    # 맡겨서, CLAUDE.md 가 안내하는 freecadcmd 직접 실행에서는 "-> out.FCStd" 를
-    # 출력하고도 그 경로에 아무것도 없었다 — 성공을 보고하고 산출물이 없는 사례.
-    # 두 소비자 모두 이동 전에 os.path.exists(TMP) 를 확인하므로 여기서 먼저
-    # 옮겨도 안전하다(그쪽은 no-op 이 되고 DST 에서 파일을 찾는다).
-    def _deliver(tmp, dst):
-        if not (tmp and dst and os.path.exists(tmp)):
-            return None
-        try:
-            os.makedirs(os.path.dirname(os.path.abspath(dst)) or ".", exist_ok=True)
-            shutil.move(tmp, dst)
-            return dst
-        except Exception as _me:
-            print(f"  [warn] 최종경로 이동 실패({dst}): {_me} — 임시본 유지: {tmp}")
-            return None
-
-    _out_fcstd = _deliver(_tmp_fcstd if _saved_fcstd else None, os.path.abspath(fcstd))
-    _out_ifc = _deliver(_tmp_ifc if (_ifc_ok and not _ifc_withheld) else None,
-                        os.path.abspath(ifc))
-
-    print(f"빌드 완료: floors={len(floor_containers)} walls={len(walls)}"
-          f" columns={len(cols)} slabs={len(slabs)}"
-          + (f" beams={len(beams)}" if beams else "")
-          + f" spaces={len(spaces)} mep={len(mep_objs)}"
-          + (f" openings_void={n_voids}" if n_voids else "")
-          + (f" clashes={len(clashes)}" if clashes else ""))
-    # 실제로 그 경로에 있는 것만 산출물로 보고한다.
-    for _p in (_out_fcstd, _out_ifc, _stats_path):
-        if _p:
-            print(f"  -> {_p}")
-    if not _out_fcstd:
-        print("  [!] FCStd 산출물 없음 — 위 로그의 게이트/저장 실패 사유를 확인할 것")
-    elif not _out_ifc:
-        print("  [!] IFC 산출물 없음(게이트 보류 또는 export 실패)")
-    if n_err:
-        print(f"  [warn] 형상 검증 실패 객체 {n_err}개")
+    print(f"BUILD_{'VERIFIED' if verified else 'FAILED'}:{_stats_path}", flush=True)
+    if not verified:
+        raise SystemExit(2)
 
 
 def _write_json(path, obj):
@@ -1325,6 +1483,45 @@ def _write_json(path, obj):
             json.dump(obj, f, ensure_ascii=False, indent=1)
     except Exception as e:
         print(f"  [warn] build.json 저장 실패: {e}")
+
+
+def _world_bounds(obj):
+    shape = obj.Shape.copy()
+    shape.Placement = obj.getGlobalPlacement()
+    box = shape.BoundBox
+    return [box.XMin, box.YMin, box.ZMin, box.XMax, box.YMax, box.ZMax]
+
+
+def _validate_saved_document(path, original_doc, expected_products):
+    """Open a different pathname to avoid FreeCAD returning the already-open doc.
+    Recompute checks that persisted Arch cuts survive reopening rather than merely
+    checking the saved shape cache or ZIP structure."""
+    reopened = None
+    try:
+        reopened = App.openDocument(path)
+        if reopened is original_doc or reopened.Name == original_doc.Name:
+            raise ValueError("FCStd validation reused the active document")
+        reopened.recompute()
+        by_label = {obj.Label: obj for obj in reopened.Objects}
+        for expected in expected_products:
+            obj = by_label.get(expected["name"])
+            if obj is None or _shape_ok(obj) is not True:
+                raise ValueError(f"FCStd missing or invalid persisted shape: {expected['name']}")
+            if abs(obj.Shape.Volume-expected["volume_mm3"]) > max(1.0, expected["volume_mm3"]*1e-8):
+                raise ValueError(f"FCStd persisted volume/cut changed: {expected['name']}")
+            if any(abs(a-b) > 1 for a, b in zip(_world_bounds(obj), expected["bbox_mm"])):
+                raise ValueError(f"FCStd persisted world bounds changed: {expected['name']}")
+            props = getattr(obj, "IfcProperties", {})
+            for key in ("EID", "SourceEIDs", "RunId", "InputSHA256"):
+                if str(props.get(key, "")).split(";;", 2)[-1] != str(expected["qa"][key]):
+                    raise ValueError(f"FCStd persisted QA property changed: {expected['name']}/{key}")
+        return {"reopened": True, "recomputed": True, "shapes": len(expected_products),
+                "volume_absolute_tolerance_mm3": 1.0, "volume_relative_tolerance": 1e-8,
+                "bounds_tolerance_mm": 1.0}
+    finally:
+        if reopened is not None and reopened.Name != original_doc.Name:
+            App.closeDocument(reopened.Name)
+        App.setActiveDocument(original_doc.Name)
 
 
 def _shape_ok(o):

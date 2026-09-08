@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>MEP Parser — 3D 미리보기</title>
+<style>/*__STYLE__*/</style>
+</head>
+<body>
+<div id="app">
+  <div id="view">
+    <div id="toolbar">
+      <button id="b3d" class="active">3D</button>
+      <button id="btop">평면(Top)</button>
+      <button id="bfit">맞춤(Fit)</button>
+      <button id="bconf">신뢰도 색</button>
+      <button id="bwire">와이어</button>
+      <button id="bplace">창호 배치: OFF</button>
+    </div>
+    <div id="tabs">
+      <button id="tlinked" class="on">도면 + 3D</button>
+      <button id="t3d">3D 보기</button>
+      <button id="t2d">평면 편집</button>
+      <span id="tools2d">
+        <button data-m="select" class="on">선택/이동</button>
+        <button data-m="split">분할</button>
+        <button data-m="join">결합</button>
+        <button data-m="draw">벽 그리기</button>
+        <span id="floorwrap" class="muted">층 <select id="floor2d" style="width:auto;padding:3px"></select></span>
+        <span id="hint2d" class="muted"></span>
+      </span>
+    </div>
+    <div id="linkedWorkspace">
+      <section id="sourcePane" aria-label="원본 DXF 도면">
+        <div id="sourceBar"><b>원본 DXF</b><label>층 <select id="sourceFloor"></select></label><button id="sourceFit">맞춤</button></div>
+        <div id="sourceUnavailable" class="muted"></div>
+        <svg id="sourceView"><g id="sourceGeometry"></g><g id="sourceOverlay"></g></svg>
+      </section>
+      <div id="threeHost" aria-label="3D 해석 모델"><div id="legend"></div></div>
+    </div>
+    <svg id="view2d"><g id="g2d"></g></svg>
+    <div id="editSourceControls" aria-label="편집 화면 원본 DXF">
+      <div class="edit-source-options">
+        <label><input id="editSourceEnabled" type="checkbox" checked>원본 DXF 겹쳐 보기</label>
+        <label>진하기 <input id="editSourceOpacity" aria-label="원본 DXF 진하기" type="range" min="20" max="100" step="5" value="65"></label>
+      </div>
+      <div class="edit-source-legend">회색: 원본 DXF · 색상: 편집 벽 · 노란색: 선택한 벽</div>
+      <div id="editSourceStatus" role="status"></div>
+    </div>
+    <div id="err">3D 화면을 시작하지 못했습니다. 브라우저의 WebGL 지원을 확인하세요.</div>
+  </div>
+  <div id="panel">
+    <h2>3D 미리보기 <span class="muted" id="src"></span></h2>
+    <div id="counts"></div>
+    <section id="sectionControls">
+      <h3>수평 단면</h3>
+      <label><input id="sectionEnabled" type="checkbox"/> 위쪽 숨기기 (렌더링 전용)</label>
+      <div class="section-inputs"><input id="sectionRange" type="range"/><input id="sectionHeight" type="number" step="100"/><span>mm</span></div>
+      <div class="muted">CAD/IFC 절단면 또는 캡을 생성하지 않습니다.</div>
+    </section>
+    <section id="reviewSection">
+      <h3>검토 대기 (<span id="reviewCount">0</span>)</h3>
+      <div class="review-filters"><select id="reviewFloor"><option value="">모든 층</option></select><select id="reviewCategory"><option value="">모든 종류</option></select></div>
+      <div id="reviewList" class="muted">없음</div>
+    </section>
+    <h3>선택한 요소</h3>
+    <div id="noSel" class="muted">요소를 클릭하세요.</div>
+    <div id="editbox">
+      <div class="kv"><span>EID</span><span id="e_eid"></span></div>
+      <div class="kv"><span>레이어</span><span id="e_layer"></span></div>
+      <div class="kv"><span>신뢰도</span><span id="e_conf"></span></div>
+      <div id="e_why"></div>
+      <div class="row"><label>카테고리</label>
+        <select id="e_cat"></select></div>
+      <div class="row"><label>폭/지름 (mm)</label><input id="e_w" type="number"/></div>
+      <div class="row"><label>높이/두께 (mm)</label><input id="e_h" type="number"/></div>
+      <div class="row"><label><input type="checkbox" id="e_del" style="width:auto"/> 삭제</label></div>
+      <div class="row" id="reviewrow"><label><input type="checkbox" id="e_review" style="width:auto"/> 이 형상을 확인하고 검토 완료</label></div>
+      <button id="apply">수정 적용</button>
+      <div id="bulk"></div>
+    </div>
+    <h3>창호 배치 (반자동)</h3>
+    <div id="schedwrap">
+      <div class="row"><label>창호일람 선택</label>
+        <select id="sched"></select></div>
+      <div class="muted" id="placehint">‘창호 배치’ 켠 뒤 벽을 클릭하면 그 위치에 배치됩니다.</div>
+    </div>
+    <h3>이 도면에서 파서가 말한 것 (<span id="nwarn">0</span>)</h3>
+    <div id="warnbox" class="muted">없음</div>
+    <h3>수정 목록 (<span id="nedits">0</span>)</h3>
+    <div id="editlist" class="muted">없음</div>
+    <div id="savebar"><span id="savestatus">서버 연결 확인 중</span><br/>
+      <button id="retry">저장 다시 시도</button><button id="serverFresh">서버 최신본 열기</button></div>
+    <h3>연결이 끊긴 이전 수정 (<span id="norphans">0</span>)</h3>
+    <div id="orphans" class="muted">없음</div>
+    <button id="dl">edits.json 다운로드</button>
+    <div class="muted" id="roundtripHelp" style="margin-top:8px">재파싱 시:<br>
+      <code style="font-size:11px">dxf_parser.py plan.dxf -o geometry.json --edits edits.json</code></div>
+  </div>
+</div>
+
+<script id="mep-data" type="application/json">/*__DATA__*/</script>
+<script id="mep-contract">/*__CONTRACT__*/</script>
+<script id="mep-app">/*__APP__*/</script>
+</body>
+</html>

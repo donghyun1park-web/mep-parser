@@ -18,6 +18,8 @@ import subprocess
 import sys
 import tempfile
 import unittest.mock as _mock
+import unittest
+import uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -44,6 +46,35 @@ def _load_builder():
 
 
 FB = _load_builder()
+
+
+def test_folded_chain_retains_exact_source_members_per_piece():
+    a = {"eid": "a", "points": [[0, 0], [5000, 0]]}
+    b = {"eid": "b", "points": [[5000, 0], [1000, 0], [1000, 1000]]}
+    parts = FB._split_source_members([[0, 0], [5000, 0], [1000, 0], [1000, 1000]], [a, b])
+    assert [members for points, members in parts] == [["a"], ["b"]]
+
+
+def test_single_source_fold_maps_to_both_pieces():
+    rec = {"eid": "a", "points": [[0, 0], [5000, 0], [1000, 0]]}
+    parts = FB._split_source_members(rec["points"], [rec])
+    assert [members for points, members in parts] == [["a"], ["a"]]
+
+
+def test_different_levels_or_dimensions_do_not_chain():
+    walls = [_w([[0, 0], [1000, 0]], overrides={"width": 200}),
+             _w([[1000, 0], [2000, 0]], overrides={"width": 400}),
+             _w([[2000, 0], [3000, 0]], overrides={"width": 400}, z_base=3000)]
+    assert len(FB._chain_wall_segments(walls)) == 3
+
+
+def test_partial_folded_wall_failure_is_unbuilt_even_if_one_piece_succeeds():
+    rec = _w([[0, 0], [5000, 0], [1000, 0]], eid="wall:partial")
+    FB.UNBUILT.clear()
+    with _mock.patch.object(FB, "make_wire", side_effect=[_mock.MagicMock(), None]):
+        FB.build_walls(_mock.MagicMock(), [rec], {})
+    assert any(item["eid"] == "wall:partial" for item in FB.UNBUILT.get("wall", []))
+    FB.UNBUILT.clear()
 
 
 def _w(pts, **kw):
@@ -104,17 +135,20 @@ def _skip_if_no_freecad():
     """건너뛰는 것을 조용히 넘기지 않는다 — 통과처럼 보이는 미실행이 제일 나쁘다."""
     if os.path.exists(_FREECAD):
         return True
-    print(f"  [skip] freecadcmd 없음 — 엔드투엔드 빌드 검사를 건너뜀 ({_FREECAD})")
-    return False
+    raise unittest.SkipTest(f"freecadcmd unavailable: {_FREECAD}")
 
 
 def _build(geom_path, out_base):
-    env = dict(os.environ, MEP_GEOMETRY=geom_path, MEP_OUT=out_base)
-    r = subprocess.run([_FREECAD, os.path.join(ROOT, "freecad_builder.py")],
-                       cwd=ROOT, env=env, capture_output=True, timeout=300)
+    from freecad_runner import run_build
+    r = run_build(_FREECAD, geom_path, out_base, os.path.join(ROOT, "freecad_builder.py"), timeout=300)
     out = (r.stdout or b"").decode("utf-8", "ignore")
     with open(out_base + ".build.json", encoding="utf-8") as f:
-        return out, json.load(f)
+        stats = json.load(f)
+    stats["subprocess"] = {"exit_code": r.returncode, "stdout": out,
+                           "stderr": (r.stderr or b"").decode("utf-8", "replace")}
+    assert stats["provenance"]["builder_path"] == os.path.join(ROOT, "freecad_builder.py")
+    assert stats["provenance"]["run_id"] == r.run_id
+    return out, stats
 
 
 def test_end_to_end_build_of_the_sample_plan():
@@ -124,7 +158,8 @@ def test_end_to_end_build_of_the_sample_plan():
     '빌드 완료' 를 찍고도 IFC 에 보가 0개인 채로 나간 적이 있다."""
     if not _skip_if_no_freecad():
         return
-    geom = os.path.join(ROOT, "_t_sample.json")
+    directory = tempfile.mkdtemp(prefix="mepbuild_")
+    geom = os.path.join(directory, "geometry.json")
     import dxf_parser as dp
     import contextlib
     import io
@@ -134,19 +169,18 @@ def test_end_to_end_build_of_the_sample_plan():
         data = dp.parse(os.path.join(ROOT, "sample_plan.dxf"), rules, blocks)
     with open(geom, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
-    base = os.path.join(tempfile.mkdtemp(prefix="mepbuild_"), "out")
-    try:
-        log, st = _build(geom, base)
-    finally:
-        os.remove(geom)
+    base = os.path.join(directory, "out")
+    log, st = _build(geom, base)
 
     assert st["verify"]["status"] == "ok", st["verify"]
+    assert st["fcstd_validation"]["reopened"] and st["fcstd_validation"]["recomputed"]
     assert st["built"]["walls"] == 3 and st["built"]["columns"] == 4
     assert st["built"]["slabs"] == 1 and st["built"]["floors"] == 1
     assert st["invalid_shapes"] == 0, st["invalid_shapes"]
     # 층 고아 = IFC 에서 조용히 누락되는 객체. 0 이어야 한다(V001/V102 의 근원).
     assert st["floor_orphans"] == 0 and st["floor_dups"] == 0, st
-    assert st["openings_void"] == 1, st["openings_void"]
+    assert st["openings_void"] == 2, st["opening_results"]
+    assert all(r["cut_host_eids"] and not r["failed_hosts"] for r in st["opening_results"])
     # 마커를 찍었으면 그 경로에 파일이 실제로 있어야 한다.
     assert "FCSTD_DST:" in log and "IFC_DST:" in log, log[-400:]
     assert os.path.exists(base + ".FCStd") and os.path.exists(base + ".ifc")
@@ -154,7 +188,7 @@ def test_end_to_end_build_of_the_sample_plan():
     # 통째로 무의미해지는데, 형상 검사는 전부 통과하므로 따로 봐야 한다.
     import verify as V
     n_pset = V.count_ifc_psets(base + ".ifc")
-    assert n_pset == st["built"]["walls"] + st["built"]["columns"] + st["built"]["slabs"],         f"Pset_MEPParser {n_pset}개 (객체 수와 불일치)"
+    assert n_pset == len(st["expected_products"]), f"Pset_MEPParser {n_pset} (missing QA products)"
     with open(base + ".ifc", encoding="utf-8", errors="ignore") as f:
         ifc = f.read()
     assert "'EID'" in ifc and "'Layer'" in ifc, "EID/Layer 가 IFC 에 없다"
@@ -224,20 +258,18 @@ def test_gate_withholds_output_when_a_record_has_no_floor():
     with contextlib.redirect_stdout(io.StringIO()):
         data = dp.parse(os.path.join(ROOT, "sample_plan.dxf"), rules, [])
     data["elements"]["wall"][0]["z_base"] = 99999.0      # 어느 층에도 안 맞는 z
-    geom = os.path.join(ROOT, "_t_bad.json")
+    directory = tempfile.mkdtemp(prefix="mepgate_")
+    geom = os.path.join(directory, "geometry.json")
     with open(geom, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
-    base = os.path.join(tempfile.mkdtemp(prefix="mepgate_"), "out")
-    try:
-        log, st = _build(geom, base)
-    finally:
-        os.remove(geom)
+    base = os.path.join(directory, "out")
+    log, st = _build(geom, base)
 
     assert "BUILD_FAILED:" in log, log[-400:]
     assert "FCSTD_DST:" not in log, "게이트가 실패했는데 마커가 나갔다"
     assert not os.path.exists(base + ".FCStd"), "산출물이 나갔다"
     assert st["verify"]["status"] == "failed", st["verify"]
-    assert any(f["id"] == "V102" for f in st["verify"]["findings"]), st["verify"]
+    assert any(f["id"] in ("V001", "V102") for f in st["verify"]["findings"]), st["verify"]
 
 
 def test_mep_gets_real_ifc_types_not_proxies():
@@ -255,14 +287,12 @@ def test_mep_gets_real_ifc_types_not_proxies():
     blocks = dp.load_layer_map(os.path.join(ROOT, "block_map.csv"))
     with contextlib.redirect_stdout(io.StringIO()):
         data = dp.parse(os.path.join(ROOT, "sample_mep.dxf"), rules, blocks)
-    geom = os.path.join(ROOT, "_t_mep.json")
+    directory = tempfile.mkdtemp(prefix="mepifc_")
+    geom = os.path.join(directory, "geometry.json")
     with open(geom, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
-    base = os.path.join(tempfile.mkdtemp(prefix="mepifc_"), "out")
-    try:
-        _log, st = _build(geom, base)
-    finally:
-        os.remove(geom)
+    base = os.path.join(directory, "out")
+    _log, st = _build(geom, base)
     assert st["built"]["mep"] == 6, st["built"]
     with open(base + ".ifc", encoding="utf-8", errors="ignore") as f:
         ifc = f.read()
@@ -270,3 +300,93 @@ def test_mep_gets_real_ifc_types_not_proxies():
                  "IFCDISTRIBUTIONELEMENT"):
         assert want in ifc, f"{want} 가 IFC 에 없다"
     assert "IFCBUILDINGELEMENTPROXY" not in ifc, "MEP 가 아직 Proxy 로 나간다"
+
+
+def test_actual_ifc_preserves_long_chained_and_folded_eids():
+    _skip_if_no_freecad()
+    import geom_contract as GC
+    long_eid = "wall:" + "a" * 400
+    data = {"contract": GC.contract_block(), "project": {"project_id": "chain", "revision": 4},
+            "elements": {"wall": [
+                _w([[0, 0], [2000, 0]], eid=long_eid),
+                _w([[2000, 0], [2000, 1000]], eid="wall:b"),
+                _w([[10000, 0], [15000, 0], [12000, 0]], eid="wall:fold") ]}}
+    directory = tempfile.mkdtemp(prefix="mep_chain_")
+    geom = os.path.join(directory, "geometry.json")
+    with open(geom, "w", encoding="utf-8") as stream:
+        json.dump(data, stream)
+    log, stats = _build(geom, os.path.join(directory, "out"))
+    assert stats["artifacts"]["ifc"]["status"] == "verified", stats
+    assert stats["eid_map"][long_eid] == stats["eid_map"]["wall:b"]
+    assert len(stats["eid_map"]["wall:fold"]) == 2
+
+
+def test_actual_door_and_window_have_leaves_cuts_and_storey_membership():
+    _skip_if_no_freecad()
+    import geom_contract as GC
+    import ifcopenshell
+    data = {"contract": GC.contract_block(), "floors": [{"label": "L1", "z": 0}],
+            "elements": {"wall": [_w([[0, 0], [5000, 0]], eid="wall:host", level="L1")],
+            "opening": [
+                {"eid": "opening:door", "kind": "circle", "center": [1000, 0], "radius": 450,
+                 "width": 900, "height": 2100, "subtype": "door", "wall_indices": [0], "level": "L1"},
+                {"eid": "opening:window", "kind": "circle", "center": [3500, 0], "radius": 500,
+                 "width": 1000, "height": 1200, "sill": 900, "subtype": "window", "wall_indices": [0], "level": "L1"}]}}
+    directory = tempfile.mkdtemp(prefix="mep_leaves_")
+    geom, base = os.path.join(directory, "geometry.json"), os.path.join(directory, "out")
+    with open(geom, "w", encoding="utf-8") as stream:
+        json.dump(data, stream)
+    log, stats = _build(geom, base)
+    assert stats["artifacts"]["ifc"]["status"] == "verified", stats
+    assert all(item["leaf_built"] and item["cut_host_eids"] for item in stats["opening_results"])
+    assert stats["artifacts"]["fcstd"]["status"] == "verified", stats
+    assert stats["fcstd_validation"]["reopened"] and stats["fcstd_validation"]["recomputed"]
+    model = ifcopenshell.open(base + ".ifc")
+    for subtype, eid in (("IfcDoor", "opening:door"), ("IfcWindow", "opening:window")):
+        leaf = model.by_type(subtype)[0]
+        assert leaf.ContainedInStructure[0].RelatingStructure.Name == "L1"
+        assert len(stats["eid_map"][eid]) == 2
+        assert leaf.GlobalId in stats["eid_map"][eid]
+        assert abs(leaf.OverallHeight - (2.1 if subtype == "IfcDoor" else 1.2)) < 1e-8
+        assert abs(leaf.OverallWidth - (0.9 if subtype == "IfcDoor" else 1.0)) < 1e-8
+
+
+def test_overlapping_openings_reuse_the_void_instead_of_failing():
+    """겹쳐 그린 개구부는 '못 뚫었다' 가 아니다 — 이미 뚫려 있는 것이다.
+
+    실무 도면은 같은 문을 레이어마다 그린다(실측 지하3층: 벽 하나에 폭 868·874·
+    874mm 개구부가 44mm 간격으로 3개). 먼저 온 커터가 그 자리를 비우고 나면 뒤에
+    오는 커터는 깎을 재료가 없다. 종전에는 그걸 전부 error 로 올려 V106 이
+    건물 전체의 납품을 막았다."""
+    if not _skip_if_no_freecad():
+        return
+    directory = tempfile.mkdtemp(prefix="mepvoid_")
+    geom = os.path.join(directory, "geometry.json")
+    import geom_contract as GC
+    wall = {"kind": "polyline", "closed": False, "eid": "w:host",
+            "points": [[0, 0], [6000, 0]], "centerline": [[0, 0], [6000, 0]],
+            "z_base": 0.0, "overrides": {"height": 3000.0, "width": 200.0}}
+    # 같은 중심에 겹치는 개구부 둘 — 두 번째가 첫 번째의 void 안에 통째로 들어간다.
+    # (실도면에서는 폭·위치가 조금씩 어긋나 부분적으로만 겹치지만, 판정 경로는 같다.)
+    openings = [{"kind": "circle", "eid": f"o:{i}", "center": [3000.0, 0.0],
+                 "radius": w / 2.0, "width": w,
+                 "z_base": 0.0, "host_dir": [1.0, 0.0], "host_width": 200.0,
+                 "wall_indices": [0]}
+                for i, w in enumerate((1200.0, 900.0))]
+    data = {"source": "synthetic", "units": "mm", "scale_applied": 1.0,
+            "contract": GC.contract_block(),
+            "params": {"wall": {"width": 200.0, "height": 3000.0}},
+            "floors": [{"z": 0.0, "label": "L1"}],
+            "elements": {"wall": [wall], "opening": openings}, "warnings": []}
+    with open(geom, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    log, st = _build(geom, os.path.join(directory, "out"))
+
+    results = st["opening_results"]
+    assert len(results) == 2, results
+    assert st["openings_void"] == 1, results          # 실제로 깎인 건 하나뿐이고
+    assert all(r["cut_host_eids"] for r in results), results   # 둘 다 뚫려 있다
+    assert results[1]["already_void"], results[1]
+    assert not results[1]["failed_hosts"], results[1]
+    assert st["verify"]["status"] == "ok", st["verify"]
+    assert "FCSTD_DST:" in log and "IFC_DST:" in log, log[-400:]

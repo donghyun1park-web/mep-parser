@@ -131,13 +131,14 @@ def test_review_resolved_is_not_re_flagged_by_the_machine():
     파서가 마지막에 `review_resolved` 를 보고 되돌린다."""
     els = {"wall": [{"eid": "w:x", "kind": "polyline", "points": [[0, 0], [1, 0]],
                      "needs_review": True, "review_reason": "thin_pair"}]}
-    apply_edits(els, {"w:x": {"review_resolved": True}})
+    from element_id import capture_edit, finalize_reviews
+    edit = capture_edit(els['wall'][0], {'review_resolved': True}, 'wall')
+    apply_edits(els, {"w:x": edit})
+    finalize_reviews(els)
     r = els["wall"][0]
     assert r["needs_review"] is False and r["review_resolved"] is True, r
     r["needs_review"] = True          # 주입 뒤 검사가 다시 켠 상황
-    for rec in els["wall"]:           # parse() 끝의 되돌리기 스윕과 같은 규칙
-        if rec.get("review_resolved") and rec.get("needs_review"):
-            rec["needs_review"] = False
+    finalize_reviews(els)             # unchanged context stays acknowledged
     assert els["wall"][0]["needs_review"] is False
 
 

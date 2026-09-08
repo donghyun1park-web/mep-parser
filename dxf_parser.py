@@ -122,6 +122,10 @@ WIDTH_CONFLICT_REL = 0.15
 # 잡힌 것이다(진짜 문은 블록 INSERT 안에 있었다). 크기 분포가 이봉이라
 # 200~600mm 구간이 통째로 비어 있고, 그 골 아래를 자른다.
 # 배관 슬리브(50~200mm)는 살린다 — MEP 도면에서 그건 진짜 개구부다.
+# 빌더 커터의 여유 깊이(mm). `freecad_builder._opening_solids` 의 margin 과 **같아야 한다** —
+# 커터는 깊이 `host_width + 이 값` 인 상자다. 링크가 커터보다 관대하면 '호스트로 붙여
+# 놓고 커터는 못 닿는' 개구부가 생기고, 그건 구멍이 안 뚫린 채 실패로만 남는다.
+OPENING_CUT_MARGIN_MM = 100.0
 OPENING_MIN_SIZE_MM = 50.0
 
 WALL_PAIR_CLAIM_FRAC = 0.6    # [interval-greedy] 겹침구간이 이 비율 이상 이미 점유됐으면
@@ -1638,12 +1642,21 @@ def drop_tiny_openings(elements, min_size=None):
 
 def link_openings_to_walls(elements, params):
     """각 opening이 교차하는 벽 index 목록을 opening["wall_indices"]에 기록.
-    판정: opening 중심→벽 중심선 수직거리 < opening 반경 + 벽두께/2 + 10mm 여유."""
+
+    판정은 **벽 자신의 축 기준**으로 수직·축방향을 분리한다:
+      수직  ≤ 벽 반두께 + 커터 반깊이            (커터가 그 벽에 닿는가)
+      축이탈 ≤ 개구부 반폭                       (벽 구간 안이거나 끝을 걸치는가)
+
+    빌더의 커터는 '개구부 폭 × 벽두께' 짜리 얇은 상자다. 수직으로 벗어난 벽은
+    아무리 가까워도 잘리지 않으므로, 여기서 붙여 봐야 '호스트인데 안 뚫림' 으로
+    남을 뿐이다. 그 상태가 V106 으로 납품을 막았다."""
     openings = elements.get("opening", [])
     walls = elements.get("wall", [])
     # 스키마 기본값(벽 유무와 무관하게 항상 설정 → build_openings 일관성)
     for op in openings:
-        op.setdefault("wall_indices", [])
+        op['wall_indices'] = []
+        op.pop('host_dir', None)
+        op.pop('host_width', None)
         if not op.get("center"):
             try:
                 cen = _centroid(op)
@@ -1677,31 +1690,67 @@ def link_openings_to_walls(elements, params):
         if op.get("sill") is None:
             op["sill"] = 0.0 if op.get("subtype") == "door" else 900.0
             assumed.append("sill")
+        assumed = sorted(set(assumed + list(op.get('dims_assumed') or [])))
+        assumed = [key for key in assumed if (op.get('overrides') or {}).get(key) is None]
         if assumed:
-            op["dims_assumed"] = assumed
+            op['dims_assumed'] = assumed
+        else:
+            op.pop('dims_assumed', None)
     if not openings or not walls:
         return
     default_w = float(params.get("wall", {}).get("width", 200.0))
     for op in openings:
         c = op.get("center") or [0, 0]
         cx, cy = float(c[0]), float(c[1])
-        r = float(op.get("radius", 50.0))
+        r = float((op.get('overrides') or {}).get('width', op.get('width', 2 * op.get('radius', 50.0)))) / 2
         indices = []
         nearest = (1e18, None, default_w)  # (거리, 벽방향단위벡터, 벽두께)
         for i, wall in enumerate(walls):
+            if op.get('level') and wall.get('level') and op['level'] != wall['level']:
+                continue
+            wz0, wz1 = _GC.z_range('wall', wall, params)
+            oz = _GC.base_z('opening', op) + float((op.get('overrides') or {}).get('sill', op.get('sill', 0)))
+            oh = _GC.height_of(op, params, 'opening')
+            if oz >= wz1 or oz + oh <= wz0:
+                continue
             cl = wall.get("centerline") or wall.get("points", [])
             if len(cl) < 2:
                 continue
-            ww = float(wall.get("width_detected")
-                       or wall.get("overrides", {}).get("width", default_w))
-            dist = _pt_to_seg_dist(cx, cy,
-                                   float(cl[0][0]), float(cl[0][1]),
-                                   float(cl[-1][0]), float(cl[-1][1]))
-            if dist < r + ww * 0.5 + 10.0:
+            ww = _GC.width_of(wall, params, 'wall')
+            segments = list(zip(cl, cl[1:]))
+            if wall.get('closed') and cl[-1] != cl[0]:
+                segments.append((cl[-1], cl[0]))
+            # ★ 수직·축방향을 **분리해서** 본다. 종전에는 수직거리 하나를
+            #   `r + 두께/2 + 10` 과 비교했는데, r 은 개구부가 **벽을 따라** 뻗는
+            #   반폭이라 수직 허용치로 쓰면 안 된다. 폭 8m 개구부가 4.2m 떨어진
+            #   벽을 물었고, 빌더의 커터(깊이 = 벽두께)는 거기 절대 닿지 못했다.
+            #   그렇게 붙은 '호스트' 는 구멍이 안 뚫린 채 실패로만 남았다.
+            #     · perp — 벽 두께 안에 들어와야 한다(블록 앵커가 벽면에 물린
+            #       경우까지 커터 반깊이로 덮는다)
+            #     · over — 벽 구간을 벗어난 정도. 개구부 반폭까지는 허용한다
+            #       (벽 끝을 걸치는 개구부는 실제로 그 벽을 자른다)
+            best = None
+            for a, b in segments:
+                ux, uy, ln = _seg_dir(a, b)
+                if ln <= 0:
+                    continue
+                sx, sy = cx - a[0], cy - a[1]
+                along = sx * ux + sy * uy
+                perp = abs(-sx * uy + sy * ux)
+                over = max(0.0, -along, along - ln)
+                if best is None or perp < best[0]:
+                    best = (perp, over, (ux, uy))
+            if best is None:
+                continue
+            perp, over, udir = best
+            # 벽과 커터 **둘 다 두께가 있다.** 닿는 조건은 두 반두께의 합이다:
+            #   벽 반두께(ww/2) + 커터 반깊이((ww + margin)/2)
+            # 한쪽만 보면 실제로 잘리는 벽을 놓친다(400mm 벽 밖 350mm 개구부).
+            reach = ww * 0.5 + (ww + OPENING_CUT_MARGIN_MM) * 0.5
+            if perp <= reach and over <= r:
                 indices.append(i)
-                if dist < nearest[0]:
-                    ux, uy, _ln = _seg_dir(cl[0], cl[-1])
-                    nearest = (dist, (ux, uy), ww)
+                if perp < nearest[0]:
+                    nearest = (perp, udir, ww)
         op["wall_indices"] = sorted(indices)
         # host 벽 배향(문/창 사각 void 방향 산출용)
         if nearest[1] is not None:
@@ -2132,7 +2181,7 @@ def apply_member_schedule(msp, layers, elements):
 
 def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAMS,
           use_ai=False, use_vision=False, api_key=None, ai_threshold=0.8,
-          ext_schedule=None, member_schedule=None, edits=None):
+          ext_schedule=None, member_schedule=None, edits=None, level_height=None):
     """DXF → geometry.json dict.
     use_ai: 텍스트 LLM 분류 + 고신뢰 자동적용. use_vision: Vision 폴백.
     ai_threshold: best_classification confidence 이 값 초과면 자동 카테고리 적용.
@@ -2448,6 +2497,7 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         for _rec in _recs:
             sigs = _rec.pop("_sigs", None) or [raw_entity_sig(_rec)]
             span = [x for x in (_rec.pop("_span_sigs", None) or []) if x]
+            _rec["source_signatures"] = list(sigs)
             _rec.pop("_parse_opts", None)      # 파서 전용 — 출력에는 싣지 않는다
             if _rec.get("eid"):
                 continue          # 수동 레코드(edits 주입) — 사용자 ID 를 덮지 않는다
@@ -2456,6 +2506,29 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
                 # 옛 공식(_sigs 만)으로 만든 ID. 구 edits.json 을 이어받는 데만 쓰고
                 # 다음 릴리스에서 지운다. 없는 카테고리는 애초에 충돌이 없었다.
                 _rec["eid_v1"] = element_eid(prefix, sigs)
+
+    # ★ EID 도 좌표도 완전히 같은 벽은 **같은 벽 하나**다. 실측(지하3층): A-CON 에서
+    #   10쌍이 그렇게 나왔다 — 폭 495.273mm 까지 소수점이 같고 원본 엔티티 시그니처도
+    #   같다. 형상은 멀쩡해 보이고 두 개가 겹쳐 서 있어 물량만 두 배가 된다.
+    #   `drop_duplicate_geometry` 를 벽에 그냥 쓰지 않는 이유는 축선만 같고 두께가
+    #   다른 쌍(450 vs 400mm)을 조용히 고르게 되기 때문인데, 여기는 EID 까지 같으니
+    #   '같은 원본에서 두 번 만들어졌다' 가 증명된다 — 고를 것이 없다.
+    #   개구부 링크(위치 인덱스)보다 앞이어야 하고, `apply_edits` 의 ambiguous 보고가
+    #   진짜 모호한 것만 가리키도록 그보다도 앞이다.
+    _wall_seen, _wall_keep, _wall_dups = set(), [], {}
+    for _rec in result["elements"].get("wall", []):
+        _k = (_rec.get("eid"), _geom_key(_rec))
+        if _k in _wall_seen:
+            _lay = _rec.get("layer", "")
+            _wall_dups[_lay] = _wall_dups.get(_lay, 0) + 1
+            continue
+        _wall_seen.add(_k)
+        _wall_keep.append(_rec)
+    if _wall_dups:
+        result["elements"]["wall"] = _wall_keep
+        result.setdefault("duplicate_geometry_dropped", {})["wall"] = _wall_dups
+        print(f"  [wall] EID·좌표까지 같은 중복 {sum(_wall_dups.values())}개 드롭: "
+              f"{_wall_dups} (남은 것 {len(_wall_keep)}개)")
 
     # EID 는 수정 주입보다 **먼저** 부여한다 — `apply_edits` 가 EID 로 찾기 때문.
     # 산정 입력(_sigs·_span_sigs)은 레코드 생성 시점에 붙으므로 여기서 계산해도
@@ -2473,6 +2546,19 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
     #   삭제·카테고리 이동으로 벽 목록이 밀린 뒤에 링크해야 제 벽을 가리킨다.
     #   종전에는 파싱이 다 끝난 뒤 main() 에서 적용해서, 벽 하나를 지우면 그 뒤
     #   개구부들이 엉뚱한 벽에 구멍을 뚫었다(경고 없음).
+    # A floor height is a project default. Apply it before explicit saved edits,
+    # so individual corrections and their review fingerprints see the final value.
+    if level_height is not None:
+        h = float(level_height)
+        if not math.isfinite(h) or h <= 0:
+            raise ValueError('층 높이는 유한한 양수여야 합니다')
+        changed = 0
+        for cat in ('wall', 'column', 'zone'):
+            for rec in result['elements'].get(cat, []):
+                ov = rec.setdefault('overrides', {})
+                changed += ov.get('height') is not None and float(ov['height']) != h
+                ov['height'] = h
+        result['level_height_overrode'] = changed
     if edits:
         from element_id import apply_edits
         result["edits_report"] = _rep = apply_edits(result["elements"], edits)
@@ -2665,17 +2751,17 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
                 f"[계단 의심] 레이어 '{_ly}': 짧은 벽 {_cnt}개 (<{int(_STAIR_LEN_THRESHOLD)}mm). "
                 "계단/장식선이면 layer_map.csv 에서 카테고리를 'slab' 으로 변경하세요.")
 
-    # 사용자가 "검토 완료" 로 표시한 것은 기계가 다시 켜지 않는다.
-    # thin_pair·width_conflict 같은 검사는 주입 뒤에 돌기 때문에, 여기서 한 번
-    # 되돌린다. 안 그러면 검토 목록이 영원히 안 줄어들어 루프가 무의미해진다.
-    _n_res = 0
-    for _recs in result["elements"].values():
-        for _r in _recs:
-            if _r.get("review_resolved") and _r.get("needs_review"):
-                _r["needs_review"] = False
-                _n_res += 1
-    if _n_res:
-        print(f"  [edits] 검토 완료 표시로 needs_review 해제 {_n_res}건")
+    if edits:
+        from element_id import finalize_reviews, suggest_relink
+        from edit_review import annotate_edit_diagnostics
+        annotate_edit_diagnostics(result['elements'], params)
+        _report = result['edits_report']
+        _report['stale_reviews'] = finalize_reviews(result['elements'], params)
+        _report['relink_suggestions'] = suggest_relink(
+            _report.get('orphaned', []), edits, result['elements'])
+        if result.get('qa'):
+            result['qa']['needs_review'] = sum(bool(r.get('needs_review'))
+                for records in result['elements'].values() for r in records)
 
     # 실제 적용된 튜닝값을 파일이 스스로 기록한다 — 몽키패치 방지 장치.
     # (보 페어링이 안 되던 시절, 모듈 전역을 런타임에 덮어써서 우회했고

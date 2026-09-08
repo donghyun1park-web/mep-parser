@@ -14,6 +14,7 @@ import datetime
 import os
 import sys
 import tempfile
+import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -29,8 +30,7 @@ except ImportError:
 def _skip():
     if ifcopenshell is not None:
         return False
-    print("  [skip] ifcopenshell 없음 — 4D 공정 검사를 건너뜀")
-    return True
+    raise unittest.SkipTest('ifcopenshell 없음 — 4D 공정 검사 미실행')
 
 
 def _mini_ifc(path):

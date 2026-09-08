@@ -25,7 +25,11 @@
 | `freecad_builder.py` | geometry.json → FreeCAD .FCStd + .ifc |
 | `ifc_4d.py` | **공정표(CSV) → IFC 공정.** 이미 만들어진 `.ifc` 에 `IfcWorkSchedule`/`IfcTask` 를 얹고 층별로 부재를 연결한다. 4D 재생은 Bonsai 가 하고 **"이 공정이 이 층의 부재들"** 이라는 연결만 우리가 만든다. `ifcopenshell` 필요(선택 의존성 — Bonsai 안에 이미 있다) |
 | `element_id.py` | **EID(원본 raw 좌표 기반 식별자) + 수정 사이드카 라운드트립** — 파라미터 변경에 불변, grouping 변경 시에만 EID 변경. `apply_edits()`로 재파싱 후 수정 보존. |
-| `preview.py` | **FreeCAD 없는 즉석 3D 미리보기** — geometry.json/DXF → 자립 `*_preview.html`(three.js). 카테고리·신뢰도 색 오버레이 + 요소 클릭 수정→`edits.json` 다운로드(EID 기반). |
+| `preview.py` + `frontend/src/` + `vendor/edit_geometry.js` | **Vite/Three.js 3D·원본 DXF 비교·평면 편집.** GUI 연결 미리보기는 프로젝트에 자동 저장한다. 동봉된 `frontend/built/`로 인터넷·Node 없이 실행하며 독립 HTML에서는 수정 파일을 내보낸다. |
+| `source_drawing.py` | 원본 DXF 도형을 읽는 표시 전용 경로. 층별 원본에 조립 오프셋을 적용하며 미지원·제한 생략을 표시한다. IFC 입력 형상을 바꾸지 않는다. |
+| `project_store.py` + `project_server.py` | **수정의 단일 저장소.** 프로젝트 revision, 원자적 저장·백업·복구, 층별 로컬 EID, GUI/브라우저/MCP 공통 처리, 인증된 PC 내부 HTTP 연결. |
+| `edit_review.py` | 수동 편집 뒤 접합 틈·겹침·개구부 연결 진단. 원본 좌표는 자동 보정하지 않는다. |
+| `artifact_validation.py` + `freecad_runner.py` | 실행별 산출물 영수증과 실제 IFC 재검사. 입력 해시·EID/GlobalId·형상·체적·층·QA 속성을 대조한다. |
 | `mep_gui.py` | **현장용 GUI** (Phase 2.5): 파일선택→스캔→파싱→**3D 미리보기(브라우저)**→needs_review 수정→3D빌드 (tkinter, 무의존) |
 | `run_gui.bat` | GUI 더블클릭 런처 (CLI 불필요) |
 | `make_sample_dxf.py` | 테스트용 샘플 DXF 생성 (A-WALL/A-COLS/A-SLAB/A-ZONE) |
@@ -34,10 +38,11 @@
 | `sample_blocks.dxf` | **블록 참조(기둥/문 INSERT) 샘플** (Phase 2 검증용) |
 | `sample_mep.dxf` | **MEP 샘플** (배관/덕트/트레이 중심선 + 장비 블록, Phase 2.7 검증용) |
 | `geometry.json` | 파서 출력 예시 |
-| `tests/run_all.py` | 의존성 없는 테스트 러너(`python tests/run_all.py`). pytest 로도 수집된다. `build_exe.bat` 이 빌드 전에 돌리고 실패 시 중단 — 깨진 .exe 를 못 만든다 |
+| `tests/run_all.py` | 의존성 없는 테스트 러너(`python tests/run_all.py`). **빌드 게이트는 `pytest tests` 다** — `build_exe.bat` 이 빌드 전에 돌리고 실패 시 중단한다. `run_all.py` 는 pytest 픽스처(`tmp_path`·`monkeypatch`)를 못 주어 테스트 48개를 못 돌리므로 **미실행이 있으면 스스로 exit 1** 을 낸다 — 반쪽 러너가 게이트 행세를 하지 않게 |
 | `tests/golden.json` | **실무 도면 회귀 다이제스트.** 도면은 고객 자료라 커밋하지 않고 경로만 `tests/golden.local.json`(gitignore)에 둔다. 도면이 없으면 `[skip]`. 갱신은 `python tests/test_golden.py --bless` |
 | `extractors.py` + `mep_macro/` | **FreeCAD 안에서만** 쓰는 라이브 자연어 모델링용 헬퍼(`freecad_live_addon`). 일반 파이프라인은 이걸 거치지 않는다 |
-| `FIX_SPEC.md` | **미실행 작업지시서** — 면선 페어링 재설계(라인-버킷)·곡선벽 ARC. `_pair_line_buckets`/`_pair_arc_faces` 아직 없음 |
+| `FIX_SPEC.md` | 면선 페어링·곡선벽 개선의 이전 설계 기록. 현재 구현 여부는 코드와 회귀 테스트를 확인한다. |
+| `docs/project_workflow.md` | 프로젝트 저장·복구·재연결·출력 검증 사용법과 현재 범위. |
 
 ## geometry.json 스키마
 ```json
@@ -88,6 +93,12 @@
 **면선 페어링을 거친 열린 벽에는 쓰지 않는다.** 축선이 같은 28쌍 중 12쌍은 두께가 다르다
 (450 vs 400mm — 두 레이어가 벽면을 다른 자리에 그렸다). 어느 쪽이 맞는지는 도면을 봐야
 알므로 여기서 조용히 고르지 않는다.
+
+**단, EID 까지 같은 벽은 예외다.** EID 가 같다는 것은 원본 엔티티 시그니처와 구간이
+같다는 뜻 — 같은 원본에서 두 번 만들어졌다는 증명이라 고를 것이 없다. 그래서 EID 부여
+직후(개구부 링크·`apply_edits` 보다 앞) `(eid, _geom_key)` 가 같은 벽을 하나만 남긴다.
+실측: 벽 682 → 672, `eid_collisions` 10 → 0, 폭 495mm 열 35 → 25. 나머지 다이제스트는
+전부 불변이었다 — 중복만 건드렸다는 증거가 그것이다.
 
 빌더는 카테고리별로 **객체를 못 만든 레코드**를 `build.json` 의 `unbuilt` 에 남긴다.
 전부 0 이어야 한다 — 이 카운터가 없던 동안 벽 72개가 경고 없이 빠진 채 납품될 수 있었다.
@@ -143,7 +154,7 @@ EID 부여는 주입보다 **먼저** 한다(`apply_edits` 가 EID 로 찾으므
 | `category` | 카테고리 이동(리스트 간 이동) |
 | `deleted` | 제거 |
 | `added` + `record` | DXF 에 없는 사용자 생성 요소. **이동·분할·결합은 전부 delete+add 로 표현한다** — 새 동사를 만들지 않는다 |
-| `review_resolved` | "봤고 괜찮다". 주입 뒤에 도는 `thin_pair` 등이 다시 켜므로 파서가 마지막에 되돌린다 |
+| `review_resolved` + `_review_signature` | 확인한 형상·치수·진단의 지문이 일치할 때만 검토 완료를 유지한다. 서비스의 명시적 `acknowledge` 동작으로 생성하며, 지문 없는 이전 표시는 다시 검토한다. |
 
 `apply_edits` 보고: `applied` · `migrated`(옛 `eid_v1` 에서 이어받음) · `added` ·
 `orphaned` · **`ambiguous`**(같은 EID 를 여러 부재가 공유 → **적용하지 않는다**).
@@ -159,8 +170,8 @@ EID 부여는 주입보다 **먼저** 한다(`apply_edits` 가 EID 로 찾으므
   선언 폭을 따라 움직인다(실측: 폭 200→400 에서 219개 이동).
 - `closed`(폴리곤 1:1)·`axis`(DIMENSION 부재)는 잘리지 않으므로 구간을 안 붙인다 —
   불필요한 EID 변경은 그 자체가 고아를 만든다.
-- 실측: 벽 EID 중복 263 → 10(남은 10개는 좌표까지 같은 진짜 중복 벽). 골든의
-  `eid_collisions` 가 감시한다.
+- 실측: 벽 EID 중복 263 → 10 → **0**(마지막 10개는 좌표까지 같은 진짜 중복 벽이라
+  위 '중복 부재' 절의 규칙으로 버린다). 골든의 `eid_collisions` 가 감시한다.
 
 ### ★ 미리보기는 "왜 이렇게 나왔는지" 를 말한다
 `build_html` 페이로드에 `warnings`·`thin_pairs`·`width_conflicts`·`qa`·`edits_report`
@@ -179,7 +190,7 @@ EID 부여는 주입보다 **먼저** 한다(`apply_edits` 가 EID 로 찾으므
 부재가 `NeedsReview=True` 로 IFC 까지 나가지 않는다.
 
 ### ★ 2D 평면 탭 — 기하 편집은 여기서만
-`preview.html` 의 두 번째 탭(SVG, 빌드 단계 없음). 3D 는 **보기 전용**이다 — 원근
+`preview.html` 의 ‘평면 편집’ 탭(SVG). 화면 개발은 `frontend`에서 `npm ci`, `npm run build`로 빌드한다. 배포본에는 빌드 결과를 동봉한다. 3D 는 **보기 전용**이다 — 원근
 투사에서는 끝점을 정확히 집을 수 없고, 건축 편집은 본래 평면이 정확하다.
 선택 패널(`fillPanel`)은 두 탭이 **공유**한다(뷰마다 인스펙터를 따로 두면 필드가
 어긋나기 시작한다).
@@ -504,6 +515,26 @@ MEP는 "추출은 곧, 3D 빌드는 나중"으로 분할(D 합의). 스키마 �
 
 - [x] **Phase 1 — 규약 중앙화**: `geom_contract.py` 신설. z 기준면·감김 정규화가 존재하는 유일한 장소.
       `preview.py` 는 import 가 불가능하므로 `js_constants()` 로 **주입**받는다(재구현 금지).
+### ★ 개구부 판정은 **세 갈래**다 — 한 줄로 묶으면 건물이 통째로 막힌다
+`opening_results` 하나를 읽는 자리가 세 곳(`verify.V106` · `artifact_validation` 의
+호스트 검사와 영수증 검사)인데, 셋 다 "호스트가 없거나 실패하면 error" 로 묶여 있었다.
+그래서 **붙일 벽을 못 찾은 개구부 15개** 때문에 실무 도면 전체가 납품 불가였다.
+
+| 상태 | 뜻 | 판정 |
+|---|---|---|
+| `requested_hosts` 가 빔 | 링크가 붙일 벽을 못 찾았다 | **warn**(한 줄로 합쳐서). 빌더가 못 한 일이 아니다 |
+| 호스트를 지정했는데 `cut_host_eids` 가 빔 | 약속한 구멍이 없다 | **error** |
+| 일부만 뚫림(`failed_hosts` 있음) | 링크는 후보 목록이라 정상적으로도 생긴다 | **warn** |
+| 입력 개구부가 `opening_results` 에 아예 없음 | 빌더가 말없이 버렸다 | **error** |
+
+**커터가 아무것도 못 깎았다고 실패가 아니다 — 이미 뚫려 있을 수 있다.**
+실무 도면은 같은 문을 레이어마다 그려 개구부가 겹친다(실측: 벽 하나에 폭 868·874·
+874mm 개구부가 44mm 간격으로 3개). 먼저 온 커터가 그 자리를 이미 비웠으면 void 는
+**존재한다**. `build_openings` 가 벽별로 적용한 커터의 합(`applied`)을 들고 있다가,
+겹치면 `already_void` 로 기록하고 그 호스트를 뚫린 것으로 센다(실측: 6건).
+못 닿은 경우는 `gaps` 에 축별 간격과 `dist_mm` 을 남긴다 — 양수인 축이 떨어진 축이고,
+셋 다 음수인데 `dist_mm`>0 이면 bbox 만 겹치는 기울어진 벽이다.
+
 - [x] **Phase 4(일부) — 빌드 게이트**: `verify.py` + 마커 withhold 방식.
       검사 실패 시 빌더가 `FCSTD_DST`/`IFC_DST` 마커를 **출력하지 않는다** → GUI·MCP 가 파일을
       옮기지 못한다. 소비자 코드 변경 없이 fail-closed. 탈출구 `MEP_ALLOW_ERRORS=1` 은

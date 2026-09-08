@@ -67,3 +67,12 @@ criteria.json
 
 # 골든 회귀용 로컬 도면 경로(고객 자료 위치) — 다이제스트만 커밋한다
 tests/golden.local.json
+
+# Durable project workspaces and review reports contain customer data.
+*.mep/
+*.build.json
+*.pytest_cache/
+
+# Frontend dependencies and per-plan implementation notes.
+node_modules/
+.superpowers/

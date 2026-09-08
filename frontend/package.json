@@ -1,0 +1,14 @@
+{
+  "name": "mep-parser-preview",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "test": "node --test ../tests/preview_review.test.mjs ../tests/preview_coordinates.test.mjs"
+  },
+  "devDependencies": {
+    "vite": "8.2.2"
+  }
+}

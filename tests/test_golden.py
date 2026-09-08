@@ -24,6 +24,7 @@ import io
 import json
 import os
 import sys
+import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -118,14 +119,14 @@ def _diff(want, got, path=""):
 def test_real_drawings_match_the_golden_digest():
     cfg = _load(CONFIG, {})
     if not cfg:
-        print(f"  [skip] {os.path.basename(CONFIG)} 없음 — 실무 도면 골든 회귀를 건너뜀")
-        return
+        raise unittest.SkipTest(f'{os.path.basename(CONFIG)} 없음 — 실무 도면 회귀 미실행')
     golden = _load(GOLDEN, {})
-    problems, ran = [], 0
+    problems, ran, missing = [], 0, []
     for name, spec in sorted(cfg.items()):
         data = _parse(spec)
         if data is None:
             print(f"  [skip] '{name}' 도면 파일 없음: {spec['dxf']}")
+            missing.append(name)
             continue
         ran += 1
         got = digest(data)
@@ -141,6 +142,8 @@ def test_real_drawings_match_the_golden_digest():
             + "\n  의도한 변화면: python tests/test_golden.py --bless")
     if ran:
         print(f"  [golden] 실무 도면 {ran}건 일치")
+    if missing:
+        raise unittest.SkipTest(f'{ran}건 일치, {len(missing)}건 미실행: {missing}')
 
 
 def _bless():

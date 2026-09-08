@@ -1,0 +1,24 @@
+{
+  "tool": "vite",
+  "version": "8.2.2",
+  "three": "0.160.0",
+  "source_hash": "sha256-lf",
+  "assets": {
+    "preview.js": "5e1ef0c7343c96562f5e51a91904867951d3f8ca9349575a284e21b3f22ea0fe",
+    "preview.css": "d79e848eefcc6fcf0bb47329f87d37d7bf887d4a7622c8d73bb11c5563e2ab27",
+    "shell.html": "c31cd15fe0195512801c8c37e11fdb9cbcafbe204d34e564f281f42a1917a023"
+  },
+  "sources": {
+    "frontend/package-lock.json": "03627119091818598186cefeed205a528879ba404f441e62fecce228612e04b4",
+    "frontend/package.json": "a191ff56950dfa6e4bd7f2e3d01040ca64ef97e5f5bb665906ff6a4eda455dc3",
+    "frontend/src/app.js": "cf1d83fb9a2529277ae2a5feee277140012f16329b6d3094788134cd2486ebab",
+    "frontend/src/review_logic.js": "0d49b1376f373b2f268dd22f33522436faa6a27485576accc0fd9a68f31637a7",
+    "frontend/src/shell.html": "3b98cf959a560732756a64f7feefe04246a45498f4ed6f79efe95f45e24afe32",
+    "frontend/src/style.css": "fbbd2d7586e09edbfeb63f8e6ae3c8b33721ce5e55abf9ad24bcc27ad1eaeaae",
+    "frontend/src/svg_coordinates.js": "37d499435b9c067d9891abefec37e2e277caffcdd18cfbfbabc7bfd06274d68e",
+    "frontend/vite.config.js": "8122603c76002c77fe3165bd97c43924d84d9ccff124b85ae8d440655bedc7d7",
+    "vendor/OrbitControls.js": "5a44a9e86a2a0fb11933eed69bc2cd33c76a496854c1aed6ed776efa87d7b064",
+    "vendor/edit_geometry.js": "e0608af0d3c950a42249ac7e16b890e9ff65c19c25252928ae37ea2f1b90ffbd",
+    "vendor/three.module.js": "76dea8151bc9352aef3528b4262e249b2604f62543828328db978d060d61a495"
+  }
+}

@@ -16,6 +16,11 @@ import geom_contract as GC
 import verify as V
 
 
+def catalog_build(data, stats, ifc_path=None):
+    """Isolated catalog tests intentionally use partial stats and STEP fragments."""
+    return V.verify_build(data, stats, ifc_path, stage="catalog")
+
+
 def clean():
     """정상 최소 모델: 벽·기둥 0~3000, 슬래브 2800~3000 (연속).
 
@@ -203,7 +208,7 @@ def test_V101_fires_when_ifc_missing_category(tmp_path=None):
     with open(ifc, "w", encoding="utf-8") as f:
         f.write("ISO-10303-21;\nDATA;\n#1=IFCWALL('x');\n#2=IFCCOLUMN('y');\nENDSEC;\n")
     st = {"intent": {"wall": 1, "column": 1, "beam": 135}}
-    rep = V.verify_build(d, st, ifc)
+    rep = catalog_build(d, st, ifc)
     assert "V101" in ids(rep), "IFC 에서 보 135개가 통째로 빠진 것을 못 잡았다"
     assert rep.failed
     os.remove(ifc)
@@ -215,28 +220,28 @@ def test_V101_silent_when_counts_match():
     ifc = os.path.join(tempfile.gettempdir(), "_vtest2.ifc")
     with open(ifc, "w", encoding="utf-8") as f:
         f.write("ISO-10303-21;\nDATA;\n#1=IFCWALL('x');\n#2=IFCCOLUMN('y');\nENDSEC;\n")
-    rep = V.verify_build(d, {"intent": {"wall": 1, "column": 1}}, ifc)
+    rep = catalog_build(d, {"intent": {"wall": 1, "column": 1}}, ifc)
     assert "V101" not in ids(rep)
     os.remove(ifc)
 
 
 def test_V102_fires_on_orphan_objects():
-    rep = V.verify_build(clean(), {"floor_orphans": 135, "floor_dups": 0})
+    rep = catalog_build(clean(), {"floor_orphans": 135, "floor_dups": 0})
     assert "V102" in ids(rep) and rep.failed
 
 
 def test_V103_fires_on_invalid_shapes():
-    rep = V.verify_build(clean(), {"invalid_shapes": 3})
+    rep = catalog_build(clean(), {"invalid_shapes": 3})
     assert "V103" in ids(rep) and rep.failed
 
 
 def test_V104_fires_on_bbox_blowup():
-    rep = V.verify_build(clean(), {"bbox": [0, 0, 0, 27250174, 5000, 3000]})
+    rep = catalog_build(clean(), {"bbox": [0, 0, 0, 27250174, 5000, 3000]})
     assert "V104" in ids(rep), "폭주 솔리드로 bbox 가 터진 것을 못 잡았다"
 
 
 def test_V102_V103_silent_when_clean():
-    rep = V.verify_build(clean(), {"floor_orphans": 0, "floor_dups": 0,
+    rep = catalog_build(clean(), {"floor_orphans": 0, "floor_dups": 0,
                                    "invalid_shapes": 0, "bbox": [0, 0, 0, 5000, 5000, 3000]})
     assert not rep.failed and ids(rep) == set()
 
@@ -266,14 +271,14 @@ def _ifc_with(psets, path=None):
 def test_v105_fires_when_no_qa_properties_reached_the_ifc():
     """형상만 맞고 속성이 빠지면 뷰어 검수가 통째로 무의미해진다.
     실제로 오래 그 상태였는데 형상 검사가 전부 통과해서 아무도 몰랐다."""
-    rep = V.verify_build({"elements": {}},
+    rep = catalog_build({"elements": {}},
                               {"built": {"walls": 3, "columns": 4, "slabs": 1}},
                               _ifc_with(0))
     assert any(f.id == "V105" for f in rep.findings), rep.text()
 
 
 def test_v105_silent_when_properties_are_present():
-    rep = V.verify_build({"elements": {}},
+    rep = catalog_build({"elements": {}},
                               {"built": {"walls": 3, "columns": 4, "slabs": 1}},
                               _ifc_with(8))
     assert not any(f.id == "V105" for f in rep.findings), rep.text()
@@ -283,3 +288,53 @@ def test_count_ifc_psets_counts_only_our_pset():
     p = _ifc_with(3)
     assert V.count_ifc_psets(p) == 3
     assert V.count_ifc_psets(p, "Pset_Other") == 0
+
+
+# ── V106 개구부 세 갈래 ────────────────────────────────────────────────────
+# 종전에는 "호스트가 없거나 실패하면 error" 한 줄이었다. 그래서 붙일 벽을 못 찾은
+# 개구부 하나만 있어도 건물 전체가 납품 불가가 됐다(실측 지하3층: 15개).
+def _pre_export(opening_results):
+    from artifact_validation import input_hash
+    data = clean()
+    st = {"intent": {}, "built": {"walls": 1}, "floor_orphans": 0, "floor_dups": 0,
+          "invalid_shapes": 0, "bbox": [0, 0, 0, 5000, 5000, 3000],
+          "unbuilt": {}, "opening_results": opening_results,
+          "provenance": {"run_id": "t", "input_sha256": input_hash(data)}}
+    return V.verify_build(data, st, None, stage="pre_export")
+
+
+def _sev(rep, check):
+    return sorted(f.severity for f in rep.findings if f.id == check)
+
+
+def test_V106_opening_without_a_host_warns_but_does_not_block():
+    rep = _pre_export([{"eid": "o:1", "requested_hosts": [], "cut_host_eids": []}])
+    assert not rep.failed, rep.text()
+    assert _sev(rep, "V106") == ["warn"], rep.text()
+
+
+def test_V106_opening_that_cut_nothing_is_an_error():
+    rep = _pre_export([{"eid": "o:1", "requested_hosts": [3], "cut_host_eids": []}])
+    assert _sev(rep, "V106") == ["error"], rep.text()
+
+
+def test_V106_partial_miss_warns():
+    rep = _pre_export([{"eid": "o:1", "requested_hosts": [3, 4], "cut_host_eids": ["w:a"],
+                        "failed_hosts": [{"wall_index": 4}]}])
+    assert not rep.failed, rep.text()
+    assert _sev(rep, "V106") == ["warn"], rep.text()
+
+
+def test_V106_already_void_host_counts_as_cut():
+    """겹쳐 그린 개구부 — 먼저 온 커터가 그 자리를 비웠으면 void 는 존재한다."""
+    rep = _pre_export([{"eid": "o:1", "requested_hosts": [3], "cut_host_eids": ["w:a"],
+                        "already_void": [{"host_name": "Wall_1", "host_eids": ["w:a"]}]}])
+    assert not rep.failed and _sev(rep, "V106") == [], rep.text()
+
+
+def test_V106_host_less_openings_are_reported_as_one_line():
+    """개구부마다 하나씩 올리면 보고서가 그걸로 덮인다(실측 15건)."""
+    rep = _pre_export([{"eid": f"o:{i}", "requested_hosts": [], "cut_host_eids": []}
+                       for i in range(15)])
+    found = [f for f in rep.findings if f.id == "V106"]
+    assert len(found) == 1 and found[0].payload["count"] == 15, rep.text()

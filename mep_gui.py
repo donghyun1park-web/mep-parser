@@ -4,9 +4,8 @@ Double-click (run_gui.bat) -> file select -> scan -> parse -> review -> 3D build
 
 Design:
 - Zero new dependencies (tkinter = Python stdlib). Engine reuses dxf_parser module.
-- Review loop: needs_review items shown in list; user edits width/height -> saved to geometry.json.
-  Build reads saved geometry.json -> preserves manual edits.
-  (Warning: re-parsing overwrites edits -> re-parse button warns before proceeding.)
+- Review changes persist by EID in a revisioned project beside the source drawing.
+  Preview, GUI and MCP share canonical edits; builds reparse the latest saved revision.
 - FreeCAD build: auto-detect freecadcmd.exe -> subprocess + env vars (MEP_GEOMETRY/MEP_OUT).
 - Layer map editor: add/delete/save layer_map.csv rows inside GUI.
   Shows unmapped layers from last parse for quick one-click add.
@@ -25,6 +24,8 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 import dxf_parser as P
+from project_server import ProjectSession, open_source_project, verified_artifacts
+from project_store import ProjectStore, ProjectCorrupt, RevisionConflict, atomic_json
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -297,9 +298,12 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title("MEP Parser -- DXF to 3D BIM")
-        root.geometry("820x660")
+        root.geometry("960x780")
         self.data = None          # parsed result dict
         self.geom_path = None     # path to saved geometry.json
+        self.project_session = None
+        self.project_server = None
+        root.protocol("WM_DELETE_WINDOW", self._close)
 
         self.v_dxf = tk.StringVar()
         self.v_map = tk.StringVar(value=user_csv("layer_map.csv"))
@@ -334,6 +338,7 @@ class App:
     def _build_buttons(self):
         f = ttk.Frame(self.root)
         f.pack(fill="x", padx=8)
+        ttk.Button(f, text="프로젝트 열기", command=self._open_project).pack(side="left", padx=4)
         ttk.Button(f, text="(1) Scan drawing", command=self._do_scan).pack(side="left", padx=4)
         ttk.Button(f, text="(2) Parse -> geometry.json", command=self._do_parse).pack(side="left", padx=4)
         ttk.Button(f, text="(2b) 누락 진단",
@@ -342,11 +347,12 @@ class App:
                    command=self._do_preview).pack(side="left", padx=4)
         ttk.Button(f, text="edits.json 불러오기",
                    command=self._pick_edits).pack(side="left", padx=4)
-        self.btn_ifc = ttk.Button(f, text="(4) IFC 빌드 (FreeCAD 불필요)",
+        self.btn_ifc = ttk.Button(f, text="선택: IFC 직접 내보내기",
                                   command=self._do_ifc_build)
-        self.btn_ifc.pack(side="left", padx=4)
-        self.btn_build = ttk.Button(f, text="(4b) 3D Build (FreeCAD)", command=self._do_build)
+        # FreeCAD is the primary build action; direct IFC remains optional.
+        self.btn_build = ttk.Button(f, text="(4) 3D Build (FreeCAD 기본)", command=self._do_build)
         self.btn_build.pack(side="left", padx=4)
+        self.btn_ifc.pack(side="left", padx=4)
         if find_freecadcmd() is None:
             self.btn_build.state(["disabled"])
         ttk.Button(f, text="(5) 물량 Excel",
@@ -363,6 +369,12 @@ class App:
                         variable=self.v_vision).pack(side="right", padx=2)
         ttk.Checkbutton(f, text="AI auto-classify",
                         variable=self.v_llm).pack(side="right", padx=2)
+        # Keep the primary build and project actions reachable at the default window size.
+        controls = f.winfo_children()
+        for control in controls:
+            control.pack_forget()
+        for i, control in enumerate(controls):
+            control.grid(row=i // 5, column=i % 5, sticky="w", padx=4, pady=3)
 
     def _build_review(self):
         f = ttk.LabelFrame(self.root,
@@ -381,6 +393,8 @@ class App:
         self.v_w = tk.StringVar()
         ttk.Entry(e, textvariable=self.v_w, width=12).pack(anchor="w", pady=2)
         ttk.Label(e, text="Height (mm)").pack(anchor="w")
+        self.v_ack = tk.BooleanVar(value=False)
+        ttk.Checkbutton(e, text="현재 검토 사유 확인 완료", variable=self.v_ack).pack(anchor="w")
         self.v_h = tk.StringVar()
         ttk.Entry(e, textvariable=self.v_h, width=12).pack(anchor="w", pady=2)
         ttk.Button(e, text="Apply & Save", command=self._apply_review).pack(anchor="w", pady=6)
@@ -473,91 +487,111 @@ class App:
                     self._set_buttons("!disabled")))
         threading.Thread(target=run, daemon=True).start()
 
-    def _pick_edits(self):
-        """preview.html 에서 내려받은 edits.json 을 지정한다.
+    def _open_project(self):
+        folder = filedialog.askdirectory(title="저장된 .mep 프로젝트 폴더 선택")
+        if not folder:
+            return
+        try:
+            store = ProjectStore(folder)
+            try:
+                manifest = store.read()
+            except ProjectCorrupt as exc:
+                if not messagebox.askyesno("프로젝트 복구", str(exc) + "\n이전 정상 저장본으로 복구할까요?"):
+                    return
+                manifest = store.recover_backup()
+            if self.project_server:
+                self.project_server.close()
+                self.project_server = None
+            self.project_session = ProjectSession(store)
+            source = manifest['sources'][0]
+            self.v_dxf.set(source['path'])
+            self.v_map.set(source.get('layer_map') or '')
+            self.v_block.set(source.get('block_map') or '')
+            self.v_schedule.set(source.get('schedule') or '')
+            self.v_llm.set(bool(source.get('options', {}).get('use_ai')))
+            self.v_vision.set(bool(source.get('options', {}).get('use_vision')))
+            self.geom_path = str(store.folder / 'geometry.json')
+            self._set_buttons('disabled')
+            def run():
+                try:
+                    state = self.project_session.state()
+                    self.root.after(0, lambda: self._parse_done(state['geometry'], source['path']))
+                except Exception as exc:
+                    self.root.after(0, lambda msg=str(exc): (self._log(msg), self._set_buttons('!disabled')))
+            threading.Thread(target=run, daemon=True).start()
+        except Exception as exc:
+            messagebox.showerror("프로젝트 열기 실패", str(exc))
 
-        종전엔 이 버튼이 아예 없어서, 미리보기가 "재파싱 시 --edits 로 적용됨" 이라
-        안내해 놓고 GUI 는 그 인자를 쓰지 않았다 — 수정 루프가 GUI 안에서 닫히지
-        않았고, 재파싱은 그냥 덮어썼다."""
-        p = filedialog.askopenfilename(title="edits.json 선택",
-                                       filetypes=[("edits.json", "*.json"),
-                                                  ("All", "*.*")])
+    def _pick_edits(self):
+        p = filedialog.askopenfilename(title="edits.json 가져오기", filetypes=[("JSON", "*.json")])
         if not p:
             return
-        self.v_edits.set(p)
         try:
-            with open(p, encoding="utf-8") as f:
-                n = len(json.load(f))
-            self._log(f"[edits] {n}건 지정: {p}  → (2) 파싱 시 적용됩니다")
-        except Exception as e:
-            self._log(f"[edits] 읽기 실패: {e}")
+            if not self.project_session:
+                raise ValueError("먼저 도면을 파싱하거나 프로젝트를 여세요.")
+            state = self.project_session.store.read()
+            self.project_session.import_legacy(p, state['revision'], state['project_id'])
+            self._save()
+            self._populate_review()
+            self._log("수정 가져오기 완료. 원본 사본을 프로젝트 imports 폴더에 보존했습니다.")
+        except Exception as exc:
+            messagebox.showerror("가져오기 실패", str(exc))
 
     def _do_parse(self):
         dxf = self._ensure_dxf()
         if not dxf:
             return
-        rules, brules = self._rules()
-        use_ai = bool(self.v_llm.get())
-        use_vision = bool(self.v_vision.get())
-        if use_ai:
-            self._log("  [AI] 텍스트 분류 + 고신뢰 자동적용 활성")
-        if use_vision:
-            self._log("  [Vision] 저신뢰 레이어 이미지 분류 폴백 활성")
-        # 재파싱은 geometry.json 을 통째로 덮어쓴다. 저장된 검토 수정이 있으면
-        # 먼저 알린다 — 헤더 주석이 약속만 하고 없던 대화상자다.
-        if self.data and not self.v_edits.get().strip():
-            n_ov = sum(1 for recs in (self.data.get("elements") or {}).values()
-                       for r in recs if r.get("overrides"))
-            if n_ov and not messagebox.askyesno(
-                    "재파싱 확인",
-                    chr(10).join([
-                        f"현재 결과에 치수 수정이 {n_ov}건 있습니다.",
-                        "재파싱하면 덮어써집니다.",
-                        "",
-                        "수정을 지키려면 취소하고 'edits.json 불러오기' 로",
-                        "지정한 뒤 다시 파싱하세요.",
-                        "",
-                        "그래도 재파싱할까요?"])):
-                self._log("재파싱 취소")
-                return
-        self._log("Parsing...")
-        self._set_buttons("disabled")
-
-        # 외부 창호일람 Excel(선택) 로드 → 평면도와 함께 먹여 창/문 배치
-        ext_sched = None
-        sched_path = self.v_schedule.get().strip()
-        if sched_path and os.path.exists(sched_path):
-            try:
-                from schedule_io import load_schedule_xlsx
-                ext_sched = load_schedule_xlsx(sched_path)
-                self._log(f"  [창호일람] Excel {len(ext_sched)}행 로드: {os.path.basename(sched_path)}")
-            except Exception as e:
-                self._log(f"  [창호일람] Excel 로드 실패(무시): {e}")
-
-        edits = None
-        ep = self.v_edits.get().strip()
-        if ep:
-            if os.path.exists(ep):
+        options = dict(use_ai=bool(self.v_llm.get()), use_vision=bool(self.v_vision.get()))
+        try:
+            same = self.project_session and self.project_session.store.read()['sources'][0]['path'] == os.path.abspath(dxf)
+            if not same:
                 try:
-                    with open(ep, encoding="utf-8") as f:
-                        edits = json.load(f)
-                    self._log(f"  [edits] {len(edits)}건 로드: {os.path.basename(ep)}")
-                except Exception as e:
-                    self._log(f"  [edits] 로드 실패(무시): {e}")
+                    self.project_session = open_source_project(dxf, layer_map=self.v_map.get().strip() or None,
+                        block_map=self.v_block.get().strip() or None, options=options,
+                        schedule=self.v_schedule.get().strip() or None)
+                except ProjectCorrupt as exc:
+                    folder = os.path.splitext(dxf)[0] + '.mep'
+                    if not messagebox.askyesno("프로젝트 복구", str(exc) + "\n이전 정상 저장본으로 복구할까요?"):
+                        return
+                    store = ProjectStore(folder)
+                    store.recover_backup()
+                    self.project_session = ProjectSession(store)
+                except OSError:
+                    folder = filedialog.askdirectory(title="도면 옆에 저장할 수 없습니다. 프로젝트 저장 폴더 선택")
+                    if not folder:
+                        return
+                    self.project_session = open_source_project(dxf, folder=folder,
+                        layer_map=self.v_map.get().strip() or None, block_map=self.v_block.get().strip() or None,
+                        options=options, schedule=self.v_schedule.get().strip() or None)
+            manifest = self.project_session.store.read()
+            sources = manifest['sources']
+            source = sources[0]
+            if same:
+                source.update(layer_map=self.v_map.get().strip() or None, block_map=self.v_block.get().strip() or None,
+                              options=options, schedule=self.v_schedule.get().strip() or None)
             else:
-                self._log(f"  [edits] 파일 없음: {ep}")
-
+                self.v_map.set(source.get('layer_map') or '')
+                self.v_block.set(source.get('block_map') or '')
+                self.v_schedule.set(source.get('schedule') or '')
+                self.v_llm.set(bool(source.get('options', {}).get('use_ai')))
+                self.v_vision.set(bool(source.get('options', {}).get('use_vision')))
+            if sources != self.project_session.store.read()['sources']:
+                self.project_session.store.update_sources(sources, manifest['options'], manifest['revision'], manifest['project_id'])
+            if self.project_server:
+                self.project_server.close()
+                self.project_server = None
+            self.geom_path = str(self.project_session.store.folder / 'geometry.json')
+        except Exception as exc:
+            messagebox.showerror("프로젝트 열기 실패", str(exc))
+            return
+        self._log("저장된 최신 수정을 적용해 다시 파싱합니다...")
+        self._set_buttons("disabled")
         def run():
             try:
-                data = P.parse(dxf, rules, brules,
-                               use_ai=use_ai, use_vision=use_vision,
-                               ext_schedule=ext_sched, edits=edits)
-                self.root.after(0, lambda: self._parse_done(data, dxf))
-            except Exception as e:
-                msg = str(e)
-                self.root.after(0, lambda m=msg: (
-                    self._log(f"[Error] Parse failed: {m}"),
-                    self._set_buttons("!disabled")))
+                state = self.project_session.state()
+                self.root.after(0, lambda: self._parse_done(state['geometry'], dxf))
+            except Exception as exc:
+                self.root.after(0, lambda msg=str(exc): (self._log(msg), self._set_buttons("!disabled")))
         threading.Thread(target=run, daemon=True).start()
 
     def _do_schedule_pick(self):
@@ -611,8 +645,8 @@ class App:
         """parse() 완료 후 메인 스레드에서 UI 업데이트."""
         self.data = data
         self._set_buttons("!disabled")
-        self.geom_path = os.path.splitext(dxf)[0] + ".geometry.json"
-        self._save()
+        self.geom_path = str(self.project_session.store.folder / "geometry.json")
+        atomic_json(self.geom_path, self.data)
         el = self.data["elements"]
         wp = self.data.get("wall_pairing", {})
         bk = self.data.get("blocks", {})
@@ -668,6 +702,7 @@ class App:
         cat, idx = sel[0].split(":")
         el = self.data["elements"][cat][int(idx)]
         ov = el.get("overrides", {})
+        self.v_ack.set(False)
         self.v_w.set(str(ov.get("width", el.get("width_detected") or "")))
         self.v_h.set(str(ov.get("height", "")))
 
@@ -677,46 +712,51 @@ class App:
             messagebox.showinfo("Info", "Select an item from the list first.")
             return
         cat, idx = sel[0].split(":")
-        el = self.data["elements"][cat][int(idx)]
-        ov = el.setdefault("overrides", {})
+        el = self.data['elements'][cat][int(idx)]
         try:
+            overrides = {}
             if self.v_w.get().strip():
-                ov["width"] = float(self.v_w.get())
+                overrides['width'] = float(self.v_w.get())
             if self.v_h.get().strip():
-                ov["height"] = float(self.v_h.get())
-        except ValueError:
-            messagebox.showwarning("Check", "Numbers only.")
-            return
-        el["needs_review"] = False
-        self._save()
-        self._log(f"[Applied] {cat}[{idx}] overrides={ov} -> saved")
-        self._populate_review()
+                overrides['height'] = float(self.v_h.get())
+            meta = self.data['project']
+            state = self.project_session.edit(el['eid'], dict(overrides=overrides, acknowledge=bool(self.v_ack.get())),
+                                              meta['revision'], meta['project_id'])
+            self.data = state['geometry']
+            atomic_json(self.geom_path, self.data)
+            self.v_ack.set(False)
+            self._populate_review()
+            self._log(f"저장 완료: revision {state['revision']}")
+        except RevisionConflict as exc:
+            self._save()
+            self._populate_review()
+            messagebox.showwarning("다른 창에서 변경됨", str(exc))
+        except Exception as exc:
+            messagebox.showerror("저장 실패", str(exc))
 
     def _save(self):
-        if self.geom_path and self.data:
-            with open(self.geom_path, "w", encoding="utf-8") as f:
-                json.dump(self.data, f, ensure_ascii=False, indent=2)
+        if self.project_session:
+            self.data = self.project_session.state()['geometry']
+            if self.geom_path:
+                atomic_json(self.geom_path, self.data)
+
+    def _close(self):
+        if self.project_server:
+            self.project_server.close()
+        self.root.destroy()
 
     def _do_preview(self):
-        """FreeCAD 없이 브라우저로 즉석 3D 미리보기(preview.py 재사용).
-        파싱 결과(self.data)를 자립 HTML 로 만들고 기본 브라우저로 연다."""
-        if not self.data:
+        if not self.project_session:
             messagebox.showwarning("Check", "먼저 (2) Parse 를 실행하세요.")
             return
         try:
             import webbrowser
-            import preview as PV
-            html = PV.build_html(self.data)
-            base = self.geom_path or os.path.join(HERE, "preview")
-            out = os.path.splitext(base)[0] + "_preview.html"
-            with open(out, "w", encoding="utf-8") as f:
-                f.write(html)
-            self._log(f"3D 미리보기 생성 -> {out} (브라우저에서 열림)")
-            self._log("  요소 클릭 → 카테고리/치수 수정 → edits.json 다운로드 → "
-                      "재파싱 시 --edits 로 적용됨")
-            webbrowser.open("file://" + os.path.abspath(out))
-        except Exception as e:
-            messagebox.showerror("Preview 실패", str(e))
+            if not self.project_server:
+                self.project_server = self.project_session.serve()
+            webbrowser.open(self.project_server.url)
+            self._log("미리보기 연결됨: 저장하면 프로젝트 revision이 갱신됩니다.")
+        except Exception as exc:
+            messagebox.showerror("Preview 실패", str(exc))
 
     def _do_diag(self):
         """벽 누락 진단 오버레이 PNG(diag_overlay.py 재사용) 생성 후 열기.
@@ -749,6 +789,7 @@ class App:
             import boq_export as BQ
             base = self.geom_path or self.v_dxf.get().strip() or os.path.join(HERE, "물량")
             out = os.path.splitext(base)[0].replace(".geometry", "") + "_물량.xlsx"
+            self._save()
             BQ.export_boq_xlsx(self.data, out)
             secs = BQ.aggregate(self.data)
             summary = " | ".join(
@@ -787,8 +828,12 @@ class App:
         def run():
             try:
                 import ifc_builder as IB
-                stats = IB.build(self.geom_path, out, storey="Level", connect=connect)
-                self.root.after(0, lambda: self._ifc_done(out, stats))
+                build_input, build_state = self.project_session.export_geometry()
+                stats = IB.build(build_input, out, storey="Level", connect=connect)
+                receipt_path = out + '.client-receipt.json'
+                atomic_json(receipt_path, stats)
+                artifacts = verified_artifacts(receipt_path, build_state['geometry'], stats.get('provenance', {}).get('run_id'))
+                self.root.after(0, lambda: self._ifc_done(out, stats, artifacts.get('ifc')))
             except Exception as e:
                 msg = str(e)
                 self.root.after(0, lambda m=msg: (
@@ -796,16 +841,9 @@ class App:
                     self.btn_ifc.state(["!disabled"])))
         threading.Thread(target=run, daemon=True).start()
 
-    def _ifc_done(self, out, stats):
-        ok = os.path.exists(out)
-        if ok:
-            sz = os.path.getsize(out)
-            self._log(f"✅ IFC 빌드 완료: {out} ({sz//1024}KB)")
-            self._log(f"   walls={stats.get('wall',0)} columns={stats.get('column',0)} "
-                      f"slabs={stats.get('slab',0)} (skipped {stats.get('skip',0)})")
-            self._log("   → Revit/ArchiCAD/BlenderBIM 또는 (3) 3D 미리보기 로 확인")
-        else:
-            self._log("[오류] IFC 파일 생성 실패")
+    def _ifc_done(self, out, stats, receipt=None):
+        receipt = receipt or {'status':'failed','error':'Current artifact receipt missing'}
+        self._log(f"IFC: {receipt['status']} — {receipt.get('path') or receipt.get('error', '')}")
         self.btn_ifc.state(["!disabled"])
 
     def _do_build(self):
@@ -817,21 +855,20 @@ class App:
             messagebox.showerror("FreeCAD not found", "freecadcmd.exe not found.")
             return
         out = os.path.splitext(self.geom_path)[0].replace(".geometry", "") + "_model"
-        env = dict(os.environ, MEP_GEOMETRY=self.geom_path, MEP_OUT=out,
-                   PYTHONIOENCODING="utf-8")
         self.btn_build.state(["disabled"])
         self._log(f"Build started... (freecadcmd) -> {out}.FCStd / .ifc")
 
         builder_py = resource_path("freecad_builder.py")
-        build_cwd = os.path.dirname(builder_py)
 
         def run():
             try:
-                r = subprocess.run([fc, builder_py],
-                                   cwd=build_cwd, env=env, capture_output=True,
-                                   text=True, encoding="utf-8", errors="replace",
-                                   timeout=900)
-                self.root.after(0, lambda: self._build_done(r, out))
+                build_input, build_state = self.project_session.export_geometry()
+                from freecad_runner import run_build
+                r = run_build(fc, build_input, out, builder_py, timeout=900)
+                r.stdout = (r.stdout or b'').decode('utf-8', errors='replace') if isinstance(r.stdout, bytes) else r.stdout
+                r.stderr = (r.stderr or b'').decode('utf-8', errors='replace') if isinstance(r.stderr, bytes) else r.stderr
+                artifacts = verified_artifacts(out + '.build.json', build_state['geometry'], r.run_id)
+                self.root.after(0, lambda: self._build_done(r, out, artifacts))
             except Exception as e:
                 # Python 3: 람다에서 except 변수 참조 시 소멸 → 명시적 캡처
                 _msg = str(e) or repr(type(e))
@@ -840,80 +877,17 @@ class App:
                     self.btn_build.state(["!disabled"])))
         threading.Thread(target=run, daemon=True).start()
 
-    def _build_done(self, r, out):
-        import shutil
-        # stdout 파싱: FCSTD_TMP/FCSTD_DST 마커로 임시파일 → 최종경로 이동
-        fcstd_tmp = fcstd_dst = ifc_tmp = ifc_dst = None
-        build_failed = ifc_failed = None
-
-        def _marker(line, tag):
-            """FreeCAD 진행률 표시가 줄 앞에 붙을 수 있어 startswith 로는 놓친다.
-            (mep_mcp_server 는 처음부터 find() 를 썼는데 GUI 만 startswith 였다.)"""
-            i = line.find(tag + ":")
-            return line[i + len(tag) + 1:].strip() if i >= 0 else None
-
-        for line in (r.stdout or "").splitlines():
-            hit = False
-            for tag, setter in (("FCSTD_TMP", "fcstd_tmp"), ("FCSTD_DST", "fcstd_dst"),
-                                ("IFC_TMP", "ifc_tmp"), ("IFC_DST", "ifc_dst"),
-                                ("BUILD_FAILED", "build_failed"), ("IFC_FAILED", "ifc_failed")):
-                v = _marker(line, tag)
-                if v:
-                    if setter == "fcstd_tmp": fcstd_tmp = v
-                    elif setter == "fcstd_dst": fcstd_dst = v
-                    elif setter == "ifc_tmp": ifc_tmp = v
-                    elif setter == "ifc_dst": ifc_dst = v
-                    elif setter == "build_failed": build_failed = v
-                    elif setter == "ifc_failed": ifc_failed = v
-                    hit = True
-                    break
-            if not hit:
-                self._log("  " + line)
-
-        # ── 게이트 실패는 크게 알린다 ────────────────────────────────────────
-        if build_failed:
-            self._log("")
-            self._log("  ██ 빌드 검사 실패 — 산출물이 생성되지 않았습니다 ██")
-            self._log(f"  검사 리포트: {build_failed}")
-            self._log("  (검사를 무시하고 강제 생성하려면 환경변수 MEP_ALLOW_ERRORS=1)")
-            try:
-                messagebox.showerror("빌드 검사 실패",
-                                     "모델에 문제가 있어 산출물을 생성하지 않았습니다.\n"
-                                     "로그의 검사 결과를 확인하세요.\n\n"
-                                     f"리포트: {build_failed}")
-            except Exception:
-                pass
-            return
-        if ifc_failed:
-            self._log("")
-            self._log("  ██ IFC 검사 실패 — FCStd 만 생성되고 IFC 는 보류됩니다 ██")
-            self._log(f"  검사 리포트: {ifc_failed}")
-
-        # FCStd 이동
-        if fcstd_tmp and fcstd_dst and os.path.exists(fcstd_tmp):
-            try:
-                os.makedirs(os.path.dirname(fcstd_dst) or ".", exist_ok=True)
-                shutil.move(fcstd_tmp, fcstd_dst)
-                self._log(f"  [저장] {fcstd_dst}")
-            except Exception as _me:
-                self._log(f"  [오류] 파일 이동 실패: {_me}")
-                self._log(f"  임시경로: {fcstd_tmp}")
-
-        # IFC 이동
-        if ifc_tmp and ifc_dst and os.path.exists(ifc_tmp):
-            try:
-                shutil.move(ifc_tmp, ifc_dst)
-                self._log(f"  [저장] {ifc_dst}")
-            except Exception as _me:
-                self._log(f"  [warn] IFC 이동 실패: {_me}")
-
-        if r.returncode != 0 and r.stderr:
-            self._log("[stderr] " + r.stderr.strip()[:500])
-
-        ok = os.path.exists(fcstd_dst or (out + ".FCStd"))
-        self._log(f"Build {'complete' if ok else 'FAILED'}: {fcstd_dst or out + '.FCStd'}"
-                  + (" ✓ IFC" if ifc_dst and os.path.exists(ifc_dst) else ""))
+    def _build_done(self, r, out, artifacts=None):
         self.btn_build.state(["!disabled"])
+        artifacts = artifacts or {}
+        for kind in ('fcstd', 'ifc'):
+            receipt = artifacts.get(kind) or {'status':'failed','error':'Current artifact receipt missing'}
+            status = receipt.get('status')
+            self._log(f"{kind.upper()}: {status} — {receipt.get('path') or receipt.get('error', '')}")
+        if any((artifacts.get(k) or {}).get('status') != 'verified' for k in ('fcstd','ifc')):
+            self._log("요청한 산출물 중 검증되지 않은 항목이 있습니다. 검사 보고서를 확인하세요.")
+            self._log((r.stdout or '')[-1500:])
+        self._log(f"검사 보고서: {out}.build.json")
 
 
 def _selftest():
@@ -933,7 +907,9 @@ def _selftest():
         data = P.parse(sample, rules, brules)
         n = sum(len(v) for v in data["elements"].values())
         html = PV.build_html(data)
-        offline = "data:text/javascript;base64" in html
+        offline = '<script id="mep-app">' in html and '<script src=' not in html
+        if not offline:
+            raise RuntimeError('오프라인 미리보기 번들이 누락되었습니다')
         msg = (f"[selftest] parse OK: elements={n}, "
                f"shapely={'on' if P.HAS_SHAPELY else 'off'}\n"
                f"[selftest] preview OK: html={len(html)} bytes, "

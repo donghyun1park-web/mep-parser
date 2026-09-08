@@ -9,6 +9,7 @@ import inspect
 import os
 import sys
 import traceback
+import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -33,7 +34,7 @@ def load(path):
 def main():
     files = sorted(f for f in os.listdir(HERE)
                    if f.startswith("test_") and f.endswith(".py"))
-    npass = nfail = 0
+    npass = nfail = nskip = nunrun = 0
     fails = []
     for fn in files:
         try:
@@ -47,10 +48,15 @@ def main():
             if not (name.startswith("test_") and inspect.isfunction(fn_obj)):
                 continue
             if inspect.signature(fn_obj).parameters:      # 픽스처 인자 있는 것은 pytest 전용
+                nunrun += 1
+                print(f'  SKIP {fn}::{name} (pytest fixture required)')
                 continue
             try:
                 fn_obj()
                 npass += 1
+            except unittest.SkipTest as exc:
+                nskip += 1
+                print(f'  SKIP {fn}::{name}: {exc}')
             except Exception:
                 nfail += 1
                 fails.append((fn, name, traceback.format_exc()))
@@ -60,8 +66,13 @@ def main():
         print(f"{fn}::{name}")
         print(tb.rstrip())
     print("\n" + "-" * 70)
-    print(f"통과 {npass} / 실패 {nfail}")
-    return 1 if nfail else 0
+    print(f"통과 {npass} / 실패 {nfail} / 환경 건너뜀 {nskip} / 미실행 {nunrun}")
+    # 환경 때문에 건너뛴 것(도면 없음·ifcopenshell 없음)은 사실이니 통과다.
+    # 하지만 **이 러너가 못 돌려서** 미실행인 것은 러너의 한계지 통과가 아니다 —
+    # 조용히 0 을 내면 게이트 노릇을 하며 48개를 안 본다. 그래서 실패로 끝낸다.
+    if nunrun:
+        print(f"  [!] 이 러너로 못 도는 테스트 {nunrun}개 — 게이트로 쓰려면 `pytest tests`")
+    return 1 if (nfail or nunrun) else 0
 
 
 if __name__ == "__main__":
