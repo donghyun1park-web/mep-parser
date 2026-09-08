@@ -49,56 +49,56 @@
       "equipment": 6,
       "opening": 34,
       "slab": 8,
-      "wall": 672
+      "wall": 667
     },
     "duplicate_geometry_dropped": {
       "column": 13,
       "wall": 10
     },
     "eid_collisions": {},
-    "eid_count": 800,
-    "eid_hash": "fb5a2150b619",
+    "eid_count": 795,
+    "eid_hash": "9a689f487457",
     "face_coverage_pct": 98,
     "floors": [
       0
     ],
     "member_schedule": {},
-    "needs_review": 180,
+    "needs_review": 161,
     "openings_dims_assumed": {
       "height": 34,
       "sill": 34
     },
     "small_openings_dropped": 244,
     "thin_pairs": {
-      "A-CON": 21,
-      "A-WALL": 1,
-      "상부골조": 4
+      "A-CON": 5,
+      "상부골조": 2
     },
     "wall_pairing": {
-      "paired": 480,
+      "paired": 475,
       "single": 0,
       "single_offset": 154
     },
     "wall_thickness_10mm": {
       "0": 4,
+      "100": 16,
       "150": 1,
       "20": 3,
       "200": 310,
       "220": 1,
       "250": 123,
       "30": 24,
-      "300": 34,
+      "300": 35,
       "350": 2,
-      "400": 33,
+      "400": 34,
       "420": 1,
       "450": 41,
       "460": 2,
       "470": 1,
       "480": 2,
-      "50": 26,
+      "50": 3,
       "500": 25,
       "70": 1
     },
-    "width_conflicts": 4
+    "width_conflicts": 1
   }
 }

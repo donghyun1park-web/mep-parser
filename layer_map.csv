@@ -14,7 +14,13 @@ A-HAT,ignore,,,
 # width 를 비우면 면선 페어링 실측(width_detected)이 쓰인다. 이 도면은 한 레이어에
 # 200·250·300·400·450mm 가 섞여 있어(width_conflicts 280개) 하나로 못 적는다.
 # 믿을 수 없는 실측(thin_pair)은 geom_contract 가 걸러 params 기본값으로 떨어뜨린다.
-WALL|벽|CON,wall,,2800,
+# pair_min: 이보다 가까운 평행선 쌍은 벽으로 안 본다. 실측(지하3층): 벽면 옆 마감선이
+# 벽면과 50mm 로 짝지어 26개가 '얇은 오결합' 이었다(A-CON 21·상부골조 4·A-WALL 1).
+# 67 = A-WALL 중앙값 200 의 1/3. 이 행이 A-CON(중앙값 250 → 83)도 덮지만 둘의 결과가
+# 같으므로(차이는 A-WALL 70mm 벽 하나뿐) 버리지 않는 쪽인 67 을 쓴다.
+# 효과: 50mm 벽 26 → 3, 그중 16개가 제 두께 100mm 로 붙었다. thin_pair 26 → 7,
+# width_conflicts 4 → 1, needs_review 180 → 161. 면선 커버리지 98.5 → 98.4(미커버 0).
+WALL|벽|CON,wall,,2800,,pair_min=67
 COL|기둥|Block_C,column,,3000,
 SLAB|FLOOR|바닥|슬래브,slab,,,200
 ZONE|ROOM|실|구역,zone,,,
