@@ -125,6 +125,21 @@ def test_repo_layer_map_loads_and_has_no_shadow():
     assert sh == [], f"저장소 layer_map.csv 에 가려진 규칙이 있다: {sh}"
 
 
+def test_default_rules_and_repo_csv_agree_on_open_layers():
+    """`-m` 유무로 판정이 달라지면 그게 다음 버그다.
+
+    'OPEN'(공백부 X 표시선)은 버리고 'A-OPENING'(진짜 개구부)은 살린다 —
+    두 경로가 같은 답을 내야 한다."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    csv_rules = dp.load_layer_map(os.path.join(root, "layer_map.csv"))
+    for layer, want in (("OPEN", "ignore"), ("A-OPENING", "opening"),
+                        ("OPENING", "opening"), ("DOOR-1", "opening")):
+        got_csv = dp.classify(layer, csv_rules, set())[0]
+        got_def = dp.classify(layer, dp.DEFAULT_LAYER_RULES, set())[0]
+        assert got_csv == want, f"layer_map.csv: {layer} -> {got_csv}"
+        assert got_def == want, f"DEFAULT_LAYER_RULES: {layer} -> {got_def}"
+
+
 # ── opts 컬럼 (레이어별 튜닝) ──────────────────────────────────────────────
 def test_opts_parsed():
     r = dp.load_layer_map(write_csv(

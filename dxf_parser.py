@@ -50,7 +50,12 @@ DEFAULT_LAYER_RULES = [
     (r"COL|기둥|Block_C", "column", {}),
     (r"SLAB|FLOOR|바닥|슬래브|STAIR|계단", "slab", {}),
     (r"ZONE|ROOM|실|구역", "zone", {}),
-    (r"DOOR|WIND|문|창|OPEN", "opening", {}),
+    # 'OPEN' 은 공백부(계단실·샤프트) X 표시선이지 개구부가 아니다 — layer_map.csv 와
+    # 같은 판정이고 실측은 그쪽 주석에 있다. `^…$` 로 고정하는 이유도 같다: 느슨한
+    # 'OPEN' 을 ignore 로 두면 'A-OPENING' 같은 **진짜** 개구부 레이어까지 말없이
+    # 버린다(만들어 내는 실수는 검사에 걸리지만 버리는 실수는 안 걸린다).
+    (r"^OPEN$", "ignore", {}),
+    (r"DOOR|WIND|문|창|OPENING", "opening", {}),
     (r"CEN|중심", "wall", {}),  # 중심선도 벽체로 간주하는 경우
     # [Phase 2.7] MEP — 데이터 추출만(3D 빌드 후속). 중심선 + 치수.
     (r"PIPE|배관|PIPING", "pipe", {}),
