@@ -128,12 +128,16 @@ def test_repo_layer_map_loads_and_has_no_shadow():
 def test_default_rules_and_repo_csv_agree_on_open_layers():
     """`-m` 유무로 판정이 달라지면 그게 다음 버그다.
 
-    'OPEN'(공백부 X 표시선)은 버리고 'A-OPENING'(진짜 개구부)은 살린다 —
+    버리는 것과 살리는 것이 이름으로 갈린다: 'OPEN'(공백부 X 표시선)·
+    'DEFPOINT'(치수 정의점)는 버리고, 'A-OPENING'(진짜 개구부)은 살린다.
+    'A-DEFPOINT-XX' 는 남의 레이어라 삼키지 않는다(미매핑으로 드러나야 한다).
     두 경로가 같은 답을 내야 한다."""
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     csv_rules = dp.load_layer_map(os.path.join(root, "layer_map.csv"))
     for layer, want in (("OPEN", "ignore"), ("A-OPENING", "opening"),
-                        ("OPENING", "opening"), ("DOOR-1", "opening")):
+                        ("OPENING", "opening"), ("DOOR-1", "opening"),
+                        ("DEFPOINT", "ignore"), ("Defpoints", "ignore"),
+                        ("A-DEFPOINT-XX", None)):
         got_csv = dp.classify(layer, csv_rules, set())[0]
         got_def = dp.classify(layer, dp.DEFAULT_LAYER_RULES, set())[0]
         assert got_csv == want, f"layer_map.csv: {layer} -> {got_csv}"

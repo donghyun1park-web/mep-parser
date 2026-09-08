@@ -6,6 +6,11 @@ pattern,category,width,height,thickness,opts
 배수판_벽체|배수판,ignore,,,
 A-CEN$|A-CEN-SUB,ignore,,,
 A-HAT,ignore,,,
+# AutoCAD 치수 정의점(비출력 레이어). 실측(지하3층): DEFPOINT 39엔티티 중 형상이
+# 되는 건 2개(나머지는 POINT), Defpoints 는 10엔티티에 0개 — 제도 부산물이다.
+# 미매핑으로 두면 모델에는 안 들어가지만 경고에 계속 남아 진짜 미매핑을 가린다.
+# ^…$ 로 고정: 느슨한 DEFPOINT 는 'A-DEFPOINT-XX' 같은 남의 레이어를 삼킨다.
+^DEFPOINTS?$,ignore,,,
 # width 를 비우면 면선 페어링 실측(width_detected)이 쓰인다. 이 도면은 한 레이어에
 # 200·250·300·400·450mm 가 섞여 있어(width_conflicts 280개) 하나로 못 적는다.
 # 믿을 수 없는 실측(thin_pair)은 geom_contract 가 걸러 params 기본값으로 떨어뜨린다.
