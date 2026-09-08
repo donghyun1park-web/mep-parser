@@ -2237,6 +2237,7 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
     _nondim_skipped = {}    # from=dim 레이어의 비-DIMENSION(보조선·화살표) 건너뛴 수
     _rule_hits = set()      # 실제 매칭된 규칙 인덱스 — 그림자 규칙 탐지용
     _layers_seen = set()
+    _rule_layer = {}        # 블록 안쪽 레이어 → 규칙을 정한 INSERT 레이어(집합)
     unmapped_block_recs = {}      # 블록명 → explode 기하 샘플(제안 통계용)
     unmapped_block_entities = {}  # 블록명 → INSERT 엔티티(AI 자동적용 재추출용)
     for e in msp:
@@ -2268,6 +2269,16 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
                     rec["overrides"] = _pub_attrs(attrs)
                     if attrs.get("_opts"):
                         rec["_parse_opts"] = attrs["_opts"]
+                # ★ explode 된 레코드의 `layer` 는 **블록 안쪽 엔티티**의 레이어인데,
+                #   카테고리·overrides·opts 는 위에서 본 대로 **INSERT 의 레이어**가
+                #   정한다. 둘이 다르면 경고가 "'상부골조' 레이어" 라고 말해도 그
+                #   이름으로 layer_map 에 행을 써 봐야 아무 일도 안 난다 — 어느 규칙에도
+                #   안 걸리는 이름이기 때문이다(실측: 벽 230개가 그랬다).
+                #   레코드마다 들고 다니지 않는다: 면선 페어링이 새 레코드를 만들면서
+                #   흘리고(실측 230 → 36), 그러면 생성 지점 5곳을 전부 고쳐야 한다.
+                #   이건 레코드가 아니라 **레이어의 성질**이라 여기서 한 번만 모은다.
+                if rec.get("layer") and rec["layer"] != e.dxf.layer:
+                    _rule_layer.setdefault(rec["layer"], set()).add(e.dxf.layer)
                 if cat in MEP_CATEGORIES:
                     annotate_mep(rec, cat, attrs, elev)
                 else:
@@ -2659,10 +2670,20 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         for _ly, _cnt in sorted(_thin_by_layer.items()):
             _med = sorted(float(x["width_detected"]) for x in _w_by_layer[_ly])[
                 len(_w_by_layer[_ly]) // 2]
+            # 처방은 **규칙이 걸린 레이어**를 가리켜야 한다. explode 된 벽은 블록
+            # 안쪽 레이어명을 달고 있어서, 그 이름으로 행을 써 봐야 아무 일도 안 난다.
+            # ★ 넘겨주는 건 그 레이어가 **자기 규칙을 가질 수 없을 때뿐**이다.
+            #   A-CON 처럼 제 행이 있는 레이어는 블록에서 나온 벽이 좀 섞여 있어도
+            #   제 행으로 고쳐야 한다(안 그러면 블록이 놓인 레이어를 가리켜 버린다 —
+            #   실측: A-CON 이 '#CHK_U_250212' 행을 고치라고 했다).
+            _rl = sorted(_rule_layer.get(_ly) or ())
+            _where = (f"'{_rl[0]}' 행(이 벽들은 그 레이어에 놓인 블록에서 나왔다)"
+                      if len(_rl) == 1 and classify(_ly, rules)[0] is None
+                      else f"'{_ly}' 행")
             _msg = (f"[얇은 오결합] 레이어 '{_ly}': 두께가 중앙값 {_med:.0f}mm 의 "
                     f"{THIN_PAIR_RATIO:.0%} 미만인 벽 {_cnt}개. 벽면 옆 마감선과 짝지은 "
-                    f"것일 수 있다 — layer_map 에 opts 'pair_min={_med / 3:.0f}' 를 주면 "
-                    "진짜 두께가 통과한다.")
+                    f"것일 수 있다 — layer_map 의 {_where}에 opts "
+                    f"'pair_min={_med / 3:.0f}' 를 주면 진짜 두께가 통과한다.")
             result["warnings"].append(_msg)
             print("  " + _msg)
 
