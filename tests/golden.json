@@ -47,7 +47,7 @@
     "counts": {
       "column": 80,
       "equipment": 6,
-      "opening": 44,
+      "opening": 34,
       "slab": 8,
       "wall": 672
     },
@@ -56,8 +56,8 @@
       "wall": 10
     },
     "eid_collisions": {},
-    "eid_count": 810,
-    "eid_hash": "8dc781ab0661",
+    "eid_count": 800,
+    "eid_hash": "fb5a2150b619",
     "face_coverage_pct": 98,
     "floors": [
       0
@@ -65,8 +65,8 @@
     "member_schedule": {},
     "needs_review": 180,
     "openings_dims_assumed": {
-      "height": 44,
-      "sill": 44
+      "height": 34,
+      "sill": 34
     },
     "small_openings_dropped": 244,
     "thin_pairs": {

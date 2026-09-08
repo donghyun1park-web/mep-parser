@@ -13,11 +13,15 @@ WALL|벽|CON,wall,,2800,
 COL|기둥|Block_C,column,,3000,
 SLAB|FLOOR|바닥|슬래브,slab,,,200
 ZONE|ROOM|실|구역,zone,,,
-DOOR|WIND|문|창,opening,,,
+DOOR|WIND|문|창|OPENING,opening,,,
 PIPE|배관|PIP,pipe,100,,
 DUCT|덕트,duct,400,300,
 TRAY|트레이|CABLE|전선,tray,300,100,
 A\-STEEL,wall,,,
-OPEN,opening,,,
+# 'OPEN' 은 공백부(계단실·샤프트) X 표시선이지 벽 개구부가 아니다 — 실측(지하3층):
+# 점 2개짜리 선 10개 = 대각선 5쌍, 중점이 정확히 겹치고 최근접 벽까지 735~2495mm.
+# 패턴을 ^OPEN$ 으로 고정한다: 느슨한 'OPEN' 을 ignore 로 두면 'A-OPENING' 같은
+# 진짜 개구부 레이어까지 말없이 버린다(ignore 는 세고 버리므로 result.ignored 에는 남는다).
+^OPEN$,ignore,,,
 A-ELE,wall,200,2800,
 A-INSUL,wall,100,2800,
