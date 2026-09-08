@@ -1657,6 +1657,8 @@ def link_openings_to_walls(elements, params):
         op['wall_indices'] = []
         op.pop('host_dir', None)
         op.pop('host_width', None)
+        for _k in ('no_host_reason', 'no_host_gap_mm', 'no_host_dist_mm'):
+            op.pop(_k, None)
         if not op.get("center"):
             try:
                 cen = _centroid(op)
@@ -1705,6 +1707,10 @@ def link_openings_to_walls(elements, params):
         r = float((op.get('overrides') or {}).get('width', op.get('width', 2 * op.get('radius', 50.0)))) / 2
         indices = []
         nearest = (1e18, None, default_w)  # (거리, 벽방향단위벡터, 벽두께)
+        on_line_over = None   # 축선 위인데 벽 구간 밖 — 그 자리 벽이 끊겨 있다
+        # 가장 가까운 벽까지의 **실거리**(점-선분). 수직거리만 쓰면 62m 떨어진 벽의
+        # 연장선이 25mm 로 찍혀, 벽 위에 있는 개구부처럼 읽힌다.
+        nearest_dist = 1e18
         for i, wall in enumerate(walls):
             if op.get('level') and wall.get('level') and op['level'] != wall['level']:
                 continue
@@ -1747,11 +1753,33 @@ def link_openings_to_walls(elements, params):
             #   벽 반두께(ww/2) + 커터 반깊이((ww + margin)/2)
             # 한쪽만 보면 실제로 잘리는 벽을 놓친다(400mm 벽 밖 350mm 개구부).
             reach = ww * 0.5 + (ww + OPENING_CUT_MARGIN_MM) * 0.5
+            nearest_dist = min(nearest_dist, math.hypot(perp, over))
             if perp <= reach and over <= r:
                 indices.append(i)
                 if perp < nearest[0]:
                     nearest = (perp, udir, ww)
+            elif perp <= reach and over <= r + ww:
+                # 벽 축선 위인데 구간을 벗어났다 — **끝이 바로 코앞일 때만** 세어야
+                # 한다. `perp` 만 보면 벽의 **연장선**까지 축선으로 쳐서, 62m 떨어진
+                # 벽이 '문선이 끊긴 벽' 으로 둔갑한다(실측: 'OPEN' 표시선 6개).
+                # 문선(jamb)은 벽 하나 두께를 넘지 않는다(실측 틈 50~113mm).
+                on_line_over = over if on_line_over is None else min(on_line_over, over)
         op["wall_indices"] = sorted(indices)
+        if not indices:
+            # ★ "붙일 벽이 없다" 는 두 가지 뜻이고 조치가 정반대다.
+            #  · 축선 위인데 벽 구간 밖  → 제도자가 문 자리에서 **벽을 끊어 그렸다.**
+            #    뚫을 재료가 없는 것이 맞다 — 고칠 것이 없다(실측: A-DOOR 문간 2곳,
+            #    벽 틈 1520mm·2121mm 안에 문 스윙이 들어앉아 있었다).
+            #  · 축선에서 아예 멀다      → 애초에 벽 개구부가 아니다. layer_map 질문이다
+            #    (실측: 'OPEN' 레이어의 공백부 X 표시선 10개 = 대각선 5쌍, 가장 가까운
+            #    벽까지 735~2495mm. 점 2개짜리 선이라 뚫을 형상 자체가 없다).
+            # 한 줄로 묶어 두면 다음 사람이 이 추적을 처음부터 다시 한다.
+            if on_line_over is not None:
+                op["no_host_reason"] = "wall_open_at_this_span"
+                op["no_host_gap_mm"] = round(on_line_over - r, 1)
+            else:
+                op["no_host_reason"] = "no_wall_on_this_line"
+                op["no_host_dist_mm"] = round(nearest_dist, 1)
         # host 벽 배향(문/창 사각 void 방향 산출용)
         if nearest[1] is not None:
             op["host_dir"] = [round(nearest[1][0], 5), round(nearest[1][1], 5)]

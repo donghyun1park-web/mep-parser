@@ -384,13 +384,25 @@ def verify_build(data, build_stats, ifc_path=None, policy=None, stage=None):
                 # 납품을 막지는 않되, 조용히 넘기지도 않는다.
                 F.append(Finding("V106", "warn", "Opening missed some hosts", opening))
         # 붙일 벽을 아예 못 찾은 개구부. 빌더가 못 한 일이 아니라 링크가 못 찾은
-        # 것이므로 납품을 막지 않는다 — 다만 **한 줄로 묶어서** 반드시 말한다.
-        # 개구부마다 하나씩 올리면(실측 15건) 보고서가 그걸로 덮인다.
-        _no_host = [o.get("eid") for o in (st.get("opening_results") or [])
-                    if not (o.get("requested_hosts") or [])]
-        if _no_host:
-            F.append(Finding("V106", "warn", "Openings found no host wall",
-                             {"count": len(_no_host), "eids": _no_host[:20]}))
+        # 것이므로 납품을 막지 않는다 — 다만 **사유별로 묶어서** 반드시 말한다.
+        # 개구부마다 하나씩 올리면(실측 15건) 보고서가 그걸로 덮이고, 전부 한 줄로
+        # 묶으면 "고칠 것 없음" 과 "레이어 매핑이 틀렸음" 이 같은 말로 보인다.
+        # 사유는 `link_openings_to_walls` 가 레코드에 적어 둔다(거기 주석 참조).
+        _why = {o.get("eid"): o.get("no_host_reason")
+                for o in (data.get("elements") or {}).get("opening") or []}
+        _groups = {}
+        for o in st.get("opening_results") or []:
+            if not (o.get("requested_hosts") or []):
+                _groups.setdefault(_why.get(o.get("eid")) or "unknown", []).append(o.get("eid"))
+        for _key, _msg in (
+                ("wall_open_at_this_span",
+                 "Openings sit where the drawing already left the wall open (nothing to cut)"),
+                ("no_wall_on_this_line",
+                 "Openings are not on any wall line — check the layer mapping"),
+                ("unknown", "Openings found no host wall")):
+            if _groups.get(_key):
+                F.append(Finding("V106", "warn", _msg,
+                                 {"count": len(_groups[_key]), "eids": _groups[_key][:20]}))
     if ifc_path and not os.path.isfile(ifc_path):
         F.append(Finding("V107", "error", "IFC output is missing"))
     if stage == "post_export":

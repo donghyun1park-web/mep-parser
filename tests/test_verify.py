@@ -332,6 +332,27 @@ def test_V106_already_void_host_counts_as_cut():
     assert not rep.failed and _sev(rep, "V106") == [], rep.text()
 
 
+def test_V106_splits_host_less_openings_by_reason():
+    """'고칠 것 없음'과 '레이어 매핑이 틀림'이 한 줄로 묶이면 같은 말로 보인다."""
+    data = clean()
+    data["elements"]["opening"] = [
+        {"eid": "o:gap", "no_host_reason": "wall_open_at_this_span", "no_host_gap_mm": 110.0},
+        {"eid": "o:far", "no_host_reason": "no_wall_on_this_line", "no_host_dist_mm": 2495.0},
+    ]
+    from artifact_validation import input_hash
+    st = {"intent": {}, "built": {"walls": 1}, "floor_orphans": 0, "floor_dups": 0,
+          "invalid_shapes": 0, "bbox": [0, 0, 0, 5000, 5000, 3000], "unbuilt": {},
+          "opening_results": [{"eid": "o:gap", "requested_hosts": [], "cut_host_eids": []},
+                              {"eid": "o:far", "requested_hosts": [], "cut_host_eids": []}],
+          "provenance": {"run_id": "t", "input_sha256": input_hash(data)}}
+    rep = V.verify_build(data, st, None, stage="pre_export")
+    assert not rep.failed, rep.text()
+    msgs = {f.message: f.payload["eids"] for f in rep.findings if f.id == "V106"}
+    assert len(msgs) == 2, rep.text()
+    assert [v for k, v in msgs.items() if "already left the wall open" in k] == [["o:gap"]], msgs
+    assert [v for k, v in msgs.items() if "layer mapping" in k] == [["o:far"]], msgs
+
+
 def test_V106_host_less_openings_are_reported_as_one_line():
     """개구부마다 하나씩 올리면 보고서가 그걸로 덮인다(실측 15건)."""
     rep = _pre_export([{"eid": f"o:{i}", "requested_hosts": [], "cut_host_eids": []}
