@@ -1,11 +1,15 @@
 import json
+import unittest
 from pathlib import Path
 import pytest
 from test_project_server import session
 
 
 def test_mcp_rejects_index_without_revision_and_writes_canonical_eid(tmp_path):
-    import mep_mcp_server as mcp
+    try:
+        import mep_mcp_server as mcp  # 선택 의존성(mcp SDK) — 없으면 건너뛴다
+    except (ImportError, SystemExit) as exc:   # 이 모듈은 의존성이 없으면 sys.exit(1)
+        raise unittest.SkipTest(f'mcp SDK 없음 — MCP 클라이언트 검사 미실행 ({exc})')
     sess = session(tmp_path)
     path, first = sess.export_geometry(tmp_path / 'geometry.json')
     eid = first['geometry']['elements']['wall'][0]['eid']

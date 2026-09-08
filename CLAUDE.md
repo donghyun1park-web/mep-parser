@@ -381,11 +381,19 @@ python ifc_4d.py out_model.ifc schedule.csv -o out_4d.ifc
 ### 7. 단일 .exe 빌드 (현장 PC = Python 불필요)
 개발 PC(Python 3.11 권장)에서 1회 빌드 → 현장 PC 더블클릭 실행.
 ```
-build_exe.bat            # = py -3.11 -m pip install ezdxf shapely pyinstaller
+build_exe.bat            # = py -3.11 -m pip install ezdxf shapely pyinstaller pytest
+                         #   + py -3.11 -m pytest tests -q        ← 게이트
                          #   + py -3.11 -m PyInstaller mep_parser.spec --noconfirm
-# → dist\MEP-Parser.exe (onefile, 윈도우 GUI, ~31MB)
+# → dist\MEP-Parser.exe (onefile, 윈도우 GUI, ~34MB)
 dist\MEP-Parser.exe --selftest   # 헤드리스 스모크(번들 건전성, exit 0=정상)
 ```
+★ **선택 의존성이 없는 PC 에서 테스트는 `skip` 이어야 한다 — 에러면 게이트가 통째로
+막힌다.** 실측: 깨끗한 Python 3.11(빌드용)에서 `ifcopenshell` 16건 + `mcp` 1건이
+에러로 터져 .exe 가 안 만들어졌다. 두 모듈 다 **없으면 `sys.exit(1)`** 하므로
+가드는 `except (ImportError, SystemExit)` 이어야 한다(`ImportError` 만 잡으면 안 걸린다).
+규약은 `tests/test_ifc4d.py` 와 같다: `unittest.SkipTest` 를 올린다.
+그래서 빌드 PC 의 게이트는 269 통과 / 21 미실행이다 — IFC 내보내기·검증 계열은
+**안 돈다.** 거기까지 게이트로 덮고 싶으면 위 pip 줄에 `ifcopenshell` 을 더한다.
 - `mep_parser.spec`: layer/block csv·freecad_builder.py·sample·vendor 동봉,
   ezdxf/shapely collect_all, matplotlib/anthropic/vision 제외(graceful 폴백).
 - 런타임 리소스는 `resource_path()`(`sys._MEIPASS`)로, 편집 csv는 `user_csv()`로

@@ -3,6 +3,7 @@ import copy
 import json
 from pathlib import Path
 import sys
+import unittest
 
 import pytest
 
@@ -18,6 +19,19 @@ def geometry():
                 "overrides": {"width": 200, "height": 3000}}]}}
 
 
+def _ifc_builder():
+    """ifcopenshell 은 선택 의존성이다(Bonsai 안에 들어 있다). 없는 PC 에서 이 테스트가
+    **에러로** 죽으면 `build_exe.bat` 의 게이트가 통째로 막혀 .exe 를 못 만든다 —
+    실측: 깨끗한 Python 3.11 에서 17건이 그렇게 터져 빌드가 중단됐다. `test_ifc4d.py`
+    와 같은 규약으로 건너뛴다(pytest 도 run_all.py 도 SkipTest 를 skip 으로 센다).
+    `ifc_builder` 는 의존성이 없으면 `sys.exit(1)` 하므로 SystemExit 도 함께 받는다."""
+    try:
+        import ifc_builder
+    except (ImportError, SystemExit) as exc:
+        raise unittest.SkipTest(f'ifcopenshell 없음 — IFC 산출물 검사 미실행 ({exc})')
+    return ifc_builder
+
+
 def test_missing_stats_and_unbuilt_cannot_pass():
     assert verify.verify_build(geometry(), {}).failed
     assert verify.verify_build(geometry(), {"unbuilt": {"beam": {"count": 1}}}).failed
@@ -30,7 +44,7 @@ def test_circle_column_is_valid_preflight_geometry():
 
 
 def test_simple_ifc_rejects_nonempty_unsupported_category_before_writing(tmp_path):
-    import ifc_builder
+    ifc_builder = _ifc_builder()
     data = geometry()
     data["elements"]["pipe"] = [{"eid": "pipe:p", "points": [[0, 0], [100, 0]]}]
     src = tmp_path / "g.json"
@@ -48,7 +62,7 @@ def test_simple_ifc_rejects_nonempty_unsupported_category_before_writing(tmp_pat
 
 
 def test_simple_export_properties_mapping_and_contract_dimensions(tmp_path):
-    import ifc_builder
+    ifc_builder = _ifc_builder()
     import ifcopenshell
     import ifcopenshell.geom
     import ifcopenshell.util.element
@@ -77,7 +91,7 @@ def test_simple_export_properties_mapping_and_contract_dimensions(tmp_path):
 
 
 def test_exported_ifc_tampering_is_rejected(tmp_path):
-    import ifc_builder
+    ifc_builder = _ifc_builder()
     import ifcopenshell
     import ifcopenshell.util.element
     data = geometry()
@@ -99,7 +113,7 @@ def test_post_export_requires_actual_file_even_if_stats_claim_success(tmp_path):
 
 
 def test_simple_circle_and_slab_follow_contract(tmp_path):
-    import ifc_builder
+    ifc_builder = _ifc_builder()
     import ifcopenshell
     import ifcopenshell.geom
     data = geometry()
@@ -123,7 +137,7 @@ def test_simple_circle_and_slab_follow_contract(tmp_path):
 
 
 def test_connected_simple_wall_is_centered(tmp_path):
-    import ifc_builder
+    ifc_builder = _ifc_builder()
     import ifcopenshell
     import ifcopenshell.geom
     src, out = tmp_path / "g.json", tmp_path / "out.ifc"
@@ -156,7 +170,7 @@ def test_runner_records_startup_failure_and_rejects_old_receipt(tmp_path):
 
 @pytest.mark.parametrize("key", ["ReviewReason", "Layer", "Level", "ProjectId", "Revision"])
 def test_qa_property_tampering_is_rejected(tmp_path, key):
-    import ifc_builder
+    ifc_builder = _ifc_builder()
     import ifcopenshell
     import ifcopenshell.api.pset
     import ifcopenshell.util.element
@@ -174,7 +188,7 @@ def test_qa_property_tampering_is_rejected(tmp_path, key):
 
 
 def test_same_elevation_storeys_use_explicit_level_and_validate_name(tmp_path):
-    import ifc_builder
+    ifc_builder = _ifc_builder()
     import ifcopenshell
     data = geometry()
     data["floors"] = [{"label": "East", "z": 0}, {"label": "West", "z": 0}]
@@ -191,7 +205,7 @@ def test_same_elevation_storeys_use_explicit_level_and_validate_name(tmp_path):
 
 @pytest.mark.parametrize("key", ["orphaned", "ambiguous", "conflicts"])
 def test_unresolved_edits_block_preflight_and_simple_ifc(tmp_path, key):
-    import ifc_builder
+    ifc_builder = _ifc_builder()
     data = geometry()
     data["edits_report"] = {key: ["wall:unapplied"]}
     assert verify.verify_geometry(data).failed
@@ -203,7 +217,7 @@ def test_unresolved_edits_block_preflight_and_simple_ifc(tmp_path, key):
 
 
 def test_equal_volume_translated_ifc_is_rejected(tmp_path):
-    import ifc_builder
+    ifc_builder = _ifc_builder()
     import ifcopenshell
     data = geometry()
     src, out = tmp_path / "g.json", tmp_path / "out.ifc"

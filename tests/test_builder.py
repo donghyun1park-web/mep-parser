@@ -324,7 +324,10 @@ def test_actual_ifc_preserves_long_chained_and_folded_eids():
 def test_actual_door_and_window_have_leaves_cuts_and_storey_membership():
     _skip_if_no_freecad()
     import geom_contract as GC
-    import ifcopenshell
+    try:
+        import ifcopenshell            # 선택 의존성 — 없으면 게이트를 막지 말고 건너뛴다
+    except ImportError as exc:
+        raise unittest.SkipTest(f'ifcopenshell 없음 — 문/창 IFC 검사 미실행 ({exc})')
     data = {"contract": GC.contract_block(), "floors": [{"label": "L1", "z": 0}],
             "elements": {"wall": [_w([[0, 0], [5000, 0]], eid="wall:host", level="L1")],
             "opening": [
