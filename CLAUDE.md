@@ -219,21 +219,21 @@ EID 부여는 주입보다 **먼저** 한다(`apply_edits` 가 EID 로 찾으므
 ### ★ 수정 루프의 남은 한계 — 알고 남겨 둔 것
 전부 "지금도 납품은 되지만, 다음에 이 코드를 여는 사람이 알아야 하는" 것들이다.
 
-**① 고아 edit 을 되붙일 방법이 사실상 없다.**
-`grouping` 이 바뀌면 EID 가 바뀌고 그 수정은 고아가 된다. 파서는 개수와 EID·좌표를
-보고하지만(`edits_report.orphaned`, preview 가 남긴 `_at`), 되붙이는 것은 사람 몫이다.
-`element_id.suggest_relink()` 는 **테스트에서만 호출되는 죽은 코드**이고, 지금 구현은
-"EID 접두가 같은 것 전부" 를 돌려주므로 벽 고아 하나에 682개를 후보로 준다 — 제안이
-아니다. 쓸모 있게 하려면 `_at` 좌표로 거리 순위를 매겨야 한다(약 10줄).
-**자동 재연결은 하지 않는다** — 잘못 붙으면 조용히 틀린 모델이 된다.
+**① 고아 edit 의 재연결은 **제안까지만** 한다.**
+`grouping` 이 바뀌면 EID 가 바뀌고 그 수정은 고아가 된다. `element_id.suggest_relink()`
+가 같은 층·같은 카테고리 안에서 거리·방향·겹침으로 순위를 매겨 상위 5개를 낸다
+(`edits_report.relink_suggestions`, 앵커는 preview 가 남긴 `_at`). 호출처는
+`dxf_parser`·`project_server`·`stack_build` 셋. 위치를 못 찾으면
+`missing_source_location`, 모호하면 `no_unambiguous_candidate` 로 사유를 남긴다.
+**자동 재연결은 하지 않는다** — 잘못 붙으면 조용히 틀린 모델이 된다. 붙이는 것은 사람 몫.
 
-**② 체인으로 묶인 벽은 대표 EID 하나만 IFC 로 간다.**
+**② 체인 멤버의 EID 는 `SourceEIDs` 로 전부 나간다.**
 `freecad_builder` 가 같은 직선의 벽 N개를 한 `Arch.makeWall` 로 묶을 때
-`set_ifc_props(wall, chain_el)` 은 대표 레코드의 EID 만 심는다. 그래서 Bonsai 에서
-그 벽을 클릭해 찾은 문제를 `edits.json` 으로 되돌릴 열쇠가 **N−1 개 없다.**
-`needs_review` 는 같은 이유로 유실되다가 멤버 전체 OR 로 고쳤는데(그 주석이 코드에
-있다), EID 는 같이 고치지 않았다. 고치려면 `members` 가 이미 손에 있으니
-`("EIDs", "IfcLabel", ",".join(...))` 한 줄이면 된다.
+`part_el["_artifact_source_eids"] = sub_eids` 로 멤버 전체를 싣고, `set_ifc_props` 가
+`Pset_MEPParser.SourceEIDs`(JSON 배열)로 내보낸다. 실측(지하3층): 속성 584개 중
+82개가 멤버 2개 이상이고 최대 17개다. 그래서 Bonsai 에서 벽을 클릭해 찾은 문제를
+`edits.json` 으로 되돌릴 열쇠가 멤버마다 있다. `needs_review` 도 같은 이유로 멤버
+전체를 OR 한다.
 
 **③ 수동 벽 끝점은 브라우저 스냅이 전부다.**
 위 2D 평면 탭 절 참조. 스냅을 놓치면 그 벽 끝에서 개구부 void 가 빗나갈 수 있다.
