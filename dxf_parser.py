@@ -285,7 +285,11 @@ OPT_SPEC = {
                            "추정하지 않는다(wall→콘크리트는 조적벽에서 바로 틀린다)"),
     "centerline": ("str",  "이 레이어에서 **중심선만** 부재로 쓴다: `color:1`(ACI 색 번호) "
                            "또는 `linetype:CENTER`. 나머지는 외곽선이라 세고 버린다"),
+    "elevation": ("str",   "MEP 부재의 z 배치를 **선언**한다: `top:<mm>` 은 부재 **상단**을 "
+                           "그 높이에 맞춘다(천장 슬래브 하단에 붙이는 규칙), "
+                           "`center:<mm>` 은 중심축을 그 높이에. 평면도에는 고저가 없다"),
 }
+ELEVATION_KINDS = ("top", "center")
 # `centerline=` 값의 형식. 로드 시점에 검증한다 — 오타난 판정 기준을 조용히 안 먹고
 # 넘어가면 외곽선이 그대로 부재가 되는데, 그건 형상이 멀쩡해 보여 검사에 안 걸린다.
 CENTERLINE_KINDS = ("color", "linetype")
@@ -317,6 +321,16 @@ def _parse_opts(raw, csv_path="", lineno=0):
                     f"{os.path.basename(csv_path)} {lineno}행: opts {k}={v!r} 는 숫자가 아니다")
         else:
             out[k] = v
+        if k == "elevation":
+            _kind, _, _v = v.partition(":")
+            try:
+                float(_v)
+            except ValueError:
+                _kind = None
+            if str(_kind).strip().lower() not in ELEVATION_KINDS:
+                raise LayerMapError(
+                    f"{os.path.basename(csv_path)} {lineno}행: opts elevation={v!r} 형식 오류 — "
+                    f"{' 또는 '.join(x + ':<mm>' for x in ELEVATION_KINDS)} 여야 한다")
         if k == "centerline" and v.partition(":")[0].strip().lower() not in CENTERLINE_KINDS:
             raise LayerMapError(
                 f"{os.path.basename(csv_path)} {lineno}행: opts centerline={v!r} 형식 오류 — "
@@ -668,14 +682,46 @@ def _entity_elevation(e, scale):
 
 def annotate_mep(rec, cat, attrs, elevation):
     """MEP 레코드에 고저·치수 자기서술 필드 부착(데이터만, 3D 빌드는 후속).
-    pipe: diameter / duct·tray: width_mm·height_mm. 모두 layer_map width/height 에서."""
+    pipe: diameter / duct·tray: width_mm·height_mm. 모두 layer_map width/height 에서.
+
+    ★ **평면도에는 고저가 없다.** 엔티티의 z 를 그대로 쓰면 덕트가 바닥에 깔린다
+    (실측 아파트 환기평면: 덕트 45개 전부 elevation=0). 그래서 `opts` 의
+    `elevation=` 선언이 실측 z 를 **이긴다** — 두께의 `overrides.width` 와 같은 규약이다.
+    현장 규칙은 "환기덕트는 천장 슬래브에 딱 붙고 그 아래로 스프링클러·배기덕트가
+    지난다" 라서, 값이 아니라 **상단**을 맞춰야 한다 → `top:<mm>`."""
     rec["elevation"] = elevation
     if cat == "pipe":
         rec["diameter"] = attrs.get("width")        # 배관 외경(mm)
     elif cat in ("duct", "tray"):
         rec["width_mm"] = attrs.get("width")
         rec["height_mm"] = attrs.get("height")
+    dec = declared_elevation(cat, rec, (attrs or {}).get("_opts"))
+    if dec is not None:
+        rec["elevation"] = dec
+        rec["elevation_source"] = "declared"       # 산출물이 스스로 말한다
     return rec
+
+
+def declared_elevation(cat, rec, opts):
+    """`elevation=` 선언 → 중심축 z(mm). 없거나 부재 높이를 모르면 None.
+
+    `top:<mm>` 은 부재 **상단**을 그 높이에 맞춘다: 중심축 = mm − 높이/2.
+    덕트 높이가 계통마다 달라도(SA 150 · RA 200) 상단은 같은 면에 붙는다 —
+    고정 중심축을 계통마다 계산해 적어 주는 것보다 규칙 그대로다."""
+    spec = (opts or {}).get("elevation")
+    if not spec:
+        return None
+    kind, _, val = str(spec).partition(":")
+    try:
+        z = float(val)
+    except ValueError:
+        return None
+    if kind.strip().lower() != "top":
+        return z
+    h = rec.get("height_mm") if cat in ("duct", "tray") else rec.get("diameter")
+    if not h:
+        return None                # 높이를 모르면 상단을 맞출 수 없다 — 조용히 추측하지 않는다
+    return z - float(h) / 2.0
 
 
 # ── [Phase 2] BLOCK(INSERT) 처리 ─────────────────────────────

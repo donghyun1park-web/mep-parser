@@ -405,3 +405,37 @@ def test_same_opening_links_once_the_z_overlaps():
     el = {"wall": [_wall_0_2400()], "opening": [_open_at(0.0)]}
     dp.link_openings_to_walls(el, {"wall": {"width": 200.0, "height": 2800.0}})
     assert el["opening"][0]["wall_indices"] == [0], el["opening"][0]
+
+
+# ── elevation= (평면도에는 고저가 없다) ────────────────────────────────────
+def test_declared_elevation_anchors_the_top_not_the_center():
+    """현장 규칙은 '환기덕트는 천장 슬래브에 딱 붙는다' 다 — 계통마다 높이가 달라도
+    **상단**이 같은 면에 붙어야 그 아래로 스프링클러·배기덕트가 지난다."""
+    o = {"elevation": "top:2500"}
+    assert dp.declared_elevation("duct", {"height_mm": 200.0}, o) == 2400.0   # RA
+    assert dp.declared_elevation("duct", {"height_mm": 150.0}, o) == 2425.0   # SA
+    assert dp.declared_elevation("pipe", {"diameter": 100.0}, o) == 2450.0
+    # center: 는 그대로 중심축
+    assert dp.declared_elevation("duct", {"height_mm": 200.0}, {"elevation": "center:2400"}) == 2400.0
+    # 높이를 모르면 상단을 맞출 수 없다 — 조용히 추측하지 않는다
+    assert dp.declared_elevation("duct", {}, o) is None
+    assert dp.declared_elevation("duct", {"height_mm": 200.0}, {}) is None
+
+
+def test_declared_elevation_beats_the_entity_z():
+    """평면도의 z 는 0 이거나 아티팩트다. 선언이 이긴다(두께의 overrides 와 같은 규약)."""
+    rec = dp.annotate_mep({}, "duct", {"width": 400.0, "height": 200.0,
+                                       "_opts": {"elevation": "top:2500"}}, 0.0)
+    assert rec["elevation"] == 2400.0 and rec["elevation_source"] == "declared", rec
+    plain = dp.annotate_mep({}, "duct", {"width": 400.0, "height": 200.0}, 12357.8)
+    assert plain["elevation"] == 12357.8 and "elevation_source" not in plain, plain
+
+
+def test_bad_elevation_spec_fails_at_load():
+    for bad in ("top", "top:abc", "bottom:2500", "2500"):
+        try:
+            dp._parse_opts(f"elevation={bad}")
+        except dp.LayerMapError:
+            continue
+        raise AssertionError(f"elevation={bad!r} 가 통과했다")
+    assert dp._parse_opts("elevation=top:2500") == {"elevation": "top:2500"}
