@@ -880,9 +880,113 @@ def _pipe_solid(pts, radius, elev):
     return result
 
 
+def _sweep_rect(pts, w2, h2, elev):
+    """사각 단면을 축선 위로 마이터 스윕. 실패하면 None(호출자가 폴백을 고른다)."""
+    if len(pts) < 2:
+        return None
+    try:
+        path = Part.makePolygon([App.Vector(float(q[0]), float(q[1]), elev) for q in pts])
+        d0 = App.Vector(float(pts[1][0]) - float(pts[0][0]),
+                        float(pts[1][1]) - float(pts[0][1]), 0.0)
+        rot = App.Rotation(App.Vector(0, 0, 1), App.Vector(d0).normalize())
+        prof = Part.makePolygon([App.Vector(-w2, -h2, 0), App.Vector(w2, -h2, 0),
+                                 App.Vector(w2, h2, 0), App.Vector(-w2, h2, 0),
+                                 App.Vector(-w2, -h2, 0)])
+        prof = prof.transformed(App.Placement(
+            App.Vector(float(pts[0][0]), float(pts[0][1]), elev), rot).Matrix)
+        ps = Part.BRepOffsetAPI.MakePipeShell(path)
+        ps.setFrenetMode(True)
+        ps.setTransitionMode(1)          # RightCorner = 마이터
+        ps.add(prof, False, False)
+        ps.build()
+        ps.makeSolid()
+        sh = ps.shape()
+        if sh and not sh.isNull() and sh.isValid() and sh.Solids:
+            return sh
+    except Exception:
+        pass
+    return None
+
+
+# 이 각도 미만의 꺾임은 중심선 잡음으로 보고 꼭짓점을 지운다(마이터 스윕 보호).
+_SWEEP_MIN_BEND_DEG = 5.0
+
+
 def _rect_solid(pts, width, height, elev):
-    """다점 중심선 → 사각단면(width×height) 세그먼트 fuse. duct/tray 용."""
+    """다점 중심선 → 사각단면(width×height). duct/tray 용.
+
+    ★ **스윕이 먼저다.** 세그먼트 상자를 fuse 하면 솔리드는 유효하지만 코너 이음매에
+      공면이 남는다(실측: 직선 덕트 6면 대 꺾인 덕트 36면). 그 상태로 IFC 로 나가면
+      테셀레이션에서 **비다양체**가 되어 V107 이 막는다(실측: 꺾이는 덕트 7개).
+      `MakePipeShell` + `RightCorner` 는 코너를 마이터로 이어 14면짜리 깔끔한
+      솔리드를 만들고 부피도 축선×단면과 정확히 일치한다 — 배관이 `Arch.makePipe`
+      로 얻는 것과 같은 성질이다. 실패하면 종전 fuse 로 떨어진다(없는 것보다 낫다).
+    """
     w2, h2 = width / 2.0, height / 2.0
+    clean = [pts[0]]
+    for q in pts[1:]:
+        if math.dist(clean[-1][:2], q[:2]) > 1e-6:
+            clean.append(q)
+    # 거의 일직선인 꼭짓점은 지운다. 2°짜리 가짜 꺾임 하나가 마이터 스윕을 깨고,
+    # 깨지면 면 많은 fuse 로 떨어져 비다양체가 된다(실측: Duct_4 가 2°·118° 를
+    # 함께 갖고 있었다). 중심선 정밀도 문제지 배관 형상이 아니다.
+    if len(clean) > 2:
+        simp = [clean[0]]
+        for k in range(1, len(clean) - 1):
+            a, b, c = simp[-1], clean[k], clean[k + 1]
+            v1 = (b[0]-a[0], b[1]-a[1]); v2 = (c[0]-b[0], c[1]-b[1])
+            n1 = math.hypot(*v1); n2 = math.hypot(*v2)
+            if n1 < 1e-9 or n2 < 1e-9:
+                continue
+            cosv = max(-1.0, min(1.0, (v1[0]*v2[0] + v1[1]*v2[1]) / (n1*n2)))
+            if math.degrees(math.acos(cosv)) >= _SWEEP_MIN_BEND_DEG:
+                simp.append(b)
+        simp.append(clean[-1])
+        clean = simp
+    swept = _sweep_rect(clean, w2, h2, elev)
+    if swept is not None:
+        return swept
+    # 통짜 스윕이 안 되면 **가장 짧은 중간 구간**에서 쪼개 각각 스윕한다.
+    # 실측: 폭 200mm 덕트가 188mm 구간에서 118° 를 돌아 마이터가 성립하지 않았다
+    # (Duct_4). 그 자리는 실제로 직관이 아니라 피팅이다 — 두 토막으로 보는 게 맞다.
+    if len(clean) >= 4:
+        k = min(range(1, len(clean) - 2),
+                key=lambda t: math.dist(clean[t][:2], clean[t + 1][:2]))
+        a = _sweep_rect(clean[:k + 1], w2, h2, elev)
+        b = _sweep_rect(clean[k + 1:], w2, h2, elev)
+        if a is not None and b is not None:
+            try:
+                both = a.fuse(b).removeSplitter()
+                if both and not both.isNull() and both.isValid():
+                    return both
+            except Exception:
+                pass
+        if a is not None and b is None:
+            return a
+        if b is not None and a is None:
+            return b
+    if False:
+        try:
+            path = Part.makePolygon([App.Vector(float(q[0]), float(q[1]), elev) for q in clean])
+            d0 = App.Vector(float(clean[1][0]) - float(clean[0][0]),
+                            float(clean[1][1]) - float(clean[0][1]), 0.0)
+            rot = App.Rotation(App.Vector(0, 0, 1), App.Vector(d0).normalize())
+            prof = Part.makePolygon([App.Vector(-w2, -h2, 0), App.Vector(w2, -h2, 0),
+                                     App.Vector(w2, h2, 0), App.Vector(-w2, h2, 0),
+                                     App.Vector(-w2, -h2, 0)])
+            prof = prof.transformed(App.Placement(
+                App.Vector(float(clean[0][0]), float(clean[0][1]), elev), rot).Matrix)
+            ps = Part.BRepOffsetAPI.MakePipeShell(path)
+            ps.setFrenetMode(True)
+            ps.setTransitionMode(1)          # RightCorner = 마이터
+            ps.add(prof, False, False)
+            ps.build()
+            ps.makeSolid()
+            swept = ps.shape()
+            if swept and not swept.isNull() and swept.isValid() and swept.Solids:
+                return swept
+        except Exception:
+            pass
     # 단면: Z축 방향 정렬 기준 사각형(XY 평면), 이후 각 세그먼트 방향으로 회전
     rect_pts = [App.Vector(-w2, -h2, 0), App.Vector(w2, -h2, 0),
                 App.Vector(w2,  h2, 0), App.Vector(-w2,  h2, 0),
@@ -916,6 +1020,16 @@ def _rect_solid(pts, width, height, elev):
     result = shapes[0]
     for s in shapes[1:]:
         result = result.fuse(s)
+    # ★ 코너에서 두 상자를 fuse 하면 이음매에 공면(coplanar) 면이 남는다. 솔리드로는
+    #   유효하지만 IFC 로 테셀레이션할 때 **비다양체**가 되어 V107 이 막는다
+    #   (실측: 꺾이는 덕트 7개가 'non-closed or non-manifold mesh'). removeSplitter
+    #   가 그 면들을 합친다. 실패하면 원본을 그대로 쓴다 — 없는 것보다 낫다.
+    try:
+        refined = result.removeSplitter()
+        if refined and not refined.isNull() and refined.isValid():
+            return refined
+    except Exception:
+        pass
     return result
 
 
@@ -968,11 +1082,13 @@ def build_mep(doc, mep_elements):
                 continue
             # 축선 길이 × 단면적 = 있어야 할 부피. 코너 마이터 때문에 정확하진 않지만
             # **자릿수가 어긋나면** 형상이 퇴화했다는 뜻이다(위 normalize 사고).
+            # ★ duct/tray 만 센다 — 이 게이트가 지키는 건 `_rect_solid` 경로다.
+            #   배관은 `Arch.makePipe` 가 스윕하고(체적 오차 0.07%), 장비는 축선이
+            #   아니라 footprint 압출이라 '길이 × 단면' 이라는 기대식이 성립하지 않는다.
+            #   한쪽만 담으면 셈이 어긋난다(실측: MEP 샘플 비율 3.78 — 장비가 built
+            #   에만 들어가 있었다).
             _len = sum(math.dist(pts[k][:2], pts[k+1][:2]) for k in range(len(pts)-1))
-            if cat == "pipe":
-                _r = float(el.get("diameter") or 100.0) / 2.0
-                MEP_VOLUME["expected_mm3"] += math.pi * _r * _r * _len
-            elif cat in ("duct", "tray"):
+            if cat in ("duct", "tray"):
                 MEP_VOLUME["expected_mm3"] += _len * float(el.get("width_mm") or 400.0) * float(
                     el.get("height_mm") or (300.0 if cat == "duct" else 100.0))
             label = f"{cat.capitalize()}_{i}"
@@ -998,7 +1114,8 @@ def build_mep(doc, mep_elements):
                     if shape is None or not shape.isValid():
                         print(f"[warn] MEP {label} 형상 오류")
                         continue
-                    MEP_VOLUME["built_mm3"] += shape.Volume
+                    if cat in ("duct", "tray"):
+                        MEP_VOLUME["built_mm3"] += shape.Volume
                     feat = doc.addObject("Part::Feature", f"MepShape_{cat}_{i}")
                     feat.Shape = shape
                     obj = Arch.makeComponent(feat)

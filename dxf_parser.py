@@ -285,6 +285,8 @@ OPT_SPEC = {
                            "추정하지 않는다(wall→콘크리트는 조적벽에서 바로 틀린다)"),
     "centerline": ("str",  "이 레이어에서 **중심선만** 부재로 쓴다: `color:1`(ACI 색 번호) "
                            "또는 `linetype:CENTER`. 나머지는 외곽선이라 세고 버린다"),
+    "connect_gap": ("float", "MEP 중심선을 이 거리(mm) 안에서 이어 붙인다. 설비 도면은 "
+                             "엘보·티를 별도 레이어에 그려 중심선이 그 자리에서 끊긴다"),
     "elevation": ("str",   "MEP 부재의 z 배치를 **선언**한다: `top:<mm>` 은 부재 **상단**을 "
                            "그 높이에 맞춘다(천장 슬래브 하단에 붙이는 규칙), "
                            "`center:<mm>` 은 중심축을 그 높이에. 평면도에는 고저가 없다"),
@@ -722,6 +724,70 @@ def declared_elevation(cat, rec, opts):
     if not h:
         return None                # 높이를 모르면 상단을 맞출 수 없다 — 조용히 추측하지 않는다
     return z - float(h) / 2.0
+
+
+
+def join_mep_runs(records, gap):
+    """MEP 중심선 2점 레코드를 끝점 거리 `gap` 안에서 한 폴리라인으로 잇는다.
+
+    설비 도면은 엘보·티를 **별도 레이어**(실측: `환기-피팅` 1317개)에 그리고 중심선은
+    그 자리에서 끊는다. 그대로 두면 덕트가 토막나 뷰어에서 연결이 안 보이고 연장도
+    조각으로 나온다(실측: 덕트 끝점 86개 중 45개가 다음 덕트까지 ~200mm).
+
+    벽의 `join_connected_lines`(5mm 격자)를 그대로 쓰지 않는 이유는 허용치가 40배
+    다르기 때문이다 — 그 격자 해시는 200mm 에서 경계 효과로 짝을 놓친다. MEP 는
+    레코드가 수십 개라 정확한 O(n²) 로 붙여도 싸다.
+
+    **잇는 것은 선언했을 때뿐이다**(`opts: connect_gap=`). 틈을 메우는 건 없던
+    기하를 만드는 일이라 파서가 알아서 할 일이 아니다. 이은 결과는
+    `mep_joined` 로 자기보고한다.
+    """
+    two = [i for i, r in enumerate(records)
+           if len(r.get("points") or []) == 2 and not r.get("closed")]
+    keep = [i for i in range(len(records)) if i not in two]
+    used, chains, bridged = set(), [], 0.0
+
+    def ends(i):
+        p = records[i]["points"]
+        return p[0], p[-1]
+
+    for i in two:
+        if i in used:
+            continue
+        used.add(i)
+        a, b = ends(i)
+        pts, members = [list(a), list(b)], [i]
+        for grow_tail in (True, False):
+            while True:
+                tip = pts[-1] if grow_tail else pts[0]
+                best = None
+                for j in two:
+                    if j in used:
+                        continue
+                    if records[j].get("layer") != records[i].get("layer"):
+                        continue
+                    for k, q in enumerate(ends(j)):
+                        d = math.hypot(tip[0]-q[0], tip[1]-q[1])
+                        if d <= gap and (best is None or d < best[0]):
+                            best = (d, j, k)
+                if best is None:
+                    break
+                d, j, k = best
+                used.add(j)
+                far = list(ends(j)[1 - k])
+                bridged += d
+                if grow_tail:
+                    pts.append(far)
+                else:
+                    pts.insert(0, far)
+                members.append(j)
+        rec = dict(records[i])
+        rec["points"] = pts
+        if len(members) > 1:
+            rec["joined_from"] = len(members)
+            rec["_sigs"] = [x for m in members for x in (records[m].get("_sigs") or [])]
+        chains.append(rec)
+    return [records[i] for i in keep] + chains, bridged
 
 
 # ── [Phase 2] BLOCK(INSERT) 처리 ─────────────────────────────
@@ -2495,6 +2561,27 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
                                  unmapped_recs, unmapped_block_entities,
                                  scale, threshold=ai_threshold)
     result["suggestions"] = suggestions
+
+    # [설비] MEP 중심선 잇기 — 선언한 레이어만. 엘보·티가 별도 레이어라 끊겨 있다.
+    _mep_joined = {}
+    for _cat in MEP_CATEGORIES:
+        _recs = result["elements"].get(_cat) or []
+        _gaps = {r.get("_parse_opts", {}).get("connect_gap") for r in _recs}
+        _gaps.discard(None)
+        if not _gaps or not _recs:
+            continue
+        _gap = float(max(_gaps))
+        _before = len(_recs)
+        result["elements"][_cat], _br = join_mep_runs(_recs, _gap)
+        _after = len(result["elements"][_cat])
+        if _before != _after:
+            _mep_joined[_cat] = {"before": _before, "after": _after,
+                                 "gap_mm": _gap, "bridged_mm": round(_br, 1)}
+    if _mep_joined:
+        result["mep_joined"] = _mep_joined
+        for _c, _v in _mep_joined.items():
+            print(f"  [MEP 연결] {_c}: {_v['before']}개 → {_v['after']}개 "
+                  f"(틈 {_v['gap_mm']:.0f}mm 이내, 이어붙인 길이 합 {_v['bridged_mm']:.0f}mm)")
 
     # [Phase 1-pre] 개별 LINE 연결: 끝점 공유 2점 레코드 → 다중점 폴리라인 병합
     _n_raw = len(result["elements"]["wall"])

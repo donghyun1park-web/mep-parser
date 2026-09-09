@@ -393,3 +393,45 @@ def test_overlapping_openings_reuse_the_void_instead_of_failing():
     assert not results[1]["failed_hosts"], results[1]
     assert st["verify"]["status"] == "ok", st["verify"]
     assert "FCSTD_DST:" in log and "IFC_DST:" in log, log[-400:]
+
+
+def test_bent_duct_survives_the_ifc_export():
+    """꺾인 덕트는 **IFC 로 나갈 때** 깨진다 — FreeCAD 안에서는 멀쩡하다.
+
+    세그먼트 상자를 fuse 하면 솔리드는 유효하고 셸도 닫혀 있지만 코너 이음매에
+    공면이 남아(직선 6면 대 꺾인 것 36면) 테셀레이션에서 비다양체가 된다.
+    실측: 병합 모델의 꺾인 덕트 7개가 V107 'non-closed or non-manifold mesh' 로
+    빌드를 막았다. 마이터 스윕으로 바꿔 14면이 됐다.
+
+    짧은 구간에서 급하게 꺾이면 마이터가 성립하지 않으므로(폭 200mm 덕트가
+    188mm 구간에서 118°) 그 자리에서 쪼개 각각 스윕한다 — 실제로 그 자리는
+    직관이 아니라 피팅이다.
+    """
+    if not _skip_if_no_freecad():
+        return
+    import geom_contract as GC
+    directory = tempfile.mkdtemp(prefix="mepduct_")
+    geom = os.path.join(directory, "geometry.json")
+    runs = [
+        # 평범한 ㄱ 자 — 마이터가 성립한다
+        [[0, 0], [5000, 0], [5000, 3000]],
+        # 짧은 구간에서 급하게 꺾인다 — 통짜 스윕이 안 되는 모양
+        [[0, 6000], [4000, 6000], [3900, 6188], [4400, 6600]],
+    ]
+    data = {"contract": GC.contract_block(), "floors": [{"label": "L1", "z": 0}],
+            "params": {"wall": {"width": 200.0, "height": 2800.0}},
+            "elements": {"duct": [
+                {"eid": f"d:{i}", "kind": "polyline", "points": p, "level": "L1",
+                 "elevation": 2490.0, "width_mm": 200.0, "height_mm": 200.0}
+                for i, p in enumerate(runs)]},
+            "warnings": []}
+    with open(geom, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    log, st = _build(geom, os.path.join(directory, "out"))
+
+    assert st["built"]["mep"] == 2, st["built"]
+    assert st["artifacts"]["ifc"]["status"] == "verified", st["artifacts"]
+    # 축선 길이 × 단면적과 자릿수가 같아야 한다 — 종잇장/토막이면 여기서 걸린다.
+    mv = st["mep_volume"]
+    assert mv["built_mm3"] > mv["expected_mm3"] * 0.9, mv
+    assert "FCSTD_DST:" in log and "IFC_DST:" in log, log[-400:]
