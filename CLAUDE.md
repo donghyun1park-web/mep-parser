@@ -302,6 +302,7 @@ EID 부여는 주입보다 **먼저** 한다(`apply_edits` 가 EID 로 찾으므
 | `from=dim` | 이 레이어의 **형상 출처가 DIMENSION**이라는 뜻. 실무 구조도면은 부재를 치수선으로 긋고 텍스트를 부재명으로 덮어쓴다. 끝점은 `defpoint2`(13)→**`defpoint3`(14)** — `defpoint`(10)는 치수선이 그려질 위치일 뿐 측정점이 아니다. ★ 같은 레이어의 **비-DIMENSION 엔티티는 치수 장식**(보조선 LINE·화살표 INSERT)이라 제외하고 `dimension_decoration_skipped` 로 센다. 실측: 부재 225개 옆에 장식 694개 — 안 거르면 길이 500mm 화살촉이 보로 세워진다 |
 | `member_re` | `from=dim` 에서 부재명으로 인정할 정규식. 일반 가드로는 부재명(`RAB1D`)과 철근상세 기호(`Lt`,`ta`)를 구분할 수 없다 |
 | `schedule=<레이어>` | 부재일람표 레이어. `member_name` → 실제 폭×춤 조인 |
+| `centerline=<판정>` | 이 레이어에서 **중심선만** 부재로 쓴다. `color:1`(ACI 색 번호) 또는 `linetype:CENTER`. 나머지는 외곽선이라 세고 버린다(`outline_skipped`). 값 형식이 틀리면 **로드 시점에 `LayerMapError`** — 오타난 판정 기준을 조용히 안 먹으면 외곽선이 그대로 부재가 되는데 그건 형상이 멀쩡해 보여 검사에 안 걸린다 |
 | `material=<이름>` | `IfcMaterial` 이름. **적힌 것만 붙는다** — `wall`→콘크리트 같은 카테고리 추정은 조적벽에서 바로 틀리고, 물량·내화·열관류가 전부 그 위에 얹혀 형상 오류보다 오래 산다. 재질은 `overrides` 를 타고 나간다(벽의 병합·체이닝이 보존하는 필드가 그것). 이름당 `IfcMaterial` 1개 + `IfcRelAssociatesMaterial` 1개, 부여 수는 `build.json` 의 `materials` 에 자기보고 |
 
 ```
@@ -448,6 +449,30 @@ dist\MEP-Parser.exe --selftest   # 헤드리스 스모크(번들 건전성, exit
   ezdxf/shapely collect_all, matplotlib/anthropic/vision 제외(graceful 폴백).
 - 런타임 리소스는 `resource_path()`(`sys._MEIPASS`)로, 편집 csv는 `user_csv()`로
   exe 폴더에 영구 사본 보장. windowed(.exe)는 `sys.stdout=None` → None-safe 가드 필수.
+
+### ★ 환기·설비 평면도 — 덕트는 **외곽선 2줄 + 중심선 1줄**로 그려진다
+건축평면도와 도면 문법이 다르다. 우리 MEP 추출은 **중심선**을 전제하는데
+(`annotate_mep` 가 축선에 치수를 붙인다), 설비 도면은 덕트를 외곽선으로 그리고
+중심선을 따로 얹는다. 그대로 먹이면 한 덕트가 3중으로 계상되고 끝막이 선까지
+덕트가 된다 — 실측(아파트 단위세대 환기평면): **덕트 179개 207.6m → 실제 45개 67.5m.**
+
+**도면이 이미 중심선을 표시하고 있다.** 실측: SA·RA 179줄 중 중심선 45줄이
+`color=1`(빨강), 그중 6줄은 `linetype=CENTER` 도 함께(색이 상위집합). 그래서
+`opts` 의 `centerline=color:1` 로 **선언**해서 쓴다 — 추정하지 않는다.
+
+★ **면선 페어링으로 대신할 수 없다.** 세 줄이 나란하면 중심선이 외곽선과
+**절반 간격**으로 먼저 짝지어져, 폭이 절반인 중복 덕트가 나온다(실측: SA·RA 를
+wall 로 돌렸더니 106개가 폭 50·102mm — 실제는 100·204mm). 측정하고 접었다.
+
+**ELLIPSE 는 플렉시블 덕트다.** `entity_to_record` 가 LINE·LWPOLYLINE·POLYLINE·
+CIRCLE·ARC·SPLINE 만 알아서 216개가 `unhandled` 경고만 남기고 빠졌다.
+`flattening(ELLIPSE_SAG)` 은 제어점이 아니라 **곡선 위의 점**을 주고 부분 타원도
+따라간다(SPLINE 의 `control_points` 근사와 다르다).
+
+**★ 이 도면으로 벽을 만들지 말 것.** 환기평면도에는 벽 레이어가 없다. 배경 도면이
+`BACK` 한 레이어에 벽·가구·창호기호·해치를 전부 담고 있어, wall 로 매핑하면
+**4313개가 나오는데 길이 중앙이 1mm 이고 500mm 넘는 건 336개뿐**이다. 벽이
+필요하면 같은 세대의 건축평면도를 `stack.json` 에 함께 넣는다.
 
 ## zone 귀속 방식
 zone은 별도 파일 없이 **DXF의 `A-ZONE` 레이어**(closed LWPOLYLINE)를 직접 사용.  

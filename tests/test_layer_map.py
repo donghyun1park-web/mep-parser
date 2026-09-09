@@ -328,3 +328,45 @@ def test_arc_segments_never_explodes_or_degenerates():
     assert dp._arc_segments(1e9, math.pi) == dp.ARC_MAX_SEGS      # 상한
     assert dp._arc_segments(0.0, 0.01) >= 2                       # 하한
     assert dp._arc_segments(100.0, math.radians(5)) >= 2
+
+
+# ── centerline= (환기평면도: 덕트가 외곽선 2줄 + 중심선 1줄) ────────────────
+class _E:
+    """색·선종류만 보는 최소 더미 — ezdxf 없이 판정기만 고정한다."""
+    def __init__(self, color=256, linetype="BYLAYER", t="LINE"):
+        self._d = {"color": color, "linetype": linetype}
+        self._t = t
+    def dxftype(self):
+        return self._t
+    @property
+    def dxf(self):
+        return self
+    def get(self, k, default=None):
+        return self._d.get(k, default)
+
+
+def test_centerline_color_keeps_only_the_marked_line():
+    """외곽선을 안 거르면 한 덕트가 3중으로 계상된다(실측 179개 → 45개)."""
+    o = {"centerline": "color:1"}
+    assert dp._is_not_centerline(_E(color=1), o) is False        # 중심선
+    assert dp._is_not_centerline(_E(color=256), o) is True       # BYLAYER = 외곽선
+    assert dp._is_not_centerline(_E(color=0), o) is True         # BYBLOCK = 외곽선
+    assert dp._is_not_centerline(_E(color=1), {}) is False       # 옵션 없으면 안 거른다
+
+
+def test_centerline_linetype_form():
+    o = {"centerline": "linetype:CENTER"}
+    assert dp._is_not_centerline(_E(linetype="CENTER"), o) is False
+    assert dp._is_not_centerline(_E(linetype="center"), o) is False   # 대소문자 무시
+    assert dp._is_not_centerline(_E(linetype="BYLAYER"), o) is True
+
+
+def test_centerline_bad_spec_fails_at_load_not_silently():
+    """오타난 판정 기준을 조용히 안 먹으면 외곽선이 그대로 부재가 된다."""
+    for bad in ("colour=1", "1", "colour:1"):
+        try:
+            dp._parse_opts(f"centerline={bad}")
+        except dp.LayerMapError:
+            continue
+        raise AssertionError(f"centerline={bad!r} 가 통과했다")
+    assert dp._parse_opts("centerline=color:1") == {"centerline": "color:1"}

@@ -149,6 +149,9 @@ FLOOR_TOL_MM = 100.0           # 이 안에 들면 같은 층(z_base 양자화).
 # 병합기는 레코드를 첫점→끝점 한 세그먼트로만 보므로 여기 없는 pairing 이
 # 다점 형상을 가지면 그 형상이 조용히 납작해진다.
 NO_MERGE_PAIRINGS = ("axis", "closed")
+# 타원호를 폴리라인으로 펼 때 허용하는 최대 활꼴 높이. **도면 단위**다(mm 도면이면 mm).
+# 5mm 면 반경 100mm 호도 9점으로 따라간다 — 덕트 축선에는 과하지 않고 충분하다.
+ELLIPSE_SAG = 5.0
 # 좌표까지 같아 버려진 닫힌 벽 폴리곤 {레이어: 개수}. detect_wall_pairs 가 채운다.
 CLOSED_WALL_DUPS = {}
 
@@ -280,7 +283,12 @@ OPT_SPEC = {
                            "섞인 도면에서 '^R[AS]' 같이 좁힐 때 쓴다"),
     "material":  ("str",   "IfcMaterial 이름. **적힌 것만 붙는다** — 카테고리로 "
                            "추정하지 않는다(wall→콘크리트는 조적벽에서 바로 틀린다)"),
+    "centerline": ("str",  "이 레이어에서 **중심선만** 부재로 쓴다: `color:1`(ACI 색 번호) "
+                           "또는 `linetype:CENTER`. 나머지는 외곽선이라 세고 버린다"),
 }
+# `centerline=` 값의 형식. 로드 시점에 검증한다 — 오타난 판정 기준을 조용히 안 먹고
+# 넘어가면 외곽선이 그대로 부재가 되는데, 그건 형상이 멀쩡해 보여 검사에 안 걸린다.
+CENTERLINE_KINDS = ("color", "linetype")
 
 
 def _parse_opts(raw, csv_path="", lineno=0):
@@ -309,6 +317,10 @@ def _parse_opts(raw, csv_path="", lineno=0):
                     f"{os.path.basename(csv_path)} {lineno}행: opts {k}={v!r} 는 숫자가 아니다")
         else:
             out[k] = v
+        if k == "centerline" and v.partition(":")[0].strip().lower() not in CENTERLINE_KINDS:
+            raise LayerMapError(
+                f"{os.path.basename(csv_path)} {lineno}행: opts centerline={v!r} 형식 오류 — "
+                f"{' 또는 '.join(x + ':<값>' for x in CENTERLINE_KINDS)} 여야 한다")
     return out
 
 
@@ -482,7 +494,7 @@ def entity_to_record(e, scale, opts=None):
     t = e.dxftype()
     layer = getattr(e.dxf, "layer", "")
     # from=dim 레이어의 형상 출처는 DIMENSION 뿐이다 — 나머지는 치수 장식.
-    if _is_dim_decoration(e, opts):
+    if _is_dim_decoration(e, opts) or _is_not_centerline(e, opts):
         return None
     xf = _ocs_to_wcs_fn(e)
 
@@ -522,6 +534,19 @@ def entity_to_record(e, scale, opts=None):
         return _tag_sig({"kind": "polyline", "closed": False, "layer": layer, "from_arc": True,
                 "arc_radius": e.dxf.radius * scale,
                 "points": [P(p[0], p[1], c.z) for p in pts]})
+    if t == "ELLIPSE":
+        # 플렉시블 덕트는 타원호로 그려진다(실측 환기평면도: 216개가 통째로 버려지고
+        # 'unhandled ELLIPSE' 경고만 남았다). `flattening` 은 제어점이 아니라
+        # **곡선 위의 점**을 주고 부분 타원(start/end param)도 그대로 따라간다.
+        # 좌표는 WCS 라 xf 를 거치지 않는다(SPLINE 과 같은 이유).
+        try:
+            pts = [[q.x * scale, q.y * scale] for q in e.flattening(ELLIPSE_SAG)]
+        except Exception:
+            return None
+        if len(pts) < 2:
+            return None
+        return _tag_sig({"kind": "polyline", "layer": layer, "points": pts,
+                         "closed": math.dist(pts[0], pts[-1]) < 1e-6})
     if t == "SPLINE":  # 제어점은 WCS
         pts = [[p[0] * scale, p[1] * scale] for p in e.control_points]
         return (_tag_sig({"kind": "polyline", "closed": e.closed, "layer": layer,
@@ -543,6 +568,33 @@ def _is_dim_decoration(e, opts):
     build_beams 가 생기면 모델 안에 실제 쓰레기 솔리드가 된다).
     """
     return bool(opts) and opts.get("from") == "dim" and e.dxftype() != "DIMENSION"
+
+
+def _is_not_centerline(e, opts):
+    """`centerline=` 레이어에서 그 표시가 없는 엔티티 = 외곽선이지 부재 축선이 아니다.
+
+    실무 환기평면도는 덕트를 **외곽선 2줄 + 중심선 1줄**로 그리고, 중심선만 색이나
+    선종류로 구분한다(실측 아파트 단위세대 환기평면: SA·RA 179줄 중 중심선 45줄이
+    `color=1`, 그중 6줄은 `linetype=CENTER` 도 함께 — 색이 상위집합이었다).
+    안 거르면 한 덕트가 3중으로 계상되고 끝막이 선까지 덕트가 된다
+    (실측: 덕트 179개 207.6m → 중심선만 45개 67.5m).
+
+    ★ 면선 페어링(`detect_wall_pairs`)으로 대신할 수 없다. 세 줄이 나란하면 중심선이
+      외곽선과 **절반 간격**으로 먼저 짝지어져, 폭이 절반인 중복 덕트가 나온다
+      (실측: 106개가 폭 50·102mm 로 나왔다 — 실제는 100·204mm).
+    """
+    spec = (opts or {}).get("centerline")
+    if not spec:
+        return False
+    kind, _, want = str(spec).partition(":")
+    kind, want = kind.strip().lower(), want.strip()
+    if kind == "color":
+        # BYLAYER(256)·BYBLOCK(0) 은 '레이어 기본색' 이라 중심선 표시가 아니다.
+        try:
+            return int(e.dxf.get("color", 256)) != int(want)
+        except (TypeError, ValueError):
+            return True
+    return str(e.dxf.get("linetype", "")).upper() != want.upper()
 
 
 # 치수 텍스트가 '측정값 표시'를 뜻하는 형태들 — 이런 건 진짜 치수선이지 부재가 아니다.
@@ -2235,6 +2287,7 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
     ignored = {}            # ignore 규칙으로 버린 것: {레이어: 개수}
     _dim_skipped = {}       # from=dim 레이어에서 '진짜 치수선' 이라 건너뛴 수
     _nondim_skipped = {}    # from=dim 레이어의 비-DIMENSION(보조선·화살표) 건너뛴 수
+    _outline_skipped = {}   # centerline= 레이어에서 중심선이 아니라 건너뛴 외곽선 수
     _rule_hits = set()      # 실제 매칭된 규칙 인덱스 — 그림자 규칙 탐지용
     _layers_seen = set()
     _rule_layer = {}        # 블록 안쪽 레이어 → 규칙을 정한 INSERT 레이어(집합)
@@ -2314,6 +2367,8 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
                     _dim_skipped[e.dxf.layer] = _dim_skipped.get(e.dxf.layer, 0) + 1
                 else:                              # 보조선·화살표 등 치수 장식
                     _nondim_skipped[e.dxf.layer] = _nondim_skipped.get(e.dxf.layer, 0) + 1
+            elif _is_not_centerline(e, _opts):     # centerline= 레이어의 외곽선·끝막이
+                _outline_skipped[e.dxf.layer] = _outline_skipped.get(e.dxf.layer, 0) + 1
             else:
                 result["warnings"].append(f"unhandled {e.dxftype()} @ {e.dxf.layer}")
             continue
@@ -2741,6 +2796,11 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         result["ignored"] = ignored
         print(f"  [ignore] {sum(ignored.values())}개 드롭: "
               + ", ".join(f"{k}({v})" for k, v in sorted(ignored.items())[:5]))
+    if _outline_skipped:
+        # 세고 버린다 — 조용히 사라지면 "덕트가 왜 이렇게 적지" 를 추적할 근거가 없다.
+        result["outline_skipped"] = _outline_skipped
+        print(f"  [중심선] 외곽선·끝막이 {sum(_outline_skipped.values())}개 건너뜀: "
+              f"{_outline_skipped} — 중심선만 부재로 쓴다(opts centerline=)")
     if _dim_skipped or _nondim_skipped:
         if _dim_skipped:
             result["dimension_skipped"] = _dim_skipped
