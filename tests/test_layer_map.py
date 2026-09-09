@@ -370,3 +370,38 @@ def test_centerline_bad_spec_fails_at_load_not_silently():
             continue
         raise AssertionError(f"centerline={bad!r} 가 통과했다")
     assert dp._parse_opts("centerline=color:1") == {"centerline": "color:1"}
+
+
+# ── 개구부가 붙을 벽을 못 찾은 사유 — z 불일치는 평면 문제가 아니다 ──────────
+def _open_at(z_base, sill=900.0, height=1200.0, x=1000.0):
+    return {"eid": "o:t", "kind": "circle", "center": [x, 0.0], "radius": 450.0,
+            "width": 900.0, "sill": sill, "height": height, "z_base": z_base}
+
+
+def _wall_0_2400():
+    return {"eid": "w:t", "kind": "polyline", "closed": False,
+            "points": [[0, 0], [5000, 0]], "centerline": [[0, 0], [5000, 0]],
+            "width_detected": 200.0, "z_base": 0.0, "overrides": {"height": 2400.0}}
+
+
+def test_opening_above_every_wall_says_so_and_never_leaks_the_sentinel():
+    """z 가 안 겹치면 평면에서 아무리 가까워도 검사 자체가 안 된다.
+
+    실측(아파트 환기평면): 환기슬리브 12개의 z_base 가 12358mm 라 벽 z 0~2400 과
+    안 겹쳤는데, 사유는 'no_wall_on_this_line'(평면 위치 문제)로 나오고 최근접
+    거리에는 센티널 1e+18 이 그대로 실렸다.
+    """
+    el = {"wall": [_wall_0_2400()], "opening": [_open_at(12357.8)]}
+    dp.link_openings_to_walls(el, {"wall": {"width": 200.0, "height": 2800.0}})
+    o = el["opening"][0]
+    assert o["wall_indices"] == []
+    assert o["no_host_reason"] == "no_wall_at_this_level", o
+    assert o["no_host_z_mm"] == [13258, 14458], o
+    assert "no_host_dist_mm" not in o, o        # 센티널을 값인 척 내보내지 않는다
+
+
+def test_same_opening_links_once_the_z_overlaps():
+    """z 만 고쳐 주면 같은 평면 위치에서 바로 붙는다 — 위 사유가 정확하다는 증거."""
+    el = {"wall": [_wall_0_2400()], "opening": [_open_at(0.0)]}
+    dp.link_openings_to_walls(el, {"wall": {"width": 200.0, "height": 2800.0}})
+    assert el["opening"][0]["wall_indices"] == [0], el["opening"][0]

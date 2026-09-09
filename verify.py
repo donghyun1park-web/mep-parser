@@ -397,8 +397,11 @@ def verify_build(data, build_stats, ifc_path=None, policy=None, stage=None):
         for _key, _msg in (
                 ("wall_open_at_this_span",
                  "Openings sit where the drawing already left the wall open (nothing to cut)"),
+                ("no_wall_at_this_level",
+                 "Openings sit at a z the walls do not span — check the drawing's Z"),
                 ("no_wall_on_this_line",
                  "Openings are not on any wall line — check the layer mapping"),
+                ("no_walls_to_check", "No walls at all to host these openings"),
                 ("unknown", "Openings found no host wall")):
             if _groups.get(_key):
                 F.append(Finding("V106", "warn", _msg,

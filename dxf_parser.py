@@ -1716,7 +1716,8 @@ def link_openings_to_walls(elements, params):
         op['wall_indices'] = []
         op.pop('host_dir', None)
         op.pop('host_width', None)
-        for _k in ('no_host_reason', 'no_host_gap_mm', 'no_host_dist_mm'):
+        for _k in ('no_host_reason', 'no_host_gap_mm', 'no_host_dist_mm',
+                   'no_host_z_mm'):
             op.pop(_k, None)
         if not op.get("center"):
             try:
@@ -1766,6 +1767,11 @@ def link_openings_to_walls(elements, params):
         r = float((op.get('overrides') or {}).get('width', op.get('width', 2 * op.get('radius', 50.0)))) / 2
         indices = []
         nearest = (1e18, None, default_w)  # (거리, 벽방향단위벡터, 벽두께)
+        # 개구부의 z 구간은 벽과 무관하다 — 루프 밖에서 한 번만 구한다.
+        _oz = _GC.base_z('opening', op) + float(
+            (op.get('overrides') or {}).get('sill', op.get('sill', 0)))
+        _oh = _GC.height_of(op, params, 'opening')
+        n_z_ok = 0            # z 구간이 겹쳐 실제로 검사된 벽 수
         on_line_over = None   # 축선 위인데 벽 구간 밖 — 그 자리 벽이 끊겨 있다
         # 가장 가까운 벽까지의 **실거리**(점-선분). 수직거리만 쓰면 62m 떨어진 벽의
         # 연장선이 25mm 로 찍혀, 벽 위에 있는 개구부처럼 읽힌다.
@@ -1774,10 +1780,9 @@ def link_openings_to_walls(elements, params):
             if op.get('level') and wall.get('level') and op['level'] != wall['level']:
                 continue
             wz0, wz1 = _GC.z_range('wall', wall, params)
-            oz = _GC.base_z('opening', op) + float((op.get('overrides') or {}).get('sill', op.get('sill', 0)))
-            oh = _GC.height_of(op, params, 'opening')
-            if oz >= wz1 or oz + oh <= wz0:
+            if _oz >= wz1 or _oz + _oh <= wz0:
                 continue
+            n_z_ok += 1
             cl = wall.get("centerline") or wall.get("points", [])
             if len(cl) < 2:
                 continue
@@ -1833,12 +1838,23 @@ def link_openings_to_walls(elements, params):
             #    (실측: 'OPEN' 레이어의 공백부 X 표시선 10개 = 대각선 5쌍, 가장 가까운
             #    벽까지 735~2495mm. 점 2개짜리 선이라 뚫을 형상 자체가 없다).
             # 한 줄로 묶어 두면 다음 사람이 이 추적을 처음부터 다시 한다.
-            if on_line_over is not None:
+            if walls and not n_z_ok:
+                # ★ 평면에서 아무리 가까워도 **z 가 안 겹치면** 애초에 검사조차 안 된다.
+                #   이걸 'no_wall_on_this_line'(평면 위치 문제)로 보고하면 사람이
+                #   평면을 들여다보며 원인을 못 찾는다 — 실측(아파트 환기평면): 환기슬리브
+                #   12개의 z_base 가 12358mm(일부 24716) 라 벽 z 0~2400 과 안 겹쳤다.
+                #   그때 `nearest_dist` 는 센티널 그대로여서 1e+18 이 JSON 으로 나갔다.
+                op["no_host_reason"] = "no_wall_at_this_level"
+                op["no_host_z_mm"] = [round(_oz), round(_oz + _oh)]
+            elif on_line_over is not None:
                 op["no_host_reason"] = "wall_open_at_this_span"
                 op["no_host_gap_mm"] = round(on_line_over - r, 1)
-            else:
+            elif nearest_dist < 1e17:
                 op["no_host_reason"] = "no_wall_on_this_line"
                 op["no_host_dist_mm"] = round(nearest_dist, 1)
+            else:
+                # 잴 벽이 하나도 없었다. 센티널을 값인 척 내보내지 않는다.
+                op["no_host_reason"] = "no_walls_to_check"
         # host 벽 배향(문/창 사각 void 방향 산출용)
         if nearest[1] is not None:
             op["host_dir"] = [round(nearest[1][0], 5), round(nearest[1][1], 5)]
