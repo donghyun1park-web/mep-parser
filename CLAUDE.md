@@ -100,6 +100,22 @@
 실측: 벽 682 → 672, `eid_collisions` 10 → 0, 폭 495mm 열 35 → 25. 나머지 다이제스트는
 전부 불변이었다 — 중복만 건드렸다는 증거가 그것이다.
 
+### ★ `App.Vector.normalize()` 는 **제자리에서** 바꾼다 — 덕트가 종잇장이 됐다
+`_rect_solid` 가 `App.Rotation(Z, seg.normalize())` 로 회전축을 만든 뒤 **같은 벡터**를
+`face.extrude(seg)` 에 넘겼다. `normalize()` 는 3000 → 1.0 으로 원본을 바꾸므로 압출
+길이가 **1mm** 가 된다. 실측: 덕트 45개가 단면 150×1, 총 부피 0.001m³ —
+**있어야 할 2.132m³ 의 0.05%** 였다.
+
+**형상은 유효하다.** `isValid()` 도 V103(퇴화 형상)도 V107(IFC 재검사)도 전부
+통과했고, IFC 에 `IfcDuctSegment` 45개가 제 위치(z 2,390~2,590)에 들어 있었다.
+뷰어에서 안 보이는 것만이 유일한 증상이었다 — 사용자가 3D 를 열어 보고 알았다.
+
+그래서 **부피로 잰다**: `build_mep` 이 축선 길이 × 단면적을 `mep_volume.expected_mm3`
+로, 실제 솔리드 부피를 `built_mm3` 로 남기고, V106 이 비율 < `MEP_VOLUME_MIN_RATIO`
+(0.5)면 error 를 올린다. 코너 마이터 때문에 1.0 은 될 수 없으니 잡으려는 건 오차가
+아니라 **자릿수가 다른 퇴화**다. 고친 뒤 실측 비율 1.000.
+(`_pipe_solid` 의 같은 `normalize()` 호출은 길이를 별도 인자로 넘겨 무사하다.)
+
 `ifctype_counts` 는 **MEP 까지** 센다(`pipesegment`·`ductsegment`·`cablecarriersegment`·
 `distributionelement`). 종전엔 구조 4종만 세서, IFC 에 `IfcDuctSegment` 45개가 들어
 있는데 영수증에는 `{'wall': 88}` 만 찍혔다 — 덕트가 조용히 사라져도 `build.json` 이

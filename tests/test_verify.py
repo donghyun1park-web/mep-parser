@@ -359,3 +359,31 @@ def test_V106_host_less_openings_are_reported_as_one_line():
                        for i in range(15)])
     found = [f for f in rep.findings if f.id == "V106"]
     assert len(found) == 1 and found[0].payload["count"] == 15, rep.text()
+
+
+def test_V106_catches_degenerate_mep_solids():
+    """형상이 **유효한데** 납작한 경우 — isValid()·V103·V107 은 전부 통과한다.
+
+    실측: `App.Vector.normalize()` 가 제자리에서 방향벡터를 바꿔(3000 → 1.0)
+    `_rect_solid` 의 extrude 길이가 1mm 가 됐다. 덕트 45개가 단면 150×1 짜리
+    종잇장이 되어 부피가 있어야 할 값의 0.05% 였는데, 검사는 전부 통과하고
+    뷰어에서만 안 보였다. 부피로 재지 않으면 이 부류는 안 잡힌다.
+    """
+    rep = _pre_export([])
+    assert not rep.failed, rep.text()          # 기준선: MEP 없으면 조용하다
+
+    from artifact_validation import input_hash
+    data = clean()
+    st = {"intent": {}, "built": {"mep": 45}, "floor_orphans": 0, "floor_dups": 0,
+          "invalid_shapes": 0, "bbox": [0, 0, 0, 5000, 5000, 3000], "unbuilt": {},
+          "opening_results": [],
+          "mep_volume": {"expected_mm3": 2.132e9, "built_mm3": 0.001e9},
+          "provenance": {"run_id": "t", "input_sha256": input_hash(data)}}
+    bad = V.verify_build(data, st, None, stage="pre_export")
+    hit = [f for f in bad.findings if f.id == "V106" and f.severity == "error"]
+    assert hit and "degenerate" in hit[0].message, bad.text()
+    assert hit[0].payload["ratio"] < 0.01, hit[0].payload
+
+    st["mep_volume"] = {"expected_mm3": 2.132e9, "built_mm3": 2.130e9}   # 마이터 오차
+    ok = V.verify_build(data, st, None, stage="pre_export")
+    assert not [f for f in ok.findings if f.id == "V106" and f.severity == "error"], ok.text()

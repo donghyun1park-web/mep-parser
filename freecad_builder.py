@@ -897,9 +897,14 @@ def _rect_solid(pts, width, height, elev):
         ln = seg.Length
         if ln < 1.0:
             continue
-        # Z→seg 방향 회전
+        # ★ `App.Vector.normalize()` 는 **제자리에서** 벡터를 바꾼다(3000 → 1.0).
+        #   회전축으로 쓴 뒤 그대로 `extrude(seg)` 에 넘기면 길이 1mm 짜리 종잇장이
+        #   나온다 — 실측: 덕트 45개가 단면 150×1, 총 부피 0.001m³(있어야 할 값의
+        #   0.04%) 였고 뷰어에서 보이지 않았다. **부피가 작아도 형상은 유효**하므로
+        #   isValid()·V103·V107 이 전부 통과한다. 사본을 정규화한다.
+        #   (`_pipe_solid` 의 같은 호출은 길이를 따로 넘기므로 무사하다.)
         try:
-            rot = App.Rotation(App.Vector(0, 0, 1), seg.normalize())
+            rot = App.Rotation(App.Vector(0, 0, 1), App.Vector(seg).normalize())
         except Exception:
             rot = App.Rotation()
         mat = App.Placement(p1, rot).Matrix
@@ -935,6 +940,9 @@ _MEP_IFC_TYPE = {
 }
 
 
+MEP_VOLUME = {}      # 축선×단면 으로 기대한 부피 대 실제로 만든 부피
+
+
 def build_mep(doc, mep_elements):
     """MEP 중심선 → Arch 컴포넌트. **IFC MEP 타입을 달아서** 내보낸다.
 
@@ -950,12 +958,23 @@ def build_mep(doc, mep_elements):
     감싸고 IfcType 만 지정한다.
     """
     objs, src = [], []
+    MEP_VOLUME.clear()
+    MEP_VOLUME.update({"expected_mm3": 0.0, "built_mm3": 0.0})
     for cat in ("pipe", "duct", "tray", "equipment"):
         for i, el in enumerate(mep_elements.get(cat, [])):
             elev = float(el.get("elevation", 0.0))
             pts = el.get("centerline") or el.get("points") or []
             if len(pts) < 2:
                 continue
+            # 축선 길이 × 단면적 = 있어야 할 부피. 코너 마이터 때문에 정확하진 않지만
+            # **자릿수가 어긋나면** 형상이 퇴화했다는 뜻이다(위 normalize 사고).
+            _len = sum(math.dist(pts[k][:2], pts[k+1][:2]) for k in range(len(pts)-1))
+            if cat == "pipe":
+                _r = float(el.get("diameter") or 100.0) / 2.0
+                MEP_VOLUME["expected_mm3"] += math.pi * _r * _r * _len
+            elif cat in ("duct", "tray"):
+                MEP_VOLUME["expected_mm3"] += _len * float(el.get("width_mm") or 400.0) * float(
+                    el.get("height_mm") or (300.0 if cat == "duct" else 100.0))
             label = f"{cat.capitalize()}_{i}"
             try:
                 obj = None
@@ -979,6 +998,7 @@ def build_mep(doc, mep_elements):
                     if shape is None or not shape.isValid():
                         print(f"[warn] MEP {label} 형상 오류")
                         continue
+                    MEP_VOLUME["built_mm3"] += shape.Volume
                     feat = doc.addObject("Part::Feature", f"MepShape_{cat}_{i}")
                     feat.Shape = shape
                     obj = Arch.makeComponent(feat)
@@ -1362,6 +1382,7 @@ def _main_impl():
         "built": {"walls": len(walls), "columns": len(cols), "slabs": len(slabs),
                   "beams": len(beams), "spaces": len(spaces), "mep": len(mep_objs),
                   "floors": len(floor_containers)},
+        "mep_volume": dict(MEP_VOLUME),
         "beams_without_section": n_nosec,
         "materials": dict(MATERIALS_APPLIED),
         "null_walls_repaired": _n_fixed,

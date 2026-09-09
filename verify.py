@@ -48,6 +48,9 @@ CHECKS = {
 # 236개가 "OK" 로 통과하던 경위.
 _STRUCT_CATS = ("wall", "column", "slab", "beam")
 _COORD_LIMIT_FACTOR = 10.0     # 입력 bbox 의 몇 배를 넘으면 이상치로 볼지
+# 축선×단면 대비 실제 MEP 부피의 하한. 코너 마이터·이음 때문에 1.0 은 될 수 없고,
+# 잡으려는 건 오차가 아니라 **자릿수가 다른 퇴화**다.
+MEP_VOLUME_MIN_RATIO = 0.5
 _FLOOR_TOL = 100.0             # freecad_builder._at_floor 과 동일해야 한다
 
 
@@ -369,6 +372,16 @@ def verify_build(data, build_stats, ifc_path=None, policy=None, stage=None):
         prov = st.get("provenance") or {}
         if not prov.get("run_id") or prov.get("input_sha256") != input_hash(data):
             F.append(Finding("V106", "error", "Missing or stale input/run provenance"))
+        # MEP 솔리드가 **퇴화**했는지. 축선 길이 × 단면적 대비 실제 부피가 자릿수로
+        # 어긋나면 형상이 납작해진 것이다. 실측: `App.Vector.normalize()` 가 제자리에서
+        # 방향벡터를 바꿔 덕트 45개가 길이 1mm 종잇장이 됐는데(있어야 할 부피의 0.04%),
+        # **형상은 유효**해서 V103·V107 이 전부 통과하고 뷰어에서만 안 보였다.
+        _mv = st.get("mep_volume") or {}
+        _exp, _got = float(_mv.get("expected_mm3") or 0), float(_mv.get("built_mm3") or 0)
+        if _exp > 0 and _got < _exp * MEP_VOLUME_MIN_RATIO:
+            F.append(Finding("V106", "error", "MEP solids are degenerate", {
+                "expected_m3": round(_exp / 1e9, 4), "built_m3": round(_got / 1e9, 4),
+                "ratio": round(_got / _exp, 4)}))
         if st.get("runtime_errors"):
             F.append(Finding("V106", "error", "Runtime failed", {"errors": st["runtime_errors"]}))
         # 개구부 판정은 세 갈래다. 종전에는 셋을 한 줄로 묶어 전부 error 로 올려,
