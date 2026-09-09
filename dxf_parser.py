@@ -2301,6 +2301,14 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
             cat, attrs = classify(bname, block_rules) if block_rules else (None, {})
             if cat is None:
                 cat, attrs = classify(e.dxf.layer, rules)  # 레이어 폴백
+            if cat == "ignore":
+                # 비-INSERT 분기와 **같은 규약**: 세고 버린다. 이 검사가 여기만
+                # 빠져 있어서 `elements["ignore"]` 버킷이 생기고 912개가 JSON 으로
+                # 나갔다(실측: 아파트 단위세대 건축평면 — 가구·위생기구·실외기가
+                # 전부 블록이라 ignore 레이어의 INSERT 가 많다). V003 이 잡았다.
+                # ★ 한 규약을 두 분기가 나눠 가지면 한쪽만 고쳐진다 — 실제로 그랬다.
+                ignored[e.dxf.layer] = ignored.get(e.dxf.layer, 0) + 1
+                continue
             if cat is not None and _is_dim_decoration(e, (attrs or {}).get("_opts")):
                 _nondim_skipped[e.dxf.layer] = _nondim_skipped.get(e.dxf.layer, 0) + 1
                 continue

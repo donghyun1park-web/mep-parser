@@ -52,3 +52,34 @@ def test_ellipse_scale_is_applied():
                         start_param=0.0, end_param=math.pi)
     rec = dp.entity_to_record(e, 1000.0)          # m 도면 → mm
     assert math.dist(rec["points"][0], [2000, 0]) < 1.0, rec["points"][0]
+
+
+def test_ignore_layer_never_becomes_an_elements_bucket():
+    """`ignore` 는 세고 버린다 — 버킷을 만들면 계약 위반이고 V003 이 빌드를 막는다.
+
+    검사가 비-INSERT 분기에만 있어서 **블록은 그대로 실렸다**(실측: 아파트 단위세대
+    건축평면에서 가구·위생기구·실외기가 전부 블록이라 912개가 JSON 으로 나갔다).
+    한 규약을 두 분기가 나눠 가지면 한쪽만 고쳐진다.
+    """
+    import contextlib
+    import io as _io
+    import tempfile
+
+    doc = ezdxf.new("R2010")
+    blk = doc.blocks.new(name="FURNITURE")
+    blk.add_lwpolyline([(0, 0), (500, 0), (500, 500), (0, 500)], close=True)
+    msp = doc.modelspace()
+    msp.add_line((0, 0), (5000, 0), dxfattribs={"layer": "A-WALL"})
+    msp.add_line((0, 200), (5000, 200), dxfattribs={"layer": "A-WALL"})
+    msp.add_blockref("FURNITURE", (1000, 1000), dxfattribs={"layer": "FUR"})
+    msp.add_line((0, 3000), (900, 3000), dxfattribs={"layer": "FUR"})
+    path = os.path.join(tempfile.mkdtemp(prefix="mepignore_"), "t.dxf")
+    doc.saveas(path)
+
+    rules = [("FUR", "ignore", {}), ("A-WALL", "wall", {})]
+    with contextlib.redirect_stdout(_io.StringIO()):
+        out = dp.parse(path, rules, block_rules=[])
+    assert "ignore" not in out["elements"], sorted(out["elements"])
+    # 선 1개 + 블록참조 1개 = 2개가 **둘 다** 집계돼야 한다.
+    assert out.get("ignored", {}).get("FUR") == 2, out.get("ignored")
+    assert out["elements"]["wall"], "정상 벽까지 사라지면 안 된다"
