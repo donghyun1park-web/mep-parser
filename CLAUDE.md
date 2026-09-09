@@ -100,6 +100,11 @@
 실측: 벽 682 → 672, `eid_collisions` 10 → 0, 폭 495mm 열 35 → 25. 나머지 다이제스트는
 전부 불변이었다 — 중복만 건드렸다는 증거가 그것이다.
 
+`ifctype_counts` 는 **MEP 까지** 센다(`pipesegment`·`ductsegment`·`cablecarriersegment`·
+`distributionelement`). 종전엔 구조 4종만 세서, IFC 에 `IfcDuctSegment` 45개가 들어
+있는데 영수증에는 `{'wall': 88}` 만 찍혔다 — 덕트가 조용히 사라져도 `build.json` 이
+말해 주지 않는 상태였다(보가 정확히 그렇게 사라진 적이 있다 — D3b 참조).
+
 빌더는 카테고리별로 **객체를 못 만든 레코드**를 `build.json` 의 `unbuilt` 에 남긴다.
 전부 0 이어야 한다 — 이 카운터가 없던 동안 벽 72개가 경고 없이 빠진 채 납품될 수 있었다.
 

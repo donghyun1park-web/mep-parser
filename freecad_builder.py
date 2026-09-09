@@ -1332,8 +1332,11 @@ def _main_impl():
     # intent 는 원본 카테고리 수가 아니라 **실제 부여된 IfcType** 으로 센다.
     # 닫힌 폴리선 벽은 Arch.makeStructure 라 IfcWall 이 아니고, 보는 slab 버킷에
     # 있지만 IfcType=Beam 이다. 원본 수로 세면 정상 빌드가 불일치로 걸린다.
+    # ★ MEP 도 센다. 종전엔 구조 4종만 세서, IFC 에 IfcDuctSegment 45개가 들어 있는데
+    #   영수증에는 {'wall': 88} 만 찍혔다 — 덕트가 조용히 사라져도 build.json 이
+    #   말해 주지 않는 상태였다(보가 그렇게 사라진 적이 있다: D3b 참조).
     _by_ifctype = {}
-    for _o in (walls + cols + slabs + beams):
+    for _o in (walls + cols + slabs + beams + mep_objs):
         _t = str(getattr(_o, "IfcType", "") or "").strip().lower().replace(" ", "")
         if _t:
             _by_ifctype[_t] = _by_ifctype.get(_t, 0) + 1
