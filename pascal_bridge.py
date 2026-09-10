@@ -536,8 +536,19 @@ def to_pascal_scene(geometry, name=None):
                 continue
             elev = GC.base_z(cat, m)                 # MEP 의 기준면은 **중심축**
             lz, lid = _level_for(elev, levels)
-            y = GC.mm_to_m(elev - lz)
-            path = [[GC.mm_to_m(p[0]), y, GC.mm_to_m(p[1])] for p in pts]
+            # ★ 수직·경사 구간은 점마다 높이가 다르다. `path3d`(계약 v3)가 있으면
+            #   그대로 쓰고, 없으면 한 높이다 — **말없이 평탄화하지 않는다.**
+            #   (오늘의 `mep_paths.extract_curve` 는 비평면 경로를 평탄화하는 대신
+            #    거부하므로 여기 오는 것은 아직 전부 평면이다.)
+            p3 = m.get("path3d")
+            if p3 and len(p3) == len(pts) and all(len(q) >= 3 for q in p3):
+                path = [[GC.mm_to_m(q[0]), GC.mm_to_m(q[2] - lz), GC.mm_to_m(q[1])]
+                        for q in p3]
+                if len({round(q[2], 6) for q in p3}) > 1:
+                    report["path3d"] = report.get("path3d", 0) + 1
+            else:
+                y = GC.mm_to_m(elev - lz)
+                path = [[GC.mm_to_m(p[0]), y, GC.mm_to_m(p[1])] for p in pts]
             try:
                 dims = _mep_dims(cat, m, params)
             except GC.ContractError as exc:
@@ -813,6 +824,13 @@ def from_pascal_scene(scene):
             rec["closed"] = False
             rec["points"] = [[GC.m_to_mm(p[0]), GC.m_to_mm(p[2])] for p in path]
             set_base(rec, "elevation", lz + GC.m_to_mm(path[0][1] if path else 0.0))
+            if len({round(p[1], 9) for p in path}) > 1:
+                # 점마다 높이가 다르다 — `elevation` 한 값으로는 못 담는다.
+                rec["path3d"] = [[GC.m_to_mm(p[0]), GC.m_to_mm(p[2]),
+                                  lz + GC.m_to_mm(p[1])] for p in path]
+                report["path3d"] = report.get("path3d", 0) + 1
+            else:
+                rec.pop("path3d", None)
             sec = n.get("section")
             if sec is not None:
                 # foreign 노드는 처음부터 mm 다 — 인치를 거치지 않는다.
