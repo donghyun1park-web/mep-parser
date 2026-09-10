@@ -126,6 +126,8 @@ def width_of(rec, params=None, category="wall"):
 # 나누기 1000 을 여기저기 쓰기 시작하면 어느 한 곳이 빠졌을 때 1000배 틀린 모델이
 # 조용히 나간다 — z 규약과 같은 이유로 변환도 이 파일에만 둔다.
 MM_PER_M = 1000.0
+# Pascal 의 덕트·배관 지름은 **인치**다(미국 관행). 여기 말고 다른 데서 25.4 를 쓰지 말 것.
+MM_PER_IN = 25.4
 
 
 def mm_to_m(v):
@@ -140,6 +142,16 @@ def m_to_mm(v):
     if isinstance(v, (list, tuple)):
         return [m_to_mm(x) for x in v]
     return None if v is None else float(v) * MM_PER_M
+
+
+def mm_to_in(v):
+    """mm → 인치."""
+    return None if v is None else float(v) / MM_PER_IN
+
+
+def in_to_mm(v):
+    """인치 → mm."""
+    return None if v is None else float(v) * MM_PER_IN
 
 
 # ── 핵심: 모든 소비자가 호출하는 단 하나의 함수 ─────────────────────────────

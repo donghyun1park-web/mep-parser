@@ -42,7 +42,7 @@
 | `tests/golden.json` | **실무 도면 회귀 다이제스트.** 도면은 고객 자료라 커밋하지 않고 경로만 `tests/golden.local.json`(gitignore)에 둔다. 도면이 없으면 `[skip]`. 갱신은 `python tests/test_golden.py --bless` |
 | `extractors.py` + `mep_macro/` | **FreeCAD 안에서만** 쓰는 라이브 자연어 모델링용 헬퍼(`freecad_live_addon`). 일반 파이프라인은 이걸 거치지 않는다 |
 | `FIX_SPEC.md` | 면선 페어링·곡선벽 개선의 이전 설계 기록. 현재 구현 여부는 코드와 회귀 테스트를 확인한다. |
-| `pascal_bridge.py` | **geometry.json ↔ Pascal(pascalorg/editor) 씬 그래프 — 벽만(0단계).** mm↔m 환산은 `geom_contract` 를 부르고, 우리 `z_base` 를 Pascal 레벨 스택으로 접었다 편다. Pascal 이 표현 못 하는 것은 `unconvertible` 로 **세어서 보고**한다 |
+| `pascal_bridge.py` | **geometry.json ↔ Pascal(pascalorg/editor) 씬 그래프.** 벽·기둥·슬래브·zone·덕트·배관. 단위(mm↔m, 지름은 인치)·축(Pascal 은 Y-up)·고저(레벨 스택) 환산은 전부 `geom_contract` 를 부른다. Pascal 이 표현 못 하거나 스키마 범위를 넘긴 것은 `unconvertible` 로 **세어서 보고**한다 |
 | `docs/project_workflow.md` | 프로젝트 저장·복구·재연결·출력 검증 사용법과 현재 범위. |
 
 ## geometry.json 스키마
@@ -561,39 +561,72 @@ CIRCLE·ARC·SPLINE 만 알아서 216개가 `unhandled` 경고만 남기고 빠�
 **4313개가 나오는데 길이 중앙이 1mm 이고 500mm 넘는 건 336개뿐**이다. 벽이
 필요하면 같은 세대의 건축평면도를 `stack.json` 에 함께 넣는다.
 
-### ★ Pascal 다리(0단계) — 위험은 형상이 아니라 **단위와 고저**다
+### ★ Pascal 다리 — 위험은 형상이 아니라 **단위·축·고저**다
 `pascal_bridge.py`. [pascalorg/editor](https://github.com/pascalorg/editor) 의 씬 그래프
-(`{nodes, rootNodeIds}`)와 벽을 주고받는다. 모형은 우리와 같다 — 축선 + 두께 + 높이.
-다른 것이 셋이고, **셋 다 틀려도 모델은 열린다**(그래서 좌표로 잰다):
+(`{nodes, rootNodeIds}`)와 부재를 주고받는다. 모형은 우리와 같다(축선/폴리곤 + 치수).
+다른 것이 셋이고, **셋 다 틀려도 모델은 열린다** — 1000배 작은 건물도, 90도 누운 덕트도,
+한 층 내려앉은 벽도. 그래서 좌표로 잰다.
 
 | | 우리 | Pascal |
 |---|---|---|
-| 단위 | mm | **m** (덕트 지름만 인치) |
-| 고저 | 부재의 `z_base` | **레벨**의 `level`·`baseElevation`·`height` |
-| 부재 | 다점 축선 · 닫힌 폴리곤 허용 | `start`→`end` **한 구간**뿐 |
+| 단위 | mm | **m**, 덕트·배관 지름만 **인치** |
+| 축 | Z-up, 평면 (x, y) | **Y-up** — 평면은 첫째·**셋째**, 둘째가 높이 |
+| 고저 | 부재의 `z_base`/`elevation` | **레벨**의 `level`·`baseElevation`·`height` |
+| 벽 | 다점 축선 · 닫힌 폴리곤 | `start`→`end` **한 구간** |
+| 기둥 | 닫힌 폴리곤 | 중심 + 폭·깊이 + **회전** |
 
-- 환산은 `geom_contract.mm_to_m`/`m_to_mm` 뿐이다. `/1000` 을 다리 안에 쓰지 말 것 —
-  z 규약을 한 곳에 둔 것과 같은 이유고, 한 군데 빠지면 1000배 틀린 건물이 조용히 나간다.
+환산은 `geom_contract.mm_to_m`/`m_to_mm`/`mm_to_in`/`in_to_mm` 뿐이다. 다리 안에서
+`/1000`·`/25.4` 를 쓰지 말 것 — z 규약을 한 곳에 둔 것과 같은 이유다.
+
+**카테고리 대응**
+
+| 우리 | Pascal 노드 | 비고 |
+|---|---|---|
+| wall | `wall` | 닫힌 **직사각형**은 축선±두께/2 로 무손실. 사다리꼴은 불가 |
+| column | `column` | 직사각형 → 중심·폭·깊이·회전. 원형 → `round`+radius |
+| slab | `slab` | `elevation` 이 **상단**, 두께는 아래로 — 우리 z 규약과 **같다** |
+| zone | `zone` | 폴리곤 + `ceilingHeight`. **고저 필드가 없다**(레벨면에 붙는다) |
+| duct | `duct-segment` | `path` 는 [x, **높이**, 평면y] m, 단면은 **인치** |
+| pipe | `pipe-segment` | 지름 인치(1.25~8), DWV 전용 스키마 |
+| **beam** | **없음** | Pascal 자신의 IFC 임포터도 *"Pascal has no `beam` node type yet"* 이라며 건너뛴다 |
+| **tray** | **없음** | `lineset` 은 냉매 배관 쌍이지 케이블트레이가 아니다 |
+| **equipment** | (부적합) | `hvac-equipment` 는 furnace\|air-handler\|condenser **캐비닛**이고 치수가 0.3~2m 로 묶여 있다 |
+| **opening** | (미구현) | `door`/`window` 로 갈 자리는 **있다** — 벽 자식이고 좌표가 벽 로컬(시작점부터의 거리)이라 아직 안 했다 |
+
 - `baseElevation` 은 **절대 고저가 아니라 누적 위에 더하는 오프셋**이다
   (`storey.ts: baseY_i = (직전 baseY + 직전 height) + baseElevation_i`). 절대값으로 착각하면
   2층부터 조용히 내려앉는다. `_levels_from_z`/`_z_of_levels` 가 그 식을 그대로 뒤집는다.
+- **레벨은 구조 카테고리(wall·column·slab·zone)의 z 로만 만든다.** 덕트의 `elevation`
+  2590mm 는 2.59m 짜리 **층**이 아니라 바닥 위 높이다 — 층으로 세면 건물에 없는 층이
+  생기고 그리로 부재가 딸려 간다.
 - **좌표는 `metadata` 에 넣지 않는다.** 넣으면 왕복이 통과해도 컨테이너가 통과한 것이지
-  변환이 통과한 게 아니다. `metadata.mep` 은 출처만(eid·layer·pairing·검토사유·`width_detected`).
+  변환이 통과한 게 아니다. `metadata.mep` 은 출처만(eid·layer·pairing·검토사유).
 - 노드 id 는 eid 의 sha1 앞 16자다. Pascal 은 난수(nanoid)를 쓰지만, 같은 도면을 두 번
   변환하면 같은 씬이어야 diff 가 의미를 갖는다.
-- **닫힌 직사각형 벽은 Pascal 벽과 같은 형상**이다(축선 ± 두께/2) — 무손실로 접었다 편다.
-  사다리꼴은 표현할 방법이 **없다**. 조용히 버리지 않고 `unconvertible` 로 센다.
-- Pascal 에서 고친 두께·높이는 `overrides` 로 돌아온다 — `width_of` 의 "적어 준 값이 이긴다" 와 같은 자리.
+- Pascal 에서 고친 치수는 `overrides` 로 돌아온다 — "적어 준 값이 이긴다" 와 같은 자리.
 
-실측(지하3층 건축평면, 벽 667):
+★ **`ColumnNode` 의 기본값은 장식용이다.** `style` 기본이 고전 기둥이고
+`shaftStartScale` 0.72(목이 잘록), `baseStyle` round-rings, `capitalStyle` simple —
+그대로 두면 구조 기둥 자리에 **그리스 신전이 선다.** Pascal 자신의 IFC 임포터도 같은
+자리에서 장식을 벗기므로(`style:'plain'`·`baseStyle:'none'`·`shaftSegmentCount:1` …)
+우리도 똑같이 벗긴다. 형상이 멀쩡해 보이는 종류의 오류라 검사에는 안 걸린다.
 
-| | |
-|---|---|
-| Pascal 벽 노드 | **660** (열린 629 + 닫힌 직사각형 31) |
-| 표현 불가 | **7** — 전부 `closed_polygon_not_rectangular`(사다리꼴, `상부골조`·`A-CON`) |
-| 왕복 최대 좌표 오차 | **1.5e-11 mm** (×1000 ÷1000 부동소수 잡음) |
-| 두께·높이·z_base 불일치 | **0 / 0 / 0** |
-| 되돌린 파일의 `verify_geometry` | 원본과 같음(error 0 · warn 1) |
+★ **zod 범위를 넘긴 노드는 내보내지 않는다.** Pascal 스키마는 수치에 상·하한이 있고
+(덕트 폭 4~60in · 높이 3~40in · 배관 지름 1.25~8in), 넘기면 `.parse()` 가 거부해 그
+노드는 **씬에 안 올라온다**. 그냥 내보내면 "변환했다" 고 말해 놓고 Pascal 에서는
+사라진다. `_RANGE` 로 미리 걸러 `out_of_pascal_range`(필드·값·한계)로 센다 —
+실측 환기평면의 **100mm 폭 덕트가 하한 101.6mm 에 걸린다.**
+
+실측:
+
+| 도면 | 입력 | Pascal 노드 | 표현 불가 | 왕복 최대 좌표 오차 |
+|---|---|---|---|---|
+| 지하3층 건축평면 | 벽 667 · 기둥 80 · 슬래브 8 · 개구부 34 · 장비 6 | **748** (벽 660 · 기둥 80 · 슬래브 8) | 벽 7(사다리꼴) · 개구부 34 · 장비 6 | **1.5e-11 mm** |
+| 아파트 환기평면 | 덕트 45 · 장비 11 · 개구부 12 | **45** | 장비 11 · 개구부 12 | **9.1e-13 mm** |
+| MEP 샘플 | 슬래브 1 · 덕트 1 · 배관 2 · 트레이 1 · 장비 2 | **4** | 트레이 1 · 장비 2 | **0** |
+
+두께·높이·`z_base`·`elevation` 불일치는 세 도면 모두 **0**, 되돌린 파일의
+`verify_geometry` 는 원본과 같다.
 
 ★ **되찾지 못하는 것 하나**: 열린 벽의 `points` 는 페어링에 쓴 **원본 면선 한 줄**이라
 축선에서 되살릴 수 없다(어느 쪽 면인지가 없다). 축선으로 채우고 `points_from_axis` 로
