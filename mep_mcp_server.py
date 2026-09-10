@@ -394,5 +394,42 @@ def build_freecad(out_name: str, json_path: str = DEFAULT_JSON) -> str:
         return f"Build failed: {exc}"
 
 
+@mcp.tool()
+def get_pascal_snapshot(json_path: str = DEFAULT_JSON) -> str:
+    """프로젝트를 Pascal 씬 그래프로 내보낸다 — 편집 화면이 받는 것과 같은 스냅샷.
+
+    반환: project_id · revision · snapshot_sha256 · scene · report(표현 불가 목록 포함).
+    적용할 때 revision 과 snapshot_sha256 을 그대로 돌려줘야 한다(낡은 씬 차단).
+    """
+    try:
+        return json.dumps(session_from_geometry(json_path).pascal_snapshot(), ensure_ascii=False)
+    except Exception as exc:
+        return f"Error: {exc}"
+
+
+@mcp.tool()
+def apply_pascal_scene(scene: dict, expected_revision: int, snapshot_sha256: str, op_id: str,
+                       dry_run: bool = True, json_path: str = DEFAULT_JSON) -> str:
+    """편집한 Pascal 씬을 **변경 명령**으로 저장한다 — 전체 덮어쓰기가 아니다.
+
+    dry_run=True(기본)는 만들 명령과 검증 결과만 돌려준다. 실제로 저장하려면 결과를
+    사람에게 보여 준 뒤 dry_run=False 로 다시 부른다. 같은 op_id 는 두 번 적용되지 않는다.
+    화면에서 빠진 노드 중 **애초에 못 보낸 부재**는 삭제로 읽지 않는다.
+    """
+    try:
+        session = session_from_geometry(json_path)
+        result = session.pascal_apply(scene, expected_revision, session.store.read()['project_id'],
+                                      snapshot_sha256, op_id, dry_run)
+        state = result.pop('state', None)
+        if isinstance(state, dict):
+            result['revision'] = state.get('revision')   # 기하 전체는 응답에 싣지 않는다
+        return json.dumps(result, ensure_ascii=False)
+    except RevisionConflict as exc:
+        return json.dumps({'error': str(exc), 'current_revision': exc.current_revision},
+                          ensure_ascii=False)
+    except Exception as exc:
+        return f"Error: {exc}"
+
+
 if __name__ == "__main__":
     mcp.run()

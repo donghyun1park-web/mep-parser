@@ -27,7 +27,9 @@ Pascal 쪽 계약(읽고 고정한 값, `packages/`):
   ifc-converter  site → building → level → 부재. parentId 와 부모 children **양쪽** 기록
 """
 
+import copy
 import hashlib
+import json
 import math
 
 import geom_contract as GC
@@ -884,23 +886,45 @@ def from_pascal_scene(scene):
 #   전부 삭제로 보이고(변환 못 한 부재까지), 동시 수정·되돌리기가 revision 검사를
 #   지나가지 못한다. `project_server.save` 가 이미 revision·검증·잠금을 갖고 있으니
 #   다리는 그 입력(= `edits.json` 어휘)만 만든다.
-_GEOM_KEYS = {"wall": ("centerline", "points"), "column": ("points", "center"),
-              "slab": ("points",), "zone": ("points",), "opening": ("center",),
-              "pipe": ("points", "path3d"), "duct": ("points", "path3d")}
+# ★ '움직였는가' 는 **왕복이 충실히 나르는 기하만** 비교한다. 열린 벽의 `points` 는
+#   페어링에 쓴 원본 면선 한 줄이라 되돌리기가 축선으로 채운다(`points_from_axis`) —
+#   그걸 비교하면 손대지 않은 페어링 벽이 **전부 이동으로 읽혀** 저장할 때마다
+#   delete+add 가 쏟아진다(실측: 실제 파싱 벽 1개짜리 프로젝트에서 재현). 닫힌
+#   형상은 축선/상자로 접었다 펴서 시작 꼭짓점이 회전하므로 꼭짓점 집합으로 본다.
+_GEOM_TOL_MM = 1e-6
 
 
-def _fingerprint(cat, rec):
-    """그 부재의 기하 지문. 치수는 뺀다 — 치수 변경은 선언(overrides)이지 이동이 아니다."""
-    out = []
-    for key in _GEOM_KEYS.get(cat, ("points",)):
-        v = rec.get(key)
-        if v is None:
-            continue
-        if key == "center":
-            out.append((key, round(v[0], 6), round(v[1], 6), round(rec.get("radius", 0.0), 6)))
-        else:
-            out.append((key, tuple(tuple(round(c, 6) for c in p) for p in v)))
-    return tuple(out)
+def _pts(v):
+    return [tuple(float(c) for c in p) for p in (v or []) if p is not None]
+
+
+def _ring(v):
+    p = _pts(v)
+    if len(p) > 1 and math.dist(p[0], p[-1]) <= _GEOM_TOL_MM:
+        p = p[:-1]
+    return sorted(p, key=lambda q: tuple(round(c, 3) for c in q))
+
+
+def _same_seq(a, b):
+    return len(a) == len(b) and all(math.dist(p, q) <= _GEOM_TOL_MM for p, q in zip(a, b))
+
+
+def _same_geometry(cat, a, b):
+    """두 레코드가 같은 자리·같은 모양인가. 치수는 뺀다 — 치수 변경은 선언이지 이동이 아니다."""
+    if cat == "wall":
+        if a.get("closed") or a.get("pairing") == "closed":
+            return _same_seq(_ring(a.get("points")), _ring(b.get("points")))
+        return _same_seq(_pts(a.get("centerline") or a.get("points")),
+                         _pts(b.get("centerline") or b.get("points")))
+    if cat == "column" and a.get("kind") == "circle":
+        return (_same_seq(_pts([a.get("center")]), _pts([b.get("center")])) and
+                abs(float(a.get("radius") or 0) - float(b.get("radius") or 0)) <= _GEOM_TOL_MM)
+    if cat in ("column", "slab", "zone"):
+        return _same_seq(_ring(a.get("points")), _ring(b.get("points")))
+    if cat == "opening":
+        return _same_seq(_pts([a.get("center")]), _pts([b.get("center")]))
+    return (_same_seq(_pts(a.get("points")), _pts(b.get("points"))) and
+            _same_seq(_pts(a.get("path3d")), _pts(b.get("path3d"))))
 
 
 def scene_to_edits(geometry, scene):
@@ -912,6 +936,7 @@ def scene_to_edits(geometry, scene):
     """
     expected, fwd = to_pascal_scene(geometry)
     back, rev = from_pascal_scene(scene)
+    params = geometry.get("params") or {}
 
     exported = {}                       # eid → 그 부재가 만든 노드 id 들
     for nid, n in expected["nodes"].items():
@@ -934,7 +959,7 @@ def scene_to_edits(geometry, scene):
         if eid not in after:
             continue                                # 되돌리기가 못 만든 것 ≠ 삭제
         _c2, now = after[eid]
-        if _fingerprint(cat, orig) != _fingerprint(cat, now):
+        if not _same_geometry(cat, orig, now):
             # 저장소 규약: 이동·분할·결합은 새 동사를 만들지 않는다 = delete + add
             edits[eid] = {"deleted": True}
             new_eid = _manual_eid(eid, eid)
@@ -944,6 +969,24 @@ def scene_to_edits(geometry, scene):
             continue
         ov = {k: v for k, v in (now.get("overrides") or {}).items()
               if (orig.get("overrides") or {}).get(k) != v}
+        # ★ `overrides` 만 비교하면 **최상위에 사는 값의 변경을 놓친다.** 실무 난방 도면처럼
+        #   지름이 최상위 `diameter` 에만 있는 레코드는 Pascal 에서 고쳐도 명령이 0개였고,
+        #   덕트를 위아래로 옮기거나 벽을 다른 층으로 옮긴 것도 평면 기하만 보는 비교에
+        #   안 걸렸다. 해소한 값끼리 비교해 바뀐 것을 **선언**으로 낸다 — 규약 함수가
+        #   `overrides` 를 먼저 보므로 그대로 이긴다.
+        z_key = "elevation" if cat in GC._ELEV_CATS else "z_base"
+        z0, z1 = GC.base_z(cat, orig), GC.base_z(cat, now)
+        if abs(z0 - z1) > _GEOM_TOL_MM and z_key not in ov:
+            ov[z_key] = z1
+        if cat in MEP_CATS:
+            try:
+                d0, d1 = _mep_dims(cat, orig, params), _mep_dims(cat, now, params)
+            except GC.ContractError:
+                d0 = d1 = {}
+            for key, v in d1.items():
+                # 별칭 하나로 이미 나갔으면(`height`) 정식 키(`height_mm`)를 겹쳐 싣지 않는다
+                if key in d0 and abs(v - d0[key]) > _GEOM_TOL_MM and                         not any(a in ov for a in _dim_aliases(cat, key)):
+                    ov[key] = v
         if ov:
             edits[eid] = {"overrides": ov}
             report["overrides"] += 1
@@ -955,6 +998,38 @@ def scene_to_edits(geometry, scene):
     report["not_exported"] = len(before) - len(exported)
     report["forward"], report["reverse"] = fwd, rev
     return edits, report
+
+
+def scene_sha256(scene):
+    """씬의 지문. 편집 화면이 받은 스냅샷과 지금 저장소가 만드는 스냅샷이 같은지
+    잰다 — revision 이 같아도 파서·다리·설정이 바뀌면 씬은 달라진다. 노드 id 와
+    값이 결정론적이라 정렬된 JSON 의 해시로 충분하다."""
+    body = json.dumps(scene, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False, allow_nan=False)
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def merge_edits(existing, commands):
+    """저장된 수정(edits.json)에 변경 명령을 **합친다** — `save` 는 통째로 교체한다.
+
+    - 사람이 만든 레코드(`added`)를 지우면 그 수정 자체가 없어진다(레코드가
+      그 수정에서만 나오므로 `deleted` 를 얹어 둘 이유가 없다).
+    - 치수는 키별로 덮는다 — 같은 부재의 다른 선언은 남는다.
+    """
+    out = copy.deepcopy(existing)
+    for eid, cmd in commands.items():
+        prev = out.get(eid) or {}
+        if cmd.get("deleted") and prev.get("added"):
+            out.pop(eid, None)
+            continue
+        cur = copy.deepcopy(prev)
+        for key, value in cmd.items():
+            if key == "overrides":
+                cur["overrides"] = dict(cur.get("overrides") or {}, **value)
+            else:
+                cur[key] = copy.deepcopy(value)
+        out[eid] = cur
+    return out
 
 
 if __name__ == "__main__":

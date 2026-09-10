@@ -645,8 +645,36 @@ revision 검사를 지나가지 못한다. `scene_to_edits(geometry, scene)` 가
 |---|---|
 | 노드를 지웠다 | `{"deleted": true}` — **그 노드가 씬에서 실제로 사라졌을 때만** |
 | 옮겼다·모양을 바꿨다 | `deleted` + 새 EID(`wm:`)로 `added` (새 동사를 만들지 않는다) |
-| 치수만 고쳤다 | `{"overrides": {...}}` |
+| 치수만 고쳤다 | `{"overrides": {...}}` — 최상위에 사는 치수(`diameter` 등)도 포함 |
+| 위아래로 옮겼다·층을 옮겼다 | `{"overrides": {"elevation"/"z_base": ...}}` — EID 를 유지한다 |
 | 애초에 못 보낸 부재 | **없음** — 되돌리기가 못 만든 것은 삭제가 아니다 |
+
+★ **'움직였는가' 는 왕복이 충실히 나르는 기하만 비교한다.** 열린 벽의 `points` 는
+원본 면선 한 줄이라 되돌리기가 축선으로 채우는데, 그걸 비교하던 동안 **손대지 않은
+페어링 벽이 전부 '이동' 으로 읽혀** 저장할 때마다 delete+add 가 쏟아질 뻔했다
+(실제 파싱 벽 1개로 재현 — 합성 벽은 `points == centerline` 이라 못 잡는다).
+`_same_geometry` 는 열린 벽은 축선, 닫힌 형상은 **꼭짓점 집합**(시작점이 회전한다),
+MEP 는 평면 점 + `path3d` 를 본다. 고저와 단면은 **해소한 값끼리**(`base_z`·
+`mep_dimensions`) 비교해 바뀌면 선언으로 낸다 — `overrides` 만 비교하면 실무 난방 도면처럼
+지름이 최상위에만 있는 레코드의 변경과, 덕트를 천장에 붙이려 올린 것이 사라진다.
+
+**저장 경로 — 스냅샷 조회·변경 적용은 한 곳이다.** `ProjectSession.pascal_snapshot()` /
+`pascal_apply()` 를 HTTP(`GET /pascal/snapshot` · `POST /pascal/apply`)와 MCP
+(`get_pascal_snapshot` · `apply_pascal_scene`)가 같이 부른다. 적용 요청은 네 가지를 싣는다:
+
+| 필드 | 막는 것 |
+|---|---|
+| `expected_revision` + `project_id` | 다른 창·Codex 가 먼저 저장한 뒤의 낡은 수정(409) |
+| `snapshot_sha256` | revision 은 같아도 파서·다리·설정이 바뀌어 **다른 씬을 보고 고친** 수정(409, `SnapshotConflict`) |
+| `op_id` | 재시도·이중 클릭의 **중복 적용**. `decisions` 에 기록되고 revision 검사보다 **먼저** 본다 — 그래야 둘째 요청이 409 로 첫 요청의 성공을 가리지 않는다 |
+| `dry_run` | 저장 없이 명령·파싱 검증만(MCP 는 기본 `True` — 사람이 보고 적용한다) |
+
+손대지 않은 씬은 **revision 을 올리지 않는다**(`no_changes`) — 빈 커밋이 이력을 흐린다.
+사람이 만든 레코드(`added`)를 지우면 그 수정 자체가 없어진다(`merge_edits`).
+
+실측(명령 수): 지하3층·환기평면·실무 난방(PB 15.9mm 5경로) 모두 **손대지 않으면 0 · 하나 고치면 1**,
+덕트 100mm 올림 → `overrides.elevation` 1개. 다층 프로젝트의 수동 EID 는 원본의
+층 접두를 물려받는다(`1F:wm:…`) — 없으면 `edits_to_local` 이 저장을 거부한다.
 
 ★ **수직·경사 구간은 점마다 높이가 다르다.** `elevation` 한 값으로 담으면 입상관이
 천장에 눕는다. 다리는 `path3d`(계약 v3 예정 키)가 있으면 점마다 싣고 그대로

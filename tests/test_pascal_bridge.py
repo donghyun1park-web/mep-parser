@@ -496,6 +496,44 @@ def test_scene_becomes_edit_commands_not_a_whole_file_replace():
     assert (rep["deleted"], rep["moved"], rep["overrides"]) == (1, 1, 1)
 
 
+def test_a_section_that_lives_at_top_level_still_becomes_a_command():
+    """실무 난방 도면처럼 지름이 `overrides` 가 아니라 **최상위 `diameter`** 에만 있는
+    레코드는, overrides 만 비교하면 Pascal 에서 고쳐도 명령이 0개였다."""
+    pb = {"kind": "polyline", "points": [[0.0, 0.0], [3000.0, 0.0]], "eid": "p:pb",
+          "elevation": 77.95, "diameter": 15.9, "material": "PB"}
+    g = _geom({"pipe": [pb]})
+    scene, _ = PB.to_pascal_scene(g)
+    node = _nodes_of(scene, PB.FOREIGN_PREFIX + "pipe")[0]
+    node["section"]["diameter"] = 20.0                      # PB 20A 로 바꿨다
+    edits, rep = PB.scene_to_edits(g, scene)
+    assert edits == {"p:pb": {"overrides": {"diameter": 20.0}}}
+    assert rep["overrides"] == 1
+
+
+def test_moving_a_duct_up_or_a_wall_to_another_level_becomes_a_command():
+    """평면 기하만 비교하면 **수직 이동**이 안 걸린다 — 덕트를 천장에 붙이려고
+    올려도, 벽을 다른 층으로 옮겨도 저장할 명령이 없었다. 고저는 선언으로 낸다
+    (`base_z` 가 overrides 를 먼저 보므로 EID 를 바꾸지 않고 이긴다)."""
+    duct = {"kind": "polyline", "points": [[0.0, 0.0], [3000.0, 0.0]], "eid": "d:1",
+            "elevation": 2400.0, "width_mm": 200.0, "height_mm": 200.0}
+    up = _wall("w:1", [0.0, 0.0], [3000.0, 0.0])
+    low = _wall("w:2", [0.0, 0.0], [3000.0, 0.0], z=4200.0)
+    g = _geom({"duct": [duct], "wall": [up, low]})
+    scene, _ = PB.to_pascal_scene(g)
+    d = _nodes_of(scene, "duct-segment")[0]
+    d["path"] = [[p[0], 2.59, p[2]] for p in d["path"]]      # 2400 → 2590 으로 올렸다
+    lv = sorted(_nodes_of(scene, "level"), key=lambda n: n["level"])
+    w = next(n for n in _nodes_of(scene, "wall") if n["metadata"]["mep"]["eid"] == "w:1")
+    lv[0]["children"].remove(w["id"])
+    lv[1]["children"].append(w["id"])
+    w["parentId"] = lv[1]["id"]                              # 위층으로 옮겼다
+
+    edits, _ = PB.scene_to_edits(g, scene)
+    assert edits["d:1"] == {"overrides": {"elevation": 2590.0}}
+    assert edits["w:1"] == {"overrides": {"z_base": 4200.0}}
+    assert "w:2" not in edits
+
+
 def test_an_unconvertible_member_is_never_read_as_a_deletion():
     """Pascal 로 못 보낸 부재는 화면에 없는 것이 **당연하다.** 그걸 삭제로 읽으면
     저장할 때마다 사다리꼴 벽·트레이·장비가 조용히 지워진다."""
@@ -661,6 +699,10 @@ def test_sample_drawings_round_trip_without_moving():
         scene, rep = PB.to_pascal_scene(g)
         back, _ = PB.from_pascal_scene(scene)
         seen.update(rep["counts_out"])
+        # ★ 손대지 않은 씬은 변경 명령이 **0** 이어야 한다. 실제 파싱 벽은 `points` 가
+        #   면선이라 축선과 다른데, 그걸 비교하던 동안 페어링 벽이 전부 '이동' 으로
+        #   읽혔다 — 합성 벽(points == centerline)으로는 안 보이는 결함이었다.
+        assert PB.scene_to_edits(g, scene)[0] == {}, fn
         for cat, recs in g["elements"].items():
             by_eid = {r.get("eid"): r for r in back["elements"].get(cat) or []}
             # ★ 되돌아오지 않은 레코드를 **건너뛰지 않는다.** 종전엔 `continue` 라

@@ -161,7 +161,7 @@ class ProjectSession:
         enriched['edits_by_floor'] = local
         return self.store.flat_edits(enriched)
 
-    def save(self, edits, expected_revision, project_id, decisions=None):
+    def save(self, edits, expected_revision, project_id, decisions=None, dry_run=False):
         validate_edits(edits)
         with self._mutex:
             manifest = self.store.refresh_inputs()
@@ -173,6 +173,8 @@ class ProjectSession:
                 self._parse(proposed)
             except Exception as exc:
                 raise ValueError('Proposed edits cannot be parsed; project was not changed: ' + str(exc)) from exc
+            if dry_run:
+                return {'dry_run': True, 'project_id': project_id, 'revision': expected_revision}
             self.store.check_revision(self.store.refresh_inputs(), expected_revision, project_id)
             self.store.replace_edits(captured, expected_revision, project_id, decisions=decisions)
             return self.state()
@@ -248,6 +250,59 @@ class ProjectSession:
     def serve(self):
         return ProjectServer(self)
 
+    # ── Pascal 편집 화면 ──────────────────────────────────────────────────
+    # 스냅샷 조회와 변경 적용이 **여기 한 곳**이다 — HTTP(`/pascal/*`)와 MCP 가
+    # 같은 함수를 부른다. 저장은 전체 JSON 되돌리기가 아니라 원본과 대조한 변경
+    # 명령이고(`pascal_bridge.scene_to_edits`), 기존 save 의 revision·검증·잠금을 탄다.
+    def pascal_snapshot(self):
+        from pascal_bridge import scene_sha256, to_pascal_scene
+        state = self.state()
+        scene, report = to_pascal_scene(state['geometry'])
+        return {'project_id': state['project_id'], 'revision': state['revision'],
+                'snapshot_sha256': scene_sha256(scene), 'scene': scene, 'report': report}
+
+    def pascal_apply(self, scene, expected_revision, project_id, snapshot_sha256, op_id,
+                     dry_run=False):
+        from pascal_bridge import merge_edits, scene_sha256, scene_to_edits, to_pascal_scene
+        if not isinstance(op_id, str) or not 0 < len(op_id) <= 128:
+            raise ValueError('op_id must be a nonempty string of at most 128 characters')
+        if not isinstance(scene, dict) or not isinstance(scene.get('nodes'), dict):
+            raise ValueError('scene must be a Pascal scene graph with nodes')
+        with self._mutex:
+            manifest = self.store.refresh_inputs()
+            if manifest['project_id'] != project_id:
+                raise ValueError('Wrong project_id')
+            # 같은 작업 ID 는 두 번 적용하지 않는다. 재시도·이중 클릭이 수정을 두 번
+            # 쌓거나, 둘째 요청이 낡은 revision 으로 409 를 내며 첫 요청의 성공을
+            # 가리지 않게 — 중복은 revision 검사보다 **먼저** 본다.
+            if any(d.get('action') == 'pascal_apply' and d.get('op_id') == op_id
+                   for d in manifest.get('decisions') or []):
+                return {'duplicate': True, 'op_id': op_id, 'state': self.state()}
+            self.store.check_revision(manifest, expected_revision, project_id)
+            state = self.state()
+            current, _ = to_pascal_scene(state['geometry'])
+            if scene_sha256(current) != snapshot_sha256:
+                raise SnapshotConflict(manifest['revision'])
+            commands, report = scene_to_edits(state['geometry'], scene)
+            summary = {k: report[k] for k in ('deleted', 'moved', 'overrides', 'added')}
+            if not commands:
+                return {'applied': False, 'reason': 'no_changes', 'summary': summary,
+                        'op_id': op_id, 'state': state}
+            decision = {'action': 'pascal_apply', 'op_id': op_id, 'revision': expected_revision,
+                        'snapshot_sha256': snapshot_sha256, 'summary': summary}
+            result = self.save(merge_edits(state['edits'], commands), expected_revision,
+                               project_id, [decision], dry_run=dry_run)
+            return {'applied': not dry_run, 'dry_run': bool(dry_run), 'op_id': op_id,
+                    'commands': commands, 'summary': summary, 'state': result}
+
+
+class SnapshotConflict(RevisionConflict):
+    """편집 화면이 받은 씬과 지금 저장소가 만드는 씬이 다르다. revision 은 같아도
+    파서·다리·설정이 바뀌면 생긴다 — 409 로 돌려보내 다시 불러오게 한다."""
+
+    def __str__(self):
+        return 'Pascal scene snapshot is stale; reload it before applying'
+
 
 class ProjectServer:
     def __init__(self, session):
@@ -289,12 +344,15 @@ class ProjectServer:
 
             def do_GET(self):
                 path = urlsplit(self.path).path
-                if path not in ('/state','/preview'):
+                if path not in ('/state','/preview','/pascal/snapshot'):
                     self.reply(404, {'error':'Unknown endpoint'})
                     return
                 if not self.authorized(preview=path == '/preview'):
                     return
                 try:
+                    if path == '/pascal/snapshot':
+                        self.reply(200, session.pascal_snapshot())
+                        return
                     state = session.state() if path == '/state' else session.preview_state()
                     if path == '/state':
                         self.reply(200, state)
@@ -311,7 +369,7 @@ class ProjectServer:
 
             def do_POST(self):
                 path = urlsplit(self.path).path
-                if path not in ('/edits', '/discard', '/relink', '/defer'):
+                if path not in ('/edits', '/discard', '/relink', '/defer', '/pascal/apply'):
                     self.reply(404, {'error':'Unknown endpoint'})
                     return
                 if not self.authorized():
@@ -330,6 +388,9 @@ class ProjectServer:
                         result = session.discard(body['eid'], *common)
                     elif path == '/defer':
                         result = session.defer(body['eid'], *common)
+                    elif path == '/pascal/apply':
+                        result = session.pascal_apply(body['scene'], *common, body['snapshot_sha256'],
+                                                      body['op_id'], bool(body.get('dry_run', False)))
                     else:
                         result = session.relink(body['orphan'],body['target'], *common)
                     self.reply(200, result)
