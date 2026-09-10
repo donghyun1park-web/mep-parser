@@ -513,6 +513,42 @@ def test_an_unconvertible_member_is_never_read_as_a_deletion():
     assert rep["not_exported"] == 2
 
 
+def test_manual_eids_keep_the_floor_prefix_of_a_stacked_project():
+    """다층 프로젝트는 모든 EID 가 `<층>:` 으로 시작해야 저장소가 층을 찾는다.
+    접두 없는 `wm:…` 은 `edits_to_local` 에서 StackError — 단층 샘플로만 시험하면
+    안 보인다. 이동·분할로 생긴 수동 레코드도 원본의 층 접두를 물려받아야 한다."""
+    from stack_build import edits_to_local
+
+    moved = _wall("1F:w:move", [0.0, 0.0], [3000.0, 0.0])
+    moved["eid_v1"] = "1F:w:old"
+    moved["source_signatures"] = ["abc"]
+    g = _geom({"wall": [moved]})
+    scene, _ = PB.to_pascal_scene(g)
+    _nodes_of(scene, "wall")[0]["start"] = [0.0, 0.5]          # 옮겼다
+
+    edits, _ = PB.scene_to_edits(g, scene)
+    local = edits_to_local(edits, [{"id": "1F", "offset": [0, 0], "z": 0}])
+    assert "w:move" in local["1F"]                               # 삭제
+    added = [e for e in local["1F"].values() if e.get("added")]
+    assert len(added) == 1
+    rec = added[0]["record"]
+    assert rec["derived_from"] == "1F:w:move" and rec["pairing"] == "manual"
+    # 옛 EID·EID 재료를 물려받으면 apply_edits 의 이관이 원본의 옛 수정을 붙인다
+    assert "eid_v1" not in rec and "source_signatures" not in rec
+
+
+def test_split_pieces_keep_the_floor_prefix_too():
+    w = _wall("2F:w:bent", [0.0, 0.0], [3000.0, 0.0])
+    w["centerline"] = [[0.0, 0.0], [3000.0, 0.0], [3000.0, 3000.0], [6000.0, 3000.0]]
+    scene, _ = PB.to_pascal_scene(_geom({"wall": [w]}))
+    segs = sorted(_nodes_of(scene, "wall"), key=lambda n: n["metadata"]["mep"]["seg"])
+    scene["nodes"][segs[1]["parentId"]]["children"].remove(segs[1]["id"])
+    del scene["nodes"][segs[1]["id"]]
+    back, _ = PB.from_pascal_scene(scene)
+    eids = sorted(r["eid"] for r in back["elements"]["wall"])
+    assert eids[0] == "2F:w:bent" and eids[1].startswith("2F:wm:")
+
+
 # ── 실제 파싱 결과 ────────────────────────────────────────────────────────
 def _axis(rec, cat):
     if rec.get("kind") == "circle":

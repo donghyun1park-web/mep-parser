@@ -144,6 +144,30 @@ def _nid(prefix, *parts):
     return "%s_%s" % (prefix, h[:16])
 
 
+def _manual_eid(like, seed):
+    """수동 레코드 EID(`wm:`). 원본 EID 의 **층 접두**를 물려받는다.
+
+    ★ 다층 프로젝트는 모든 EID 가 `<층>:` 으로 시작해야 저장소가 그 수정을 어느
+      층 사이드카에 넣을지 안다(`stack_build.edits_to_local`). 접두 없는 `wm:…` 은
+      `StackError` 로 저장 자체가 실패한다 — 단층 샘플로만 시험하면 안 보인다.
+    """
+    parts = str(like or "").split(":")
+    prefix = parts[0] + ":" if len(parts) >= 3 else ""
+    return prefix + "wm:" + _nid("m", seed).split("_")[-1]
+
+
+# 새 EID 를 받는 파생 레코드가 물려받으면 안 되는 **식별 입력**. 출처(lineage)는
+# `source_refs` + `derived_from` 으로 남기되, EID 를 만드는 재료와 옛 EID 는 버린다 —
+# `eid_v1` 이 남으면 `apply_edits` 의 이관이 원본의 옛 수정을 복사본에 붙인다.
+_IDENTITY_INPUTS = ("eid_v1", "_sigs", "_span_sigs", "source_signatures")
+
+
+def _derived(rec, new_eid, from_eid):
+    out = {k: v for k, v in rec.items() if k not in _IDENTITY_INPUTS}
+    out.update(eid=new_eid, pairing="manual", derived_from=from_eid)
+    return out
+
+
 def _node(nid, ntype, parent, **extra):
     n = {"object": "node", "id": nid, "type": ntype, "parentId": parent,
          "visible": True, "metadata": {}}
@@ -689,9 +713,7 @@ def from_pascal_scene(scene):
                 # 끊겨 나온 조각은 **새 부재**다. 원본 EID 를 나눠 가지면 수정
                 # 사이드카가 어느 쪽을 가리키는지 알 수 없다(golden 의
                 # eid_collisions 가 잡는 바로 그 상태). 수동 레코드 규약을 쓴다.
-                rec["eid"] = "wm:" + first["id"].split("_")[-1]
-                rec["pairing"] = "manual"
-                rec.pop("eid_v1", None)
+                rec = _derived(rec, _manual_eid(rec.get("eid"), first["id"]), rec.get("eid"))
 
             t_mm = GC.m_to_mm(first.get("thickness", PASCAL_DEFAULT_WALL_THICKNESS_M))
             h_mm = GC.m_to_mm(first.get("height", PASCAL_DEFAULT_WALL_HEIGHT_M))
@@ -915,9 +937,9 @@ def scene_to_edits(geometry, scene):
         if _fingerprint(cat, orig) != _fingerprint(cat, now):
             # 저장소 규약: 이동·분할·결합은 새 동사를 만들지 않는다 = delete + add
             edits[eid] = {"deleted": True}
-            new_eid = "wm:" + _nid("m", eid).split("_")[-1]
+            new_eid = _manual_eid(eid, eid)
             edits[new_eid] = {"added": True, "category": cat,
-                              "record": dict(now, eid=new_eid, pairing="manual")}
+                              "record": _derived(now, new_eid, eid)}
             report["moved"] += 1
             continue
         ov = {k: v for k, v in (now.get("overrides") or {}).items()
