@@ -463,6 +463,56 @@ def test_a_column_outside_pascals_range_is_still_unconvertible():
     assert rep["unconvertible"][0]["category"] == "column"
 
 
+# ── 씬 → 변경 명령 ────────────────────────────────────────────────────────
+def test_scene_becomes_edit_commands_not_a_whole_file_replace():
+    """편집 결과는 **변경 명령**으로 저장한다. 전체 JSON 을 되돌려 덮어쓰면
+    화면에 없는 것이 전부 삭제로 보이고, 동시 수정·되돌리기가 revision 검사를
+    지나가지 못한다. 어휘는 이미 있는 `edits.json` 것을 쓴다."""
+    from project_store import validate_edits
+
+    keep = _wall("w:keep", [0.0, 0.0], [3000.0, 0.0])
+    gone = _wall("w:del", [0.0, 1000.0], [3000.0, 1000.0])
+    moved = _wall("w:move", [0.0, 2000.0], [3000.0, 2000.0])
+    thick = _wall("w:thick", [0.0, 3000.0], [3000.0, 3000.0])
+    g = _geom({"wall": [keep, gone, moved, thick]})
+
+    scene, _ = PB.to_pascal_scene(g)
+    by = {n["metadata"]["mep"]["eid"]: n for n in _nodes_of(scene, "wall")}
+    d = by["w:del"]
+    scene["nodes"][d["parentId"]]["children"].remove(d["id"])
+    del scene["nodes"][d["id"]]                       # 사람이 지웠다
+    by["w:move"]["start"] = [0.0, 2.5]                # 옮겼다
+    by["w:thick"]["thickness"] = 0.45                 # 두께만 고쳤다
+
+    edits, rep = PB.scene_to_edits(g, scene)
+    validate_edits(edits)                             # 저장 경로가 받는 모양이어야 한다
+    assert edits["w:del"] == {"deleted": True}
+    assert edits["w:thick"] == {"overrides": {"width": 450.0}}
+    assert "w:keep" not in edits                      # 안 건드린 것은 명령이 없다
+    # 이동은 새 동사를 만들지 않는다 — delete + add
+    assert edits["w:move"] == {"deleted": True}
+    added = [e for k, e in edits.items() if e.get("added")]
+    assert len(added) == 1 and added[0]["record"]["pairing"] == "manual"
+    assert (rep["deleted"], rep["moved"], rep["overrides"]) == (1, 1, 1)
+
+
+def test_an_unconvertible_member_is_never_read_as_a_deletion():
+    """Pascal 로 못 보낸 부재는 화면에 없는 것이 **당연하다.** 그걸 삭제로 읽으면
+    저장할 때마다 사다리꼴 벽·트레이·장비가 조용히 지워진다."""
+    tri = {"kind": "polyline", "closed": True, "z_base": 0.0, "eid": "w:tri",
+           "points": [[0.0, 0.0], [2000.0, 0.0], [2000.0, 600.0], [0.0, 700.0]],
+           "pairing": "closed", "layer": "상부골조"}
+    tray = {"kind": "polyline", "points": [[0.0, 0.0], [1000.0, 0.0]], "eid": "t:1",
+            "elevation": 3000.0}
+    g = _geom({"wall": [_wall("w:1", [0.0, 0.0], [3000.0, 0.0]), tri], "tray": [tray]})
+    scene, fwd = PB.to_pascal_scene(g)
+    assert len(fwd["unconvertible"]) == 2
+
+    edits, rep = PB.scene_to_edits(g, scene)
+    assert edits == {}                                 # 아무것도 안 건드렸으면 명령도 없다
+    assert rep["not_exported"] == 2
+
+
 # ── 실제 파싱 결과 ────────────────────────────────────────────────────────
 def _axis(rec, cat):
     if rec.get("kind") == "circle":

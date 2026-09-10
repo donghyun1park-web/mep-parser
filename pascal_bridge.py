@@ -857,6 +857,84 @@ def from_pascal_scene(scene):
     return geometry, report
 
 
+# ── 씬 → 변경 명령 ────────────────────────────────────────────────────────
+# ★ 편집 결과를 **전체 JSON 되돌리기로 저장하지 않는다.** 그러면 화면에 없는 것이
+#   전부 삭제로 보이고(변환 못 한 부재까지), 동시 수정·되돌리기가 revision 검사를
+#   지나가지 못한다. `project_server.save` 가 이미 revision·검증·잠금을 갖고 있으니
+#   다리는 그 입력(= `edits.json` 어휘)만 만든다.
+_GEOM_KEYS = {"wall": ("centerline", "points"), "column": ("points", "center"),
+              "slab": ("points",), "zone": ("points",), "opening": ("center",),
+              "pipe": ("points", "path3d"), "duct": ("points", "path3d")}
+
+
+def _fingerprint(cat, rec):
+    """그 부재의 기하 지문. 치수는 뺀다 — 치수 변경은 선언(overrides)이지 이동이 아니다."""
+    out = []
+    for key in _GEOM_KEYS.get(cat, ("points",)):
+        v = rec.get(key)
+        if v is None:
+            continue
+        if key == "center":
+            out.append((key, round(v[0], 6), round(v[1], 6), round(rec.get("radius", 0.0), 6)))
+        else:
+            out.append((key, tuple(tuple(round(c, 6) for c in p) for p in v)))
+    return tuple(out)
+
+
+def scene_to_edits(geometry, scene):
+    """(edits, report) — Pascal 씬을 원본과 대조한 **변경 명령**.
+
+    삭제는 **그 노드가 씬에서 실제로 사라졌을 때만** 낸다. 되돌리기가 레코드를
+    못 만든 것(호스트가 없어진 개구부 등)은 삭제가 아니다 — 그렇게 해석하면
+    변환 못 한 부재가 저장할 때마다 지워진다.
+    """
+    expected, fwd = to_pascal_scene(geometry)
+    back, rev = from_pascal_scene(scene)
+
+    exported = {}                       # eid → 그 부재가 만든 노드 id 들
+    for nid, n in expected["nodes"].items():
+        eid = ((n.get("metadata") or {}).get("mep") or {}).get("eid")
+        if eid:
+            exported.setdefault(eid, []).append(nid)
+    before = {r["eid"]: (cat, r) for cat, recs in (geometry.get("elements") or {}).items()
+              for r in recs if r.get("eid")}
+    after = {r["eid"]: (cat, r) for cat, recs in (back.get("elements") or {}).items()
+             for r in recs if r.get("eid")}
+
+    edits, report = {}, {"deleted": 0, "moved": 0, "overrides": 0, "added": 0,
+                         "not_exported": 0}
+    for eid, nids in sorted(exported.items()):
+        cat, orig = before[eid]
+        if all(nid not in scene.get("nodes", {}) for nid in nids):
+            edits[eid] = {"deleted": True}          # 사람이 지운 것만 삭제다
+            report["deleted"] += 1
+            continue
+        if eid not in after:
+            continue                                # 되돌리기가 못 만든 것 ≠ 삭제
+        _c2, now = after[eid]
+        if _fingerprint(cat, orig) != _fingerprint(cat, now):
+            # 저장소 규약: 이동·분할·결합은 새 동사를 만들지 않는다 = delete + add
+            edits[eid] = {"deleted": True}
+            new_eid = "wm:" + _nid("m", eid).split("_")[-1]
+            edits[new_eid] = {"added": True, "category": cat,
+                              "record": dict(now, eid=new_eid, pairing="manual")}
+            report["moved"] += 1
+            continue
+        ov = {k: v for k, v in (now.get("overrides") or {}).items()
+              if (orig.get("overrides") or {}).get(k) != v}
+        if ov:
+            edits[eid] = {"overrides": ov}
+            report["overrides"] += 1
+
+    for eid, (cat, rec) in sorted(after.items()):
+        if eid not in before and eid not in edits:
+            edits[eid] = {"added": True, "category": cat, "record": rec}
+            report["added"] += 1
+    report["not_exported"] = len(before) - len(exported)
+    report["forward"], report["reverse"] = fwd, rev
+    return edits, report
+
+
 if __name__ == "__main__":
     import argparse
     import json
