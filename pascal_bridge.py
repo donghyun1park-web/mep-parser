@@ -36,6 +36,13 @@ import geom_contract as GC
 PASCAL_DEFAULT_WALL_THICKNESS_M = 0.1
 PASCAL_DEFAULT_WALL_HEIGHT_M = 2.5
 
+# Pascal 이 모르는 타입의 노드 접두. 씬 스키마가 foreign 노드를 통째로
+# 보존하므로(BaseNode + loose) 우리 규격을 mm 그대로 담아 보낼 수 있다.
+FOREIGN_PREFIX = "mep-parser:"
+
+# 벽 조각이 '이어져 있다' 고 볼 거리(mm). 이보다 벌어지면 다른 벽이다.
+WALL_JOIN_TOL_MM = 1.0
+
 # 직사각형으로 인정할 허용치(mm·도)
 RECT_TOL_MM = 1.0
 RECT_TOL_DEG = 1.0
@@ -88,7 +95,32 @@ def _out_of_range(node):
 _PROVENANCE = ("eid", "eid_v1", "layer", "pairing", "confidence", "needs_review",
                "review_reason", "width_detected", "overrides", "zone",
                "source_signatures", "handle", "subtype", "source", "member_name",
-               "section", "schedule_match", "elevation_source", "dims_assumed")
+               "section", "schedule_match", "elevation_source", "dims_assumed",
+               # ── MEP 출처: 원본 곡선의 길이·근거와 계통 정보. 다리가 다시 계산할
+               #    수 없는 값들이라(샘플한 폴리선에는 원호가 없다) 반드시 실어 나른다.
+               "system", "material", "nominal_size", "placement", "dimension_basis",
+               "dimension_status", "geometry_mode", "region_id", "level", "floor_id",
+               "source_refs", "source_geometry", "source_length_mm", "sampled_length_mm",
+               "length_basis", "source_elevation_mm", "curve_chord_error_mm", "_sigs")
+
+
+def _dim_aliases(cat, key):
+    """그 치수를 담을 수 있는 키 전부(정식 키 + GUI 별칭). 표는 `geom_contract` 것이다.
+
+    ponytail: `MEP_DIM_ALIASES` 가 아직 없는 트리를 위한 폴백. 들어오면 지운다.
+    """
+    table = getattr(GC, "MEP_DIM_ALIASES", None)
+    if table is None:
+        return (key,)
+    return table.get(cat, {}).get(key, (key,))
+
+
+def _dim_keys(cat):
+    """그 카테고리의 정식 치수 키들."""
+    table = getattr(GC, "MEP_DIM_ALIASES", None)
+    if table is not None:
+        return tuple(table.get(cat, {}))
+    return ("diameter",) if cat == "pipe" else ("width_mm", "height_mm")
 
 
 def _mep_dims(cat, rec, params):
@@ -273,7 +305,7 @@ def to_pascal_scene(geometry, name=None):
     src = name or geometry.get("source") or "mep"
 
     report = {"counts_in": {c: len(v) for c, v in sorted(el.items()) if v},
-              "counts_out": {}, "unconvertible": [], "levels": 0,
+              "counts_out": {}, "unconvertible": [], "foreign": {}, "levels": 0,
               "split_multi_segment": 0, "closed_as_axis": 0,
               "opening_extra_hosts_dropped": 0, "opening_points_dropped": 0,
               "opening_past_wall_end": 0}
@@ -516,16 +548,34 @@ def to_pascal_scene(geometry, name=None):
                 # footprint 모드처럼 공칭 단면이 없는 레코드 — 세그먼트로 못 만든다
                 bad(cat, m, "mep_dimensions_unresolved", detail="missing " + ",".join(need))
                 continue
-            mid_ = _nid("duct-segment" if cat == "duct" else "pipe-segment", eid)
+            native = "duct-segment" if cat == "duct" else "pipe-segment"
+            mid_ = _nid(native, eid)
             if cat == "duct":
-                node = _node(mid_, "duct-segment", lid,
+                node = _node(mid_, native, lid,
                              name=str(m.get("layer") or cat), children=[], path=path,
                              shape="rect", width=GC.mm_to_in(dims["width_mm"]),
                              height=GC.mm_to_in(dims["height_mm"]))
             else:
-                node = _node(mid_, "pipe-segment", lid,
+                node = _node(mid_, native, lid,
                              name=str(m.get("layer") or cat), children=[], path=path,
                              diameter=GC.mm_to_in(dims["diameter"]))
+            bounds = _out_of_range(node)
+            if bounds is not None:
+                # ★ Pascal 의 기본 MEP 노드는 미국 주택 규격이다(배관 1.25~8인치 =
+                #   DWV, 덕트 높이 3인치 하한). 우리 PB 15.9mm·높이 54mm 덕트는
+                #   **하나도 못 들어간다** — 실측: 난방 5경로·환기 41경로가 0개가 됐다.
+                #   그렇다고 버리면 안 된다. Pascal 의 씬 스키마는 **모르는 타입**을
+                #   `ForeignNodeEnvelope`(BaseNode + loose)로 받아 그대로 저장한다.
+                #   그래서 치수를 **mm 그대로** 실어 foreign 노드로 내보낸다 —
+                #   지금은 안 그려지지만 저장·왕복은 무손실이고, 전용 플러그인 노드가
+                #   들어오면 그 자리에서 그려진다. 범위에 맞춰 값을 깎지 않는다.
+                field, val, lo, hi = bounds
+                node = _node(mid_, FOREIGN_PREFIX + cat, lid,
+                             name=str(m.get("layer") or cat), children=[], path=path,
+                             section=dict(dims, units="mm"), nativeNodeType=native,
+                             outOfPascalRange={"field": field, "value_in": round(val, 4),
+                                               "min": lo, "max": hi})
+                report["foreign"][cat] = report["foreign"].get(cat, 0) + 1
             node["metadata"]["mep"] = _meta(m)
             add(mid_, node, lid, cat, m)
 
@@ -547,7 +597,8 @@ def from_pascal_scene(scene):
                      key=lambda n: n.get("level", 0))
     z_of = {lv["id"]: z for lv, z in zip(ordered, _z_of_levels(ordered))}
 
-    report = {"counts_out": {}, "edited": {}, "points_from_axis": 0}
+    report = {"counts_out": {}, "edited": {}, "points_from_axis": 0,
+              "wall_split_by_deletion": 0, "dropped": {}}
 
     def out(cat, rec):
         elements.setdefault(cat, []).append(rec)
@@ -561,6 +612,17 @@ def from_pascal_scene(scene):
         rec[key] = value
         if key in rec.get("overrides", {}):
             rec["overrides"][key] = value
+
+    def set_dim(rec, cat, key, value):
+        """해소한 단면을 기록한다. `mep_dimensions` 가 **`overrides` 를 먼저** 보므로
+        최상위만 쓰면 Pascal 에서 100→150 으로 키운 것이 조용히 100 으로 남는다
+        (z_base 와 같은 함정). 별칭 표는 `geom_contract` 것을 쓴다 — 여기서
+        다시 쓰면 키가 하나 늘 때마다 이쪽이 먼저 틀린다."""
+        rec[key] = value
+        ov = rec.get("overrides") or {}
+        for name in _dim_aliases(cat, key):
+            if name in ov:
+                ov[name] = value
 
     def edited(what):
         report["edited"][what] = report["edited"].get(what, 0) + 1
@@ -587,41 +649,72 @@ def from_pascal_scene(scene):
 
     for (lid, _key), segs in sorted(groups.items()):
         segs.sort()
-        first = segs[0][2]
-        rec, meta = base(first)
-        axis = [[GC.m_to_mm(first["start"][0]), GC.m_to_mm(first["start"][1])]]
-        for _s, _i, n in segs:
-            axis.append([GC.m_to_mm(n["end"][0]), GC.m_to_mm(n["end"][1])])
-        rec["kind"] = "polyline"
-        rec["closed"] = bool(meta.get("closed"))
-        set_base(rec, "z_base", z_of.get(lid, 0.0))
+        # ★ 이어진 조각만 한 벽이다. Pascal 에서 가운데 구간을 지우면 남은 조각이
+        #   붙어 있지 않은데, 그대로 이으면 **없던 대각선 벽**이 생긴다(실측:
+        #   3구간 벽의 가운데를 지우자 [3000,0]→[6000,3000] 이 나왔다).
+        #   끊긴 자리에서 나눈다 — 저장소 규약대로 '분할 = delete + add' 다.
+        runs, tail = [], None
+        for item in segs:
+            n = item[2]
+            head_pt = [GC.m_to_mm(n["start"][0]), GC.m_to_mm(n["start"][1])]
+            if tail is not None and math.dist(tail, head_pt) <= WALL_JOIN_TOL_MM:
+                runs[-1].append(item)
+            else:
+                runs.append([item])
+            tail = [GC.m_to_mm(n["end"][0]), GC.m_to_mm(n["end"][1])]
+        if len(runs) > 1:
+            report["wall_split_by_deletion"] += len(runs) - 1
 
-        t_mm = GC.m_to_mm(first.get("thickness", PASCAL_DEFAULT_WALL_THICKNESS_M))
-        h_mm = GC.m_to_mm(first.get("height", PASCAL_DEFAULT_WALL_HEIGHT_M))
-        # 닫힌 벽의 두께는 직사각형의 짧은 변이라 `width_of` 가 아니라 폴리곤이
-        # 들고 있다 — `overrides` 에 적으면 원본에 없던 선언이 생긴다.
-        if not rec["closed"] and abs(t_mm - GC.width_of(rec, params, "wall")) > 0.5:
-            rec["overrides"]["width"] = t_mm
-            edited("wall_thickness")
-        if abs(h_mm - GC.height_of(rec, params, "wall")) > 0.5:
-            rec["overrides"]["height"] = h_mm
-            edited("wall_height")
+        for ri, run in enumerate(runs):
+            first = run[0][2]
+            rec, meta = base(first)
+            axis = [[GC.m_to_mm(first["start"][0]), GC.m_to_mm(first["start"][1])]]
+            for _s, _i, n in run:
+                axis.append([GC.m_to_mm(n["end"][0]), GC.m_to_mm(n["end"][1])])
+            rec["kind"] = "polyline"
+            rec["closed"] = bool(meta.get("closed"))
+            set_base(rec, "z_base", z_of.get(lid, 0.0))
+            if ri:
+                # 끊겨 나온 조각은 **새 부재**다. 원본 EID 를 나눠 가지면 수정
+                # 사이드카가 어느 쪽을 가리키는지 알 수 없다(golden 의
+                # eid_collisions 가 잡는 바로 그 상태). 수동 레코드 규약을 쓴다.
+                rec["eid"] = "wm:" + first["id"].split("_")[-1]
+                rec["pairing"] = "manual"
+                rec.pop("eid_v1", None)
 
-        if rec["closed"]:
-            ring = _rect_from_axis(axis, t_mm)
-            if ring is None:
-                continue
-            # 축선 방향에 따라 감김이 뒤집힌다 — 계약대로 CCW 로 정규화한다.
-            rec["points"] = GC.ccw(ring)
-        else:
-            rec["centerline"] = axis
-            # 원래 `points` 는 페어링에 쓴 **원본 면선 한 줄**이라 축선에서
-            # 되살릴 수 없다(어느 쪽 면인지가 없다). 축선으로 채우고 센다.
-            rec["points"] = [list(p) for p in axis]
-            report["points_from_axis"] += 1
-        wall_index_of[first["id"]] = len(elements.get("wall") or [])
-        wall_axis_of[first["id"]] = axis
-        out("wall", rec)
+            t_mm = GC.m_to_mm(first.get("thickness", PASCAL_DEFAULT_WALL_THICKNESS_M))
+            h_mm = GC.m_to_mm(first.get("height", PASCAL_DEFAULT_WALL_HEIGHT_M))
+            # 닫힌 벽의 두께는 직사각형의 짧은 변이라 `width_of` 가 아니라 폴리곤이
+            # 들고 있다 — `overrides` 에 적으면 원본에 없던 선언이 생긴다.
+            if not rec["closed"] and abs(t_mm - GC.width_of(rec, params, "wall")) > 0.5:
+                rec["overrides"]["width"] = t_mm
+                edited("wall_thickness")
+            if abs(h_mm - GC.height_of(rec, params, "wall")) > 0.5:
+                rec["overrides"]["height"] = h_mm
+                edited("wall_height")
+
+            if rec["closed"]:
+                ring = _rect_from_axis(axis, t_mm)
+                if ring is None:
+                    continue
+                # 축선 방향에 따라 감김이 뒤집힌다 — 계약대로 CCW 로 정규화한다.
+                rec["points"] = GC.ccw(ring)
+            else:
+                rec["centerline"] = axis
+                # 원래 `points` 는 페어링에 쓴 **원본 면선 한 줄**이라 축선에서
+                # 되살릴 수 없다(어느 쪽 면인지가 없다). 축선으로 채우고 센다.
+                rec["points"] = [list(p) for p in axis]
+                report["points_from_axis"] += 1
+
+            idx = len(elements.get("wall") or [])
+            # ★ **구간마다** 기록한다. 개구부는 자기가 붙은 구간의 축선으로
+            #   위치를 되살려야 한다 — 대표 조각만 담으면 다구간 벽의 둘째
+            #   구간에 붙은 개구부가 호스트를 못 찾고 **말없이 사라진다**.
+            for _s, nid, n in run:
+                wall_index_of[nid] = idx
+                wall_axis_of[nid] = [[GC.m_to_mm(n["start"][0]), GC.m_to_mm(n["start"][1])],
+                                     [GC.m_to_mm(n["end"][0]), GC.m_to_mm(n["end"][1])]]
+            out("wall", rec)
 
     # ── 나머지 노드 ───────────────────────────────────────────────────────
     for nid in sorted(nodes):
@@ -681,7 +774,11 @@ def from_pascal_scene(scene):
             host = n.get("wallId") or n.get("parentId")
             axis = wall_axis_of.get(host)
             if axis is None:
-                continue                     # 붙을 벽이 없는 개구부는 만들지 않는다
+                # 호스트 벽(또는 그 구간)이 씬에서 사라졌다. 개구부를 벽 없이
+                # 만들 수는 없지만 **조용히 버리지도 않는다** — 지웠는지
+                # 빠뜨렸는지는 사람이 봐야 안다.
+                report["dropped"]["opening_host_missing"] =                     report["dropped"].get("opening_host_missing", 0) + 1
+                continue
             pos = n.get("position") or [0, 0, 0]
             u = GC.m_to_mm(pos[0])
             (x0, y0), (x1, y1) = axis[0], axis[-1]
@@ -704,18 +801,29 @@ def from_pascal_scene(scene):
             set_base(rec, "z_base", z_of.get(nodes.get(host, {}).get("parentId"), 0.0))
             out("opening", rec)
 
-        elif t in ("duct-segment", "pipe-segment"):
-            cat = "duct" if t == "duct-segment" else "pipe"
+        elif t in ("duct-segment", "pipe-segment") or t.startswith(FOREIGN_PREFIX):
+            if t.startswith(FOREIGN_PREFIX):
+                cat = t[len(FOREIGN_PREFIX):]
+                if cat not in MEP_CATS:
+                    continue
+            else:
+                cat = "duct" if t == "duct-segment" else "pipe"
             path = n.get("path") or []
             rec["kind"] = "polyline"
             rec["closed"] = False
             rec["points"] = [[GC.m_to_mm(p[0]), GC.m_to_mm(p[2])] for p in path]
             set_base(rec, "elevation", lz + GC.m_to_mm(path[0][1] if path else 0.0))
-            if cat == "duct":
-                rec["width_mm"] = GC.in_to_mm(n.get("width", 14))
-                rec["height_mm"] = GC.in_to_mm(n.get("height", 8))
+            sec = n.get("section")
+            if sec is not None:
+                # foreign 노드는 처음부터 mm 다 — 인치를 거치지 않는다.
+                for key in _dim_keys(cat):
+                    if sec.get(key) is not None:
+                        set_dim(rec, cat, key, float(sec[key]))
+            elif cat == "duct":
+                set_dim(rec, cat, "width_mm", GC.in_to_mm(n.get("width", 14)))
+                set_dim(rec, cat, "height_mm", GC.in_to_mm(n.get("height", 8)))
             else:
-                rec["diameter"] = GC.in_to_mm(n.get("diameter", 2))
+                set_dim(rec, cat, "diameter", GC.in_to_mm(n.get("diameter", 2)))
             out(cat, rec)
 
     geometry = {

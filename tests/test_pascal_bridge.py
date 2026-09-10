@@ -411,16 +411,28 @@ def test_categories_pascal_cannot_hold_are_counted():
         "opening": "no_host_wall"}
 
 
-def test_a_duct_outside_pascals_range_is_not_emitted():
-    """zod 가 거부하는 노드를 내보내면 '변환했다' 고 말해 놓고 Pascal 에서는 사라진다.
-    덕트 폭 하한이 4인치(101.6mm)라 실측 100mm 덕트가 여기 걸린다."""
+def test_a_duct_outside_pascals_range_is_never_clamped_into_a_native_node():
+    """범위를 넘긴 값을 **깎아서** 내보내면 Pascal 에는 다른 크기의 덕트가 선다.
+    native 노드로는 내보내지 않고(그러면 zod 가 거부해 씬에서 사라진다) 치수를
+    그대로 실은 foreign 노드로 보낸다."""
     rec = {"kind": "polyline", "points": [[0.0, 0.0], [1000.0, 0.0]], "eid": "d:1",
            "elevation": 2590.0, "width_mm": 100.0, "height_mm": 150.0}
     scene, rep = PB.to_pascal_scene(_geom({"duct": [rec]}))
-    assert _nodes_of(scene, "duct-segment") == []
-    u = rep["unconvertible"][0]
-    assert u["reason"] == "out_of_pascal_range" and u["field"] == "width"
-    assert u["min"] == 4.0
+    assert _nodes_of(scene, "duct-segment") == []          # 깎아서 native 로 보내지 않는다
+    node = _nodes_of(scene, PB.FOREIGN_PREFIX + "duct")[0]
+    assert node["section"]["width_mm"] == 100.0            # 하한 101.6mm 로 올리지 않는다
+    assert node["outOfPascalRange"]["field"] == "width"
+    assert rep["foreign"] == {"duct": 1}
+
+
+def test_a_column_outside_pascals_range_is_still_unconvertible():
+    """구조 노드에는 foreign 대안을 두지 않는다 — zod 가 거부하면 그대로 보고한다."""
+    rec = {"kind": "polyline", "closed": True, "z_base": 0.0, "eid": "c:0",
+           "points": [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
+           "overrides": {"height": 0.0}}
+    scene, rep = PB.to_pascal_scene(_geom({"column": [rec]}))
+    assert _nodes_of(scene, "column") == []
+    assert rep["unconvertible"][0]["category"] == "column"
 
 
 # ── 실제 파싱 결과 ────────────────────────────────────────────────────────
@@ -431,6 +443,91 @@ def _axis(rec, cat):
         # 닫힌 형상은 축선/상자로 접었다 펴므로 시작 꼭짓점이 회전할 수 있다.
         return sorted((round(p[0], 6), round(p[1], 6)) for p in rec["points"])
     return [tuple(p) for p in (rec.get("centerline") or rec["points"])]
+
+
+def test_deleting_a_middle_segment_does_not_invent_a_diagonal():
+    """Pascal 에서 꺾인 벽의 가운데 구간을 지우면 남은 조각은 **떨어져 있다.**
+    그대로 이으면 도면에 없던 대각선 벽이 생긴다. 끊긴 자리에서 나누고,
+    갈라져 나온 조각은 저장소 규약대로 수동(`wm:`) 레코드가 된다."""
+    w = _wall("w:1", [0.0, 0.0], [3000.0, 0.0])
+    w["centerline"] = [[0.0, 0.0], [3000.0, 0.0], [3000.0, 3000.0], [6000.0, 3000.0]]
+    scene, _ = PB.to_pascal_scene(_geom({"wall": [w]}))
+    segs = sorted(_nodes_of(scene, "wall"), key=lambda n: n["metadata"]["mep"]["seg"])
+    mid = segs[1]
+    scene["nodes"][mid["parentId"]]["children"].remove(mid["id"])
+    del scene["nodes"][mid["id"]]
+
+    back, rep = PB.from_pascal_scene(scene)
+    axes = sorted((r["centerline"] for r in back["elements"]["wall"]), key=lambda a: a[0])
+    assert axes == [[[0.0, 0.0], [3000.0, 0.0]], [[3000.0, 3000.0], [6000.0, 3000.0]]]
+    assert rep["wall_split_by_deletion"] == 1
+    eids = {r["eid"] for r in back["elements"]["wall"]}
+    assert "w:1" in eids and any(e.startswith("wm:") for e in eids)   # EID 중복 없이
+
+
+def test_opening_on_a_later_wall_segment_survives():
+    """개구부는 자기가 붙은 **구간**의 축선으로 위치를 되살려야 한다. 대표 조각만
+    보면 다구간 벽의 둘째 구간에 붙은 개구부가 호스트를 못 찾고 사라진다."""
+    w = _wall("w:1", [0.0, 0.0], [3000.0, 0.0])
+    w["centerline"] = [[0.0, 0.0], [3000.0, 0.0], [3000.0, 3000.0]]
+    op = _opening("o:1", (3000.0, 1500.0))
+    scene, rep = PB.to_pascal_scene(_geom({"wall": [w], "opening": [op]}))
+    assert rep["counts_out"]["opening"] == 1
+
+    back, _ = PB.from_pascal_scene(scene)
+    got = back["elements"]["opening"][0]
+    assert math.dist(got["center"], [3000.0, 1500.0]) < 1e-6
+
+
+def test_opening_whose_host_wall_vanished_is_counted():
+    """호스트가 사라지면 개구부를 만들 수 없다 — 그래도 **조용히 버리지 않는다.**"""
+    scene, _ = PB.to_pascal_scene(_geom({"wall": [_wall("w:1", [0.0, 0.0], [4000.0, 0.0])],
+                                         "opening": [_opening("o:1", (1500.0, 0.0))]}))
+    wall = _nodes_of(scene, "wall")[0]
+    del scene["nodes"][wall["id"]]
+    back, rep = PB.from_pascal_scene(scene)
+    assert back["elements"].get("opening", []) == []
+    assert rep["dropped"]["opening_host_missing"] == 1
+
+
+def test_mep_section_edited_in_pascal_beats_the_old_declaration():
+    """`mep_dimensions` 는 `overrides` 를 먼저 본다. 최상위만 갱신하면 Pascal 에서
+    100→150 으로 키운 것이 조용히 100 으로 남는다 — 별칭 키 전부에 적용해야 한다."""
+    for alias in ("diameter", "width", "outside_diameter_mm"):
+        rec = {"kind": "polyline", "points": [[0.0, 0.0], [3000.0, 0.0]], "eid": "p:1",
+               "elevation": 2600.0, "diameter": 100.0, "overrides": {alias: 100.0}}
+        scene, _ = PB.to_pascal_scene(_geom({"pipe": [rec]}))
+        _nodes_of(scene, "pipe-segment")[0]["diameter"] = GC.mm_to_in(150.0)
+        back, _ = PB.from_pascal_scene(scene)
+        r = back["elements"]["pipe"][0]
+        assert GC.mep_dimensions("pipe", r, {})["diameter"] == 150.0, alias
+
+
+def test_real_mep_sizes_survive_as_foreign_nodes():
+    """Pascal 의 기본 배관·덕트는 미국 주택 규격이라(배관 1.25~8인치, 덕트 높이
+    3인치 하한) **우리 PB 15.9mm 와 높이 54mm 덕트가 하나도 안 들어간다.**
+    버리는 대신 씬 스키마가 통째로 보존하는 foreign 노드로 내보낸다 — 치수는
+    범위에 맞춰 깎지 않고 **mm 그대로**."""
+    pb = {"kind": "polyline", "points": [[0.0, 0.0], [3000.0, 0.0]], "eid": "p:pb",
+          "elevation": 77.95, "diameter": 15.9, "nominal_size": "15A",
+          "material": "PB", "system": "공급", "source_length_mm": 3000.0,
+          "length_basis": "analytic"}
+    duct = {"kind": "polyline", "points": [[0.0, 0.0], [3000.0, 0.0]], "eid": "d:1",
+            "elevation": 2590.0, "width_mm": 110.0, "height_mm": 54.0, "system": "SA"}
+    scene, rep = PB.to_pascal_scene(_geom({"pipe": [pb], "duct": [duct]}))
+    assert rep["counts_out"] == {"pipe": 1, "duct": 1}
+    assert rep["foreign"] == {"pipe": 1, "duct": 1} and rep["unconvertible"] == []
+    node = next(n for n in scene["nodes"].values() if n["type"] == PB.FOREIGN_PREFIX + "pipe")
+    assert node["section"]["diameter"] == 15.9 and node["section"]["units"] == "mm"
+    assert node["nativeNodeType"] == "pipe-segment"
+
+    back, _ = PB.from_pascal_scene(scene)
+    r = back["elements"]["pipe"][0]
+    assert GC.mep_dimensions("pipe", r, {})["diameter"] == 15.9
+    assert (r["material"], r["nominal_size"], r["system"]) == ("PB", "15A", "공급")
+    assert r["source_length_mm"] == 3000.0 and r["length_basis"] == "analytic"
+    d = back["elements"]["duct"][0]
+    assert (d["width_mm"], d["height_mm"]) == (110.0, 54.0)
 
 
 def test_sample_drawings_round_trip_without_moving():
@@ -452,10 +549,15 @@ def test_sample_drawings_round_trip_without_moving():
         seen.update(rep["counts_out"])
         for cat, recs in g["elements"].items():
             by_eid = {r.get("eid"): r for r in back["elements"].get(cat) or []}
+            # ★ 되돌아오지 않은 레코드를 **건너뛰지 않는다.** 종전엔 `continue` 라
+            #   조용히 사라진 부재가 검사를 그냥 통과했다(실측: 다구간 벽 둘째
+            #   구간의 개구부가 항상 사라지고 있었는데 아무 검사도 안 걸렸다).
+            reported = {u.get("eid") for u in rep["unconvertible"]}
             for r in recs:
-                b = by_eid.get(r.get("eid"))
-                if b is None:
+                if r.get("eid") not in by_eid:
+                    assert r.get("eid") in reported, (fn, cat, r.get("eid"), "말없이 사라짐")
                     continue
+                b = by_eid[r.get("eid")]
                 a1, a2 = _axis(r, cat), _axis(b, cat)
                 assert len(a1) == len(a2), (fn, cat, r.get("eid"))
                 assert max(math.dist(p, q) for p, q in zip(a1, a2)) < 1e-6, (fn, cat)
