@@ -94,6 +94,20 @@ _PROVENANCE = ("eid", "eid_v1", "layer", "pairing", "confidence", "needs_review"
                "section", "schedule_match", "elevation_source")
 
 
+def _mep_dims(cat, rec, params):
+    """MEP 단면 치수. 규약은 `geom_contract` 가 갖는다 — GUI 별칭 키(`width`/
+    `height`/`diameter_mm`)와 '치수 미해소' 판정이 거기 있다. 여기서 `rec["width_mm"]`
+    만 읽으면 별칭만 있는 레코드가 **조용히 기본값 400mm 덕트**가 된다.
+
+    ponytail: `mep_dimensions` 가 아직 없는 트리를 위한 폴백. 그 함수가 들어오면 지운다.
+    """
+    fn = getattr(GC, "mep_dimensions", None)
+    if fn is not None:
+        return fn(cat, rec, params)          # ContractError 는 호출자가 잡는다
+    keys = ("diameter",) if cat == "pipe" else ("width_mm", "height_mm")
+    return {k: float(rec.get(k) or GC.DEFAULT_DIMS[cat][k]) for k in keys}
+
+
 def _nid(prefix, *parts):
     """결정론적 노드 id. Pascal 의 nanoid 와 같은 형식(16자 [0-9a-z])이되 난수가
     아니다 — 같은 도면을 두 번 변환하면 같은 씬이어야 diff 가 의미를 갖는다."""
@@ -417,20 +431,26 @@ def to_pascal_scene(geometry, name=None):
             lz, lid = _level_for(elev, levels)
             y = GC.mm_to_m(elev - lz)
             path = [[GC.mm_to_m(p[0]), y, GC.mm_to_m(p[1])] for p in pts]
+            try:
+                dims = _mep_dims(cat, m, params)
+            except GC.ContractError as exc:
+                bad(cat, m, "mep_dimensions_unresolved", detail=str(exc))
+                continue
+            need = ("diameter",) if cat == "pipe" else ("width_mm", "height_mm")
+            if any(dims.get(k) is None for k in need):
+                # footprint 모드처럼 공칭 단면이 없는 레코드 — 세그먼트로 못 만든다
+                bad(cat, m, "mep_dimensions_unresolved", detail="missing " + ",".join(need))
+                continue
             mid_ = _nid("duct-segment" if cat == "duct" else "pipe-segment", eid)
             if cat == "duct":
                 node = _node(mid_, "duct-segment", lid,
                              name=str(m.get("layer") or cat), children=[], path=path,
-                             shape="rect",
-                             width=GC.mm_to_in(m.get("width_mm") or
-                                               GC.DEFAULT_DIMS["duct"]["width_mm"]),
-                             height=GC.mm_to_in(m.get("height_mm") or
-                                                GC.DEFAULT_DIMS["duct"]["height_mm"]))
+                             shape="rect", width=GC.mm_to_in(dims["width_mm"]),
+                             height=GC.mm_to_in(dims["height_mm"]))
             else:
                 node = _node(mid_, "pipe-segment", lid,
                              name=str(m.get("layer") or cat), children=[], path=path,
-                             diameter=GC.mm_to_in(m.get("diameter") or
-                                                  GC.DEFAULT_DIMS["pipe"]["diameter"]))
+                             diameter=GC.mm_to_in(dims["diameter"]))
             node["metadata"]["mep"] = _meta(m)
             add(mid_, node, lid, cat, m)
 
@@ -457,6 +477,15 @@ def from_pascal_scene(scene):
     def out(cat, rec):
         elements.setdefault(cat, []).append(rec)
         report["counts_out"][cat] = report["counts_out"].get(cat, 0) + 1
+
+    def set_base(rec, key, value):
+        """해소한 고저를 기록한다. `overrides` 에 같은 키가 남아 있으면 **함께**
+        갱신한다 — `geom_contract.base_z` 가 선언(overrides)을 먼저 보므로,
+        최상위만 쓰면 Pascal 에서 층을 옮긴 것이 조용히 사라진다(형상은 멀쩡하고
+        벽만 딴 층에 선다). 어느 쪽을 읽든 같은 값이어야 한다."""
+        rec[key] = value
+        if key in rec.get("overrides", {}):
+            rec["overrides"][key] = value
 
     def edited(what):
         report["edited"][what] = report["edited"].get(what, 0) + 1
@@ -488,7 +517,7 @@ def from_pascal_scene(scene):
             axis.append([GC.m_to_mm(n["end"][0]), GC.m_to_mm(n["end"][1])])
         rec["kind"] = "polyline"
         rec["closed"] = bool(meta.get("closed"))
-        rec["z_base"] = z_of.get(lid, 0.0)
+        set_base(rec, "z_base", z_of.get(lid, 0.0))
 
         t_mm = GC.m_to_mm(first.get("thickness", PASCAL_DEFAULT_WALL_THICKNESS_M))
         h_mm = GC.m_to_mm(first.get("height", PASCAL_DEFAULT_WALL_HEIGHT_M))
@@ -528,7 +557,7 @@ def from_pascal_scene(scene):
             pos = n.get("position") or [0, 0, 0]
             z0 = lz + GC.m_to_mm(pos[1])
             h_mm = GC.m_to_mm(n.get("height", PASCAL_DEFAULT_WALL_HEIGHT_M))
-            rec["z_base"] = z0
+            set_base(rec, "z_base", z0)
             if meta.get("kind") == "circle":
                 rec["kind"] = "circle"
                 rec["center"] = [GC.m_to_mm(pos[0]), GC.m_to_mm(pos[2])]
@@ -550,7 +579,7 @@ def from_pascal_scene(scene):
             rec["closed"] = True
             rec["points"] = [[GC.m_to_mm(p[0]), GC.m_to_mm(p[1])]
                              for p in n.get("polygon") or []]
-            rec["z_base"] = lz + GC.m_to_mm(n.get("elevation", 0.0))
+            set_base(rec, "z_base", lz + GC.m_to_mm(n.get("elevation", 0.0)))
             th = GC.m_to_mm(n.get("thickness", 0.05))
             if abs(th - GC.thickness_of(rec, params, "slab")) > 0.5:
                 rec["overrides"]["thickness"] = th
@@ -562,7 +591,7 @@ def from_pascal_scene(scene):
             rec["closed"] = True
             rec["points"] = [[GC.m_to_mm(p[0]), GC.m_to_mm(p[1])]
                              for p in n.get("polygon") or []]
-            rec["z_base"] = lz
+            set_base(rec, "z_base", lz)
             ch = GC.m_to_mm(n.get("ceilingHeight", 2.7))
             if abs(ch - GC.height_of(rec, params, "zone")) > 0.5:
                 rec["overrides"]["height"] = ch
@@ -575,7 +604,7 @@ def from_pascal_scene(scene):
             rec["kind"] = "polyline"
             rec["closed"] = False
             rec["points"] = [[GC.m_to_mm(p[0]), GC.m_to_mm(p[2])] for p in path]
-            rec["elevation"] = lz + GC.m_to_mm(path[0][1] if path else 0.0)
+            set_base(rec, "elevation", lz + GC.m_to_mm(path[0][1] if path else 0.0))
             if cat == "duct":
                 rec["width_mm"] = GC.in_to_mm(n.get("width", 14))
                 rec["height_mm"] = GC.in_to_mm(n.get("height", 8))

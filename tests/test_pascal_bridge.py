@@ -135,6 +135,30 @@ def test_thickness_edited_in_pascal_comes_back_as_a_declaration():
     assert back["elements"]["wall"][0]["overrides"]["width"] == 450.0
 
 
+def test_moving_a_level_in_pascal_is_not_hidden_by_a_stale_override():
+    """`geom_contract.base_z` 는 선언(`overrides`)을 먼저 본다. 되돌릴 때 최상위
+    `z_base` 만 쓰면 Pascal 에서 층을 옮긴 것이 **조용히 사라진다** — 형상은
+    멀쩡하고 벽만 딴 층에 선다. 어느 쪽을 읽든 같은 값이어야 한다."""
+    up = _wall("w:1", [0.0, 0.0], [3000.0, 0.0])
+    up["overrides"] = {"z_base": 4200.0, "height": 2800.0}
+    low = _wall("w:2", [0.0, 0.0], [3000.0, 0.0])
+    scene, rep = PB.to_pascal_scene(_geom({"wall": [up, low]}))
+    assert rep["levels"] == 2
+
+    lv = sorted(_nodes_of(scene, "level"), key=lambda n: n["level"])
+    moved = next(n for n in _nodes_of(scene, "wall")
+                 if n["metadata"]["mep"]["eid"] == "w:1")
+    lv[1]["children"].remove(moved["id"])          # 사용자가 아래층으로 끌어내렸다
+    lv[0]["children"].append(moved["id"])
+    moved["parentId"] = lv[0]["id"]
+
+    back, _ = PB.from_pascal_scene(scene)
+    r = next(w for w in back["elements"]["wall"] if w["eid"] == "w:1")
+    assert r["z_base"] == 0.0
+    assert r["overrides"]["z_base"] == 0.0         # 선언도 함께 따라와야 한다
+    assert GC.base_z("wall", r) == 0.0
+
+
 def test_ids_are_deterministic():
     """같은 입력은 같은 씬이어야 diff 가 의미를 갖는다(Pascal 의 id 는 난수다)."""
     g = _geom({"wall": [_wall("w:1", [0.0, 0.0], [3000.0, 0.0])]})
@@ -256,6 +280,29 @@ def test_pipe_diameter_is_inches():
     assert abs(n["diameter"] - 100.0 / 25.4) < 1e-9
     back, _ = PB.from_pascal_scene(scene)
     assert abs(back["elements"]["pipe"][0]["diameter"] - 100.0) < 1e-9
+
+
+def test_mep_dimensions_come_from_the_contract_not_from_here():
+    """단면 치수 규약은 `geom_contract` 것이다 — GUI 별칭 키(`width`/`height`)와
+    '치수 미해소' 판정이 거기 있다. 여기서 `width_mm` 만 읽으면 별칭만 있는 덕트가
+    **조용히 기본값 400mm** 로 나간다(형상은 멀쩡해서 아무 검사에도 안 걸린다)."""
+    alias = {"kind": "polyline", "points": [[0.0, 0.0], [3000.0, 0.0]], "eid": "d:a",
+             "elevation": 2590.0, "width": 500.0, "height": 300.0}
+    scene, _ = PB.to_pascal_scene(_geom({"duct": [alias]}))
+    n = _nodes_of(scene, "duct-segment")[0]
+    assert abs(GC.in_to_mm(n["width"]) - 500.0) < 1e-9
+    assert abs(GC.in_to_mm(n["height"]) - 300.0) < 1e-9
+
+
+def test_mep_with_unresolved_dimensions_is_reported():
+    """치수를 모르는 레코드에 기본값을 씌워 내보내지 않는다 — 물량이 조용히 틀린다."""
+    if not hasattr(GC, "mep_dimensions"):
+        raise __import__("unittest").SkipTest("geom_contract.mep_dimensions 없음")
+    unk = {"kind": "polyline", "points": [[0.0, 0.0], [3000.0, 0.0]], "eid": "d:u",
+           "elevation": 2590.0, "dimension_status": "unknown"}
+    scene, rep = PB.to_pascal_scene(_geom({"duct": [unk]}))
+    assert _nodes_of(scene, "duct-segment") == []
+    assert rep["unconvertible"][0]["reason"] == "mep_dimensions_unresolved"
 
 
 def test_zone_becomes_a_room_polygon():
