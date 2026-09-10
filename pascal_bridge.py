@@ -54,9 +54,6 @@ NO_PASCAL_NODE = {
     # 0.3~2m 로 묶여 있다(실측 지하3층: 장비 6개 전부 2.1~2.6m 로 초과).
     # 우리 equipment 는 임의 footprint 라 담을 그릇이 아니다.
     "equipment": "hvac_cabinet_only",
-    # 개구부는 DoorNode/WindowNode 로 갈 자리가 **있다** — 벽 자식이고 좌표가
-    # 벽 로컬(시작점부터의 거리)이라 이 단계에서 안 했을 뿐이다.
-    "opening": "needs_wall_local_frame",
 }
 
 # ★ Pascal 스키마의 **수치 범위**. zod 가 거부하면 그 노드는 씬에 안 올라온다 —
@@ -91,7 +88,7 @@ def _out_of_range(node):
 _PROVENANCE = ("eid", "eid_v1", "layer", "pairing", "confidence", "needs_review",
                "review_reason", "width_detected", "overrides", "zone",
                "source_signatures", "handle", "subtype", "source", "member_name",
-               "section", "schedule_match", "elevation_source")
+               "section", "schedule_match", "elevation_source", "dims_assumed")
 
 
 def _mep_dims(cat, rec, params):
@@ -208,6 +205,30 @@ def _box_corners(cx, cy, width_mm, depth_mm, rot):
     return out
 
 
+# ── 벽 로컬 좌표(개구부) ───────────────────────────────────────────────────
+# Pascal 의 문·창은 벽의 **자식**이고 위치가 벽 로컬이다:
+#   [시작점부터의 거리, 바닥 위 중심 높이, 벽 중심면에서의 오프셋]
+# (`spatial-grid-manager.ts`: "localX - distance from wall start",
+#  `door.ts`: "center of the door ... (Y = height/2, always at floor)")
+def _wall_local(seg, pt):
+    """(u_mm, 수직 오프셋_mm, 순위용 거리_mm, 구간길이_mm).
+
+    u 는 **자르지 않는다** — 실무 도면은 문을 벽 마구리 밖에 걸쳐 그린다
+    (실측 지하3층: 29개 중 11개가 최대 610mm 밖). 잘라 버리면 그만큼 조용히
+    옮겨진다. 수직 오프셋도 버리면 안 된다(실측 중앙 100mm) — Pascal 의
+    셋째 성분이 '벽 중심면에서의 거리' 라 담을 자리가 있다."""
+    (x0, y0), (x1, y1) = seg
+    dx, dy = x1 - x0, y1 - y0
+    length = math.hypot(dx, dy)
+    if length == 0:
+        return 0.0, 0.0, math.dist((x0, y0), pt), 0.0
+    t = ((pt[0] - x0) * dx + (pt[1] - y0) * dy) / (length * length)
+    offset = ((pt[0] - x0) * -dy + (pt[1] - y0) * dx) / length
+    clamped = max(0.0, min(1.0, t))
+    foot = (x0 + dx * clamped, y0 + dy * clamped)
+    return t * length, offset, math.dist(foot, pt), length
+
+
 # ── 레벨 스택 (storey.ts 의 계산을 그대로 뒤집는다) ─────────────────────────
 def _levels_from_z(zs_mm, heights_mm):
     """오름차순 z(mm) → [(ordinal, baseElevation_m, height_m)].
@@ -253,7 +274,9 @@ def to_pascal_scene(geometry, name=None):
 
     report = {"counts_in": {c: len(v) for c, v in sorted(el.items()) if v},
               "counts_out": {}, "unconvertible": [], "levels": 0,
-              "split_multi_segment": 0, "closed_as_axis": 0}
+              "split_multi_segment": 0, "closed_as_axis": 0,
+              "opening_extra_hosts_dropped": 0, "opening_points_dropped": 0,
+              "opening_past_wall_end": 0}
 
     def bad(cat, rec, reason, **extra):
         item = {"category": cat, "eid": rec.get("eid"), "layer": rec.get("layer"),
@@ -317,8 +340,11 @@ def to_pascal_scene(geometry, name=None):
             bad(cat, rec, reason)
 
     # ── 벽 ────────────────────────────────────────────────────────────────
+    wall_eid_at = {}        # 원본 벽 목록의 위치 인덱스 → eid (개구부의 wall_indices 용)
+    wall_segs = {}          # eid → [(node_id, (시작), (끝))]
     for i, w in enumerate(el.get("wall") or []):
         eid = w.get("eid") or "wall:%d" % i
+        wall_eid_at[i] = eid
         lz, lid = _level_for(GC.base_z("wall", w), levels)
         axis = w.get("centerline") or w.get("points") or []
         thickness = GC.width_of(w, params, "wall")
@@ -347,6 +373,55 @@ def to_pascal_scene(geometry, name=None):
                 frontSide="unknown", backSide="unknown")
             node["metadata"]["mep"] = _meta(w, seg=s, segs=len(axis) - 1, closed=closed)
             add(wid, node, lid, "wall", w)
+            if wid in nodes:
+                wall_segs.setdefault(eid, []).append(
+                    (wid, tuple(axis[s]), tuple(axis[s + 1])))
+
+    # ── 개구부(문·창·구멍) — **벽의 자식**이다 ─────────────────────────────
+    for i, op in enumerate(el.get("opening") or []):
+        eid = op.get("eid") or "op:%d" % i
+        hosts = [h for h in (op.get("wall_indices") or []) if h in wall_eid_at]
+        if not hosts:
+            bad("opening", op, "no_host_wall", detail=op.get("no_host_reason"))
+            continue
+        segs = [(wid, a, b) for h in hosts
+                for wid, a, b in wall_segs.get(wall_eid_at[h], [])]
+        if not segs:
+            # 붙을 벽이 Pascal 로 안 갔다(사다리꼴 등) — 자식만 남기면 고아가 된다
+            bad("opening", op, "host_wall_not_converted")
+            continue
+        if len(hosts) > 1:
+            report["opening_extra_hosts_dropped"] += len(hosts) - 1
+        center = op.get("center") or [0.0, 0.0]
+        wid, a, b = min(segs, key=lambda t: _wall_local((t[1], t[2]), center)[2])
+        u, offset, _d, seg_len = _wall_local((a, b), center)
+        if u < -RECT_TOL_MM or u > seg_len + RECT_TOL_MM:
+            report["opening_past_wall_end"] += 1
+
+        width = float(op.get("width") or 0.0)
+        height = float(op.get("height") or GC.DEFAULT_DIMS["opening"]["height"])
+        sill = float(op.get("sill") or 0.0)
+        sub = op.get("subtype")
+        oid = _nid("door" if sub == "door" else "window", eid)
+        # 문의 중심 높이는 height/2(바닥 기준), 창은 sill + height/2 — 같은 식이다.
+        pos = [GC.mm_to_m(u), GC.mm_to_m(sill + height / 2.0), GC.mm_to_m(offset)]
+        if sub == "door":
+            node = _node(oid, "door", wid, name=str(op.get("layer") or "door"),
+                         children=[], position=pos, rotation=[0, 0, 0],
+                         wallId=wid, width=GC.mm_to_m(width), height=GC.mm_to_m(height))
+        else:
+            # subtype 이 없으면 **틀 없는 구멍**이다 — Pascal 의 openingKind='opening'
+            # 이 정확히 그것이라 문인지 창인지 추측할 필요가 없다.
+            node = _node(oid, "window", wid, name=str(op.get("layer") or "opening"),
+                         children=[], position=pos, rotation=[0, 0, 0], wallId=wid,
+                         width=GC.mm_to_m(width), height=GC.mm_to_m(height),
+                         openingKind="window" if sub == "window" else "opening")
+        node["metadata"]["mep"] = _meta(op, kind=op.get("kind", "circle"))
+        if op.get("points"):
+            # 개구부의 `points` 는 원본 문짝 기호의 도형이라 중심·폭으로 되살릴 수
+            # 없다. 빌더는 center/width/height/sill 만 쓰므로 형상에는 영향이 없다.
+            report["opening_points_dropped"] += 1
+        add(oid, node, wid, "opening", op)
 
     # ── 기둥 ──────────────────────────────────────────────────────────────
     for i, c in enumerate(el.get("column") or []):
@@ -498,6 +573,8 @@ def from_pascal_scene(scene):
         return rec, meta
 
     elements = {}
+    wall_index_of = {}      # 대표 벽 노드 id → 되돌린 목록에서의 위치(개구부가 가리킬 자리)
+    wall_axis_of = {}       # 대표 벽 노드 id → 축선(mm)
 
     # ── 벽: 같은 eid 의 조각들을 순서대로 다시 잇는다(정변환 split 의 역) ──
     groups = {}
@@ -542,6 +619,8 @@ def from_pascal_scene(scene):
             # 되살릴 수 없다(어느 쪽 면인지가 없다). 축선으로 채우고 센다.
             rec["points"] = [list(p) for p in axis]
             report["points_from_axis"] += 1
+        wall_index_of[first["id"]] = len(elements.get("wall") or [])
+        wall_axis_of[first["id"]] = axis
         out("wall", rec)
 
     # ── 나머지 노드 ───────────────────────────────────────────────────────
@@ -597,6 +676,33 @@ def from_pascal_scene(scene):
                 rec["overrides"]["height"] = ch
                 edited("zone_height")
             out("zone", rec)
+
+        elif t in ("door", "window"):
+            host = n.get("wallId") or n.get("parentId")
+            axis = wall_axis_of.get(host)
+            if axis is None:
+                continue                     # 붙을 벽이 없는 개구부는 만들지 않는다
+            pos = n.get("position") or [0, 0, 0]
+            u = GC.m_to_mm(pos[0])
+            (x0, y0), (x1, y1) = axis[0], axis[-1]
+            dx, dy = x1 - x0, y1 - y0
+            length = math.hypot(dx, dy) or 1.0
+            width = GC.m_to_mm(n.get("width", 0.9))
+            height = GC.m_to_mm(n.get("height", 2.1))
+            off = GC.m_to_mm(pos[2])
+            rec["kind"] = meta.get("kind", "circle")
+            rec["center"] = [x0 + dx / length * u - dy / length * off,
+                             y0 + dy / length * u + dx / length * off]
+            rec["radius"] = width / 2.0
+            rec["width"] = width
+            rec["height"] = height
+            rec["sill"] = GC.m_to_mm(pos[1]) - height / 2.0
+            rec["subtype"] = ("door" if t == "door" else
+                              "window" if n.get("openingKind") == "window" else None)
+            rec["host_dir"] = [dx / length, dy / length]
+            rec["wall_indices"] = [wall_index_of[host]] if host in wall_index_of else []
+            set_base(rec, "z_base", z_of.get(nodes.get(host, {}).get("parentId"), 0.0))
+            out("opening", rec)
 
         elif t in ("duct-segment", "pipe-segment"):
             cat = "duct" if t == "duct-segment" else "pipe"

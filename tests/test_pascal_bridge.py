@@ -316,6 +316,81 @@ def test_zone_becomes_a_room_polygon():
     assert back["elements"]["zone"][0]["points"][2] == [4000.0, 3000.0]
 
 
+def _opening(eid, center, width=900.0, height=1200.0, sill=900.0, hosts=(0,), sub=None):
+    return {"kind": "circle", "center": list(center), "radius": width / 2.0,
+            "z_base": 0.0, "eid": eid, "wall_indices": list(hosts), "subtype": sub,
+            "width": width, "height": height, "sill": sill, "layer": "A-DOOR"}
+
+
+def test_opening_lands_on_its_wall_in_wall_local_coordinates():
+    """Pascal 의 문·창은 **벽의 자식**이고 위치가 벽 로컬이다 —
+    [시작점부터의 거리, 바닥 위 중심 높이, 벽 중심면에서의 오프셋]."""
+    w = _wall("w:1", [0.0, 0.0], [4000.0, 0.0])
+    g = _geom({"wall": [w], "opening": [_opening("o:1", (1500.0, 0.0))]})
+    scene, rep = PB.to_pascal_scene(g)
+    assert rep["counts_out"]["opening"] == 1
+    node = _nodes_of(scene, "window")[0]
+    wall = _nodes_of(scene, "wall")[0]
+    assert node["parentId"] == wall["id"] and node["wallId"] == wall["id"]
+    assert node["id"] in wall["children"]          # parentId 와 children 양쪽
+    assert node["position"] == [1.5, 1.5, 0.0]     # 1500mm 지점, 중심높이 900+1200/2
+    assert node["width"] == 0.9 and node["height"] == 1.2
+
+    back, _ = PB.from_pascal_scene(scene)
+    r = back["elements"]["opening"][0]
+    assert r["center"] == [1500.0, 0.0] and r["sill"] == 900.0
+    assert r["wall_indices"] == [0] and r["radius"] == 450.0
+
+
+def test_opening_without_a_subtype_is_a_frameless_cutout():
+    """문인지 창인지 모르면 **추측하지 않는다.** Pascal 의 `openingKind:'opening'`
+    이 정확히 '틀 없는 구멍' 이다(실측 지하3층: 개구부 34개 전부 subtype 없음)."""
+    g = _geom({"wall": [_wall("w:1", [0.0, 0.0], [4000.0, 0.0])],
+               "opening": [_opening("o:1", (1500.0, 0.0)),
+                           _opening("o:2", (2500.0, 0.0), sub="door", sill=0.0),
+                           _opening("o:3", (3500.0, 0.0), sub="window")]})
+    scene, _ = PB.to_pascal_scene(g)
+    kinds = {n["metadata"]["mep"]["eid"]: (n["type"], n.get("openingKind"))
+             for n in scene["nodes"].values() if n["type"] in ("door", "window")}
+    assert kinds["o:1"] == ("window", "opening")
+    assert kinds["o:2"] == ("door", None)
+    assert kinds["o:3"] == ("window", "window")
+
+    back, _ = PB.from_pascal_scene(scene)
+    got = {o["eid"]: o["subtype"] for o in back["elements"]["opening"]}
+    assert got == {"o:1": None, "o:2": "door", "o:3": "window"}
+
+
+def test_opening_keeps_its_offset_and_its_overshoot():
+    """개구부 중심은 벽 축선 위에 있지 않고(실측 중앙 100mm 벗어남), 실무 도면은
+    문을 벽 마구리 **밖**에 걸쳐 그린다(실측 29개 중 11개, 최대 610mm).
+    둘 다 버리면 그만큼 조용히 옮겨진다."""
+    w = _wall("w:1", [0.0, 0.0], [2000.0, 0.0])
+    off = _opening("o:off", (1000.0, 125.0))          # 축선에서 125mm 옆
+    past = _opening("o:past", (2400.0, 0.0))          # 벽 끝에서 400mm 밖
+    scene, rep = PB.to_pascal_scene(_geom({"wall": [w], "opening": [off, past]}))
+    assert rep["opening_past_wall_end"] == 1
+    pos = {n["metadata"]["mep"]["eid"]: n["position"] for n in _nodes_of(scene, "window")}
+    assert pos["o:off"][2] == 0.125                   # 셋째 성분 = 중심면 오프셋
+    assert pos["o:past"][0] == 2.4                    # 구간 밖이라도 자르지 않는다
+
+    back, _ = PB.from_pascal_scene(scene)
+    got = {o["eid"]: o["center"] for o in back["elements"]["opening"]}
+    assert got["o:off"] == [1000.0, 125.0] and got["o:past"] == [2400.0, 0.0]
+
+
+def test_opening_with_no_host_wall_is_reported():
+    """붙을 벽이 없으면 벽 자식이 될 수 없다 — 세어서 보고한다
+    (실측 지하3층 5개는 제도자가 문 자리에서 벽을 끊어 그린 경우)."""
+    op = _opening("o:1", (1500.0, 0.0), hosts=())
+    op["no_host_reason"] = "wall_open_at_this_span"
+    scene, rep = PB.to_pascal_scene(_geom({"wall": [_wall("w:1", [0.0, 0.0], [4000.0, 0.0])],
+                                           "opening": [op]}))
+    assert _nodes_of(scene, "window") == []
+    u = rep["unconvertible"][0]
+    assert u["reason"] == "no_host_wall" and u["detail"] == "wall_open_at_this_span"
+
+
 def test_categories_pascal_cannot_hold_are_counted():
     """보·케이블트레이는 Pascal 에 노드 자체가 없고(그쪽 IFC 임포터도 보를 건너뛴다),
     장비는 0.3~2m 짜리 HVAC 캐비닛뿐이며, 개구부는 벽 로컬 좌표가 필요하다.
@@ -326,14 +401,14 @@ def test_categories_pascal_cannot_hold_are_counted():
                "equipment": [{"kind": "polyline", "closed": True, "eid": "e:1",
                               "points": [[0, 0], [800, 0], [800, 800], [0, 800]]}],
                "opening": [{"kind": "circle", "center": [500, 0], "radius": 450.0,
-                            "eid": "o:1"}]})
+                            "eid": "o:1", "wall_indices": []}]})
     scene, rep = PB.to_pascal_scene(g)
     assert rep["counts_out"] == {}
     assert {u["category"]: u["reason"] for u in rep["unconvertible"]} == {
         "beam": "no_beam_node_in_pascal",
         "tray": "no_cable_tray_node_in_pascal",
         "equipment": "hvac_cabinet_only",
-        "opening": "needs_wall_local_frame"}
+        "opening": "no_host_wall"}
 
 
 def test_a_duct_outside_pascals_range_is_not_emitted():
