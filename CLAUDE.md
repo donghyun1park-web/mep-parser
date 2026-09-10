@@ -42,6 +42,7 @@
 | `tests/golden.json` | **실무 도면 회귀 다이제스트.** 도면은 고객 자료라 커밋하지 않고 경로만 `tests/golden.local.json`(gitignore)에 둔다. 도면이 없으면 `[skip]`. 갱신은 `python tests/test_golden.py --bless` |
 | `extractors.py` + `mep_macro/` | **FreeCAD 안에서만** 쓰는 라이브 자연어 모델링용 헬퍼(`freecad_live_addon`). 일반 파이프라인은 이걸 거치지 않는다 |
 | `FIX_SPEC.md` | 면선 페어링·곡선벽 개선의 이전 설계 기록. 현재 구현 여부는 코드와 회귀 테스트를 확인한다. |
+| `pascal_bridge.py` | **geometry.json ↔ Pascal(pascalorg/editor) 씬 그래프 — 벽만(0단계).** mm↔m 환산은 `geom_contract` 를 부르고, 우리 `z_base` 를 Pascal 레벨 스택으로 접었다 편다. Pascal 이 표현 못 하는 것은 `unconvertible` 로 **세어서 보고**한다 |
 | `docs/project_workflow.md` | 프로젝트 저장·복구·재연결·출력 검증 사용법과 현재 범위. |
 
 ## geometry.json 스키마
@@ -559,6 +560,49 @@ CIRCLE·ARC·SPLINE 만 알아서 216개가 `unhandled` 경고만 남기고 빠�
 `BACK` 한 레이어에 벽·가구·창호기호·해치를 전부 담고 있어, wall 로 매핑하면
 **4313개가 나오는데 길이 중앙이 1mm 이고 500mm 넘는 건 336개뿐**이다. 벽이
 필요하면 같은 세대의 건축평면도를 `stack.json` 에 함께 넣는다.
+
+### ★ Pascal 다리(0단계) — 위험은 형상이 아니라 **단위와 고저**다
+`pascal_bridge.py`. [pascalorg/editor](https://github.com/pascalorg/editor) 의 씬 그래프
+(`{nodes, rootNodeIds}`)와 벽을 주고받는다. 모형은 우리와 같다 — 축선 + 두께 + 높이.
+다른 것이 셋이고, **셋 다 틀려도 모델은 열린다**(그래서 좌표로 잰다):
+
+| | 우리 | Pascal |
+|---|---|---|
+| 단위 | mm | **m** (덕트 지름만 인치) |
+| 고저 | 부재의 `z_base` | **레벨**의 `level`·`baseElevation`·`height` |
+| 부재 | 다점 축선 · 닫힌 폴리곤 허용 | `start`→`end` **한 구간**뿐 |
+
+- 환산은 `geom_contract.mm_to_m`/`m_to_mm` 뿐이다. `/1000` 을 다리 안에 쓰지 말 것 —
+  z 규약을 한 곳에 둔 것과 같은 이유고, 한 군데 빠지면 1000배 틀린 건물이 조용히 나간다.
+- `baseElevation` 은 **절대 고저가 아니라 누적 위에 더하는 오프셋**이다
+  (`storey.ts: baseY_i = (직전 baseY + 직전 height) + baseElevation_i`). 절대값으로 착각하면
+  2층부터 조용히 내려앉는다. `_levels_from_z`/`_z_of_levels` 가 그 식을 그대로 뒤집는다.
+- **좌표는 `metadata` 에 넣지 않는다.** 넣으면 왕복이 통과해도 컨테이너가 통과한 것이지
+  변환이 통과한 게 아니다. `metadata.mep` 은 출처만(eid·layer·pairing·검토사유·`width_detected`).
+- 노드 id 는 eid 의 sha1 앞 16자다. Pascal 은 난수(nanoid)를 쓰지만, 같은 도면을 두 번
+  변환하면 같은 씬이어야 diff 가 의미를 갖는다.
+- **닫힌 직사각형 벽은 Pascal 벽과 같은 형상**이다(축선 ± 두께/2) — 무손실로 접었다 편다.
+  사다리꼴은 표현할 방법이 **없다**. 조용히 버리지 않고 `unconvertible` 로 센다.
+- Pascal 에서 고친 두께·높이는 `overrides` 로 돌아온다 — `width_of` 의 "적어 준 값이 이긴다" 와 같은 자리.
+
+실측(지하3층 건축평면, 벽 667):
+
+| | |
+|---|---|
+| Pascal 벽 노드 | **660** (열린 629 + 닫힌 직사각형 31) |
+| 표현 불가 | **7** — 전부 `closed_polygon_not_rectangular`(사다리꼴, `상부골조`·`A-CON`) |
+| 왕복 최대 좌표 오차 | **1.5e-11 mm** (×1000 ÷1000 부동소수 잡음) |
+| 두께·높이·z_base 불일치 | **0 / 0 / 0** |
+| 되돌린 파일의 `verify_geometry` | 원본과 같음(error 0 · warn 1) |
+
+★ **되찾지 못하는 것 하나**: 열린 벽의 `points` 는 페어링에 쓴 **원본 면선 한 줄**이라
+축선에서 되살릴 수 없다(어느 쪽 면인지가 없다). 축선으로 채우고 `points_from_axis` 로
+센다(실측 629). 빌드 형상은 축선 기준이라 영향이 없지만, 면선 커버리지 통계는 못 돌린다.
+
+```
+python pascal_bridge.py geometry.json -o scene.json          # → Pascal 씬
+python pascal_bridge.py scene.json --back -o geometry.json   # ← 되돌리기
+```
 
 ## zone 귀속 방식
 zone은 별도 파일 없이 **DXF의 `A-ZONE` 레이어**(closed LWPOLYLINE)를 직접 사용.  

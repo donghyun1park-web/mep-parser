@@ -121,6 +121,27 @@ def width_of(rec, params=None, category="wall"):
     return _dim(category, "width", rec, params)
 
 
+# ── 단위 ────────────────────────────────────────────────────────────────────
+# geometry.json 은 **mm**(스키마 `"units": "mm"`), Pascal 씬 그래프는 **m** 이다.
+# 나누기 1000 을 여기저기 쓰기 시작하면 어느 한 곳이 빠졌을 때 1000배 틀린 모델이
+# 조용히 나간다 — z 규약과 같은 이유로 변환도 이 파일에만 둔다.
+MM_PER_M = 1000.0
+
+
+def mm_to_m(v):
+    """mm 스칼라/좌표열 → m. 리스트는 구조를 유지한 채 재귀."""
+    if isinstance(v, (list, tuple)):
+        return [mm_to_m(x) for x in v]
+    return None if v is None else float(v) / MM_PER_M
+
+
+def m_to_mm(v):
+    """m 스칼라/좌표열 → mm."""
+    if isinstance(v, (list, tuple)):
+        return [m_to_mm(x) for x in v]
+    return None if v is None else float(v) * MM_PER_M
+
+
 # ── 핵심: 모든 소비자가 호출하는 단 하나의 함수 ─────────────────────────────
 def z_range(category, rec, params=None):
     """(z0, z1) = (아랫면, 윗면). 카테고리 규약을 여기서만 해석한다."""
