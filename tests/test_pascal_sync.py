@@ -65,6 +65,32 @@ def test_dry_run_validates_then_apply_commits_once(tmp_path):
     assert [d["op_id"] for d in decisions if d.get("action") == "pascal_apply"] == ["op-1"]
 
 
+def test_the_returned_snapshot_is_the_next_base(tmp_path):
+    """편집 화면은 자동 저장을 계속한다. 적용이 돌려준 스냅샷(새 revision·새 해시·새 씬)이
+    다음 저장의 기준이어야 한다 — 특히 **이동** 뒤에는 부재가 새 EID·새 노드 id 를
+    받으므로, 화면에 남은 옛 씬으로 다시 저장하면 복사본을 지우는 명령이 나온다."""
+    sess = _session(tmp_path)
+    snap = sess.pascal_snapshot()
+    _walls(snap["scene"])[0]["start"][1] += 0.5            # 옮겼다 → delete + add
+    done = sess.pascal_apply(snap["scene"], snap["revision"], snap["project_id"],
+                             snap["snapshot_sha256"], "move-1")
+    new = done["snapshot"]
+    assert new["revision"] == snap["revision"] + 1
+    assert new["snapshot_sha256"] == sess.pascal_snapshot()["snapshot_sha256"]
+    assert done["summary"]["moved"] == 1
+
+    # 돌려받은 씬을 기준으로 다시 저장하면(화면이 갈아 끼운 상태) 바뀐 것이 없다
+    again = sess.pascal_apply(new["scene"], new["revision"], new["project_id"],
+                              new["snapshot_sha256"], "noop-2")
+    assert again["applied"] is False and again["reason"] == "no_changes"
+
+    # 그 기준에서 이어서 고친 것은 정상적으로 한 번 더 쌓인다
+    _walls(new["scene"])[0]["thickness"] = 0.3
+    third = sess.pascal_apply(new["scene"], new["revision"], new["project_id"],
+                              new["snapshot_sha256"], "edit-3")
+    assert third["snapshot"]["revision"] == snap["revision"] + 2
+
+
 def test_stale_revision_and_stale_snapshot_are_refused(tmp_path):
     sess = _session(tmp_path)
     snap = sess.pascal_snapshot()

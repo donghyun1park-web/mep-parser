@@ -277,7 +277,8 @@ class ProjectSession:
             # 가리지 않게 — 중복은 revision 검사보다 **먼저** 본다.
             if any(d.get('action') == 'pascal_apply' and d.get('op_id') == op_id
                    for d in manifest.get('decisions') or []):
-                return {'duplicate': True, 'op_id': op_id, 'state': self.state()}
+                return {'duplicate': True, 'op_id': op_id, 'state': self.state(),
+                        'snapshot': self.pascal_snapshot()}
             self.store.check_revision(manifest, expected_revision, project_id)
             state = self.state()
             current, _ = to_pascal_scene(state['geometry'])
@@ -292,8 +293,14 @@ class ProjectSession:
                         'snapshot_sha256': snapshot_sha256, 'summary': summary}
             result = self.save(merge_edits(state['edits'], commands), expected_revision,
                                project_id, [decision], dry_run=dry_run)
-            return {'applied': not dry_run, 'dry_run': bool(dry_run), 'op_id': op_id,
-                    'commands': commands, 'summary': summary, 'state': result}
+            out = {'applied': not dry_run, 'dry_run': bool(dry_run), 'op_id': op_id,
+                   'commands': commands, 'summary': summary, 'state': result}
+            if not dry_run:
+                # 편집 화면은 이 씬으로 **갈아 끼워야** 다음 저장이 맞는다. 이동한 부재는
+                # 새 EID·새 노드 id 를 받으므로, 화면에 남은 옛 노드로 다시 저장하면
+                # 방금 만든 복사본을 지우고 옛것을 되살리는 명령이 나온다.
+                out['snapshot'] = self.pascal_snapshot()
+            return out
 
 
 class SnapshotConflict(RevisionConflict):

@@ -43,6 +43,7 @@
 | `extractors.py` + `mep_macro/` | **FreeCAD 안에서만** 쓰는 라이브 자연어 모델링용 헬퍼(`freecad_live_addon`). 일반 파이프라인은 이걸 거치지 않는다 |
 | `FIX_SPEC.md` | 면선 페어링·곡선벽 개선의 이전 설계 기록. 현재 구현 여부는 코드와 회귀 테스트를 확인한다. |
 | `pascal_bridge.py` | **geometry.json ↔ Pascal(pascalorg/editor) 씬 그래프.** 벽·기둥·슬래브·zone·덕트·배관. 단위(mm↔m, 지름은 인치)·축(Pascal 은 Y-up)·고저(레벨 스택) 환산은 전부 `geom_contract` 를 부른다. Pascal 이 표현 못 하거나 스키마 범위를 넘긴 것은 `unconvertible` 로 **세어서 보고**한다 |
+| `pascal_host/` | **Pascal 편집 화면 호스트(3단계 첫 조각).** `PASCAL_COMMIT`(고정 커밋) · `overlay/`(체크아웃에 얹는 우리 파일 5개: `/mep` 페이지와 `/api/mep/*` 서버 측 프록시) · `run_host.py`(저장소 서버와 Pascal 을 함께 띄우는 실행기) |
 | `docs/project_workflow.md` | 프로젝트 저장·복구·재연결·출력 검증 사용법과 현재 범위. |
 
 ## geometry.json 스키마
@@ -736,6 +737,62 @@ continue` 라 조용히 사라진 부재가 검사를 그냥 통과했다(위 �
 python pascal_bridge.py geometry.json -o scene.json          # → Pascal 씬
 python pascal_bridge.py scene.json --back -o geometry.json   # ← 되돌리기
 ```
+
+### ★ Pascal 편집 화면 호스트 — 저장 기준은 우리 저장소 하나다
+`pascal_host/`. 고정 커밋(`PASCAL_COMMIT`)의 Pascal 체크아웃에 **우리 오버레이 파일**을
+얹어 빌드하고, `run_host.py` 가 프로젝트 저장소 서버와 함께 띄운다.
+```
+python pascal_host/run_host.py <도면.dxf | 프로젝트.mep> --pascal <체크아웃> [--sync-overlay --build]
+# → http://127.0.0.1:3002/mep
+```
+Pascal 의 `Editor` 는 영속화가 `onLoad`/`onSave` 어댑터 둘뿐이라 **같은 편집기**에
+우리 어댑터를 끼운다(`SceneLoader` 와 같은 자리). Pascal 의 씬 DB 에는 쓰지 않는다.
+
+| 부품 | 하는 일 |
+|---|---|
+| `app/mep/page.tsx` + `components/mep-project-loader.tsx` | 불러오기 `/api/mep/snapshot` · 자동 저장(1초 디바운스) `/api/mep/apply` |
+| `app/api/mep/{snapshot,apply}/route.ts` + `lib/mep-project.ts` | **서버 측 프록시.** 저장소 토큰을 붙여 `ProjectServer` 로 넘긴다 |
+
+- **토큰은 브라우저로 가지 않는다.** `MEP_PROJECT_TOKEN` 은 Next 서버 프로세스 환경에만
+  있고 클라이언트 파일은 `/api/mep/*` 만 부른다(`NEXT_PUBLIC_` 금지 — 테스트가 고정).
+  애초에 브라우저가 직접 부를 수도 없다: 우리 서버는 다른 출처를 **403** 으로 막는다(실측).
+- **127.0.0.1 에만 바인딩한다.** 프록시가 토큰을 대신 붙이므로 LAN 에 열리면 인증 없는
+  쓰기 경로가 된다. 라우트의 `guardSceneApiRequest`(Pascal 자신의 루프백 가드)는 두 번째 방어선.
+- **저장 뒤에는 돌려받은 스냅샷으로 화면을 갈아 끼운다**(`applySceneGraphToEditor`).
+  이동한 부재는 새 EID·새 노드 id 를 받으므로, 화면에 남은 옛 씬으로 이어서 저장하면
+  방금 만든 복사본을 지우고 옛것을 되살리는 명령이 나온다. 그래서 `pascal_apply` 가
+  성공·중복 응답에 새 스냅샷을 싣는다.
+  갈아 끼운 씬이 부르는 **메아리 저장은 거르지 않는다** — 편집기가 노드마다 기본값을
+  채워 넣어 우리 씬과 서명(`sceneGraphSignature`)이 같아질 수 없다(그걸로 거르던 코드는
+  실측에서 한 번도 안 걸려 뺐다). 저장소가 명령 0개로 `no_changes` 를 답해 revision 이
+  그대로다. 대신 **revision 이 오른 스냅샷만** 갈아 끼운다 — 같은 revision 을 다시 끼우면
+  메아리가 또 메아리를 불러 저장이 끝나지 않는다.
+- **사이드바 탭(장면 트리·작도·설정)을 넘겨야 한다.** 안 넘기면 편집기가 플러그인 탭만
+  띄워 장면 트리가 없고, 다른 부재 속에 묻힌 벽은 고를 길이 없다(실측으로 겪음).
+- **체크아웃이 고정 커밋이 아니거나 오버레이가 어긋나면 띄우지 않는다** — 다른 코드가 도는
+  편집 화면으로 저장하면 무엇이 저장됐는지 아무도 모른다. Pascal 의 `next.config` 가
+  `ignoreBuildErrors: true` 라 빌드는 타입 오류를 삼킨다 — 오버레이는 `tsc` 로 따로 검사한다.
+
+실측(`sample_plan.dxf`, 고정 커밋 `b422fe2`): 편집 화면이 프록시로 **현재 revision** 을
+불러온다 · 열린 벽 두께 +50mm → 명령 `overrides.width` 하나 · 돌려받은 스냅샷 r+1 ·
+같은 작업 ID 재전송 → `duplicate` · 낡은 기준 → **409 가 프록시를 그대로 통과** ·
+재열기 + DXF 재파싱 뒤에도 유지. 오버레이 `tsc` 오류 0.
+
+**실제 화면 편집 왕복(실측)**: 장면 트리에서 외곽 블록 속에 묻힌 열린 벽을 골라 인스펙터에서
+두께 0.25 → **0.3** 입력 → 1초 뒤 자동 저장이 `/api/mep/apply` 200(작업 ID 는 브라우저
+`crypto.randomUUID()`) → 저장소 **r3**, 수정 `w:58ef7ed7: width 300` → 돌려받은 스냅샷을
+갈아 끼운 뒤의 메아리 저장은 `no_changes`(revision 그대로) → 새로고침하면 우리 저장소에서
+r3 를 다시 불러오고 → 재열기 + DXF 재파싱 뒤 빌더가 쓸 두께(`width_of`)도 300mm.
+메아리 거르기를 빼고 revision 비교로 바꾼 뒤 다시 잰 것: 두께 0.35 → 0.4 → 저장 요청
+**2번**(편집 162ms → r5 · 2초 뒤 메아리 63ms `no_changes`), 그 뒤 10초간 추가 요청 0 —
+저장 고리가 없다.
+
+★ **저장 상태 표시는 브라우저 번역에서 뺀다(`translate="no"`).** Pascal 화면이 영어라
+브라우저가 자동 번역을 켜는데, 번역기가 텍스트 노드를 `<font>` 로 갈아 끼우면 React 가
+바꾼 revision 이 **화면에 안 나타난다** — 실측: 저장소는 r3 인데 표시는 r2 에 멈춰 있었다
+(`<font>` 4개, `<html class="translated…">`). '저장됐나' 를 판단하는 유일한 표시가 조용히
+틀리는 종류라, 번역과 무관한 `data-revision` 도 함께 둔다. 고친 뒤 실측: 번역이 켜진 채
+(인스펙터 글자가 한국어로 바뀐 상태) 표시가 r4 → r5 로 제대로 바뀌고 그 안의 `<font>` 는 0개.
 
 ## zone 귀속 방식
 zone은 별도 파일 없이 **DXF의 `A-ZONE` 레이어**(closed LWPOLYLINE)를 직접 사용.  
