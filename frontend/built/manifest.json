@@ -4,14 +4,15 @@
   "three": "0.160.0",
   "source_hash": "sha256-lf",
   "assets": {
-    "preview.js": "5e1ef0c7343c96562f5e51a91904867951d3f8ca9349575a284e21b3f22ea0fe",
+    "preview.js": "7dd5f757330508fd8ea799c6fd5918589bc4430f697eb3d03ade0df299ce509c",
     "preview.css": "d79e848eefcc6fcf0bb47329f87d37d7bf887d4a7622c8d73bb11c5563e2ab27",
-    "shell.html": "c31cd15fe0195512801c8c37e11fdb9cbcafbe204d34e564f281f42a1917a023"
+    "shell.html": "d56ccdc913d4643526d64c7bb75bd40d255787dc6fb5c286505499ce3ffc01fd"
   },
   "sources": {
     "frontend/package-lock.json": "03627119091818598186cefeed205a528879ba404f441e62fecce228612e04b4",
-    "frontend/package.json": "a191ff56950dfa6e4bd7f2e3d01040ca64ef97e5f5bb665906ff6a4eda455dc3",
-    "frontend/src/app.js": "cf1d83fb9a2529277ae2a5feee277140012f16329b6d3094788134cd2486ebab",
+    "frontend/package.json": "6ad22f1d058e43fb9861aa8af59693d40dedbee8fef9ab8bb366b8c259ea1d68",
+    "frontend/src/app.js": "08746dbc494d39c12da34f460568e1ee64343ef44dd22fe40afa2a41663dd216",
+    "frontend/src/mep_preview_geometry.js": "2ec66453295f650807ff82fa18cef4cbb386bcf34a03dc6a0e9765d20cb06187",
     "frontend/src/review_logic.js": "0d49b1376f373b2f268dd22f33522436faa6a27485576accc0fd9a68f31637a7",
     "frontend/src/shell.html": "3b98cf959a560732756a64f7feefe04246a45498f4ed6f79efe95f45e24afe32",
     "frontend/src/style.css": "fbbd2d7586e09edbfeb63f8e6ae3c8b33721ce5e55abf9ad24bcc27ad1eaeaae",

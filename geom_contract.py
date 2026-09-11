@@ -14,6 +14,8 @@ FreeCAD·shapely 의존 없음(순수 표준 라이브러리) — 그래야 단�
     z0, z1 = z_range("slab", rec, params)
 """
 
+import math
+
 SCHEMA_VERSION = 2
 
 # ── z 기준면(datum) ────────────────────────────────────────────────────────
@@ -84,7 +86,89 @@ def datum_of(category):
 def base_z(category, rec):
     """해당 카테고리가 쓰는 기준 z 값. MEP 는 elevation, 나머지는 z_base."""
     key = "elevation" if category in _ELEV_CATS else "z_base"
-    return float(rec.get(key, 0.0) or 0.0)
+    value = (rec.get('overrides') or {}).get(key, rec.get(key, 0.0))
+    return float(value if value is not None else 0.0)
+
+
+def _positive(value, field):
+    if isinstance(value, bool):
+        raise ContractError(f'{field}: boolean is not a dimension')
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        raise ContractError(f'{field}: numeric dimension required') from None
+    if not math.isfinite(value) or value <= 0:
+        raise ContractError(f'{field}: finite positive dimension required')
+    return value
+
+
+# 단면 치수의 정식 키와 GUI 별칭. **소비자가 다시 쓰지 말 것** — 되돌릴 때
+# 어떤 키를 지워야 선언이 갱신되는지도 이 표가 정한다(`pascal_bridge`).
+MEP_DIM_ALIASES = {
+    'pipe': {'diameter': ('diameter', 'outside_diameter_mm', 'diameter_mm', 'width')},
+    'duct': {'width_mm': ('width_mm', 'width'), 'height_mm': ('height_mm', 'height')},
+    'tray': {'width_mm': ('width_mm', 'width'), 'height_mm': ('height_mm', 'height')},
+}
+
+
+def mep_dimensions(category, rec, params=None):
+    """Physical outside dimensions; canonical keys win over legacy GUI aliases.
+
+    A nominal designation (e.g. PB15A) never becomes an outside diameter.
+    Legacy records may use defaults; explicitly unknown profile dimensions may not.
+    """
+    aliases = MEP_DIM_ALIASES
+    if category not in aliases:
+        raise ContractError('Not a linear MEP category: ' + str(category))
+    if rec.get('dimension_status') == 'unknown':
+        raise ContractError('MEP outside dimensions are unresolved')
+    sources = [rec.get('overrides') or {}, rec, (params or {}).get(category) or {}, DEFAULT_DIMS[category]]
+    result = {}
+    for key, names in aliases[category].items():
+        if key == 'width_mm' and rec.get('geometry_mode') == 'footprint':
+            continue  # The actual polygon defines plan width; no nominal width is invented.
+        value = next((source[name] for source in sources for name in names if source.get(name) is not None), None)
+        result[key] = _positive(value, category + '.' + key)
+    return result
+
+
+def mep_elevation(placement, section_height_mm, levels, floor_layers, explicit_center_mm=None):
+    """Resolve a project placement rule into the existing MEP axis datum, in mm."""
+    height = _positive(section_height_mm, 'section_height_mm')
+    levels = levels or {}
+    base = levels.get('structural_slab_top_mm', 0.0)
+    try:
+        base = float(base)
+    except (TypeError, ValueError):
+        raise ContractError('Structural slab top must be finite') from None
+    if not math.isfinite(base):
+        raise ContractError('Structural slab top must be finite')
+    if placement in ('source', 'center'):
+        if isinstance(explicit_center_mm, bool):
+            raise ContractError('An explicit center elevation is required')
+        try:
+            center = float(explicit_center_mm)
+        except (ValueError, TypeError):
+            raise ContractError('An explicit center elevation is required') from None
+        if not math.isfinite(center):
+            raise ContractError('Center elevation must be finite')
+        return center
+    if placement == 'slab_soffit':
+        storey = _positive(levels.get('floor_to_floor_mm'), 'floor_to_floor_mm')
+        slab = _positive(levels.get('slab_thickness_mm'), 'slab_thickness_mm')
+        if slab >= storey or height > storey - slab:
+            raise ContractError('Section does not fit below the upper slab')
+        return base + storey - slab - height / 2
+    if placement == 'foam_top':
+        layers = floor_layers or []
+        if sum(row.get('role') == 'foamed_concrete' for row in layers) != 1:
+            raise ContractError('Exactly one foamed_concrete layer is required')
+        z = base
+        for row in layers:
+            z += _positive(row.get('thickness_mm'), 'floor_layer.thickness_mm')
+            if row.get('role') == 'foamed_concrete':
+                return z + height / 2
+    raise ContractError('Unknown MEP placement: ' + str(placement))
 
 
 def thickness_of(rec, params=None, category="slab"):
@@ -169,10 +253,8 @@ def z_range(category, rec, params=None):
         return (z - t, z)
 
     # axis — 단면 중심이 elevation
-    if category == "pipe":
-        half = _dim("pipe", "diameter", rec, params) / 2.0
-    else:  # duct / tray
-        half = _dim(category, "height_mm", rec, params) / 2.0
+    dims = mep_dimensions(category, rec, params)
+    half = dims['diameter' if category == 'pipe' else 'height_mm'] / 2.0
     return (z - half, z + half)
 
 
@@ -287,13 +369,25 @@ def js_constants():
         "  if (params && params[cat] && params[cat][key] != null) return +params[cat][key];\n"
         "  return +(((DEFAULT_DIMS[cat]||{})[key]) || 0);\n"
         "}\n"
+        "function gcMepDimensions(cat, rec, params){\n"
+        "  const aliases = {pipe:{diameter:['diameter','outside_diameter_mm','diameter_mm','width']},duct:{width_mm:['width_mm','width'],height_mm:['height_mm','height']},tray:{width_mm:['width_mm','width'],height_mm:['height_mm','height']}};\n"
+        "  if (!aliases[cat] || rec.dimension_status === 'unknown') throw new Error('Unresolved MEP dimensions');\n"
+        "  const sources=[rec.overrides||{},rec,(params||{})[cat]||{},DEFAULT_DIMS[cat]], out={};\n"
+        "  for(const [key,names] of Object.entries(aliases[cat])){\n"
+        "    if(key==='width_mm' && rec.geometry_mode==='footprint') continue;\n"
+        "    let value; outer: for(const source of sources){ for(const name of names){ if(source[name]!=null){value=source[name];break outer;} } }\n"
+        "    if(typeof value==='boolean' || !Number.isFinite(+value) || +value<=0) throw new Error('Invalid MEP dimension: '+key);\n"
+        "    out[key]=+value;\n"
+        "  } return out;\n"
+        "}\n"
         "function gcZRange(cat, rec, params){\n"
         "  const d = Z_DATUM[cat];\n"
-        "  const z = +((ELEV_CATS.indexOf(cat)>=0 ? rec.elevation : rec.z_base) || 0);\n"
+        "  const key=ELEV_CATS.includes(cat)?'elevation':'z_base';\n"
+        "  const z=+((rec.overrides||{})[key] ?? rec[key] ?? 0);\n"
         "  if (d === 'bottom') return [z, z + gcDim(cat,'height',rec,params)];\n"
         "  if (d === 'top')    return [z - gcDim(cat,'thickness',rec,params), z];\n"
-        "  const half = (cat === 'pipe') ? gcDim('pipe','diameter',rec,params)/2\n"
-        "                                : gcDim(cat,'height_mm',rec,params)/2;\n"
+        "  const dims=gcMepDimensions(cat,rec,params);\n"
+        "  const half=(cat==='pipe'?dims.diameter:dims.height_mm)/2;\n"
         "  return [z - half, z + half];\n"
         "}\n"
         # 폭 규약을 JS 가 다시 구현하지 않게 주입한다. 종전엔 preview 가 두 곳에서

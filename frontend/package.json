@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
-    "test": "node --test ../tests/preview_review.test.mjs ../tests/preview_coordinates.test.mjs"
+    "test": "node --test ../tests/preview_review.test.mjs ../tests/preview_coordinates.test.mjs ../tests/preview_mep.test.mjs"
   },
   "devDependencies": {
     "vite": "8.2.2"

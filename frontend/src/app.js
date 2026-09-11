@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { buildReviewEntries, deriveSectionRange, floorKeyOf, isZVisible, reconcileSection, uniqueByEid, fitDistance, recordOnEditFloor, editBackdropState } from './review_logic.js';
 import { screenToDrawing, drawingUnitsPerPixel } from './svg_coordinates.js';
+import { sourceSampleCurve, mepPropertyKeys } from './mep_preview_geometry.js';
 
 const DATA = JSON.parse(document.getElementById('mep-data').textContent);
 const RUNTIME = DATA.project_runtime || null;
@@ -17,7 +18,7 @@ window.addEventListener('error', e => {
     document.getElementById('err').style.display='block';
 });
 
-const {gcDim,gcZRange,gcWidthOf,gcCcw,gcBeamRings} = globalThis.MepContract;
+const {gcDim,gcZRange,gcWidthOf,gcCcw,gcBeamRings,gcMepDimensions} = globalThis.MepContract;
 
 const S = 0.001;                  // mm -> m
 const CX = DATA.center[0], CY = DATA.center[1];
@@ -52,6 +53,7 @@ grid.rotation.x = Math.PI/2; scene.add(grid);
 
 const toM = p => [ (p[0]-CX)*S, (p[1]-CY)*S ];
 const meshes = [];
+let mepRenderWarnings=[];
 let useConf = false, wire = false;
 const sectionPlane=new THREE.Plane(new THREE.Vector3(0,0,-1),0);
 let sectionEnabled=false, sectionHeight=NaN;
@@ -147,18 +149,37 @@ function buildOpening(rec){
   m.position.z=(sill+hmm/2)*S; m.rotation.z=Math.atan2(dir[1],dir[0]);
 }
 function buildMepLinear(rec, cat){
-  const pts=rec.points||rec.centerline; if(!pts||pts.length<2) return;
-  const elev=(rec.elevation||0)*S;
-  const dia=(rec.diameter|| (rec.width_mm? Math.max(rec.width_mm,rec.height_mm||rec.width_mm):100));
-  for(let i=0;i<pts.length-1;i++){
-    const a=toM(pts[i]), b=toM(pts[i+1]);
-    const dx=b[0]-a[0], dy=b[1]-a[1]; const len=Math.hypot(dx,dy); if(len<1e-6) continue;
-    let geo;
-    if(cat==='pipe'){ const r=dia*S/2; geo=new THREE.CylinderGeometry(r,r,len,16); geo.rotateZ(Math.PI/2); }
-    else { const wd=(rec.width_mm||300)*S, ht=(rec.height_mm||150)*S; geo=new THREE.BoxGeometry(len,wd,ht); }
-    const m=addMesh(geo,cat,rec,elev);
-    m.position.x=(a[0]+b[0])/2; m.position.y=(a[1]+b[1])/2; m.position.z=elev;
-    m.rotation.z=Math.atan2(dy,dx);
+  try {
+    const dims=gcMepDimensions(cat,rec,P), range=gcZRange(cat,rec,P);
+    const elev=(range[0]+range[1])*S/2;
+    if(rec.geometry_mode==='footprint'){
+      const outer=rec.points||rec.outer||rec.footprint?.outer;
+      if(!outer||outer.length<3) throw new Error('Footprint boundary is missing');
+      const shape=shapeFrom(outer);
+      for(const ring of (rec.holes||rec.footprint?.holes||[])){
+        const hole=new THREE.Path();
+        ring.forEach((p,i)=>{ const xy=toM(p); if(i) hole.lineTo(...xy); else hole.moveTo(...xy); });
+        hole.closePath(); shape.holes.push(hole);
+      }
+      addMesh(new THREE.ExtrudeGeometry(shape,{depth:(range[1]-range[0])*S,bevelEnabled:false}),cat,rec,range[0]*S);
+      return;
+    }
+    const raw=rec.points||rec.centerline;
+    if(!raw||raw.length<2) throw new Error('Centerline is missing');
+    const pts=raw.filter((point,index)=>!index||Math.hypot(point[0]-raw[index-1][0],point[1]-raw[index-1][1])>1e-8);
+    if(cat==='pipe'){
+      const vectors=pts.map(p=>new THREE.Vector3(...toM(p),0));
+      addMesh(new THREE.TubeGeometry(sourceSampleCurve(THREE,vectors),vectors.length-1,dims.diameter*S/2,16,false),cat,rec,elev);
+      return;
+    }
+    for(let i=0;i<pts.length-1;i++){
+      const a=toM(pts[i]),b=toM(pts[i+1]),dx=b[0]-a[0],dy=b[1]-a[1],len=Math.hypot(dx,dy);
+      if(len<1e-9) continue;
+      const m=addMesh(new THREE.BoxGeometry(len,dims.width_mm*S,dims.height_mm*S),cat,rec,elev);
+      m.position.x=(a[0]+b[0])/2; m.position.y=(a[1]+b[1])/2; m.rotation.z=Math.atan2(dy,dx);
+    }
+  } catch(error) {
+    mepRenderWarnings.push(`${rec.eid||rec.layer||cat}: 3D 표시 보류 · ${error.message}`);
   }
 }
 function buildEquip(rec){
@@ -169,6 +190,7 @@ function buildEquip(rec){
 function rebuild(){
   for(const m of meshes){ scene.remove(m); m.geometry.dispose(); m.material.dispose(); }
   meshes.length=0;
+  mepRenderWarnings=[];
   const E=EFFECTIVE_ELEMENTS;
   (E.slab||[]).forEach(buildSlab);
   (E.beam||[]).forEach(buildBeam);
@@ -192,6 +214,7 @@ function rebuild(){
   updateSectionBounds();
   renderSourceOverlay();
   renderReview();
+  renderWarnings();
 }
 
 function fit(){
@@ -284,8 +307,13 @@ function fillPanel(rec, cat){
   document.getElementById('e_layer').textContent=rec.layer||'-';
   document.getElementById('e_conf').textContent=(rec.confidence!=null?rec.confidence:'-')+(rec.pairing?' / '+rec.pairing:'');
   sel.value=(edits[eid]?.category)||cat;
-  document.getElementById('e_w').value=edits[eid]?.overrides?.width ?? rec.overrides?.width ?? rec.width_detected ?? rec.width ?? '';
-  document.getElementById('e_h').value=edits[eid]?.overrides?.height ?? rec.overrides?.height ?? rec.overrides?.thickness ?? '';
+  if(['pipe','duct','tray'].includes(cat)) {
+    try { const dims=gcMepDimensions(cat,rec,P); document.getElementById('e_w').value=dims.diameter??dims.width_mm??''; document.getElementById('e_h').value=dims.height_mm??''; }
+    catch { document.getElementById('e_w').value=''; document.getElementById('e_h').value=''; }
+  } else {
+    document.getElementById('e_w').value=edits[eid]?.overrides?.width ?? rec.overrides?.width ?? rec.width_detected ?? rec.width ?? '';
+    document.getElementById('e_h').value=edits[eid]?.overrides?.height ?? rec.overrides?.height ?? rec.overrides?.thickness ?? '';
+  }
   document.getElementById('e_del').checked=!!edits[eid]?.deleted;
   const reviewRow=document.getElementById('reviewrow');
   reviewRow.style.display=(rec.needs_review||rec.review_ack_stale)?'block':'none';
@@ -362,6 +390,10 @@ document.getElementById('apply').addEventListener('click', ()=>{
     deleted:document.getElementById('e_del').checked,
     reviewResolved:document.getElementById('e_review').checked
   });
+  if(['pipe','duct','tray'].includes(cat)) {
+    const [widthKey,heightKey]=mepPropertyKeys(cat), ov=e.added?e.record.overrides:e.overrides;
+    if(ov){ delete ov.width; delete ov.height; if(Number.isFinite(w)) ov[widthKey]=w; if(heightKey&&Number.isFinite(h)) ov[heightKey]=h; }
+  }
   edits[eid]=e;
   if(!Object.keys(e).filter(k=>k[0]!=='_').length) delete edits[eid];
   refreshEdits();
@@ -1134,7 +1166,7 @@ if(_restored!==null){
 // 파서가 낸 경고·통계를 화면에 옮긴다. 종전엔 CLI 로그에만 있었고, 3D 를 보는
 // 사람은 무엇이 의심스러운지 알 수 없었다.
 function renderWarnings(){
-  const w=[...(DATA.warnings||[])];
+  const w=[...(DATA.warnings||[]),...mepRenderWarnings];
   for(const c of (DATA.width_conflicts||[]).slice(0,6))
     w.push('두께 불일치: '+c.layer+' 선언 '+Math.round(c.declared)
            +' != 실측 '+Math.round(c.detected)+'mm x '+c.count+'개');

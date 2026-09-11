@@ -88,6 +88,13 @@ def set_ifc_props(obj, rec):
         ("Revision",      "IfcText", str(PROVENANCE.get("revision") if PROVENANCE.get("revision") is not None else "")),
         ("Layer",         "IfcLabel",      rec.get("layer")),
         ("Level",         "IfcLabel",      rec.get("level")),
+        ("System",        "IfcLabel",      rec.get("system")),
+        ("Region",        "IfcLabel",      rec.get("region_id")),
+        ("Circuit",       "IfcLabel",      rec.get("circuit_id")),
+        ("NominalSize",   "IfcLabel",      rec.get("nominal_size")),
+        ("SourceRefs",    "IfcText",       json.dumps(rec.get("source_refs") or [], ensure_ascii=False)),
+        ("SourceLength",  "IfcReal",       rec.get("source_length_mm")),
+        ("Assumptions",   "IfcText",       json.dumps(rec.get("assumptions") or [], ensure_ascii=False)),
         ("MemberName",    "IfcLabel",      sec.get("name") or rec.get("member_name")),
         ("Section",       "IfcLabel",      sec.get("size")),
         ("Pairing",       "IfcLabel",      rec.get("pairing")),
@@ -104,7 +111,7 @@ def set_ifc_props(obj, rec):
     except Exception as _pe:                      # IfcProperties 없는 객체(Part::Feature 등)
         print(f"  [warn] IFC 속성 부여 실패({getattr(obj, 'Label', '?')}): {_pe}")
 
-    mat = (rec.get("overrides") or {}).get("material")
+    mat = (rec.get("overrides") or {}).get("material") or rec.get("material")
     if mat and hasattr(obj, "Material"):
         try:
             obj.Material = _material(obj, str(mat))
@@ -1057,7 +1064,15 @@ _MEP_IFC_TYPE = {
 MEP_VOLUME = {}      # 축선×단면 으로 기대한 부피 대 실제로 만든 부피
 
 
-def build_mep(doc, mep_elements):
+def _footprint_solid(rec, bottom, height):
+    """Extrude source outline and subtract its holes, without an inferred axis."""
+    shape = _equip_solid(rec["points"], bottom, height)
+    for hole in rec.get("holes") or []:
+        shape = shape.cut(_equip_solid(hole, bottom, height))
+    return shape.removeSplitter()
+
+
+def build_mep(doc, mep_elements, params=None):
     """MEP 중심선 → Arch 컴포넌트. **IFC MEP 타입을 달아서** 내보낸다.
 
     종전에는 Part::Feature 로만 만들어 IFC 에서 전부 IfcBuildingElementProxy 가 됐다.
@@ -1076,10 +1091,12 @@ def build_mep(doc, mep_elements):
     MEP_VOLUME.update({"expected_mm3": 0.0, "built_mm3": 0.0})
     for cat in ("pipe", "duct", "tray", "equipment"):
         for i, el in enumerate(mep_elements.get(cat, [])):
-            elev = float(el.get("elevation", 0.0))
-            pts = el.get("centerline") or el.get("points") or []
+            elev = GC.base_z(cat, el)
+            pts = (el.get("points") if el.get("geometry_mode") == "footprint" else el.get("centerline") or el.get("points")) or []
             if len(pts) < 2:
                 continue
+            if cat in ("duct", "tray") and el.get("closed") and el.get("geometry_mode") != "footprint" and pts[-1] != pts[0]:
+                pts = pts + [pts[0]]
             # 축선 길이 × 단면적 = 있어야 할 부피. 코너 마이터 때문에 정확하진 않지만
             # **자릿수가 어긋나면** 형상이 퇴화했다는 뜻이다(위 normalize 사고).
             # ★ duct/tray 만 센다 — 이 게이트가 지키는 건 `_rect_solid` 경로다.
@@ -1088,29 +1105,34 @@ def build_mep(doc, mep_elements):
             #   한쪽만 담으면 셈이 어긋난다(실측: MEP 샘플 비율 3.78 — 장비가 built
             #   에만 들어가 있었다).
             _len = sum(math.dist(pts[k][:2], pts[k+1][:2]) for k in range(len(pts)-1))
-            if cat in ("duct", "tray"):
-                MEP_VOLUME["expected_mm3"] += _len * float(el.get("width_mm") or 400.0) * float(
-                    el.get("height_mm") or (300.0 if cat == "duct" else 100.0))
             label = f"{cat.capitalize()}_{i}"
             try:
+                dims = GC.mep_dimensions(cat, el, params) if cat != "equipment" else {}
+                if cat in ("duct", "tray"):
+                    if el.get("geometry_mode") == "footprint":
+                        area = GC.poly_area(pts) - sum(GC.poly_area(h) for h in el.get("holes") or [])
+                    else:
+                        area = _len * dims["width_mm"]
+                    MEP_VOLUME["expected_mm3"] += area * dims["height_mm"]
                 obj = None
                 if cat == "pipe":
-                    ax = make_wire([[p[0], p[1]] for p in pts], False, doc=doc,
+                    ax = make_wire([[p[0], p[1]] for p in pts], bool(el.get("closed")), doc=doc,
                                    label=f"PipeAxis_{i}")
                     if ax is None:
                         continue
                     ax.Placement.Base.z = elev
-                    obj = Arch.makePipe(ax, diameter=float(el.get("diameter") or 100.0))
+                    obj = Arch.makePipe(ax, diameter=dims["diameter"])
                 else:
                     if cat in ("duct", "tray"):
-                        w = float(el.get("width_mm") or 400.0)
-                        h = float(el.get("height_mm")
-                                  or (300.0 if cat == "duct" else 100.0))
-                        shape = _rect_solid(pts, w, h, elev)
+                        h = dims["height_mm"]
+                        if el.get("geometry_mode") == "footprint":
+                            shape = _footprint_solid(el, GC.z_range(cat, el, params)[0], h)
+                        else:
+                            shape = _rect_solid(pts, dims["width_mm"], h, elev)
                     else:                                   # equipment
                         if not el.get("closed") or len(pts) < 3:
                             continue
-                        shape = _equip_solid(pts, elev)
+                        shape = _equip_solid(pts, elev, GC.z_range(cat, el, params)[1] - elev)
                     if shape is None or not shape.isValid():
                         print(f"[warn] MEP {label} 형상 오류")
                         continue
@@ -1282,7 +1304,7 @@ def _main_impl():
     slabs,  slab_src  = build_slabs(doc, el.get("slab", []), params)
     beams, beam_src, n_nosec = build_beams(doc, el.get("beam", []), params)
     spaces, space_src = build_spaces(doc, el.get("zone", []), params)
-    mep_objs          = build_mep(doc, el)
+    mep_objs          = build_mep(doc, el, params)
     print(f"  → cols={len(cols)} slabs={len(slabs)} beams={len(beams)}"
           f" spaces={len(spaces)} mep={len(mep_objs)} ({_time.time()-_t1:.1f}s)")
     for _c, _v in sorted(UNBUILT.items()):

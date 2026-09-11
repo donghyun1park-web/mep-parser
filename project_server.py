@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from project_store import ProjectStore, RevisionConflict, atomic_bytes, atomic_json, validate_edits
+from project_store import ProjectStore, RevisionConflict, atomic_bytes, atomic_json, validate_edits, fingerprint
 
 
 class ProjectSession:
@@ -106,6 +106,76 @@ class ProjectSession:
             path = self.store.folder / 'builds' / f"geometry-r{state['revision']}-{secrets.token_hex(4)}.json"
         atomic_json(path, state['geometry'])
         return str(path), state
+
+    def _profile_source(self, manifest, source_id):
+        source = next((item for item in manifest['sources'] if item['id'] == source_id), None)
+        if source is None:
+            raise ValueError('Unknown source identity')
+        return source
+
+    def configure_source(self, profile, expected_revision, project_id, source_id='main', proposal_id=None):
+        """Validate and parse a candidate before atomically saving project-local MEP settings."""
+        from mep_profile import validate_profile
+        with self._mutex:
+            manifest = self.store.refresh_inputs()
+            self.store.check_revision(manifest, expected_revision, project_id)
+            proposed = copy.deepcopy(manifest)
+            source = self._profile_source(proposed, source_id)
+            normalized = validate_profile(profile, source_sha256=fingerprint(source['path']))
+            source.setdefault('options', {})['mep_profile'] = normalized
+            try:
+                self._parse(proposed)
+            except Exception as exc:
+                raise ValueError('MEP candidate cannot be parsed; project was not changed: ' + str(exc)) from exc
+            self.store.check_revision(self.store.refresh_inputs(), expected_revision, project_id)
+            decision = {'action': 'apply_mep_profile', 'source_id': source_id,
+                        'revision': expected_revision, 'source_sha256': normalized['source_sha256']}
+            if proposal_id:
+                decision['proposal_id'] = proposal_id
+            self.store.update_sources(proposed['sources'], proposed['options'], expected_revision,
+                                      project_id, decisions=[decision])
+            return self.state()
+
+    def propose_mep_profile(self, profile, expected_revision, project_id, source_id='main', reason=''):
+        """Save a reviewable proposal. Never changes a profile, geometry or review acknowledgement."""
+        from mep_profile import validate_profile
+        with self._mutex:
+            manifest = self.store.refresh_inputs()
+            self.store.check_revision(manifest, expected_revision, project_id)
+            source = self._profile_source(manifest, source_id)
+            normalized = validate_profile(profile, source_sha256=fingerprint(source['path']))
+            proposal = {'schema_version': 1, 'proposal_id': secrets.token_hex(16),
+                        'project_id': project_id, 'base_revision': expected_revision,
+                        'source_id': source_id, 'source_sha256': normalized['source_sha256'],
+                        'profile': normalized, 'reason': str(reason)[:8000]}
+            self.store.check_revision(self.store.refresh_inputs(), expected_revision, project_id)
+            atomic_json(self.store.folder / 'proposals' / (proposal['proposal_id'] + '.json'), proposal)
+            return proposal
+
+    def mep_proposals(self):
+        manifest = self.store.refresh_inputs()
+        applied = {item.get('proposal_id') for item in manifest.get('decisions', [])}
+        proposals = []
+        for path in sorted((self.store.folder / 'proposals').glob('*.json')):
+            try:
+                item = json.loads(path.read_text(encoding='utf-8'))
+                if item['project_id'] != manifest['project_id'] or item['proposal_id'] in applied:
+                    continue
+                item['stale'] = item['base_revision'] != manifest['revision']
+                proposals.append(item)
+            except (ValueError, KeyError, OSError):
+                continue
+        return proposals
+
+    def apply_mep_proposal(self, proposal_id, expected_revision, project_id):
+        if not isinstance(proposal_id, str) or len(proposal_id) != 32 or any(c not in '0123456789abcdef' for c in proposal_id):
+            raise ValueError('Invalid proposal identity')
+        proposal = json.loads((self.store.folder / 'proposals' / (proposal_id + '.json')).read_text(encoding='utf-8'))
+        manifest = self.store.refresh_inputs()
+        self.store.check_revision(manifest, expected_revision, project_id)
+        self.store.check_revision(manifest, proposal['base_revision'], proposal['project_id'])
+        return self.configure_source(proposal['profile'], expected_revision, project_id,
+                                     proposal['source_id'], proposal_id=proposal_id)
 
     def _capture(self, flat, manifest):
         from element_id import capture_edit, review_signature

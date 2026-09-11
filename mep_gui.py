@@ -340,6 +340,7 @@ class App:
         f.pack(fill="x", padx=8)
         ttk.Button(f, text="프로젝트 열기", command=self._open_project).pack(side="left", padx=4)
         ttk.Button(f, text="(1) Scan drawing", command=self._do_scan).pack(side="left", padx=4)
+        ttk.Button(f, text="설비 도면 설정 · Codex 제안", command=self._do_mep_setup).pack(side="left", padx=4)
         ttk.Button(f, text="(2) Parse -> geometry.json", command=self._do_parse).pack(side="left", padx=4)
         ttk.Button(f, text="(2b) 누락 진단",
                    command=self._do_diag).pack(side="left", padx=4)
@@ -352,6 +353,7 @@ class App:
         # FreeCAD is the primary build action; direct IFC remains optional.
         self.btn_build = ttk.Button(f, text="(4) 3D Build (FreeCAD 기본)", command=self._do_build)
         self.btn_build.pack(side="left", padx=4)
+        ttk.Button(f, text="Blender / GLB 내보내기", command=self._do_blender_build).pack(side="left", padx=4)
         self.btn_ifc.pack(side="left", padx=4)
         if find_freecadcmd() is None:
             self.btn_build.state(["disabled"])
@@ -567,8 +569,10 @@ class App:
             sources = manifest['sources']
             source = sources[0]
             if same:
+                saved_options = dict(source.get('options') or {})
+                saved_options.update(options)
                 source.update(layer_map=self.v_map.get().strip() or None, block_map=self.v_block.get().strip() or None,
-                              options=options, schedule=self.v_schedule.get().strip() or None)
+                              options=saved_options, schedule=self.v_schedule.get().strip() or None)
             else:
                 self.v_map.set(source.get('layer_map') or '')
                 self.v_block.set(source.get('block_map') or '')
@@ -703,8 +707,18 @@ class App:
         el = self.data["elements"][cat][int(idx)]
         ov = el.get("overrides", {})
         self.v_ack.set(False)
-        self.v_w.set(str(ov.get("width", el.get("width_detected") or "")))
-        self.v_h.set(str(ov.get("height", "")))
+        if cat in ('pipe', 'duct', 'tray'):
+            from geom_contract import mep_dimensions
+            try:
+                dims = mep_dimensions(cat, el, self.data.get('params'))
+                self.v_w.set(str(dims.get('diameter', dims.get('width_mm', ''))))
+                self.v_h.set(str(dims.get('height_mm', '')))
+            except ValueError:
+                self.v_w.set('')
+                self.v_h.set('')
+        else:
+            self.v_w.set(str(ov.get("width", el.get("width_detected") or "")))
+            self.v_h.set(str(ov.get("height", "")))
 
     def _apply_review(self):
         sel = self.tree.selection()
@@ -714,11 +728,8 @@ class App:
         cat, idx = sel[0].split(":")
         el = self.data['elements'][cat][int(idx)]
         try:
-            overrides = {}
-            if self.v_w.get().strip():
-                overrides['width'] = float(self.v_w.get())
-            if self.v_h.get().strip():
-                overrides['height'] = float(self.v_h.get())
+            from mep_setup_ui import mep_property_overrides
+            overrides = mep_property_overrides(cat, self.v_w.get(), self.v_h.get())
             meta = self.data['project']
             state = self.project_session.edit(el['eid'], dict(overrides=overrides, acknowledge=bool(self.v_ack.get())),
                                               meta['revision'], meta['project_id'])
@@ -744,6 +755,88 @@ class App:
         if self.project_server:
             self.project_server.close()
         self.root.destroy()
+
+    def _do_mep_setup(self):
+        dxf = self._ensure_dxf()
+        if not dxf:
+            return
+        try:
+            same = self.project_session and self.project_session.store.read()['sources'][0]['path'] == os.path.abspath(dxf)
+            if not same:
+                try:
+                    self.project_session = open_source_project(dxf, layer_map=self.v_map.get().strip() or None,
+                        block_map=self.v_block.get().strip() or None, options={'use_ai': False, 'use_vision': False})
+                except OSError:
+                    folder = filedialog.askdirectory(title='설비 프로젝트 저장 폴더 선택')
+                    if not folder:
+                        return
+                    self.project_session = open_source_project(dxf, folder=folder,
+                        layer_map=self.v_map.get().strip() or None, block_map=self.v_block.get().strip() or None,
+                        options={'use_ai': False, 'use_vision': False})
+            if self.project_server:
+                self.project_server.close()
+                self.project_server = None
+        except Exception as exc:
+            messagebox.showerror('프로젝트 열기 실패', str(exc))
+            return
+        self._set_buttons('disabled')
+        self._log('설비 원본의 영역·레이어·단위를 분석하고 있습니다…')
+        selected_session = self.project_session
+        def scanned(inventory):
+            from mep_setup_ui import MepSetupDialog
+            self._set_buttons('!disabled')
+            def saved(state):
+                if self.project_session is selected_session:
+                    self._parse_done(state['geometry'], dxf)
+                else:
+                    self._log(f"별도 설비 프로젝트 revision {state['revision']} 저장 완료: {dxf}")
+            MepSetupDialog(self.root, selected_session, inventory, saved)
+        def run():
+            try:
+                from mep_profile import inspect_mep_source
+                saved_profile = selected_session.store.read()['sources'][0].get('options', {}).get('mep_profile') or {}
+                inventory = inspect_mep_source(dxf, unit_scale_to_mm=saved_profile.get('unit_scale_to_mm'))
+                self.root.after(0, lambda: scanned(inventory))
+            except Exception as exc:
+                self.root.after(0, lambda msg=str(exc): (self._log(msg), self._set_buttons('!disabled'), messagebox.showerror('설비 분석 실패', msg)))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _do_blender_build(self):
+        if not self.project_session:
+            messagebox.showinfo('프로젝트 필요', '먼저 도면을 파싱하거나 설비 도면 설정을 저장하세요.')
+            return
+        folder = filedialog.askdirectory(title='Blender / GLB 결과 저장 폴더', initialdir=str(self.project_session.store.folder))
+        if not folder:
+            return
+        selected_session = self.project_session
+        self._set_buttons('disabled')
+        self._log('최신 저장 revision으로 Blender / GLB를 생성하고 실제 저장 파일을 검증합니다…')
+        def done(receipt):
+            self._set_buttons('!disabled')
+            self._log('Blender 내보내기: ' + receipt.get('status', 'failed'))
+            if receipt.get('status') == 'verified':
+                from mep_setup_ui import blender_review_status
+                review_summary, detail = blender_review_status(receipt)
+                self._log(review_summary)
+                for message in detail:
+                    self._log('  [검토] ' + message)
+                for kind, item in receipt.get('artifacts', {}).items():
+                    self._log(f"  {kind}: {item.get('path', '')}")
+                messagebox.showinfo('Blender / GLB 생성 완료', review_summary + '\n' + '\n'.join(detail[:8]) + '\n\n' + '\n'.join(item.get('path', '') for item in receipt['artifacts'].values()))
+            else:
+                messagebox.showwarning('내보내기 미완료', '\n'.join(map(str, receipt.get('errors', []) + receipt.get('diagnostics', []))) or str(receipt.get('status')))
+        def run():
+            try:
+                from blender_runner import build_blender
+                build_input, state = selected_session.export_geometry()
+                from pathlib import Path
+                import secrets
+                out_dir = Path(folder) / f"blender-r{state['revision']}-{secrets.token_hex(4)}"
+                receipt = build_blender(build_input, str(out_dir))
+                self.root.after(0, lambda: done(receipt))
+            except Exception as exc:
+                self.root.after(0, lambda msg=str(exc): done({'status': 'failed', 'errors': [msg]}))
+        threading.Thread(target=run, daemon=True).start()
 
     def _do_preview(self):
         if not self.project_session:
@@ -910,10 +1003,53 @@ def _selftest():
         offline = '<script id="mep-app">' in html and '<script src=' not in html
         if not offline:
             raise RuntimeError('오프라인 미리보기 번들이 누락되었습니다')
+        # Exercise the shipped MEP path/profile/export preparation modules, without running native CAD.
+        import tempfile
+        import hashlib
+        import math
+        import ezdxf
+        import geom_contract as GC
+        import blender_builder as BB
+        from mep_profile import inspect_mep_source
+        with tempfile.TemporaryDirectory(prefix='mep-selftest-', dir=base) as folder:
+            from pathlib import Path
+            drawing = Path(folder) / 'heating.dxf'
+            doc = ezdxf.new(units=4)
+            doc.layers.new('SELFTEST_HEAT')
+            doc.modelspace().add_line((0, 0), (1000, 0), dxfattribs={'layer': 'SELFTEST_HEAT'})
+            doc.modelspace().add_arc((1000, 100), 100, 270, 360, dxfattribs={'layer': 'SELFTEST_HEAT'})
+            doc.saveas(drawing)
+            inventory = inspect_mep_source(str(drawing))
+            source_hash = hashlib.sha256(drawing.read_bytes()).hexdigest()
+            if inventory['source_sha256'] != source_hash:
+                raise RuntimeError('MEP inventory source hash mismatch')
+            profile = {'version': 1, 'source_sha256': source_hash,
+                'layers': [{'pattern': '^SELFTEST_HEAT$', 'category': 'pipe', 'system': 'heating',
+                            'diameter_mm': 15.9, 'nominal_size': '15A', 'material': 'PB',
+                            'dimension_basis': 'assumed', 'placement': 'foam_top'}],
+                'levels': {'structural_slab_top_mm': 0},
+                'floor_layers': [{'role': 'impact_insulation', 'thickness_mm': 30},
+                                {'role': 'foamed_concrete', 'thickness_mm': 40},
+                                {'role': 'screed', 'thickness_mm': 40}]}
+            heat = P.parse(str(drawing), [], [], mep_profile=profile)
+            paths = heat['elements']['pipe']
+            if len(paths) != 1 or len(paths[0].get('source_refs', [])) != 2:
+                raise RuntimeError('MEP LINE/ARC connectivity or provenance failed')
+            pipe = paths[0]
+            if GC.mep_dimensions('pipe', pipe)['diameter'] != 15.9 or any(abs(a-b) > 1e-6 for a, b in zip(GC.z_range('pipe', pipe), (70., 85.9))):
+                raise RuntimeError('MEP OD or foam-top elevation failed')
+            if abs(pipe['source_length_mm'] - (1000 + math.pi * 50)) > 1e-6:
+                raise RuntimeError('MEP analytic curve length failed')
+            payload = BB.prepare_payload(heat)
+            if not any(item.get('kind') == 'curve' for item in payload['objects']):
+                raise RuntimeError('Blender payload has no source pipe curve')
         msg = (f"[selftest] parse OK: elements={n}, "
                f"shapely={'on' if P.HAS_SHAPELY else 'off'}\n"
                f"[selftest] preview OK: html={len(html)} bytes, "
-               f"offline_three={offline}\n[selftest] PASS\n")
+               f"offline_three={offline}\n"
+               f"[selftest] MEP profile/LINE+ARC/source_refs OK: paths={len(paths)}\n"
+               f"[selftest] PB OD/foam_top OK: 15.9 mm, z=70..85.9 mm\n"
+               f"[selftest] Blender payload preparation OK: objects={len(payload['objects'])}\n[selftest] PASS\n")
         rc = 0
     except Exception:
         msg = "[selftest] FAIL\n" + traceback.format_exc()

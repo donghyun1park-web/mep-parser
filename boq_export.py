@@ -21,6 +21,7 @@ import os
 import sys
 
 from geom_contract import poly_area as _poly_area
+from geom_contract import mep_dimensions
 
 
 def _polyline_len(pts):
@@ -162,24 +163,32 @@ def aggregate(data):
     out["창호"] = (["구분", "규격(mm)", "개수"], rows, tot)
 
     # ── MEP: 규격별 길이 ─────────────────────────────────────
-    mg = {}
+    mg, footprints = {}, []
     for cat, label in (("pipe", "배관"), ("duct", "덕트"), ("tray", "트레이")):
         for m in els.get(cat, []):
-            pts = m.get("centerline") or m.get("points") or []
+            pts = ((m.get("points") or []) if m.get("geometry_mode") == "footprint" else m.get("centerline") or m.get("points") or [])
             if len(pts) < 2:
                 continue
-            ov = m.get("overrides") or {}
-            size = ov.get("width") or m.get("width_detected") or \
-                m.get("diameter") or ""
-            size = f"{_r10(size)}" if size else "-"
+            dims = mep_dimensions(cat, m, params)
+            if m.get("geometry_mode") == "footprint":
+                area = _poly_area(pts) - sum(_poly_area(h) for h in m.get("holes") or [])
+                footprints.append([label, m.get("eid") or m.get("layer", ""), dims["height_mm"], round(area / 1e6, 6)])
+                continue
+            size = f"{dims['diameter']:g}" if cat == "pipe" else f"{dims['width_mm']:g}x{dims['height_mm']:g}"
             key = (label, size)
             g = mg.setdefault(key, {"count": 0, "len": 0.0})
             g["count"] += 1
-            g["len"] += _polyline_len(pts)
-    rows = [[k[0], k[1], g["count"], round(g["len"] / 1000, 1)]
+            length = m.get("source_length_mm")
+            # Explicitly edited paths no longer have the source path's length.
+            if length is None or m.get("geometry_modified"):
+                length = _polyline_len(pts + [pts[0]]) if m.get("closed") and pts[0] != pts[-1] else _polyline_len(pts)
+            g["len"] += float(length)
+    rows = [[k[0], k[1], g["count"], round(g["len"] / 1000, 3)]
             for k, g in sorted(mg.items())]
-    tot = ["합계", "", sum(r[2] for r in rows), round(sum(r[3] for r in rows), 1)]
+    tot = ["합계", "", sum(r[2] for r in rows), round(sum(r[3] for r in rows), 3)]
     out["MEP"] = (["구분", "규격(mm)", "개수", "길이(m)"], rows, tot)
+    out["MEP 외곽"] = (["구분", "원본 식별자", "높이(mm)", "평면 면적(㎡)"], footprints,
+                       ["합계", "", "", round(sum(r[3] for r in footprints), 6)])
     return out
 
 

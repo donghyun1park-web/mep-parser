@@ -24,6 +24,9 @@ import geom_contract as GC
 
 # 검사 카탈로그 — id: (기본 severity, 한 줄 설명)
 CHECKS = {
+    "V010": ("error", "설비 좌표·외경·단면·높이 또는 경로가 유효하지 않음"),
+    "V011": ("error", "설비 원본 추적·선택 영역·누락 검증 실패"),
+    "V012": ("warn", "설비 연결·규격·설치 조건 검토 필요"),
     "V106": ("error", "필수 빌드 증거 누락 또는 미생성 요소"),
     "V107": ("error", "현재 실행 IFC 형상/식별자/층/속성 검증 실패"),
     "V001": ("error", "floors[] 에 매칭되지 않는 구조 요소(빌드 시 어느 층에도 안 들어가 IFC 에서 누락)"),
@@ -241,7 +244,66 @@ def verify_geometry(data, policy=None):
     if cov is not None and cov < floor_pct:
         F.append(Finding("V008", _sev("V008", policy),
                          f"면선 커버리지 {cov:.0f}% < {floor_pct}%", {"coverage": cov}))
+    F += _check_mep(data, policy)
     return Report(F, policy)
+
+
+def _check_mep(data, policy):
+    findings, invalid, scope, review = [], [], [], []
+    profile = data.get("mep_profile") or {}
+    bounds = (profile.get("region") or {}).get("bounds_mm")
+    count = 0
+    for cat in ("pipe", "duct", "tray"):
+        for rec in (data.get("elements") or {}).get(cat) or []:
+            count += 1
+            info = {"category": cat, "eid": rec.get("eid"), "layer": rec.get("layer")}
+            pts = (rec.get("points") or []) if rec.get("geometry_mode") == "footprint" else _pts(rec)
+            try:
+                GC.mep_dimensions(cat, rec, data.get("params"))
+                z0, z1 = GC.z_range(cat, rec, data.get("params"))
+                if not all(math.isfinite(z) for z in (z0, z1)) or z1 <= z0:
+                    raise ValueError("invalid installation elevation")
+                rings = [pts] + (rec.get("holes") or [])
+                for ring in rings:
+                    if len(ring) < 2 or any(len(p) < 2 or not all(math.isfinite(float(v)) for v in p) for p in ring):
+                        raise ValueError("missing or nonfinite path coordinates")
+                    if sum(math.dist(a[:2], b[:2]) for a, b in zip(ring, ring[1:])) <= 1e-6:
+                        raise ValueError("zero length path")
+                if rec.get("geometry_mode") == "footprint":
+                    from shapely.geometry import Polygon
+                    polygon = Polygon(pts, rec.get("holes") or [])
+                    if not rec.get("closed") or not polygon.is_valid or polygon.area <= 1e-6:
+                        raise ValueError("invalid footprint polygon")
+            except (GC.ContractError, ValueError, TypeError, IndexError, OverflowError) as exc:
+                invalid.append(dict(info, reason=str(exc)))
+                continue
+            if profile:
+                if not rec.get("source_refs") and rec.get("pairing") != "manual":
+                    scope.append(dict(info, reason="source_refs missing"))
+                if bounds and any(not (bounds[0]-1e-6 <= p[0] <= bounds[2]+1e-6 and bounds[1]-1e-6 <= p[1] <= bounds[3]+1e-6) for p in pts):
+                    scope.append(dict(info, reason="geometry outside selected region"))
+            if rec.get("needs_review") or rec.get("dimension_basis") == "assumed" or rec.get("assumptions"):
+                review.append(dict(info, reason=rec.get("review_reason") or "assumed dimensions or installation conditions"))
+    diagnostics = data.get("mep_diagnostics") or {}
+    coverage = diagnostics.get("source_coverage") or {}
+    if coverage:
+        numbers = [coverage.get(k) for k in ("selected", "represented", "omitted")]
+        if (any(isinstance(n, bool) or not isinstance(n, int) or n < 0 for n in numbers)
+                or numbers[1] + numbers[2] != numbers[0]
+                or coverage.get("complete") is not (numbers[2] == 0)):
+            scope.append({"reason": "inconsistent source coverage counts", "coverage": coverage})
+        elif numbers[2]:
+            review.append({"reason": "selected source entities are partly or wholly unrepresented", "coverage": coverage})
+    for issue in diagnostics.get("issues") or []:
+        (scope if issue.get("severity") in ("error", "fatal") else review).append(issue)
+    if profile.get("layers") and count == 0:
+        scope.append({"reason": "profile selected MEP layers but no MEP geometry was produced"})
+    for cid, items, label in (("V010", invalid, "유효하지 않은 설비 형상"),
+                              ("V011", scope, "설비 원본/영역 검증"),
+                              ("V012", review, "설비 검토 항목")):
+        if items:
+            findings.append(Finding(cid, _sev(cid, policy), f"{label} {len(items)}건", {"count": len(items), "sample": items[:20]}))
+    return findings
 
 
 def _outlier_limit(xs, ys, factor=_COORD_LIMIT_FACTOR):

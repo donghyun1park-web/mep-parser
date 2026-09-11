@@ -76,3 +76,8 @@ tests/golden.local.json
 # Frontend dependencies and per-plan implementation notes.
 node_modules/
 .superpowers/
+outputs/
+.native-*/
+.test-*/
+.test_*/
+frontend/.npm-cache/

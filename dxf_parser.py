@@ -563,10 +563,17 @@ def entity_to_record(e, scale, opts=None):
             return None
         return _tag_sig({"kind": "polyline", "layer": layer, "points": pts,
                          "closed": math.dist(pts[0], pts[-1]) < 1e-6})
-    if t == "SPLINE":  # 제어점은 WCS
-        pts = [[p[0] * scale, p[1] * scale] for p in e.control_points]
-        return (_tag_sig({"kind": "polyline", "closed": e.closed, "layer": layer,
-                 "points": pts}) if pts else None)
+    if t == "SPLINE":  # Evaluate the curve; control polygon is only the legacy identity.
+        old = [[float(p[0]) * scale, float(p[1]) * scale] for p in e.control_points]
+        try:
+            from mep_paths import extract_curve
+            curve = extract_curve(e, scale, .5)
+        except ValueError:
+            return None
+        rec = _tag_sig({"kind": "polyline", "closed": e.closed, "layer": layer,
+                       "points": old or curve["points"]})
+        rec["points"] = curve["points"]
+        return rec
     if t == "DIMENSION" and opts and opts.get("from") == "dim":
         return _dimension_to_record(e, scale, layer, opts.get("member_re"))
     return None
@@ -742,6 +749,7 @@ def join_mep_runs(records, gap):
     기하를 만드는 일이라 파서가 알아서 할 일이 아니다. 이은 결과는
     `mep_joined` 로 자기보고한다.
     """
+    from mep_paths import compatibility_key
     two = [i for i, r in enumerate(records)
            if len(r.get("points") or []) == 2 and not r.get("closed")]
     keep = [i for i in range(len(records)) if i not in two]
@@ -764,7 +772,7 @@ def join_mep_runs(records, gap):
                 for j in two:
                     if j in used:
                         continue
-                    if records[j].get("layer") != records[i].get("layer"):
+                    if compatibility_key(records[j]) != compatibility_key(records[i]):
                         continue
                     for k, q in enumerate(ends(j)):
                         d = math.hypot(tip[0]-q[0], tip[1]-q[1])
@@ -775,10 +783,15 @@ def join_mep_runs(records, gap):
                 d, j, k = best
                 used.add(j)
                 far = list(ends(j)[1 - k])
+                near = list(ends(j)[k])
                 bridged += d
                 if grow_tail:
+                    if d > 1e-9:
+                        pts.append(near)
                     pts.append(far)
                 else:
+                    if d > 1e-9:
+                        pts.insert(0, near)
                     pts.insert(0, far)
                 members.append(j)
         rec = dict(records[i])
@@ -2396,7 +2409,8 @@ def apply_member_schedule(msp, layers, elements):
 
 def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAMS,
           use_ai=False, use_vision=False, api_key=None, ai_threshold=0.8,
-          ext_schedule=None, member_schedule=None, edits=None, level_height=None):
+          ext_schedule=None, member_schedule=None, edits=None, level_height=None,
+          mep_profile=None):
     """DXF → geometry.json dict.
     use_ai: 텍스트 LLM 분류 + 고신뢰 자동적용. use_vision: Vision 폴백.
     ai_threshold: best_classification confidence 이 값 초과면 자동 카테고리 적용.
@@ -2404,9 +2418,18 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         주어지면 DXF 내부 추출본과 병합(외부 우선) 후 벽 끊김 매칭에 사용.
     member_schedule: 부재일람표 레이어명 목록(CLI --member-schedule).
         layer_map 의 opts `schedule=<레이어>` 와 합집합으로 쓰인다."""
+    if mep_profile is not None:
+        from mep_profile import validate_profile, scale_to_mm
+        with open(dxf_path, 'rb') as source_stream:
+            source_hash = hashlib.sha256(source_stream.read()).hexdigest()
+        mep_profile = validate_profile(mep_profile, source_hash)
     doc = ezdxf.readfile(dxf_path)
     msp = doc.modelspace()
     scale = 1000.0 if doc.header.get("$INSUNITS", 0) == 6 else 1.0
+    if mep_profile is not None:
+        scale = scale_to_mm(doc, mep_profile.get('unit_scale_to_mm'))
+        if scale is None:
+            raise ValueError('Unknown DXF units; provide unit_scale_to_mm')
     result = {"source": dxf_path, "units": "mm", "scale_applied": scale, "params": params,
               "elements": {"wall": [], "column": [], "slab": [], "zone": [], "opening": [],
                            "pipe": [], "duct": [], "tray": [], "equipment": []},
@@ -2570,9 +2593,15 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         _gaps.discard(None)
         if not _gaps or not _recs:
             continue
-        _gap = float(max(_gaps))
         _before = len(_recs)
-        result["elements"][_cat], _br = join_mep_runs(_recs, _gap)
+        _joined = [r for r in _recs if r.get('_parse_opts', {}).get('connect_gap') is None]
+        _br = 0.0
+        for _declared_gap in sorted(_gaps):
+            _subset = [r for r in _recs if r.get('_parse_opts', {}).get('connect_gap') == _declared_gap]
+            _paths, _added = join_mep_runs(_subset, float(_declared_gap))
+            _joined.extend(_paths); _br += _added
+        result["elements"][_cat] = _joined
+        _gap = float(max(_gaps))
         _after = len(result["elements"][_cat])
         if _before != _after:
             _mep_joined[_cat] = {"before": _before, "after": _after,
@@ -2748,6 +2777,12 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
             + ", ".join(f"{k}({v})" for k, v in sorted(_tiny.items())[:4]))
         print(f"  [개구부] 조각 {sum(_tiny.values())}개 드롭(<{OPENING_MIN_SIZE_MM:.0f}mm): "
               + ", ".join(f"{k}({v})" for k, v in sorted(_tiny.items())[:4]))
+    if mep_profile is not None:
+        from mep_profile import apply_mep_profile
+        with open(dxf_path, 'rb') as source_stream:
+            if hashlib.sha256(source_stream.read()).hexdigest() != source_hash:
+                raise ValueError('Source SHA256 changed during parsing; model discarded')
+        apply_mep_profile(doc, result, mep_profile)
     # [라운드트립] 각 요소에 EID 부여 — 원본 raw 엔티티 시그니처 기반(element_id.py).
     # 파라미터(폭/높이 등) 변경에 불변, grouping이 실제로 바뀔 때만 EID 변경.
     for _cat, _recs in result["elements"].items():
@@ -2989,7 +3024,7 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
             _z = _el.get("z_base", 0.0)
             _z_vals.add(round(_z / _FLOOR_TOL) * _FLOOR_TOL)
     if not _z_vals:
-        _z_vals = {0.0}
+        _z_vals = {float(mep_profile['levels']['structural_slab_top_mm']) if mep_profile is not None else 0.0}
     result["floors"] = [{"z": float(z), "label": f"Level_{i+1}"}
                         for i, z in enumerate(sorted(_z_vals))]
     assign_zones(result["elements"], result["elements"].get("zone", []))

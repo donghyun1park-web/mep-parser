@@ -64,7 +64,8 @@ def run_build(freecadcmd, geometry_path, out_base, builder_path, timeout=900):
                    MEP_OUT=os.path.abspath(out_base), MEP_BUILD_RUN_ID=run_id)
         try:
             result = subprocess.run([str(freecadcmd), wrapper], cwd=os.path.dirname(builder_path),
-                                    env=env, capture_output=True, timeout=timeout)
+                                    env=env, capture_output=True, timeout=timeout,
+                                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0)
         except subprocess.TimeoutExpired as exc:
             _record_runtime(geometry_path, out_base, builder_path, run_id, None,
                             exc.stdout, exc.stderr, "FreeCAD runtime timeout")

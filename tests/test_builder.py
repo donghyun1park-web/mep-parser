@@ -134,6 +134,11 @@ _FREECAD = (shutil.which("freecadcmd")
 def _skip_if_no_freecad():
     """건너뛰는 것을 조용히 넘기지 않는다 — 통과처럼 보이는 미실행이 제일 나쁘다."""
     if os.path.exists(_FREECAD):
+        if os.name == 'nt':
+            from blender_runner import resource_snapshot
+            available = resource_snapshot(ROOT, {'objects': []})['available_ram_bytes']
+            if available is None or available < 2 * 1024**3:
+                raise unittest.SkipTest(f'FreeCAD native fixture requires 2 GiB available RAM; measured {available} bytes')
         return True
     raise unittest.SkipTest(f"freecadcmd unavailable: {_FREECAD}")
 

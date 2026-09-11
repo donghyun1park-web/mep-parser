@@ -17,6 +17,8 @@ datas = [
     ('geom_contract.py', '.'),
     ('verify.py', '.'),
     ('artifact_validation.py', '.'),
+    ('blender_builder.py', '.'),
+    ('blender_verify.py', '.'),
     ('sample_plan.dxf', '.'),        # --selftest 스모크용
     ('vendor/three.module.js', 'vendor'),
     ('vendor/OrbitControls.js', 'vendor'),
@@ -27,6 +29,7 @@ binaries = []
 hiddenimports = ['preview', 'dxf_parser', 'element_id']
 hiddenimports += ['edit_review', 'project_store', 'project_server', 'freecad_runner']
 hiddenimports += ['source_drawing']
+hiddenimports += ['mep_paths', 'mep_profile', 'mep_setup_ui', 'blender_runner', 'blender_builder', 'blender_verify']
 
 # ezdxf/shapely 는 동적 import·바이너리(GEOS) 의존 → 전체 수집
 for _pkg in ('ezdxf', 'shapely'):
@@ -45,7 +48,9 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=['matplotlib', 'anthropic', 'vision_classify',
-              'PIL', 'IPython', 'pytest', 'notebook', 'pandas'],
+              'PIL', 'IPython', 'pytest', 'notebook', 'pandas',
+              # The application uses Tk; optional ezdxf Qt viewers are not shipped.
+              'PySide6', 'shiboken6', 'PySide2', 'shiboken2', 'PyQt6', 'PyQt5', 'wx'],
     noarchive=False,
 )
 pyz = PYZ(a.pure)
