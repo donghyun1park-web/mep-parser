@@ -277,12 +277,14 @@ def test_mep_elevation_is_a_height_not_a_level():
 
 def test_a_riser_keeps_its_heights():
     """수직·경사 구간은 점마다 높이가 다르다. `elevation` 한 값으로 담으면 입상관이
-    천장에 눕는다 — `path3d`(계약 v3)가 있으면 점마다 싣고 그대로 되돌린다.
-    (오늘의 `mep_paths.extract_curve` 는 비평면 경로를 평탄화하는 대신 **거부**하므로
-     이 갈래는 계약이 확장될 때를 위한 것이다.)"""
+    천장에 눕는다 — 계약 v3 `path3d` 의 높이 변화를 점마다 싣고, 돌아올 때는 elevation
+    기준 상대 높이의 직선 구간으로 담는다."""
+    import geom_contract as GC
     riser = {"kind": "polyline", "points": [[0.0, 0.0], [3000.0, 0.0], [3000.0, 0.0]],
              "eid": "p:r", "elevation": 2600.0, "diameter": 100.0,
-             "path3d": [[0.0, 0.0, 2600.0], [3000.0, 0.0, 2600.0], [3000.0, 0.0, 500.0]]}
+             "path3d": {"segments": [
+                 {"type": "line", "start": [0.0, 0.0, 0.0], "end": [3000.0, 0.0, 0.0]},
+                 {"type": "line", "start": [3000.0, 0.0, 0.0], "end": [3000.0, 0.0, -2100.0]}]}}
     scene, rep = PB.to_pascal_scene(_geom({"pipe": [riser]}))
     node = _nodes_of(scene, "pipe-segment")[0]
     assert [round(p[1], 6) for p in node["path"]] == [2.6, 2.6, 0.5]
@@ -290,7 +292,9 @@ def test_a_riser_keeps_its_heights():
 
     back, _ = PB.from_pascal_scene(scene)
     r = back["elements"]["pipe"][0]
-    assert r["path3d"] == riser["path3d"] and r["elevation"] == 2600.0
+    assert r["elevation"] == 2600.0 and GC.path3d_problems(r) == []
+    assert [[round(c, 6) for c in p] for p in GC.route_points("pipe", r)] == \
+        [[0.0, 0.0, 2600.0], [3000.0, 0.0, 2600.0], [3000.0, 0.0, 500.0]]
 
 
 def test_a_flat_run_does_not_grow_a_path3d():

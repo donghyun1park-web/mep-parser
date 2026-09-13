@@ -362,7 +362,8 @@ def _outlines(records, issues, endpoint_tolerance_mm):
         rec['profile_rule_indices'] = sorted({records[i]['_profile_rule'] for i in indices})
         rec['boundary_join_tolerance_mm'] = tolerance
         rec['boundary_max_adjustment_mm'] = max(deviations, default=0.)
-        for key in ('source_length_mm', 'sampled_length_mm', 'length_basis'):
+        # 외곽선 레코드는 경로가 아니라 면이다 — 첫 경계선의 길이·경로를 물려받지 않는다.
+        for key in ('source_length_mm', 'sampled_length_mm', 'length_basis', 'path3d', 'path3d_basis'):
             rec.pop(key, None)
         rec['footprint_area_mm2'] = polygon.area
         output.append(rec)

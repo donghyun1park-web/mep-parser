@@ -260,6 +260,9 @@ def _check_mep(data, policy):
             pts = (rec.get("points") or []) if rec.get("geometry_mode") == "footprint" else _pts(rec)
             try:
                 GC.mep_dimensions(cat, rec, data.get("params"))
+                problems = GC.path3d_problems(rec)      # 계약 v3 경로가 끊겼거나 정의가 틀림
+                if problems:
+                    raise ValueError("invalid path3d: " + problems[0])
                 z0, z1 = GC.z_range(cat, rec, data.get("params"))
                 if not all(math.isfinite(z) for z in (z0, z1)) or z1 <= z0:
                     raise ValueError("invalid installation elevation")

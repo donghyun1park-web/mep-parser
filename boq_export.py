@@ -174,14 +174,19 @@ def aggregate(data):
                 area = _poly_area(pts) - sum(_poly_area(h) for h in m.get("holes") or [])
                 footprints.append([label, m.get("eid") or m.get("layer", ""), dims["height_mm"], round(area / 1e6, 6)])
                 continue
-            size = f"{dims['diameter']:g}" if cat == "pipe" else f"{dims['width_mm']:g}x{dims['height_mm']:g}"
+            if "diameter" in dims:                   # 배관 · 원형 덕트(v3)
+                size = f"{dims['diameter']:g}" if cat == "pipe" else f"Ø{dims['diameter']:g}"
+            else:
+                size = f"{dims['width_mm']:g}x{dims['height_mm']:g}"
             key = (label, size)
             g = mg.setdefault(key, {"count": 0, "len": 0.0})
             g["count"] += 1
             length = m.get("source_length_mm")
-            # Explicitly edited paths no longer have the source path's length.
+            # 원본 길이는 손대지 않은 원본 경로의 길이다. 편집했거나 사람이 그린 경로는
+            # 현재 모델 경로의 길이(수직·경사 구간 포함, 계약 v3)를 센다.
             if length is None or m.get("geometry_modified"):
-                length = _polyline_len(pts + [pts[0]]) if m.get("closed") and pts[0] != pts[-1] else _polyline_len(pts)
+                from geom_contract import route_length
+                length = route_length(m)
             g["len"] += float(length)
     rows = [[k[0], k[1], g["count"], round(g["len"] / 1000, 3)]
             for k, g in sorted(mg.items())]

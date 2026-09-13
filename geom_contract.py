@@ -14,9 +14,14 @@ FreeCAD·shapely 의존 없음(순수 표준 라이브러리) — 그래야 단�
     z0, z1 = z_range("slab", rec, params)
 """
 
+import bisect
 import math
 
-SCHEMA_VERSION = 2
+# v3: MEP 경로가 `path3d`(직선·원호·스플라인 구간, 점마다 높이)를 갖는다. mm·Z-up 은
+# 그대로다. v2 파일은 **좌표를 하나도 옮기지 않고** 읽힌다 — `path3d` 가 없으면 경로는
+# (평면 points, elevation) 의 직선 구간이다(`path3d_segments`).
+SCHEMA_VERSION = 3
+COMPATIBLE_VERSIONS = (2, 3)
 
 # ── z 기준면(datum) ────────────────────────────────────────────────────────
 #   bottom : z_base 가 아랫면. 위로 height 만큼 올라간다.
@@ -109,6 +114,20 @@ MEP_DIM_ALIASES = {
     'duct': {'width_mm': ('width_mm', 'width'), 'height_mm': ('height_mm', 'height')},
     'tray': {'width_mm': ('width_mm', 'width'), 'height_mm': ('height_mm', 'height')},
 }
+# 원형 덕트(v3). `width` 별칭은 두지 않는다 — 사각 덕트의 폭 선언이 모양을 바꾸는
+# 순간 지름으로 읽히면 조용히 다른 크기가 된다.
+ROUND_DIM_ALIASES = {'diameter': ('diameter', 'outside_diameter_mm', 'diameter_mm')}
+SECTION_SHAPES = ('round', 'rect')
+
+
+def section_shape(category, rec):
+    """단면 모양. 배관은 원형뿐이고, 덕트·트레이는 선언이 없으면 사각(v2 와 같다)."""
+    shape = (rec.get('overrides') or {}).get('section_shape', rec.get('section_shape'))
+    if shape is None:
+        return 'round' if category == 'pipe' else 'rect'
+    if shape not in SECTION_SHAPES or (category == 'pipe' and shape != 'round'):
+        raise ContractError(f'{category}: unsupported section shape {shape!r}')
+    return shape
 
 
 def mep_dimensions(category, rec, params=None):
@@ -116,15 +135,19 @@ def mep_dimensions(category, rec, params=None):
 
     A nominal designation (e.g. PB15A) never becomes an outside diameter.
     Legacy records may use defaults; explicitly unknown profile dimensions may not.
+    Round ducts/trays return ``{'diameter': ...}``; rectangular ones width/height.
     """
-    aliases = MEP_DIM_ALIASES
-    if category not in aliases:
+    if category not in MEP_DIM_ALIASES:
         raise ContractError('Not a linear MEP category: ' + str(category))
     if rec.get('dimension_status') == 'unknown':
         raise ContractError('MEP outside dimensions are unresolved')
-    sources = [rec.get('overrides') or {}, rec, (params or {}).get(category) or {}, DEFAULT_DIMS[category]]
+    aliases = MEP_DIM_ALIASES[category]
+    defaults = DEFAULT_DIMS[category]
+    if category != 'pipe' and section_shape(category, rec) == 'round':
+        aliases, defaults = ROUND_DIM_ALIASES, {}      # 원형 덕트 지름은 기본값으로 때우지 않는다
+    sources = [rec.get('overrides') or {}, rec, (params or {}).get(category) or {}, defaults]
     result = {}
-    for key, names in aliases[category].items():
+    for key, names in aliases.items():
         if key == 'width_mm' and rec.get('geometry_mode') == 'footprint':
             continue  # The actual polygon defines plan width; no nominal width is invented.
         value = next((source[name] for source in sources for name in names if source.get(name) is not None), None)
@@ -252,15 +275,522 @@ def z_range(category, rec, params=None):
         t = _dim(category, "thickness", rec, params)
         return (z - t, z)
 
-    # axis — 단면 중심이 elevation
+    # axis — 단면 중심이 elevation. 3D 경로(v3)는 점마다 높이가 달라 전체 범위를 준다.
     dims = mep_dimensions(category, rec, params)
-    half = dims['diameter' if category == 'pipe' else 'height_mm'] / 2.0
-    return (z - half, z + half)
+    half = dims['diameter' if 'diameter' in dims else 'height_mm'] / 2.0
+    lo, hi = path3d_dz_range(rec)
+    return (z + lo - half, z + hi + half)
 
 
 def z_range_for(data, category, rec):
     """geometry.json 전체를 받아 params 를 자동으로 꺼내 쓰는 편의 함수."""
     return z_range(category, rec, data.get("params"))
+
+
+# ── MEP 경로(계약 v3) ─────────────────────────────────────────────────────
+# 배관·덕트·트레이의 **현재 형상**은 `path3d.segments` 다. 화면·빌더가 쓰는 샘플 점은
+# 여기서 파생된다(`sample_segments`) — 원호를 작은 직선으로 바꿔 저장하지 않는다.
+#
+#   {"type": "line",   "start": [x,y,dz], "end": [x,y,dz]}
+#   {"type": "arc",    "start": [..], "end": [..], "center": [..], "normal": [nx,ny,nz]}
+#        start→end 는 normal 둘레 **반시계**(오른손). 전원(全圓)은 start == end.
+#   {"type": "spline", "degree": p, "control_points": [[x,y,dz],..], "knots": [..],
+#                      "weights": [..]}   ← 없으면 전부 1(비유리)
+#
+# ★ z 는 부재 `elevation`(중심축)에서의 **상대값**이다. 그래서 설치 높이 규칙(프로필
+#   placement · `top:` 선언 · overrides.elevation)이 여전히 한 손잡이이고, 경로 전체를
+#   위아래로 옮긴 편집은 v2 처럼 elevation 선언 하나로 남는다. DXF 평면도에서 온 경로는
+#   전부 dz = 0 이다. 모든 소비자는 `route_points()` 로 절대 좌표를 받는다.
+ROUTE_CATS = ("pipe", "duct", "tray")
+ROUTE_SEGMENT_TYPES = ("line", "arc", "spline")
+ROUTE_CHORD_MM = 0.5            # 빌더 기본 현오차(mm). 화면은 더 거칠게 써도 된다.
+_EPS = 1e-9
+_UP = (0.0, 0.0, 1.0)
+
+
+def _p3(p):
+    return [float(p[0]), float(p[1]), float(p[2]) if len(p) > 2 else 0.0]
+
+
+def _sub(a, b):
+    return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+
+
+def _add(a, b):
+    return [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+
+
+def _mul(a, s):
+    return [a[0] * s, a[1] * s, a[2] * s]
+
+
+def _dot(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def _cross(a, b):
+    return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+
+
+def _norm(a):
+    return math.sqrt(_dot(a, a))
+
+
+def _unit(a):
+    n = _norm(a)
+    if n < _EPS:
+        raise ContractError("zero-length direction")
+    return [a[0] / n, a[1] / n, a[2] / n]
+
+
+def path3d_segments(rec):
+    """현재 경로의 해석 구간(상대 z, mm).
+
+    `path3d` 가 없으면 v2 평면 경로(points)의 직선 구간이다 — **무이동 변환**.
+    닫힌 경로는 마지막 점에서 첫 점으로 닫는다(빌더가 하던 그대로)."""
+    p3 = rec.get("path3d")
+    if p3:
+        segs = p3.get("segments") if isinstance(p3, dict) else None
+        if not segs:
+            raise ContractError("path3d.segments is required")
+        for s in segs:
+            if s.get("type") not in ROUTE_SEGMENT_TYPES:
+                raise ContractError(f"unsupported path3d segment {s.get('type')!r}")
+        return segs
+    pts = rec.get("centerline") or rec.get("points") or []
+    if rec.get("closed") and len(pts) > 2 and math.dist(pts[0][:2], pts[-1][:2]) > _EPS:
+        pts = list(pts) + [pts[0]]
+    return [{"type": "line", "start": [float(a[0]), float(a[1]), 0.0],
+             "end": [float(b[0]), float(b[1]), 0.0]}
+            for a, b in zip(pts, pts[1:]) if math.dist(a[:2], b[:2]) > _EPS]
+
+
+def _arc_frame(s):
+    """원호 → (중심, u, v, 반지름, 회전각). u 는 중심→시작, v = normal × u."""
+    c, a, b = _p3(s["center"]), _p3(s["start"]), _p3(s["end"])
+    n = _unit(_p3(s["normal"]))
+    ua, ub = _sub(a, c), _sub(b, c)
+    r = _norm(ua)
+    tol = max(1e-6, r * 1e-6)
+    if r < _EPS or abs(_norm(ub) - r) > tol:
+        raise ContractError("arc start/end do not lie on one circle")
+    if abs(_dot(ua, n)) > tol or abs(_dot(ub, n)) > tol:
+        raise ContractError("arc points are not in the plane of its normal")
+    u = _mul(ua, 1.0 / r)
+    v = _cross(n, u)
+    theta = math.atan2(_dot(ub, v), _dot(ub, u))
+    if theta <= 1e-12:
+        theta += 2.0 * math.pi                  # start == end → 전원
+    return c, u, v, r, theta
+
+
+def _nurbs(s):
+    p = int(s["degree"])
+    ctrl = [_p3(q) for q in s["control_points"]]
+    knots = [float(k) for k in s["knots"]]
+    w = [float(x) for x in (s.get("weights") or [1.0] * len(ctrl))]
+    if p < 1 or len(ctrl) <= p or len(knots) != len(ctrl) + p + 1 or len(w) != len(ctrl):
+        raise ContractError("inconsistent spline degree/control points/knots/weights")
+    if any(not math.isfinite(x) or x <= 0 for x in w):
+        raise ContractError("spline weights must be positive")
+    if any(b < a for a, b in zip(knots, knots[1:])):
+        raise ContractError("spline knots must be non-decreasing")
+    return p, ctrl, knots, w
+
+
+def _nurbs_point(p, ctrl, knots, w, t):
+    """de Boor(동차 좌표) — 유리 B-스플라인 한 점."""
+    n = len(ctrl) - 1
+    k = min(max(bisect.bisect_right(knots, t) - 1, p), n)
+    d = [[ctrl[j][0] * w[j], ctrl[j][1] * w[j], ctrl[j][2] * w[j], w[j]] for j in range(k - p, k + 1)]
+    for r in range(1, p + 1):
+        for j in range(p, r - 1, -1):
+            i = j + k - p
+            den = knots[i + p - r + 1] - knots[i]
+            al = 0.0 if den == 0 else (t - knots[i]) / den
+            d[j] = [(1 - al) * d[j - 1][m] + al * d[j][m] for m in range(4)]
+    x, y, z, ww = d[p]
+    return [x / ww, y / ww, z / ww]
+
+
+def _sample_spline(s, chord):
+    p, ctrl, knots, w = _nurbs(s)
+    t0, t1 = knots[p], knots[len(ctrl)]
+    spans = sorted({k for k in knots if t0 <= k <= t1})
+    out = [_nurbs_point(p, ctrl, knots, w, t0)]
+
+    def refine(ta, pa, tb, pb, depth):
+        tm = (ta + tb) / 2.0
+        pm = _nurbs_point(p, ctrl, knots, w, tm)
+        ab = _sub(pb, pa)
+        L = _norm(ab)
+        dev = _norm(_sub(pm, pa)) if L < _EPS else _norm(_cross(_sub(pm, pa), ab)) / L
+        if depth < 18 and dev > chord:
+            refine(ta, pa, tm, pm, depth + 1)
+            refine(tm, pm, tb, pb, depth + 1)
+        else:
+            out.append(pb)
+
+    for a, b in zip(spans, spans[1:]):
+        # 매듭 구간마다 4등분에서 시작한다 — 한 번의 중점 검사로 굴곡을 놓치지 않게.
+        ts = [a + (b - a) * i / 4.0 for i in range(5)]
+        ps = [_nurbs_point(p, ctrl, knots, w, t) for t in ts]
+        for i in range(4):
+            refine(ts[i], ps[i], ts[i + 1], ps[i + 1], 0)
+    return out
+
+
+def _sample_one(s, chord):
+    t = s["type"]
+    if t == "line":
+        return [_p3(s["start"]), _p3(s["end"])]
+    if t == "arc":
+        c, u, v, r, theta = _arc_frame(s)
+        step = 2.0 * math.acos(max(-1.0, 1.0 - min(chord / r, 1.0)))
+        n = max(1, math.ceil(theta / step))
+        return [_add(c, _add(_mul(u, r * math.cos(theta * i / n)), _mul(v, r * math.sin(theta * i / n))))
+                for i in range(n + 1)]
+    return _sample_spline(s, chord)
+
+
+def sample_segments(segments, chord_error_mm=ROUTE_CHORD_MM, dz=0.0):
+    """구간 → 샘플 점 [[x,y,z],..](연속 중복 제거). `dz` 를 z 에 더한다."""
+    if not (chord_error_mm > 0):
+        raise ContractError("chord error must be positive")
+    out = []
+    for s in segments:
+        for p in _sample_one(s, chord_error_mm):
+            q = [p[0], p[1], p[2] + dz]
+            if not out or math.dist(out[-1], q) > _EPS:
+                out.append(q)
+    return out
+
+
+def route_points(category, rec, chord_error_mm=ROUTE_CHORD_MM):
+    """MEP 경로의 **절대** 3D 샘플 점(mm). 모든 빌더·다리가 이것을 쓴다."""
+    return sample_segments(path3d_segments(rec), chord_error_mm, base_z(category, rec))
+
+
+def path3d_dz_range(rec):
+    """경로 상대 높이 범위 (min, max). v2 평면 경로는 (0, 0)."""
+    if not rec.get("path3d"):
+        return (0.0, 0.0)
+    zs = [p[2] for p in sample_segments(path3d_segments(rec))]
+    return (min(zs), max(zs)) if zs else (0.0, 0.0)
+
+
+def is_planar_polyline_route(rec):
+    """직선 구간만 있고 모두 dz = 0 인가 — v2 빌더 경로를 그대로 써도 되는 경우."""
+    return all(s["type"] == "line" and abs(_p3(s["start"])[2]) <= _EPS and abs(_p3(s["end"])[2]) <= _EPS
+               for s in path3d_segments(rec))
+
+
+def segment_length(s):
+    """구간 길이(mm). 직선·원호는 해석값, 스플라인은 0.001mm 현오차 샘플의 길이.
+
+    ★ 꺾은선은 곡선보다 늘 짧다(상대오차 ≈ 현오차/3R). 0.01mm 로는 R1000 에서
+      1.6e-6 이 모자랐다 — 원본 길이를 소수 여섯째 자리까지 대조하는 검사가 있다."""
+    if s["type"] == "line":
+        return math.dist(_p3(s["start"]), _p3(s["end"]))
+    if s["type"] == "arc":
+        _c, _u, _v, r, theta = _arc_frame(s)
+        return r * theta
+    pts = _sample_spline(s, 0.001)
+    return sum(math.dist(a, b) for a, b in zip(pts, pts[1:]))
+
+
+def route_length(rec):
+    """현재 모델 길이(mm, 수직 구간 포함). 원본 길이는 `source_length_mm` 가 따로 들고 있다."""
+    return sum(segment_length(s) for s in path3d_segments(rec))
+
+
+def route_length_basis(rec):
+    return ("evaluated_curve_approximation"
+            if any(s["type"] == "spline" for s in path3d_segments(rec)) else "analytic")
+
+
+def reverse_segments(segments):
+    """경로 방향 뒤집기 — 원호는 법선을, 스플라인은 매듭을 함께 뒤집는다."""
+    out = []
+    for s in reversed(segments):
+        q = dict(s)
+        if s["type"] in ("line", "arc"):
+            q["start"], q["end"] = s["end"], s["start"]
+            if s["type"] == "arc":
+                q["normal"] = [-float(c) for c in s["normal"]]
+        else:
+            k = [float(x) for x in s["knots"]]
+            c = k[0] + k[-1]
+            q["knots"] = [c - x for x in reversed(k)]
+            q["control_points"] = list(reversed(s["control_points"]))
+            if s.get("weights"):
+                q["weights"] = list(reversed(s["weights"]))
+        out.append(q)
+    return out
+
+
+def translate_segments(segments, delta):
+    """구간 평행이동 — 모양(원호·스플라인)을 그대로 두고 옮긴다."""
+    d = _p3(delta)
+
+    def mv(p):
+        p = _p3(p)
+        return [p[0] + d[0], p[1] + d[1], p[2] + d[2]]
+
+    out = []
+    for s in segments:
+        q = dict(s)
+        for key in ("start", "end", "center"):
+            if key in q:
+                q[key] = mv(q[key])
+        if "control_points" in q:
+            q["control_points"] = [mv(p) for p in q["control_points"]]
+        out.append(q)
+    return out
+
+
+def polyline_segments(points):
+    """3D 점열 → 직선 구간(편집으로 모양이 바뀐 경로)."""
+    pts = [_p3(p) for p in points]
+    return [{"type": "line", "start": a, "end": b}
+            for a, b in zip(pts, pts[1:]) if math.dist(a, b) > _EPS]
+
+
+def path3d_problems(rec, tol_mm=1e-6):
+    """path3d 가 정의대로인가. 빈 목록이면 정상. 구간끼리 끊겨 있으면 그 자리를 말한다."""
+    if not rec.get("path3d"):
+        return []
+    try:
+        segs = path3d_segments(rec)
+        ends = []
+        for s in segs:
+            pts = _sample_one(s, 1.0)
+            ends.append((pts[0], pts[-1]))
+    except (ContractError, KeyError, TypeError, ValueError) as exc:
+        return [str(exc)]
+    return [f"segment {i} starts {math.dist(ends[i - 1][1], ends[i][0]):.6f} mm from segment {i - 1}"
+            for i in range(1, len(ends)) if math.dist(ends[i - 1][1], ends[i][0]) > tol_mm]
+
+
+# ── 단면 ────────────────────────────────────────────────────────────────────
+def mep_section(category, rec, params=None):
+    """단면 한 벌 — 모양 · 치수(mm) · roll(라디안). 빌더·다리가 모두 이것을 쓴다."""
+    dims = mep_dimensions(category, rec, params)
+    ov = rec.get("overrides") or {}
+    roll = ov.get("section_roll", rec.get("section_roll", 0.0))
+    return dict(dims, shape=section_shape(category, rec), roll=float(roll or 0.0))
+
+
+def section_axes(direction, roll=0.0):
+    """사각 단면의 (폭 축, 높이 축).
+
+    Pascal `rectSectionAxes` 를 우리 축으로 옮긴 것이다 — roll 0 에서 폭은 수평이고
+    연직 구간은 world X 로 떨어진다. 다리가 (x,y,z) → (x,z,y) 로 축을 맞바꿔도
+    **같은 roll 값이 같은 단면**을 뜻하도록 거울상까지 반영했다."""
+    d = _unit(_p3(direction))
+    w0 = _cross(d, _UP)
+    w0 = [1.0, 0.0, 0.0] if _norm(w0) < 1e-4 else _unit(w0)
+    h0 = _unit(_cross(d, w0))
+    c, s = math.cos(roll), math.sin(roll)
+    return (_add(_mul(w0, c), _mul(h0, s)), _add(_mul(w0, -s), _mul(h0, c)))
+
+
+def _rotate_min(v, a, b):
+    """a → b 최소 회전을 v 에 적용(로드리게스)."""
+    k = _cross(a, b)
+    s, c = _norm(k), _dot(a, b)
+    if s < 1e-12:
+        if c > 0:
+            return list(v)
+        raise ContractError("route reverses direction (180 degree turn)")
+    k = _mul(k, 1.0 / s)
+    return _add(_add(_mul(v, c), _mul(_cross(k, v), s)), _mul(k, _dot(k, v) * (1.0 - c)))
+
+
+def _dedup3(points, tol=1e-6):
+    pts = []
+    for p in points:
+        q = _p3(p)
+        if not pts or math.dist(pts[-1], q) > tol:
+            pts.append(q)
+    return pts
+
+
+def _rect_corners(p, w, h, hw, hh):
+    return [_add(p, _add(_mul(w, sx * hw), _mul(h, sy * hh)))
+            for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
+
+
+def _rect_ring_list(pts, width, height, roll, closed):
+    """(내부) 한 조각의 링. 끝은 직각, 꺾인 점은 마이터, closed 면 고리(첫 링을 끝에 한 번 더)."""
+    n = len(pts)
+    dirs = [_unit(_sub(pts[(i + 1) % n], pts[i])) for i in range(n if closed else n - 1)]
+    hw, hh = float(width) / 2.0, float(height) / 2.0
+
+    def mitre(p, a, b, w, h, along):
+        # (w, h) 는 `along`(a 또는 b)에 수직인 단면 — 그 방향으로 이등분면에 투영한다.
+        m = _add(a, b)
+        if _norm(m) < 1e-9:
+            raise ContractError("route reverses direction (180 degree turn)")
+        nrm = _unit(m)
+        return [_sub(c, _mul(along, _dot(_sub(c, p), nrm) / _dot(along, nrm)))
+                for c in _rect_corners(p, w, h, hw, hh)]
+
+    w0, h0 = section_axes(dirs[0], roll)
+    w, h = w0, h0
+    rings = [mitre(pts[0], dirs[-1], dirs[0], w, h, dirs[0]) if closed else _rect_corners(pts[0], w, h, hw, hh)]
+    for i in range(1, n if closed else n - 1):
+        a, b = dirs[i - 1], dirs[i]
+        rings.append(mitre(pts[i], a, b, w, h, a))
+        w, h = _rotate_min(w, a, b), _rotate_min(h, a, b)
+    if closed:
+        w, h = _rotate_min(w, dirs[-1], dirs[0]), _rotate_min(h, dirs[-1], dirs[0])
+        if math.dist(w, w0) > 1e-6 or math.dist(h, h0) > 1e-6:
+            # 비평면 고리는 한 바퀴 돌면 단면이 비틀린 채 돌아온다 — 억지로 잇지 않는다.
+            raise ContractError("closed rectangular route twists around its loop")
+        rings.append([list(p) for p in rings[0]])
+    else:
+        rings.append(_rect_corners(pts[-1], w, h, hw, hh))
+    return rings
+
+
+def rect_rings(points, width, height, roll=0.0):
+    """사각 단면을 경로 따라 옮긴 링들(각 4점, mm). 끝은 직각, 꺾인 점은 마이터.
+
+    ★ 단면 방향은 첫 구간의 `section_axes` 를 **최소 회전으로 전달**한다 — 구간마다
+      새로 정하면 연직 구간에서 world X 로 떨어져 비틀리고, 그러면 꺾인 점의 두
+      단면이 맞지 않아 틈이 난다. 수평 경로에서는 구간마다 정한 것과 같다.
+    닫힌 경로(첫 점 == 끝 점)는 모든 꼭짓점을 마이터로 잇는다 — 끝에 뚜껑 둘을 겹쳐
+    두면 한 자리에 반대 방향 면이 생긴다. 닫혔다는 표시로 첫 링을 끝에 한 번 더 넣는다.
+    짧은 급꺾임에서는 관이 뒤집힐 수 있다 — 빌더는 `rect_parts` 를 쓴다."""
+    pts = _dedup3(points)
+    if len(pts) < 2:
+        return []
+    closed = len(pts) > 3 and math.dist(pts[0], pts[-1]) <= 1e-6
+    return _rect_ring_list(pts[:-1] if closed else pts, width, height, roll, closed)
+
+
+def inverted_segments(rings, points, closed=None):
+    """옆 모서리 길이가 0 이하가 되는 구간 번호 — 양 끝 마이터 면이 단면 안에서 교차했다."""
+    pts = _dedup3(points)
+    if closed is None:
+        closed = len(pts) > 3 and math.dist(pts[0], pts[-1]) <= 1e-6
+    body = pts[:-1] if closed else pts
+    n = len(body)
+    bad = []
+    for i in range(n if closed else n - 1):
+        d = _unit(_sub(body[(i + 1) % n], body[i]))
+        if any(_dot(_sub(rings[i + 1][k], rings[i][k]), d) <= 1e-6 for k in range(4)):
+            bad.append(i)
+    return bad
+
+
+def rect_parts(points, width, height, roll=0.0):
+    """사각 관을 **뒤집히지 않는 조각들**로 — [링 목록, ...]. 빌더는 이것을 쓴다.
+
+    ★ 짧은 구간에서 급하게 꺾이면 양 끝 마이터 면이 단면 안에서 교차해 관이 뒤집힌다
+      (실측: 폭 200mm 덕트가 188mm 구간에서 118°). 그 구간은 앞뒤를 **직각으로 끊은
+      독립 토막**으로 만든다 — 그 자리는 실제로 직관이 아니라 피팅이다. 토막을 넘어서도
+      단면 방향은 최소 회전으로 이어진다. 조각 길이의 합 = 경로 길이라 기대 부피
+      (길이 × 단면적)는 그대로다."""
+    pts = _dedup3(points)
+    if len(pts) < 2:
+        return []
+    whole = rect_rings(pts, width, height, roll)
+    if not inverted_segments(whole, pts):
+        return [whole]
+    # 닫힌 고리도 첫 점에서 끊어 열린 꺾은선으로 조각낸다(드문 경우).
+    open_rings = _rect_ring_list(pts, width, height, roll, False)
+    bad = set(inverted_segments(open_rings, pts, closed=False))
+    dirs = [_unit(_sub(b, a)) for a, b in zip(pts, pts[1:])]
+    frames = [section_axes(dirs[0], roll)]
+    for a, b in zip(dirs, dirs[1:]):
+        w, h = frames[-1]
+        frames.append((_rotate_min(w, a, b), _rotate_min(h, a, b)))
+    hw, hh = float(width) / 2.0, float(height) / 2.0
+    parts, cur = [], None
+    for i in range(len(dirs)):
+        if i in bad:
+            if cur is not None:
+                cur.append(_rect_corners(pts[i], *frames[i - 1], hw, hh))
+                parts.append(cur)
+                cur = None
+            parts.append([_rect_corners(pts[i], *frames[i], hw, hh),
+                          _rect_corners(pts[i + 1], *frames[i], hw, hh)])
+            continue
+        if cur is None:
+            cur = [_rect_corners(pts[i], *frames[i], hw, hh)]
+        if i == len(dirs) - 1 or (i + 1) in bad:
+            cur.append(_rect_corners(pts[i + 1], *frames[i], hw, hh))
+            parts.append(cur)
+            cur = None
+        else:
+            cur.append(open_rings[i + 1])          # 마이터 링은 한 조각 계산과 같다
+    return parts
+
+
+def _signed_volume(verts, faces):
+    vol = 0.0
+    for f in faces:
+        a = verts[f[0]]
+        for i in range(1, len(f) - 1):
+            vol += _dot(a, _cross(verts[f[i]], verts[f[i + 1]])) / 6.0
+    return vol
+
+
+def rect_sweep_mesh(rings):
+    """링 → 닫힌 사각 관 메시(verts, 사각형 faces). 면 방향은 바깥쪽.
+
+    `rect_rings` 가 닫힌 경로로 표시한 링(첫 링 == 끝 링)은 고리로 잇고 뚜껑을 달지 않는다."""
+    closed = len(rings) > 2 and all(math.dist(p, q) <= 1e-9 for p, q in zip(rings[0], rings[-1]))
+    body = rings[:-1] if closed else rings
+    m = len(body)
+    verts = [list(p) for ring in body for p in ring]
+    faces = []
+    for i in range(m if closed else m - 1):
+        o, q = 4 * i, 4 * ((i + 1) % m)
+        for k in range(4):
+            k2 = (k + 1) % 4
+            faces.append([o + k, o + k2, q + k2, q + k])
+    if not closed:
+        last = 4 * (m - 1)
+        faces.append([3, 2, 1, 0])
+        faces.append([last, last + 1, last + 2, last + 3])
+    if _signed_volume(verts, faces) < 0:
+        faces = [list(reversed(f)) for f in faces]
+    return verts, faces
+
+
+# ── 네이티브 빌더용 해석 곡선 접근자(FreeCAD 가 원호·스플라인을 샘플 없이 만든다) ──
+def arc_sweep(s):
+    """원호 회전각(라디안, (0, 2π])."""
+    return _arc_frame(s)[4]
+
+
+def arc_point(s, fraction):
+    """원호 위 점 — 회전각의 `fraction`(0~1) 자리."""
+    c, u, v, r, theta = _arc_frame(s)
+    a = theta * float(fraction)
+    return _add(c, _add(_mul(u, r * math.cos(a)), _mul(v, r * math.sin(a))))
+
+
+def nurbs_definition(s):
+    """스플라인 → (차수, 제어점, 매듭, 가중치). 정합성 검사를 거친 값이다."""
+    return _nurbs(s)
+
+
+def start_tangent(segments):
+    """경로 시작점의 **접선** 단위벡터. 원 단면을 여기에 수직으로 놓는다 — 첫 구간의
+    현(chord)에 수직으로 놓으면 곡선으로 시작하는 관이 기울어 찌그러진다."""
+    s = segments[0]
+    if s["type"] == "line":
+        return _unit(_sub(_p3(s["end"]), _p3(s["start"])))
+    if s["type"] == "arc":
+        return _arc_frame(s)[2]                       # d/dt(c + r(cos t·u + sin t·v)) at 0 ∝ v
+    p, ctrl, knots, w = _nurbs(s)
+    t0, t1 = knots[p], knots[len(ctrl)]
+    dt = (t1 - t0) * 1e-7
+    return _unit(_sub(_nurbs_point(p, ctrl, knots, w, t0 + dt), _nurbs_point(p, ctrl, knots, w, t0)))
 
 
 # ── 폴리곤 감김 정규화 ─────────────────────────────────────────────────────
@@ -338,7 +868,7 @@ def check_contract(data):
     c = data.get("contract")
     if c:
         v = c.get("version")
-        if v != SCHEMA_VERSION:
+        if v not in COMPATIBLE_VERSIONS:
             issues.append(f"계약 버전 불일치: 파일 {v} vs 코드 {SCHEMA_VERSION}")
         for cat, dat in (c.get("z_datum") or {}).items():
             if Z_DATUM.get(cat) != dat:
@@ -369,11 +899,18 @@ def js_constants():
         "  if (params && params[cat] && params[cat][key] != null) return +params[cat][key];\n"
         "  return +(((DEFAULT_DIMS[cat]||{})[key]) || 0);\n"
         "}\n"
+        f"const MEP_DIM_ALIASES = {_json.dumps(MEP_DIM_ALIASES)};\n"
+        f"const ROUND_DIM_ALIASES = {_json.dumps(ROUND_DIM_ALIASES)};\n"
+        "function gcSectionShape(cat, rec){\n"
+        "  const s = (rec.overrides||{}).section_shape ?? rec.section_shape;\n"
+        "  return s == null ? (cat==='pipe'?'round':'rect') : s;\n"
+        "}\n"
         "function gcMepDimensions(cat, rec, params){\n"
-        "  const aliases = {pipe:{diameter:['diameter','outside_diameter_mm','diameter_mm','width']},duct:{width_mm:['width_mm','width'],height_mm:['height_mm','height']},tray:{width_mm:['width_mm','width'],height_mm:['height_mm','height']}};\n"
-        "  if (!aliases[cat] || rec.dimension_status === 'unknown') throw new Error('Unresolved MEP dimensions');\n"
-        "  const sources=[rec.overrides||{},rec,(params||{})[cat]||{},DEFAULT_DIMS[cat]], out={};\n"
-        "  for(const [key,names] of Object.entries(aliases[cat])){\n"
+        "  if (!MEP_DIM_ALIASES[cat] || rec.dimension_status === 'unknown') throw new Error('Unresolved MEP dimensions');\n"
+        "  const round = cat !== 'pipe' && gcSectionShape(cat, rec) === 'round';\n"
+        "  const aliases = round ? ROUND_DIM_ALIASES : MEP_DIM_ALIASES[cat];\n"
+        "  const sources=[rec.overrides||{},rec,(params||{})[cat]||{},round?{}:DEFAULT_DIMS[cat]], out={};\n"
+        "  for(const [key,names] of Object.entries(aliases)){\n"
         "    if(key==='width_mm' && rec.geometry_mode==='footprint') continue;\n"
         "    let value; outer: for(const source of sources){ for(const name of names){ if(source[name]!=null){value=source[name];break outer;} } }\n"
         "    if(typeof value==='boolean' || !Number.isFinite(+value) || +value<=0) throw new Error('Invalid MEP dimension: '+key);\n"
@@ -387,7 +924,7 @@ def js_constants():
         "  if (d === 'bottom') return [z, z + gcDim(cat,'height',rec,params)];\n"
         "  if (d === 'top')    return [z - gcDim(cat,'thickness',rec,params), z];\n"
         "  const dims=gcMepDimensions(cat,rec,params);\n"
-        "  const half=(cat==='pipe'?dims.diameter:dims.height_mm)/2;\n"
+        "  const half=(dims.diameter!=null?dims.diameter:dims.height_mm)/2;\n"
         "  return [z - half, z + half];\n"
         "}\n"
         # 폭 규약을 JS 가 다시 구현하지 않게 주입한다. 종전엔 preview 가 두 곳에서

@@ -43,7 +43,7 @@ source slab 외곽이 없으면 `floor_footprint_not_available` 진단을 표시
 - 호스트 Python에서 Shapely 2.1 이상으로 메시 payload를 준비한다. Blender의 Python에 Shapely를 별도로 설치할 필요가 없다. constrained Delaunay 지원이 없으면 준비 단계가 명시적으로 실패한다.
 - Polygon 외곽·구멍의 감김을 정규화하고 constrained Delaunay로 상·하면을 만든다. 공선 꼭짓점을 임의 삭제하지 않고 모든 ring의 측면과 대응시킨다. 모든 모서리가 두 면에 사용되는지와 방향·체적을 검사한다.
 - 난방관은 편집 가능한 Blender Curve다. 직경을 화면상 잘 보이게 부풀리지 않는다. 짝수 bevel resolution을 사용하고 평가된 실제 메시의 상·하단을 다시 측정한다.
-- 사각 경로는 수평 평면에서 miter를 갖는 연속 외곽을 만든 뒤 높이 압출한다. 수직·경사 덕트, 제작용 피팅, 내부 유체 공간이나 판 두께를 구현한 모델은 아니다.
+- 사각 경로 중 평면 직선 경로는 수평 평면에서 miter를 갖는 연속 외곽을 만든 뒤 높이 압출한다. 수직·경사·곡선 경로(계약 v3 `path3d`)는 `geom_contract.rect_parts`의 마이터 링으로 닫힌 관을 만든다 — FreeCAD와 같은 링이다. 제작용 피팅, 내부 유체 공간이나 판 두께를 구현한 모델은 아니다.
 - 기본 `MEP_EXPOSED` 장면에서는 최상부 바닥층을 숨겨 배관을 검토하고, `MEP_COVERED`에서 모든 바닥층을 확인한다. 원본 없는 건축·장비·플렉시블을 추가 생성하지 않는다.
 - zone과 opening은 독립 물리 솔리드로 만들지 않고 입력과 진단에 보존한다. 임의 Boolean 벽체 타공은 수행하지 않는다.
 

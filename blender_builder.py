@@ -118,15 +118,41 @@ def prepare_payload(data):
                         diagnostics.append({'code': 'dimension_default_used', 'eid': eid, 'field': key,
                             'value': dims[key], 'message': 'Existing contract default; specification is not confirmed.'})
                 base['dimensions_mm'] = dims
-            if cat == 'pipe':
-                if len(points) < 2 or sum(math.dist(a, b) for a, b in zip(points, points[1:])) <= 0:
-                    raise ValueError(f'Empty pipe path: {eid}')
-                if rec.get('closed') and points[-1] != points[0]:
-                    points = points + [points[0]]
-                base.update(kind='curve', radius_m=dims['diameter']/2000,
-                    points_m=[[(p[0]-origin[0])/1000, (p[1]-origin[1])/1000, (z0+z1)/2000] for p in points])
-                objects.append(base)
-                continue
+            if cat in GC.ROUTE_CATS and rec.get('geometry_mode') != 'footprint':
+                # 계약 v3: 경로는 `route_points`(점마다 절대 높이), 단면은 `mep_section` 하나다.
+                # FreeCAD·Pascal 이 같은 두 함수를 쓰므로 출력끼리 경로·단면 방향이 갈리지 않는다.
+                problems = GC.path3d_problems(rec)
+                if problems:
+                    raise ValueError(f'Invalid path3d for {eid}: {problems[0]}')
+                section = GC.mep_section(cat, rec, params)
+                route = GC.route_points(cat, rec)
+                if len(route) < 2 or sum(math.dist(a, b) for a, b in zip(route, route[1:])) <= 0:
+                    raise ValueError(f'Empty {cat} path: {eid}')
+                if 'diameter' in section:            # 배관·원형 덕트 — 원형 bevel 곡선
+                    base.update(kind='curve', radius_m=section['diameter']/2000,
+                        points_m=[[(p[0]-origin[0])/1000, (p[1]-origin[1])/1000, p[2]/1000] for p in route])
+                    objects.append(base)
+                    continue
+                if not GC.is_planar_polyline_route(rec):
+                    # 수직·경사·곡선 사각 경로 — 공통 마이터 링으로 닫힌 관을 만든다. 기대 부피는
+                    # 샘플 꺾은선 길이 × 단면적이다(마이터 관에서 정확히 성립한다).
+                    from blender_verify import validate_mesh_payload
+                    # 짧은 급꺾임은 뒤집히지 않게 직각 토막으로 나뉘어 온다 — 한 객체의 여러 닫힌 셸로 싣는다.
+                    verts, faces = [], []
+                    for part in GC.rect_parts(route, section['width_mm'], section['height_mm'], section['roll']):
+                        pv, pf = GC.rect_sweep_mesh(part)
+                        faces += [[k + len(verts) for k in f] for f in pf]
+                        verts += pv
+                    length = sum(math.dist(a, b) for a, b in zip(route, route[1:]))
+                    mesh = {'kind': 'mesh', 'faces': faces,
+                            'vertices_m': [[(p[0]-origin[0])/1000, (p[1]-origin[1])/1000, (p[2]-origin[2])/1000]
+                                           for p in verts],
+                            'expected_volume_m3': length * section['width_mm'] * section['height_mm'] / 1e9}
+                    validate_mesh_payload(mesh)
+                    base.update(mesh, sweep_width_mm=section['width_mm'], section_roll=section['roll'],
+                                geometry_method='route_mitre_sweep_3d')
+                    objects.append(base)
+                    continue
             if rec.get('kind') == 'circle':
                 center = _xy([rec['center']])[0]
                 radius = _number(rec['radius'], 'circle radius', True)

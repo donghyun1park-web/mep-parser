@@ -34,7 +34,8 @@ def test_closed_duct_centerline_includes_the_last_segment():
     shape.Volume=4000*100*60
     with patch.object(FB, '_rect_solid', return_value=shape) as sweep, patch.object(FB, 'set_ifc_props'):
         FB.build_mep(MagicMock(), {'duct':[rec]})
-        assert sweep.call_args.args[0] == rec['points']+[rec['points'][0]]
+        # 계약 v3: 사각 관은 절대 3D 경로(닫힌 경로는 첫 점으로 되돌아온다)를 받는다.
+        assert sweep.call_args.args[0] == [p + [0.0] for p in rec['points'] + [rec['points'][0]]]
         assert FB.MEP_VOLUME['expected_mm3'] == 4000*100*60
 
 

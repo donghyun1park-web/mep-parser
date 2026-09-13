@@ -887,157 +887,72 @@ def _pipe_solid(pts, radius, elev):
     return result
 
 
-def _sweep_rect(pts, w2, h2, elev):
-    """사각 단면을 축선 위로 마이터 스윕. 실패하면 None(호출자가 폴백을 고른다)."""
-    if len(pts) < 2:
-        return None
-    try:
-        path = Part.makePolygon([App.Vector(float(q[0]), float(q[1]), elev) for q in pts])
-        d0 = App.Vector(float(pts[1][0]) - float(pts[0][0]),
-                        float(pts[1][1]) - float(pts[0][1]), 0.0)
-        rot = App.Rotation(App.Vector(0, 0, 1), App.Vector(d0).normalize())
-        prof = Part.makePolygon([App.Vector(-w2, -h2, 0), App.Vector(w2, -h2, 0),
-                                 App.Vector(w2, h2, 0), App.Vector(-w2, h2, 0),
-                                 App.Vector(-w2, -h2, 0)])
-        prof = prof.transformed(App.Placement(
-            App.Vector(float(pts[0][0]), float(pts[0][1]), elev), rot).Matrix)
-        ps = Part.BRepOffsetAPI.MakePipeShell(path)
-        ps.setFrenetMode(True)
-        ps.setTransitionMode(1)          # RightCorner = 마이터
-        ps.add(prof, False, False)
-        ps.build()
-        ps.makeSolid()
-        sh = ps.shape()
-        if sh and not sh.isNull() and sh.isValid() and sh.Solids:
-            return sh
-    except Exception:
-        pass
-    return None
+def _rect_solid(route, width, height, roll=0.0):
+    """사각 단면 관(덕트·트레이) — `geom_contract.rect_rings` 로 만든 **평면 면**만의 솔리드.
 
-
-# 이 각도 미만의 꺾임은 중심선 잡음으로 보고 꼭짓점을 지운다(마이터 스윕 보호).
-_SWEEP_MIN_BEND_DEG = 5.0
-
-
-def _rect_solid(pts, width, height, elev):
-    """다점 중심선 → 사각단면(width×height). duct/tray 용.
-
-    ★ **스윕이 먼저다.** 세그먼트 상자를 fuse 하면 솔리드는 유효하지만 코너 이음매에
-      공면이 남는다(실측: 직선 덕트 6면 대 꺾인 덕트 36면). 그 상태로 IFC 로 나가면
-      테셀레이션에서 **비다양체**가 되어 V107 이 막는다(실측: 꺾이는 덕트 7개).
-      `MakePipeShell` + `RightCorner` 는 코너를 마이터로 이어 14면짜리 깔끔한
-      솔리드를 만들고 부피도 축선×단면과 정확히 일치한다 — 배관이 `Arch.makePipe`
-      로 얻는 것과 같은 성질이다. 실패하면 종전 fuse 로 떨어진다(없는 것보다 낫다).
+    ★ 종전 `MakePipeShell` 스윕은 단면을 +Z → 진행방향 **최소 회전**으로 놓았다. 그래서
+      x 방향 덕트는 폭과 높이가 **뒤바뀌고** 대각선 덕트는 단면이 **45° 기울었다** —
+      FreeCAD 1.1 실측(400×100 덕트의 높이 방향 크기): y 방향 100 · x 방향 400 ·
+      대각선 353.6. 부피는 그대로라 V106(부피)·V107(IFC 재검사)이 못 잡는다.
+      Blender·Pascal 과 **같은 링**을 쓰면 세 출력의 단면이 한 규약이 된다(폭은 수평,
+      꺾인 점은 마이터, 방향은 최소 회전으로 전달).
+    ★ 면을 한 셸로 꿰매므로 상자 fuse 의 공면 이음매(IFC 비다양체, 실측 V107 7건)가 없다.
+    ★ 부피는 샘플 꺾은선 길이 × 단면적과 **정확히** 같다 — 마이터 관의 성질이다.
     """
-    w2, h2 = width / 2.0, height / 2.0
-    clean = [pts[0]]
-    for q in pts[1:]:
-        if math.dist(clean[-1][:2], q[:2]) > 1e-6:
-            clean.append(q)
-    # 거의 일직선인 꼭짓점은 지운다. 2°짜리 가짜 꺾임 하나가 마이터 스윕을 깨고,
-    # 깨지면 면 많은 fuse 로 떨어져 비다양체가 된다(실측: Duct_4 가 2°·118° 를
-    # 함께 갖고 있었다). 중심선 정밀도 문제지 배관 형상이 아니다.
-    if len(clean) > 2:
-        simp = [clean[0]]
-        for k in range(1, len(clean) - 1):
-            a, b, c = simp[-1], clean[k], clean[k + 1]
-            v1 = (b[0]-a[0], b[1]-a[1]); v2 = (c[0]-b[0], c[1]-b[1])
-            n1 = math.hypot(*v1); n2 = math.hypot(*v2)
-            if n1 < 1e-9 or n2 < 1e-9:
-                continue
-            cosv = max(-1.0, min(1.0, (v1[0]*v2[0] + v1[1]*v2[1]) / (n1*n2)))
-            if math.degrees(math.acos(cosv)) >= _SWEEP_MIN_BEND_DEG:
-                simp.append(b)
-        simp.append(clean[-1])
-        clean = simp
-    swept = _sweep_rect(clean, w2, h2, elev)
-    if swept is not None:
-        return swept
-    # 통짜 스윕이 안 되면 **가장 짧은 중간 구간**에서 쪼개 각각 스윕한다.
-    # 실측: 폭 200mm 덕트가 188mm 구간에서 118° 를 돌아 마이터가 성립하지 않았다
-    # (Duct_4). 그 자리는 실제로 직관이 아니라 피팅이다 — 두 토막으로 보는 게 맞다.
-    if len(clean) >= 4:
-        k = min(range(1, len(clean) - 2),
-                key=lambda t: math.dist(clean[t][:2], clean[t + 1][:2]))
-        a = _sweep_rect(clean[:k + 1], w2, h2, elev)
-        b = _sweep_rect(clean[k + 1:], w2, h2, elev)
-        if a is not None and b is not None:
-            try:
-                both = a.fuse(b).removeSplitter()
-                if both and not both.isNull() and both.isValid():
-                    return both
-            except Exception:
-                pass
-        if a is not None and b is None:
-            return a
-        if b is not None and a is None:
-            return b
-    if False:
-        try:
-            path = Part.makePolygon([App.Vector(float(q[0]), float(q[1]), elev) for q in clean])
-            d0 = App.Vector(float(clean[1][0]) - float(clean[0][0]),
-                            float(clean[1][1]) - float(clean[0][1]), 0.0)
-            rot = App.Rotation(App.Vector(0, 0, 1), App.Vector(d0).normalize())
-            prof = Part.makePolygon([App.Vector(-w2, -h2, 0), App.Vector(w2, -h2, 0),
-                                     App.Vector(w2, h2, 0), App.Vector(-w2, h2, 0),
-                                     App.Vector(-w2, -h2, 0)])
-            prof = prof.transformed(App.Placement(
-                App.Vector(float(clean[0][0]), float(clean[0][1]), elev), rot).Matrix)
-            ps = Part.BRepOffsetAPI.MakePipeShell(path)
-            ps.setFrenetMode(True)
-            ps.setTransitionMode(1)          # RightCorner = 마이터
-            ps.add(prof, False, False)
-            ps.build()
-            ps.makeSolid()
-            swept = ps.shape()
-            if swept and not swept.isNull() and swept.isValid() and swept.Solids:
-                return swept
-        except Exception:
-            pass
-    # 단면: Z축 방향 정렬 기준 사각형(XY 평면), 이후 각 세그먼트 방향으로 회전
-    rect_pts = [App.Vector(-w2, -h2, 0), App.Vector(w2, -h2, 0),
-                App.Vector(w2,  h2, 0), App.Vector(-w2,  h2, 0),
-                App.Vector(-w2, -h2, 0)]
-    rect_wire = Part.makePolygon(rect_pts)
-    rect_face = Part.Face(rect_wire)
-    shapes = []
-    for k in range(len(pts) - 1):
-        p1 = App.Vector(float(pts[k][0]),   float(pts[k][1]),   elev)
-        p2 = App.Vector(float(pts[k+1][0]), float(pts[k+1][1]), elev)
-        seg = p2 - p1
-        ln = seg.Length
-        if ln < 1.0:
-            continue
-        # ★ `App.Vector.normalize()` 는 **제자리에서** 벡터를 바꾼다(3000 → 1.0).
-        #   회전축으로 쓴 뒤 그대로 `extrude(seg)` 에 넘기면 길이 1mm 짜리 종잇장이
-        #   나온다 — 실측: 덕트 45개가 단면 150×1, 총 부피 0.001m³(있어야 할 값의
-        #   0.04%) 였고 뷰어에서 보이지 않았다. **부피가 작아도 형상은 유효**하므로
-        #   isValid()·V103·V107 이 전부 통과한다. 사본을 정규화한다.
-        #   (`_pipe_solid` 의 같은 호출은 길이를 따로 넘기므로 무사하다.)
-        try:
-            rot = App.Rotation(App.Vector(0, 0, 1), App.Vector(seg).normalize())
-        except Exception:
-            rot = App.Rotation()
-        mat = App.Placement(p1, rot).Matrix
-        face_rot = rect_face.transformed(mat)
-        solid = face_rot.extrude(seg)
-        shapes.append(solid)
-    if not shapes:
+    solids = []
+    for part in GC.rect_parts(route, width, height, roll):
+        verts, faces = GC.rect_sweep_mesh(part)
+        V = [App.Vector(*p) for p in verts]
+        solid = Part.Solid(Part.Shell([Part.Face(Part.makePolygon([V[k] for k in f] + [V[f[0]]]))
+                                       for f in faces]))
+        if solid.Volume < 0:
+            solid.reverse()
+        solids.append(solid)
+    if not solids:
         return None
-    result = shapes[0]
-    for s in shapes[1:]:
-        result = result.fuse(s)
-    # ★ 코너에서 두 상자를 fuse 하면 이음매에 공면(coplanar) 면이 남는다. 솔리드로는
-    #   유효하지만 IFC 로 테셀레이션할 때 **비다양체**가 되어 V107 이 막는다
-    #   (실측: 꺾이는 덕트 7개가 'non-closed or non-manifold mesh'). removeSplitter
-    #   가 그 면들을 합친다. 실패하면 원본을 그대로 쓴다 — 없는 것보다 낫다.
+    # 짧은 급꺾임은 뒤집히지 않게 직각 토막으로 나뉘어 온다(`GC.rect_parts`) — 합친다.
+    shape = solids[0] if len(solids) == 1 else solids[0].fuse(solids[1:])
     try:
-        refined = result.removeSplitter()
+        refined = shape.removeSplitter()
         if refined and not refined.isNull() and refined.isValid():
             return refined
     except Exception:
         pass
-    return result
+    return shape
+
+
+def _route_wire(cat, el):
+    """계약 v3 경로 → Part.Wire(절대 z). 원호·스플라인은 **해석 곡선 그대로** 넘긴다 —
+    샘플 꺾은선으로 스윕하면 코너마다 이음매가 생기고 원본 곡률을 잃는다."""
+    segs = GC.translate_segments(GC.path3d_segments(el), [0.0, 0.0, GC.base_z(cat, el)])
+    edges = []
+    for s in segs:
+        if s["type"] == "line":
+            a, b = App.Vector(*s["start"]), App.Vector(*s["end"])
+            if (b - a).Length > 1e-6:
+                edges.append(Part.LineSegment(a, b).toShape())
+        elif s["type"] == "arc":
+            # 세 점 원호로는 전원을 못 만든다 — 1.5π 를 넘으면 반으로 나눈다.
+            parts = 2 if GC.arc_sweep(s) > 1.5 * math.pi else 1
+            for k in range(parts):
+                t0, t1 = k / parts, (k + 1) / parts
+                edges.append(Part.Arc(App.Vector(*GC.arc_point(s, t0)),
+                                      App.Vector(*GC.arc_point(s, (t0 + t1) / 2.0)),
+                                      App.Vector(*GC.arc_point(s, t1))).toShape())
+        else:
+            degree, poles, knots, weights = GC.nurbs_definition(s)
+            uniq, mults = [], []
+            for k in knots:
+                if uniq and abs(k - uniq[-1]) <= 1e-12:
+                    mults[-1] += 1
+                else:
+                    uniq.append(k)
+                    mults.append(1)
+            curve = Part.BSplineCurve()
+            curve.buildFromPolesMultsKnots([App.Vector(*p) for p in poles], mults, uniq,
+                                           False, degree, weights)
+            edges.append(curve.toShape())
+    return Part.Wire(edges) if edges else None
 
 
 def _equip_solid(pts, elev, default_h=1000.0):
@@ -1073,18 +988,20 @@ def _footprint_solid(rec, bottom, height):
 
 
 def build_mep(doc, mep_elements, params=None):
-    """MEP 중심선 → Arch 컴포넌트. **IFC MEP 타입을 달아서** 내보낸다.
+    """MEP 경로 → Arch 컴포넌트. **IFC MEP 타입을 달아서** 내보낸다.
 
     종전에는 Part::Feature 로만 만들어 IFC 에서 전부 IfcBuildingElementProxy 가 됐다.
     형상은 맞지만 뷰어(Bonsai/Navisworks)가 배관인지 덕트인지 모르니 시스템 필터도,
     카테고리별 물량도, 의미 있는 간섭 리포트도 안 나온다. MEP 가 이 프로젝트의
     차별점인데 정작 IFC 에서 정체불명이었다.
 
-    배관은 `Arch.makePipe` 가 축선을 따라 원형 단면을 스윕한다 — 다점 폴리라인을
-    한 객체로 처리하고 코너도 마이터로 잇는다(실측: 직선합 대비 체적 오차 0.07%).
-    직접 원통을 fuse 하던 것보다 형상도 낫고 IfcType 도 공짜다.
-    덕트/트레이/장비는 Arch 전용 생성자가 없으므로 기존 솔리드를 Arch 컴포넌트로
-    감싸고 IfcType 만 지정한다.
+    계약 v3: 경로는 `GC.path3d_segments`/`GC.route_points`, 단면은 `GC.mep_section`
+    하나다 — Blender·Pascal 이 같은 함수를 쓴다.
+    - 원형 단면(배관·원형 덕트)은 `Arch.makePipe` 가 축선을 스윕한다(실측: 직선합 대비
+      체적 오차 0.07%). 평면 직선 경로는 종전처럼 2D 와이어를 elevation 에 올리고,
+      원호·스플라인·수직 구간이 있으면 해석 곡선 와이어(`_route_wire`)를 준다.
+    - 사각 단면은 `_rect_solid` — 공통 마이터 링으로 만든 평면 면 솔리드.
+    - 외곽선 덕트(footprint)와 장비는 평면 외곽 압출 그대로다.
     """
     objs, src = [], []
     MEP_VOLUME.clear()
@@ -1092,51 +1009,57 @@ def build_mep(doc, mep_elements, params=None):
     for cat in ("pipe", "duct", "tray", "equipment"):
         for i, el in enumerate(mep_elements.get(cat, [])):
             elev = GC.base_z(cat, el)
-            pts = (el.get("points") if el.get("geometry_mode") == "footprint" else el.get("centerline") or el.get("points")) or []
+            footprint = el.get("geometry_mode") == "footprint"
+            pts = (el.get("points") if footprint else el.get("centerline") or el.get("points")) or []
             if len(pts) < 2:
                 continue
-            if cat in ("duct", "tray") and el.get("closed") and el.get("geometry_mode") != "footprint" and pts[-1] != pts[0]:
-                pts = pts + [pts[0]]
-            # 축선 길이 × 단면적 = 있어야 할 부피. 코너 마이터 때문에 정확하진 않지만
-            # **자릿수가 어긋나면** 형상이 퇴화했다는 뜻이다(위 normalize 사고).
-            # ★ duct/tray 만 센다 — 이 게이트가 지키는 건 `_rect_solid` 경로다.
-            #   배관은 `Arch.makePipe` 가 스윕하고(체적 오차 0.07%), 장비는 축선이
-            #   아니라 footprint 압출이라 '길이 × 단면' 이라는 기대식이 성립하지 않는다.
-            #   한쪽만 담으면 셈이 어긋난다(실측: MEP 샘플 비율 3.78 — 장비가 built
-            #   에만 들어가 있었다).
-            _len = sum(math.dist(pts[k][:2], pts[k+1][:2]) for k in range(len(pts)-1))
             label = f"{cat.capitalize()}_{i}"
             try:
-                dims = GC.mep_dimensions(cat, el, params) if cat != "equipment" else {}
-                if cat in ("duct", "tray"):
-                    if el.get("geometry_mode") == "footprint":
-                        area = GC.poly_area(pts) - sum(GC.poly_area(h) for h in el.get("holes") or [])
-                    else:
-                        area = _len * dims["width_mm"]
-                    MEP_VOLUME["expected_mm3"] += area * dims["height_mm"]
-                obj = None
-                if cat == "pipe":
-                    ax = make_wire([[p[0], p[1]] for p in pts], bool(el.get("closed")), doc=doc,
-                                   label=f"PipeAxis_{i}")
-                    if ax is None:
+                obj = shape = None
+                counted = False          # 기대 부피를 넣은 것만 실제 부피를 더한다(한쪽만 담으면 셈이 어긋난다)
+                if cat == "equipment":
+                    if not el.get("closed") or len(pts) < 3:
                         continue
-                    ax.Placement.Base.z = elev
-                    obj = Arch.makePipe(ax, diameter=dims["diameter"])
+                    shape = _equip_solid(pts, elev, GC.z_range(cat, el, params)[1] - elev)
+                elif footprint:
+                    # 축선 길이 × 단면적 = 있어야 할 부피. **자릿수가 어긋나면** 형상이 퇴화했다는
+                    # 뜻이다(normalize 사고). 사각·외곽선 duct/tray 만 센다 — 원형 단면은 스윕 몫이고,
+                    # 장비는 축선이 아니라 footprint 압출이라 기대식이 성립하지 않는다.
+                    h = GC.mep_dimensions(cat, el, params)["height_mm"]
+                    area = GC.poly_area(pts) - sum(GC.poly_area(q) for q in el.get("holes") or [])
+                    MEP_VOLUME["expected_mm3"] += area * h
+                    shape, counted = _footprint_solid(el, GC.z_range(cat, el, params)[0], h), True
                 else:
-                    if cat in ("duct", "tray"):
-                        h = dims["height_mm"]
-                        if el.get("geometry_mode") == "footprint":
-                            shape = _footprint_solid(el, GC.z_range(cat, el, params)[0], h)
-                        else:
-                            shape = _rect_solid(pts, dims["width_mm"], h, elev)
-                    else:                                   # equipment
-                        if not el.get("closed") or len(pts) < 3:
+                    section = GC.mep_section(cat, el, params)
+                    if section["shape"] == "round" and GC.is_planar_polyline_route(el):
+                        ax = make_wire([[p[0], p[1]] for p in pts], bool(el.get("closed")), doc=doc,
+                                       label=f"{cat.capitalize()}Axis_{i}")
+                        if ax is None:
                             continue
-                        shape = _equip_solid(pts, elev, GC.z_range(cat, el, params)[1] - elev)
+                        ax.Placement.Base.z = elev
+                        obj = Arch.makePipe(ax, diameter=section["diameter"])
+                    elif section["shape"] == "round":
+                        # ★ `Arch.makePipe` 는 원 단면을 첫 구간의 **현(chord)** 에 수직으로 놓는다
+                        #   (DraftGeomUtils.vec). 첫 구간이 원호·스플라인이면 단면이 기울어 관이
+                        #   찌그러진다 — FreeCAD 1.1 실측: R1000 사분원 NURBS 위 Ø100 덕트가 부피
+                        #   70.7%(= cos45°), 높이 방향 크기 190. 경로 시작 **접선**에 수직인 원으로
+                        #   해석 곡선 와이어를 직접 스윕한다(모서리는 둥근 전이).
+                        wire = _route_wire(cat, el)
+                        start = GC.route_points(cat, el)[0]
+                        circle = Part.Wire(Part.makeCircle(section["diameter"] / 2.0, App.Vector(*start),
+                                                           App.Vector(*GC.start_tangent(GC.path3d_segments(el)))))
+                        shape = wire.makePipeShell([circle], True, True, 2)
+                    else:
+                        route = GC.route_points(cat, el)
+                        length = sum(math.dist(a, b) for a, b in zip(route, route[1:]))
+                        MEP_VOLUME["expected_mm3"] += length * section["width_mm"] * section["height_mm"]
+                        shape = _rect_solid(route, section["width_mm"], section["height_mm"], section["roll"])
+                        counted = True
+                if obj is None:
                     if shape is None or not shape.isValid():
                         print(f"[warn] MEP {label} 형상 오류")
                         continue
-                    if cat in ("duct", "tray"):
+                    if counted:
                         MEP_VOLUME["built_mm3"] += shape.Volume
                     feat = doc.addObject("Part::Feature", f"MepShape_{cat}_{i}")
                     feat.Shape = shape

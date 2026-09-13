@@ -16,7 +16,7 @@
 | 파일 | 역할 |
 |------|------|
 | `dxf_parser.py` | DXF → geometry.json 파서 v2 |
-| `geom_contract.py` | **기하 계약의 단일 출처.** z 기준면 `z_range()`, 감김 정규화 `ccw()`, 보 축선→footprint `beam_rings()`. JS 소비자(preview)는 `js_constants()` 로 같은 식을 주입받는다. FreeCAD 의존 없음(단위테스트 가능) |
+| `geom_contract.py` | **기하 계약의 단일 출처.** z 기준면 `z_range()`, 감김 정규화 `ccw()`, 보 축선→footprint `beam_rings()`, MEP 경로 계약 v3(`path3d_segments`·`route_points`·`mep_section`·`rect_parts`). JS 소비자(preview)는 `js_constants()` 로 같은 식을 주입받는다. FreeCAD 의존 없음(단위테스트 가능) |
 | `verify.py` | **빌드 게이트.** `verify_geometry`(빌드 전) / `verify_build`(빌드 후). 검사 ID V001~V104. 실패 시 빌더가 마커를 출력하지 않아 산출물이 나가지 않는다 |
 | `stack_build.py` | **선언적 다층 조립.** `stack.json`(층별 dxf·z·offset) → 한 geometry.json. 통심선 offset 해결기 + 가드 3개. 파싱은 `dxf_parser.parse` 호출만 한다 |
 | `schedule_table.py` | **부재일람표(MEMBER LIST) 복원.** TEXT 격자 → 표 → `{부재명: 단면}`. `layer_map` 의 `opts: schedule=<레이어>` 로 조인 |
@@ -118,22 +118,52 @@
 아니라 **자릿수가 다른 퇴화**다. 고친 뒤 실측 비율 1.000.
 (`_pipe_solid` 의 같은 `normalize()` 호출은 길이를 별도 인자로 넘겨 무사하다.)
 
-### ★ 덕트는 **스윕**한다 — 상자 fuse 는 IFC 에서 깨진다
-`_rect_solid` 가 세그먼트 상자를 fuse 하면 FreeCAD 안에서는 멀쩡하다(valid · 솔리드 1 ·
-닫힌 셸 1). 그런데 코너 이음매에 공면이 남아 **면 수가 폭증**하고(직선 6면 대 꺾인 것
-36면) IFC 테셀레이션에서 비다양체가 된다 — 실측: 꺾이는 덕트 7개가 V107 에 걸려
-납품이 막혔다. `removeSplitter` 로는 안 된다.
+### ★ 계약 v3 — MEP 경로는 `path3d`(해석 구간), 샘플 점은 파생이다
+배관·덕트·트레이의 현재 형상은 `path3d.segments` 다 — 직선 · 원호(중심·법선, 법선 둘레 반시계) ·
+스플라인(NURBS: 차수·제어점·매듭·가중치). mm·Z-up 그대로이고 **z 는 `elevation`(중심축)에서의
+상대값**이다. 그래서 설치 높이 규칙(프로필 placement · `top:` 선언 · `overrides.elevation`)이
+여전히 한 손잡이이고, 경로 전체를 위아래로 옮긴 편집도 elevation 선언 하나로 남는다.
+DXF 평면도에서 온 경로는 전부 dz = 0 이다.
 
-`MakePipeShell` + `setTransitionMode(1)`(RightCorner) 이 코너를 마이터로 잇는다 —
-14면, 부피가 축선×단면과 **정확히** 일치. 배관이 `Arch.makePipe` 로 얻는 것과 같다.
+| `geom_contract` | 쓰는 곳 |
+|---|---|
+| `path3d_segments` · `route_points` · `route_length` | 모든 빌더·물량·다리. `path3d` 가 없으면 (points, elevation) 의 직선 구간 — **v2 파일은 좌표를 하나도 옮기지 않는다** |
+| `mep_section` · `section_shape` | 단면 모양·치수·`section_roll`. 원형 덕트는 `section_shape: "round"` + `diameter` — 지름을 기본값으로 때우지 않는다 |
+| `rect_parts` · `rect_sweep_mesh` · `start_tangent` | 관 형상(아래 절) |
 
-- 5° 미만 꺾임은 꼭짓점을 지운다(`_SWEEP_MIN_BEND_DEG`). 중심선 잡음 하나가 마이터를
-  깨뜨리고, 깨지면 면 많은 fuse 로 떨어진다.
-- 짧은 구간에서 급하게 꺾이면 마이터가 성립하지 않는다(실측: 폭 200mm 덕트가
-  188mm 구간에서 118°). **가장 짧은 중간 구간에서 쪼개** 각각 스윕한다 — 그 자리는
-  실제로 직관이 아니라 피팅이다.
+- `mep_paths.extract_curve` 가 원본을 읽는 순간 `path3d` 를 **샘플 점과 같은 방향**으로 낸다.
+  타원은 `rational_bspline_from_ellipse` 로 정확한 NURBS, 거울 복사한 원호(돌출 −Z)는 돌출
+  벡터가 곧 법선이다. `join_paths` 는 뒤집힌 원본의 구간을 식째로 뒤집어 붙인다. 해석 구간이
+  평가한 곡선과 끝이 안 맞으면 샘플 점으로 대체하고 `path3d_basis: "evaluated_points"` 로 말한다.
+- EID 는 계속 원본 사양(`source_geometry`)에서만 나온다 — `path3d` 가 생겨도 기존 수정이 고아가 되지 않는다.
+- 원본 길이 `source_length_mm` 은 출처로 남고, 편집했거나 사람이 그린 경로의 물량은
+  `route_length`(수직·경사 포함)다. 끊긴 `path3d` 는 V010 이 막는다.
 
-`mep_volume` 은 **duct/tray 만** 센다. 배관은 `Arch.makePipe`(오차 0.07%)고 장비는
+### ★ 사각 덕트는 **공통 마이터 링**으로 만든다 — 스윕이 단면을 눕혔다
+FreeCAD·Blender 가 `geom_contract.rect_parts` 의 같은 링을 쓴다. 폭은 수평(`section_axes` —
+Pascal `rectSectionAxes` 를 다리의 축 맞바꿈까지 반영해 옮긴 것), 꺾인 점은 마이터, 단면
+방향은 첫 구간에서 **최소 회전으로 전달**한다(연직 구간에서 world X 로 떨어져 비틀리지 않게).
+링의 평면 면을 한 셸로 꿰매므로 상자 fuse 의 공면 이음매(IFC 비다양체 — 실측: 꺾이는 덕트
+7개가 V107)가 없고, 부피가 샘플 꺾은선 길이 × 단면적과 **정확히** 같다. Blender 의 평면 직선
+경로는 종전 평면 버퍼 압출 그대로다(폭 수평, 같은 형상).
+
+★ **종전 `MakePipeShell` 스윕은 단면을 눕혔다.** 사각 단면을 +Z → 진행방향 최소 회전으로
+놓았는데, 그 회전은 방향마다 사각형을 다르게 돌린다. FreeCAD 1.1 실측(400×100 덕트의 높이
+방향 크기): **y 방향 100 · x 방향 400 · 대각선 353.6** — x 방향 덕트는 폭·높이가 뒤바뀌고
+대각선은 45° 기울었다. 부피는 그대로라 V106(부피)·V107(IFC 재검사)이 못 잡았고, Blender 는
+폭이 수평이라 같은 도면이 두 출력에서 다른 덕트였다. 고친 뒤 네 방향 모두 100.
+
+★ 짧은 구간에서 급하게 꺾이면 양 끝 마이터 면이 단면 안에서 교차해 관이 **뒤집힌다**
+(실측: 폭 200mm 덕트가 188mm 구간에서 118°). `rect_parts` 가 그 구간만 **직각으로 끊은 독립
+토막**으로 만든다 — 그 자리는 실제로 직관이 아니라 피팅이다. FreeCAD 는 토막을 합치고(실측:
+유효 솔리드 1개, 부피 비율 0.836 — 모서리 겹침만큼), Blender 는 한 객체의 여러 닫힌 셸로 싣는다.
+
+★ 원형 단면(배관·원형 덕트): 평면 직선 경로는 종전처럼 `Arch.makePipe`. 원호·스플라인·수직
+구간이 있으면 해석 곡선 와이어(`_route_wire`)를 **경로 시작 접선**(`start_tangent`)에 수직인 원으로
+직접 스윕한다 — `Arch.makePipe` 는 원을 첫 구간의 **현(chord)** 에 수직으로 놓아 곡선으로 시작하는
+관을 찌그러뜨린다(실측: R1000 사분원 NURBS 위 Ø100 덕트가 부피 70.7% = cos45°, 고친 뒤 1.0000).
+
+`mep_volume` 은 **사각·외곽선 duct/tray 만** 센다. 원형 단면은 스윕 몫(오차 0.07~0.1%)이고 장비는
 축선이 아니라 footprint 압출이라 '길이 × 단면' 기대식이 안 맞는다. 한쪽만 담으면
 셈이 어긋난다(실측: 장비가 built 에만 들어가 MEP 샘플 비율이 3.78 이었다 → 1.0000).
 
@@ -678,10 +708,10 @@ MEP 는 평면 점 + `path3d` 를 본다. 고저와 단면은 **해소한 값끼
 층 접두를 물려받는다(`1F:wm:…`) — 없으면 `edits_to_local` 이 저장을 거부한다.
 
 ★ **수직·경사 구간은 점마다 높이가 다르다.** `elevation` 한 값으로 담으면 입상관이
-천장에 눕는다. 다리는 `path3d`(계약 v3 예정 키)가 있으면 점마다 싣고 그대로
-되돌리며, 평면 경로에는 그 키를 **만들어 붙이지 않는다**(계약에 없는 필드가 데이터에
-번진다). 오늘의 `mep_paths.extract_curve` 는 비평면 경로를 평탄화하는 대신 **거부**
-하므로 이 갈래는 아직 안 돈다 — 계약이 확장되는 날 조용히 눕지 않게 미리 맞춰 둔 것이다.
+천장에 눕는다. 다리는 계약 v3 `path3d` 에 높이 변화가 있으면 경로 샘플(`route_points`, 현오차
+`PASCAL_CHORD_MM`)을 점마다 싣고, 돌아올 때는 elevation 기준 **상대 높이의 직선 구간**으로
+담는다. 평면 경로는 종전 그대로 `points` 를 한 높이에 싣고 그 키를 만들어 붙이지 않는다.
+모양 비교도 상대 샘플로 해서, 전체를 올린 것은 `overrides.elevation` 하나로 남는다.
 
 ★ **이어진 조각만 한 벽이다.** Pascal 에서 꺾인 벽의 가운데 구간을 지우면 남은
 조각이 떨어져 있는데, 그대로 이으면 **도면에 없던 대각선 벽**이 생긴다(실측: 3구간

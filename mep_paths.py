@@ -5,7 +5,9 @@ import hashlib
 import json
 import math
 
-from ezdxf.math import arc_angle_span_deg
+from ezdxf.math import arc_angle_span_deg, rational_bspline_from_ellipse
+
+import geom_contract as GC
 
 
 def _xyz(point, scale):
@@ -25,17 +27,33 @@ def _signature(value):
                                      allow_nan=False).encode()).hexdigest()[:24]
 
 
+def _spline_segment(bspline, scale):
+    seg = {'type': 'spline', 'degree': int(bspline.degree),
+           'control_points': [_xyz(p, scale) for p in bspline.control_points],
+           'knots': [float(k) for k in bspline.knots()]}
+    weights = [float(w) for w in bspline.weights()]
+    if weights:
+        seg['weights'] = weights
+    return seg
+
+
 def extract_curve(entity, scale=1.0, chord_error_mm=.25, source_ref=None, max_points=100000):
     """Evaluate the actual curve; retain analytic primitives independently of sampling.
 
     LINE/ARC and bulge polylines have exact source lengths. General SPLINE/ELLIPSE
     lengths remain explicitly approximate. Nonplanar routes require a 3D contract
     and are rejected instead of silently flattening their elevation.
+
+    The returned ``path3d`` (contract v3) holds the same curve as analytic
+    line/arc/spline segments running in the direction of ``points``; its z is
+    relative to ``source_elevation_mm``. Identity (``_sigs``) still comes from the
+    source specification only, so EIDs do not change.
     """
     if not math.isfinite(scale) or scale <= 0 or not math.isfinite(chord_error_mm) or chord_error_mm <= 0:
         raise ValueError('Curve scale and chord error must be positive and finite')
     kind = entity.dxftype()
     points = []
+    segments = []                       # analytic, absolute WCS millimetres
     exact = None
     closed = False
     spec = {'type': kind}
@@ -53,6 +71,7 @@ def extract_curve(entity, scale=1.0, chord_error_mm=.25, source_ref=None, max_po
         add(a); add(b)
         exact = (b - a).magnitude * scale
         spec.update(start_mm=_xyz(a, scale), end_mm=_xyz(b, scale))
+        segments.append({'type': 'line', 'start': _xyz(a, scale), 'end': _xyz(b, scale)})
     elif kind in ('ARC', 'CIRCLE'):
         r = float(entity.dxf.radius) * scale
         if r <= 0:
@@ -75,6 +94,11 @@ def extract_curve(entity, scale=1.0, chord_error_mm=.25, source_ref=None, max_po
         spec.update(center_ocs_mm=_xyz(entity.dxf.center, scale), radius_mm=r,
                     extrusion=list(entity.dxf.extrusion), start_angle_deg=start,
                     end_angle_deg=end, span_radians=span)
+        # DXF 원호는 돌출 벡터 둘레 반시계다 — 그 벡터가 곧 v3 원호의 법선이다.
+        normal = entity.dxf.extrusion.normalize()
+        segments.append({'type': 'arc', 'start': list(points[0]), 'end': list(points[-1]),
+                         'center': _xyz(entity.ocs().to_wcs(entity.dxf.center), scale),
+                         'normal': [normal.x, normal.y, normal.z]})
     elif kind in ('LWPOLYLINE', 'POLYLINE'):
         if kind == 'POLYLINE' and not (entity.is_2d_polyline or entity.is_3d_polyline):
             raise ValueError('Polygon mesh/polyface is not a MEP centerline')
@@ -86,6 +110,7 @@ def extract_curve(entity, scale=1.0, chord_error_mm=.25, source_ref=None, max_po
                 points.append(list(points[0]))
             exact = sum(math.dist(a, b) for a, b in zip(points, points[1:]))
             spec['vertices_wcs_mm'] = copy.deepcopy(points)
+            segments.extend(GC.polyline_segments(points))
         else:
             closed = bool(entity.closed if kind == 'LWPOLYLINE' else entity.is_closed)
             vertices = list(entity.vertices_in_wcs()) if kind == 'LWPOLYLINE' else list(entity.points_in_wcs())
@@ -93,13 +118,16 @@ def extract_curve(entity, scale=1.0, chord_error_mm=.25, source_ref=None, max_po
             for i, part in enumerate(entity.virtual_entities()):
                 sub = extract_curve(part, scale, chord_error_mm, max_points=max_points)
                 subpoints = [[p[0], p[1], sub['source_elevation_mm']] for p in sub['points']]
+                subsegs = GC.translate_segments(sub['path3d']['segments'], [0, 0, sub['source_elevation_mm']])
                 target = _xyz(vertices[i], scale)
                 reverse = math.dist(subpoints[-1], target) < math.dist(subpoints[0], target)
                 if reverse:
                     subpoints.reverse()
+                    subsegs = GC.reverse_segments(subsegs)
                 if points and math.dist(points[-1], subpoints[0]) > 1e-6:
                     raise ValueError('Polyline primitive endpoints are inconsistent')
                 points.extend(subpoints[1:] if points else subpoints)
+                segments.extend(subsegs)
                 if len(points) > max_points:
                     raise ValueError('Curve point budget exceeded; requested tolerance was not met')
                 exact += sub['source_length_mm']
@@ -114,10 +142,13 @@ def extract_curve(entity, scale=1.0, chord_error_mm=.25, source_ref=None, max_po
             spec.update(degree=int(entity.dxf.degree), control_points_mm=[_xyz(p, scale) for p in entity.control_points],
                         fit_points_mm=[_xyz(p, scale) for p in entity.fit_points], knots=list(map(float, entity.knots)),
                         weights=list(map(float, entity.weights)), closed=closed)
+            segments.append(_spline_segment(entity.construction_tool(), scale))
         else:
             spec.update(center_mm=_xyz(entity.dxf.center, scale), major_axis_mm=_xyz(entity.dxf.major_axis, scale),
                         ratio=float(entity.dxf.ratio), start_param=float(entity.dxf.start_param),
                         end_param=float(entity.dxf.end_param), extrusion=list(entity.dxf.extrusion))
+            # 타원 호는 유리 2차 B-스플라인으로 **정확히** 표현된다 — 샘플로 뭉개지 않는다.
+            segments.append(_spline_segment(rational_bspline_from_ellipse(entity.construction_tool()), scale))
     else:
         raise ValueError('Unsupported MEP curve: ' + kind)
     if len(points) < 2:
@@ -129,11 +160,25 @@ def extract_curve(entity, scale=1.0, chord_error_mm=.25, source_ref=None, max_po
                                       'type': kind, 'insert_path': []})
     ident = {k: v for k, v in ref.items() if k != 'source_sha256'}
     sample_length = sum(math.dist(a, b) for a, b in zip(points, points[1:]))
+    z0 = points[0][2]
+    path3d = {'segments': GC.translate_segments(segments, [0, 0, -z0])}
+    basis = 'analytic_source'
+    try:
+        ends = GC.sample_segments(path3d['segments'], max(chord_error_mm, 1e-3), z0)
+        mismatch = max(math.dist(ends[0], points[0]), math.dist(ends[-1], points[-1]))
+    except GC.ContractError:
+        mismatch = math.inf
+    if mismatch > 1e-3:
+        # 해석 구간이 평가한 곡선과 끝이 안 맞으면(예: 주기 스플라인의 매듭 영역) 조용히
+        # 믿지 않는다 — 평가한 점을 그대로 구간으로 쓰고 그렇다고 적는다.
+        path3d = {'segments': GC.translate_segments(GC.polyline_segments(points), [0, 0, -z0])}
+        basis = 'evaluated_points'
     return {'kind': 'polyline', 'closed': closed, 'points': [p[:2] for p in points],
             'source_refs': [ref], 'source_geometry': [spec],
             'source_length_mm': exact, 'sampled_length_mm': sample_length,
             'length_basis': 'analytic' if exact is not None else 'evaluated_curve_approximation',
-            'source_elevation_mm': points[0][2], 'curve_chord_error_mm': chord_error_mm,
+            'source_elevation_mm': z0, 'curve_chord_error_mm': chord_error_mm,
+            'path3d': path3d, 'path3d_basis': basis,
             '_sigs': [_signature({'source': ident, 'geometry': spec})]}
 
 
@@ -141,7 +186,8 @@ def compatibility_key(record):
     """Attributes which cannot be discarded when combining routes."""
     fields = ('layer', 'category', 'system', 'region_id', 'level', 'floor_id', 'elevation',
               'diameter', 'width_mm', 'height_mm', 'nominal_size', 'material', 'placement',
-              'dimension_basis', 'overrides', 'geometry_mode', '_parse_opts', '_profile_rule')
+              'dimension_basis', 'overrides', 'geometry_mode', '_parse_opts', '_profile_rule',
+              'section_shape')
     return json.dumps({k: record[k] for k in fields if k in record}, sort_keys=True, default=str)
 
 
@@ -149,7 +195,8 @@ def join_paths(records, endpoint_tolerance_mm=.001, gap_review_mm=10):
     """Join only coincident endpoints of compatible paths, stopping at branches.
 
     Interior intersections do not create nodes. Nearby, noncoincident endpoints
-    are reported but never joined. The returned records retain all source refs.
+    are reported but never joined. The returned records retain all source refs,
+    and their ``path3d`` segments are reversed where a source path was reversed.
     """
     if endpoint_tolerance_mm <= 0 or gap_review_mm < endpoint_tolerance_mm:
         raise ValueError('Invalid endpoint/gap tolerance')
@@ -198,6 +245,7 @@ def join_paths(records, endpoint_tolerance_mm=.001, gap_review_mm=10):
                 edge = candidates[0]
             rec = copy.deepcopy(rows[route[0][0]])
             pts = []; refs = []; specs = []; sigs = []; exact = 0.; approximate = False
+            segs = []; analytic = True
             for idx, rev in route:
                 r = rows[idx]; rp = list(reversed(r['points'])) if rev else r['points']
                 pts.extend(copy.deepcopy(rp[1:] if pts else rp))
@@ -208,11 +256,22 @@ def join_paths(records, endpoint_tolerance_mm=.001, gap_review_mm=10):
                     approximate = True
                 else:
                     exact += r['source_length_mm']
+                rs = (r.get('path3d') or {}).get('segments')
+                if rs is None:
+                    analytic = False
+                else:
+                    segs.extend(GC.reverse_segments(rs) if rev else copy.deepcopy(rs))
             rec.update(points=pts, closed=math.dist(pts[0], pts[-1]) <= tol, source_refs=refs,
                        source_geometry=specs, _sigs=sigs, joined_from=len(route),
                        source_length_mm=None if approximate else exact,
                        sampled_length_mm=sum(math.dist(a, b) for a, b in zip(pts, pts[1:])),
                        length_basis='evaluated_curve_approximation' if approximate else 'analytic')
+            if analytic and segs:
+                rec['path3d'] = {'segments': segs}
+                if any(rows[idx].get('path3d_basis') == 'evaluated_points' for idx, _rev in route):
+                    rec['path3d_basis'] = 'evaluated_points'
+            else:
+                rec.pop('path3d', None); rec.pop('path3d_basis', None)
             rec['path_topology'] = 'closed' if rec['closed'] else 'open'
             output.append(rec)
 

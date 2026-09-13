@@ -44,6 +44,8 @@ FOREIGN_PREFIX = "mep-parser:"
 
 # 벽 조각이 '이어져 있다' 고 볼 거리(mm). 이보다 벌어지면 다른 벽이다.
 WALL_JOIN_TOL_MM = 1.0
+# 3D 경로(계약 v3)를 Pascal 에 실을 때의 현오차(mm) — 화면용이다. 저장 비교도 같은 값으로 샘플한다.
+PASCAL_CHORD_MM = 2.0
 
 # 직사각형으로 인정할 허용치(mm·도)
 RECT_TOL_MM = 1.0
@@ -562,16 +564,18 @@ def to_pascal_scene(geometry, name=None):
                 continue
             elev = GC.base_z(cat, m)                 # MEP 의 기준면은 **중심축**
             lz, lid = _level_for(elev, levels)
-            # ★ 수직·경사 구간은 점마다 높이가 다르다. `path3d`(계약 v3)가 있으면
-            #   그대로 쓰고, 없으면 한 높이다 — **말없이 평탄화하지 않는다.**
-            #   (오늘의 `mep_paths.extract_curve` 는 비평면 경로를 평탄화하는 대신
-            #    거부하므로 여기 오는 것은 아직 전부 평면이다.)
-            p3 = m.get("path3d")
-            if p3 and len(p3) == len(pts) and all(len(q) >= 3 for q in p3):
+            # ★ 수직·경사 구간은 점마다 높이가 다르다. 계약 v3 `path3d` 에 높이 변화가 있으면
+            #   경로 샘플(`GC.route_points`)을 점마다 싣는다 — **말없이 평탄화하지 않는다.**
+            #   평면 경로는 종전 그대로 `points`(원본 샘플)를 한 높이에 싣는다.
+            try:
+                dz_lo, dz_hi = GC.path3d_dz_range(m)
+            except GC.ContractError as exc:
+                bad(cat, m, "path3d_invalid", detail=str(exc))
+                continue
+            if dz_lo != 0.0 or dz_hi != 0.0:
                 path = [[GC.mm_to_m(q[0]), GC.mm_to_m(q[2] - lz), GC.mm_to_m(q[1])]
-                        for q in p3]
-                if len({round(q[2], 6) for q in p3}) > 1:
-                    report["path3d"] = report.get("path3d", 0) + 1
+                        for q in GC.route_points(cat, m, PASCAL_CHORD_MM)]
+                report["path3d"] = report.get("path3d", 0) + 1
             else:
                 y = GC.mm_to_m(elev - lz)
                 path = [[GC.mm_to_m(p[0]), y, GC.mm_to_m(p[1])] for p in pts]
@@ -847,11 +851,12 @@ def from_pascal_scene(scene):
             rec["kind"] = "polyline"
             rec["closed"] = False
             rec["points"] = [[GC.m_to_mm(p[0]), GC.m_to_mm(p[2])] for p in path]
-            set_base(rec, "elevation", lz + GC.m_to_mm(path[0][1] if path else 0.0))
+            z0_mm = lz + GC.m_to_mm(path[0][1] if path else 0.0)
+            set_base(rec, "elevation", z0_mm)
             if len({round(p[1], 9) for p in path}) > 1:
-                # 점마다 높이가 다르다 — `elevation` 한 값으로는 못 담는다.
-                rec["path3d"] = [[GC.m_to_mm(p[0]), GC.m_to_mm(p[2]),
-                                  lz + GC.m_to_mm(p[1])] for p in path]
+                # 점마다 높이가 다르다 — 계약 v3 `path3d`(z 는 elevation 에서의 상대값)로 담는다.
+                rec["path3d"] = {"segments": GC.polyline_segments(
+                    [[GC.m_to_mm(p[0]), GC.m_to_mm(p[2]), lz + GC.m_to_mm(p[1]) - z0_mm] for p in path])}
                 report["path3d"] = report.get("path3d", 0) + 1
             else:
                 rec.pop("path3d", None)
@@ -923,8 +928,20 @@ def _same_geometry(cat, a, b):
         return _same_seq(_ring(a.get("points")), _ring(b.get("points")))
     if cat == "opening":
         return _same_seq(_pts([a.get("center")]), _pts([b.get("center")]))
-    return (_same_seq(_pts(a.get("points")), _pts(b.get("points"))) and
-            _same_seq(_pts(a.get("path3d")), _pts(b.get("path3d"))))
+    return _same_seq(_mep_shape(cat, a), _mep_shape(cat, b))
+
+
+def _mep_shape(cat, rec):
+    """Pascal 이 나르는 MEP 기하 — 평면 경로는 points, 3D 경로(v3)는 elevation 기준 **상대** 샘플.
+    경로 전체를 위아래로 옮긴 것은 모양 변경이 아니라 elevation 선언이다(아래 z 비교가 낸다)."""
+    try:
+        dz_lo, dz_hi = GC.path3d_dz_range(rec)
+    except GC.ContractError:
+        dz_lo = dz_hi = 0.0
+    if dz_lo == 0.0 and dz_hi == 0.0:
+        return [(float(p[0]), float(p[1]), 0.0) for p in (rec.get("points") or [])]
+    z = GC.base_z(cat, rec)
+    return [(p[0], p[1], p[2] - z) for p in GC.route_points(cat, rec, PASCAL_CHORD_MM)]
 
 
 def scene_to_edits(geometry, scene):

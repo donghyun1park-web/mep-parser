@@ -62,7 +62,9 @@ def validate_payload(data):
             pts = obj['points_m']; radius = obj['radius_m']
             require(len(pts) >= 2 and all(len(p) == 3 and all(math.isfinite(v) for v in p) for p in pts), 'Invalid curve positions')
             require(math.isfinite(radius) and radius > 0, 'Invalid curve radius')
-            require(all(abs(p[2]*1000-radius*1000-z[0]) < 1e-7 and abs(p[2]*1000+radius*1000-z[1]) < 1e-7 for p in pts), 'Curve Z/radius contradict source bounds')
+            # 계약 v3 경로는 점마다 높이가 다르다 — 가장 낮은/높은 점 ± 반지름이 원본 범위다.
+            zs = [p[2]*1000 for p in pts]
+            require(abs(min(zs)-radius*1000-z[0]) < 1e-6 and abs(max(zs)+radius*1000-z[1]) < 1e-6, 'Curve Z/radius contradict source bounds')
         else:
             raise ValueError('Unsupported payload object kind')
 
