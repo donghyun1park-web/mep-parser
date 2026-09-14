@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Pascal 편집 화면 ↔ MEP-Parser 프로젝트 저장소를 함께 띄운다(3단계 첫 조각).
+"""Pascal 편집 화면 ↔ MEP-Parser 프로젝트 저장소를 함께 띄운다(3단계).
 
     python pascal_host/run_host.py <도면.dxf | 프로젝트.mep 폴더> --pascal <Pascal 체크아웃>
-        [--sync-overlay] [--build] [--port 3002]
+        [--sync-overlay] [--build] [--port 3002] [--open]
+    python pascal_host/run_host.py <도면.dxf | 프로젝트.mep 폴더> --runtime <동봉 런타임> [--open]
 
 1. 프로젝트 저장소(`ProjectSession`)를 열고 `ProjectServer` 를 127.0.0.1 임의 포트에 띄운다.
 2. **고정 커밋**(`PASCAL_COMMIT`)의 Pascal 을 127.0.0.1 에만 띄우고, `MEP_PROJECT_URL`/
@@ -15,16 +16,26 @@
 
 오버레이(`pascal_host/overlay/`)는 **우리 코드**다. 체크아웃에 복사해 빌드한다 — 체크아웃이
 고정 커밋이 아니거나 오버레이가 어긋나 있으면 띄우지 않는다(다른 코드가 도는 것을 막는다).
+
+동봉 런타임(`stage_runtime.py` 가 만든 폴더)은 Next standalone 서버 + node 실행 파일이다. 현장 PC 에
+체크아웃·bun·npm 이 없어도 뜬다. 런타임이 기록한 **고정 커밋·오버레이 지문**이 지금 저장소의 것과
+다르면 같은 이유로 띄우지 않는다.
 """
 import argparse
+import hashlib
+import json
 import os
 import shutil
 import subprocess
 import sys
+import time
+import urllib.request
+import webbrowser
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 OVERLAY = HERE / "overlay"
+RUNTIME_MANIFEST = "mep-runtime.json"
 sys.path.insert(0, str(HERE.parent))
 
 
@@ -55,6 +66,46 @@ def sync_overlay(checkout):
         shutil.copyfile(OVERLAY / rel, dst)
 
 
+def overlay_sha256():
+    """오버레이 파일 전체의 지문 — 동봉 런타임이 어느 오버레이로 빌드됐는지 대조한다."""
+    h = hashlib.sha256()
+    for rel in overlay_files():
+        h.update(rel.as_posix().encode("utf-8") + b"\0")
+        h.update((OVERLAY / rel).read_bytes() + b"\0")
+    return h.hexdigest()
+
+
+def runtime_problems(runtime):
+    """동봉 런타임이 **지금 저장소의** 편집 화면인가 — 문제 목록(비어야 띄운다)."""
+    runtime = Path(runtime)
+    try:
+        manifest = json.loads((runtime / RUNTIME_MANIFEST).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ["%s 이 없거나 읽을 수 없다" % RUNTIME_MANIFEST]
+    problems = []
+    if manifest.get("pascal_commit") != pinned_commit():
+        problems.append("고정 커밋이 다르다: %s ≠ %s" % (manifest.get("pascal_commit"), pinned_commit()))
+    if manifest.get("overlay_sha256") != overlay_sha256():
+        problems.append("런타임을 만든 뒤 오버레이가 바뀌었다 — stage_runtime.py 로 다시 만들 것")
+    for key in ("entrypoint", "node"):
+        rel = manifest.get(key)
+        if not rel or not (runtime / rel).is_file():
+            problems.append("%s 파일이 없다: %s" % (key, rel))
+    return problems
+
+
+def runtime_command(runtime, port):
+    """(argv, 작업 폴더, 환경 추가분) — 동봉 node 로 standalone 서버를 **127.0.0.1 에만** 띄운다.
+    standalone `server.js` 는 HOSTNAME 이 없으면 모든 인터페이스(0.0.0.0)에 붙는다 — 반드시 준다.
+    ★ 경로는 **절대 경로**로 넘긴다. 작업 폴더를 server.js 옆으로 옮기므로, `--runtime pascal_runtime`
+      같은 상대 경로를 그대로 주면 node 가 새 작업 폴더 기준으로 찾아 MODULE_NOT_FOUND 로 죽는다(실측)."""
+    runtime = Path(runtime).resolve()
+    manifest = json.loads((runtime / RUNTIME_MANIFEST).read_text(encoding="utf-8"))
+    entry = runtime / manifest["entrypoint"]
+    return ([str(runtime / manifest["node"]), str(entry)], entry.parent,
+            {"HOSTNAME": "127.0.0.1", "PORT": str(port)})
+
+
 def checkout_commit(checkout):
     return subprocess.run(["git", "-C", str(checkout), "rev-parse", "HEAD"],
                           capture_output=True, text=True).stdout.strip()
@@ -69,43 +120,67 @@ def open_session(target):
     return open_source_project(str(target))
 
 
+def wait_until_healthy(port, web, timeout=120):
+    """편집 화면이 응답할 때까지 기다린다(브라우저가 연결 거부 화면을 먼저 보지 않게)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline and web.poll() is None:
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:%d/api/health" % port, timeout=2):
+                return True
+        except OSError:
+            time.sleep(0.5)
+    return False
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Pascal 편집 화면 + MEP-Parser 프로젝트 저장소")
     ap.add_argument("target", help="도면 .dxf 또는 기존 프로젝트(.mep) 폴더")
-    ap.add_argument("--pascal", required=True, help="고정 커밋의 Pascal 체크아웃(bun install 끝난 것)")
+    where = ap.add_mutually_exclusive_group(required=True)
+    where.add_argument("--pascal", help="고정 커밋의 Pascal 체크아웃(bun install 끝난 것)")
+    where.add_argument("--runtime", help="stage_runtime.py 가 만든 동봉 런타임 폴더(npm·bun 불필요)")
     ap.add_argument("--port", type=int, default=3002)
     ap.add_argument("--sync-overlay", action="store_true", help="오버레이를 체크아웃에 복사")
     ap.add_argument("--build", action="store_true", help="apps/editor 를 next build")
+    ap.add_argument("--open", action="store_true", help="준비되면 브라우저로 편집 화면을 연다")
     a = ap.parse_args(argv)
 
-    checkout = Path(a.pascal).resolve()
-    app = checkout / "apps" / "editor"
-    head, pin = checkout_commit(checkout), pinned_commit()
-    if head != pin:
-        sys.exit("Pascal 체크아웃이 고정 커밋이 아니다: %s ≠ %s" % (head or "(git 아님)", pin))
-    if a.sync_overlay:
-        sync_overlay(checkout)
-    missing, changed = overlay_drift(checkout)
-    if missing or changed:
-        sys.exit("오버레이가 체크아웃과 다르다 — --sync-overlay --build 로 맞출 것. "
-                 "없음 %s · 다름 %s" % (missing, changed))
+    if a.runtime:
+        problems = runtime_problems(a.runtime)
+        if problems:
+            sys.exit("동봉 런타임을 띄우지 않는다 — " + " · ".join(problems))
+        cmd, cwd, extra = runtime_command(a.runtime, a.port)
+    else:
+        checkout = Path(a.pascal).resolve()
+        app = checkout / "apps" / "editor"
+        head, pin = checkout_commit(checkout), pinned_commit()
+        if head != pin:
+            sys.exit("Pascal 체크아웃이 고정 커밋이 아니다: %s ≠ %s" % (head or "(git 아님)", pin))
+        if a.sync_overlay:
+            sync_overlay(checkout)
+        missing, changed = overlay_drift(checkout)
+        if missing or changed:
+            sys.exit("오버레이가 체크아웃과 다르다 — --sync-overlay --build 로 맞출 것. "
+                     "없음 %s · 다름 %s" % (missing, changed))
 
-    node = shutil.which("node")
-    if not node:
-        sys.exit("node 가 PATH 에 없다")
-    next_bin = subprocess.check_output([node, "-p", "require.resolve('next/dist/bin/next')"],
-                                       cwd=app, text=True).strip()
-    if a.build:
-        subprocess.run([node, next_bin, "build"], cwd=app, check=True)
+        node = shutil.which("node")
+        if not node:
+            sys.exit("node 가 PATH 에 없다")
+        next_bin = subprocess.check_output([node, "-p", "require.resolve('next/dist/bin/next')"],
+                                           cwd=app, text=True).strip()
+        if a.build:
+            subprocess.run([node, next_bin, "build"], cwd=app, check=True)
+        cmd, cwd, extra = [node, next_bin, "start", "-H", "127.0.0.1", "-p", str(a.port)], app, {}
 
     session = open_session(a.target)
     server = session.serve()
-    env = dict(os.environ, MEP_PROJECT_URL=server.base_url, MEP_PROJECT_TOKEN=server.token)
-    # 127.0.0.1 에만 바인딩한다 — 프록시는 토큰을 대신 붙이므로 LAN 에 열리면
-    # 인증 없는 쓰기 경로가 된다(오버레이 라우트의 루프백 가드는 두 번째 방어선).
-    web = subprocess.Popen([node, next_bin, "start", "-H", "127.0.0.1", "-p", str(a.port)],
-                           cwd=app, env=env)
-    print("편집 화면: http://127.0.0.1:%d/mep" % a.port, flush=True)
+    env = dict(os.environ, MEP_PROJECT_URL=server.base_url, MEP_PROJECT_TOKEN=server.token, **extra)
+    # 127.0.0.1 에만 바인딩한다 — 프록시는 토큰을 대신 붙이므로 LAN 에 열리면 인증 없는 쓰기 경로가
+    # 된다(오버레이 라우트의 루프백 가드는 두 번째 방어선).
+    web = subprocess.Popen(cmd, cwd=cwd, env=env)
+    url = "http://127.0.0.1:%d/mep" % a.port
+    print("편집 화면: %s" % url, flush=True)
+    if a.open and wait_until_healthy(a.port, web):
+        webbrowser.open(url)
     try:
         web.wait()
     except KeyboardInterrupt:

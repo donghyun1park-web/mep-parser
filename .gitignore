@@ -75,6 +75,8 @@ tests/golden.local.json
 
 # Frontend dependencies and per-plan implementation notes.
 node_modules/
+# 동봉 편집 화면 런타임(pascal_host/stage_runtime.py 가 만든다 — 빌드 산출물)
+pascal_runtime/
 .superpowers/
 outputs/
 .native-*/

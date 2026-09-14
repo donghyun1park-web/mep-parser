@@ -32,6 +32,7 @@
 | `artifact_validation.py` + `freecad_runner.py` | 실행별 산출물 영수증과 실제 IFC 재검사. 입력 해시·EID/GlobalId·형상·체적·층·QA 속성을 대조한다. |
 | `mep_gui.py` | **현장용 GUI** (Phase 2.5): 파일선택→스캔→파싱→**3D 미리보기(브라우저)**→needs_review 수정→3D빌드 (tkinter, 무의존) |
 | `run_gui.bat` | GUI 더블클릭 런처 (CLI 불필요) |
+| `run_editor.bat` + `pascal_host/stage_runtime.py` | **편집 화면 런처(npm·bun 없이).** `stage_runtime.py` 가 Pascal standalone 빌드 + node 실행 파일 + `mep-runtime.json`(고정 커밋·오버레이 지문)을 `pascal_runtime/`(gitignore)에 모으고, `run_editor.bat <도면|프로젝트>` 가 `run_host.py --runtime pascal_runtime --open` 을 부른다 |
 | `make_sample_dxf.py` | 테스트용 샘플 DXF 생성 (A-WALL/A-COLS/A-SLAB/A-ZONE) |
 | `sample_plan.dxf` | 단선 벽 샘플 (회귀용) |
 | `sample_walls.dxf` | **양면 2선 벽 샘플** (Phase 1 평행선 검출 검증용) |
@@ -884,6 +885,15 @@ Pascal 의 `Editor` 는 영속화가 `onLoad`/`onSave` 어댑터 둘뿐이라 **
   의 검토 목록(검토 사유 · 붙일 벽이 없는 개구부 · 끊긴 이음)과 편집 화면에 못 보낸 부재. 목록을 누르면
   그 EID 의 노드를 고른다. 조치할 것이 없는 사유(`wall_open_at_this_span`)는 싣지 않는다. 저장으로
   revision 이 오르면 로더가 `mep:revision` 이벤트를 보내 목록을 다시 불러온다.
+- **현장 PC 는 동봉 런타임으로 띄운다**(npm·bun·체크아웃 없이). 개발 PC 에서 체크아웃을
+  `PASCAL_PORTABLE_BUILD=1 next build` 한 뒤 `python pascal_host/stage_runtime.py --pascal <체크아웃>` —
+  Pascal 자신의 CLI 스테이저(`packages/cli/scripts/stage-runtime.ts`)와 같은 순서로 standalone·public·
+  `.next/static` 을 모으고 bun 저장소를 평탄화한다. `run_host.py --runtime` 은 런타임의 **고정 커밋·오버레이
+  지문**이 지금 저장소와 다르면 띄우지 않고, 동봉 node 로 `server.js` 를 `HOSTNAME=127.0.0.1` 로 띄운다
+  (standalone 서버는 HOSTNAME 이 없으면 0.0.0.0 에 붙는다). ★ 경로는 절대 경로로 넘긴다 — 작업 폴더를
+  server.js 옆으로 옮기므로 상대 경로 `pascal_runtime` 이 두 번 붙어 MODULE_NOT_FOUND 로 죽었다(실측).
+  실측(`sample_mep.dxf`): 스테이징 10초·239MB, 리스너 `127.0.0.1:3002` 하나, health·스냅샷(guide 1)·원본 SVG·
+  검토 200, dry-run 적용은 명령 `width_mm 450` 만 내고 revision 그대로, 실제 적용 r0 → r1.
 - **체크아웃이 고정 커밋이 아니거나 오버레이가 어긋나면 띄우지 않는다** — 다른 코드가 도는
   편집 화면으로 저장하면 무엇이 저장됐는지 아무도 모른다. Pascal 의 `next.config` 가
   `ignoreBuildErrors: true` 라 빌드는 타입 오류를 삼킨다 — 오버레이는 `tsc` 로 따로 검사한다.
