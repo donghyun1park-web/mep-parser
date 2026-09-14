@@ -243,18 +243,19 @@ def test_slab_elevation_is_the_top_face():
     assert GC.thickness_of(r, {}, "slab") == 210.0
 
 
-def test_duct_is_inches_and_the_plan_y_goes_third():
+def test_duct_section_is_mm_and_the_plan_y_goes_third():
     """Pascal 은 Y-up 이다 — path 의 둘째가 높이, 셋째가 평면 y. 뒤바꾸면 덕트가
-    바닥에 눕는다. 단면은 **인치**다(200mm = 7.874in)."""
+    바닥에 눕는다. 설비는 전용 노드로 가고 단면은 **mm 그대로**다(인치로 깎지 않는다)."""
     rec = {"kind": "polyline", "closed": False, "eid": "d:1", "layer": "SA",
            "points": [[0.0, 0.0], [3000.0, 0.0], [3000.0, 2000.0]],
            "elevation": 2590.0, "width_mm": 200.0, "height_mm": 200.0}
     scene, rep = PB.to_pascal_scene(_geom({"duct": [rec]}))
-    n = _nodes_of(scene, "duct-segment")[0]
+    n = _nodes_of(scene, PB.MEP_NODE_PREFIX + "duct")[0]
     assert rep["counts_out"] == {"duct": 1}
     assert n["path"] == [[0.0, 2.59, 0.0], [3.0, 2.59, 0.0], [3.0, 2.59, 2.0]]
     assert n["shape"] == "rect"
-    assert abs(n["width"] - 200.0 / 25.4) < 1e-9
+    assert (n["widthMm"], n["heightMm"]) == (200.0, 200.0)
+    assert PB.MEP_PLUGIN_ID in scene["installedPlugins"]
 
     back, _ = PB.from_pascal_scene(scene)
     r = back["elements"]["duct"][0]
@@ -272,7 +273,7 @@ def test_mep_elevation_is_a_height_not_a_level():
                          "eid": "d:1"}]})
     scene, rep = PB.to_pascal_scene(g)
     assert rep["levels"] == 1
-    assert _nodes_of(scene, "duct-segment")[0]["path"][0][1] == 2.59
+    assert _nodes_of(scene, PB.MEP_NODE_PREFIX + "duct")[0]["path"][0][1] == 2.59
 
 
 def test_a_riser_keeps_its_heights():
@@ -286,7 +287,7 @@ def test_a_riser_keeps_its_heights():
                  {"type": "line", "start": [0.0, 0.0, 0.0], "end": [3000.0, 0.0, 0.0]},
                  {"type": "line", "start": [3000.0, 0.0, 0.0], "end": [3000.0, 0.0, -2100.0]}]}}
     scene, rep = PB.to_pascal_scene(_geom({"pipe": [riser]}))
-    node = _nodes_of(scene, "pipe-segment")[0]
+    node = _nodes_of(scene, PB.MEP_NODE_PREFIX + "pipe")[0]
     assert [round(p[1], 6) for p in node["path"]] == [2.6, 2.6, 0.5]
     assert rep["path3d"] == 1
 
@@ -307,12 +308,12 @@ def test_a_flat_run_does_not_grow_a_path3d():
     assert rep.get("path3d") is None
 
 
-def test_pipe_diameter_is_inches():
+def test_pipe_diameter_stays_mm():
     rec = {"kind": "polyline", "points": [[0.0, 0.0], [2000.0, 0.0]],
            "elevation": 2600.0, "diameter": 100.0, "eid": "p:1"}
     scene, _ = PB.to_pascal_scene(_geom({"pipe": [rec]}))
-    n = _nodes_of(scene, "pipe-segment")[0]
-    assert abs(n["diameter"] - 100.0 / 25.4) < 1e-9
+    n = _nodes_of(scene, PB.MEP_NODE_PREFIX + "pipe")[0]
+    assert n["diameterMm"] == 100.0 and n["shape"] == "round"
     back, _ = PB.from_pascal_scene(scene)
     assert abs(back["elements"]["pipe"][0]["diameter"] - 100.0) < 1e-9
 
@@ -321,26 +322,19 @@ def test_mep_dimensions_come_from_the_contract_not_from_here():
     """단면 치수 규약은 `geom_contract` 것이다 — GUI 별칭 키(`width`/`height`)와
     '치수 미해소' 판정이 거기 있다. 여기서 `width_mm` 만 읽으면 별칭만 있는 덕트가
     **조용히 기본값 400mm** 로 나간다(형상은 멀쩡해서 아무 검사에도 안 걸린다)."""
-    if not hasattr(GC, "mep_dimensions"):
-        # 이 검사는 `geom_contract.mep_dimensions`(별칭·overrides 우선)를 시험한다.
-        # 그 계약이 아직 커밋되지 않은 트리에서는 시험할 대상이 없다.
-        raise __import__("unittest").SkipTest("geom_contract.mep_dimensions 가 없는 트리")
     alias = {"kind": "polyline", "points": [[0.0, 0.0], [3000.0, 0.0]], "eid": "d:a",
              "elevation": 2590.0, "width": 500.0, "height": 300.0}
     scene, _ = PB.to_pascal_scene(_geom({"duct": [alias]}))
-    n = _nodes_of(scene, "duct-segment")[0]
-    assert abs(GC.in_to_mm(n["width"]) - 500.0) < 1e-9
-    assert abs(GC.in_to_mm(n["height"]) - 300.0) < 1e-9
+    n = _nodes_of(scene, PB.MEP_NODE_PREFIX + "duct")[0]
+    assert (n["widthMm"], n["heightMm"]) == (500.0, 300.0)
 
 
 def test_mep_with_unresolved_dimensions_is_reported():
     """치수를 모르는 레코드에 기본값을 씌워 내보내지 않는다 — 물량이 조용히 틀린다."""
-    if not hasattr(GC, "mep_dimensions"):
-        raise __import__("unittest").SkipTest("geom_contract.mep_dimensions 없음")
     unk = {"kind": "polyline", "points": [[0.0, 0.0], [3000.0, 0.0]], "eid": "d:u",
            "elevation": 2590.0, "dimension_status": "unknown"}
     scene, rep = PB.to_pascal_scene(_geom({"duct": [unk]}))
-    assert _nodes_of(scene, "duct-segment") == []
+    assert _nodes_of(scene, PB.MEP_NODE_PREFIX + "duct") == []
     assert rep["unconvertible"][0]["reason"] == "mep_dimensions_unresolved"
 
 
@@ -431,9 +425,9 @@ def test_opening_with_no_host_wall_is_reported():
 
 
 def test_categories_pascal_cannot_hold_are_counted():
-    """보·케이블트레이는 Pascal 에 노드 자체가 없고(그쪽 IFC 임포터도 보를 건너뛴다),
-    장비는 0.3~2m 짜리 HVAC 캐비닛뿐이며, 개구부는 벽 로컬 좌표가 필요하다.
-    넷 다 **세어서** 보고한다 — 조용히 빠지면 물량이 말없이 줄어든다."""
+    """보는 Pascal 에 노드 자체가 없고(그쪽 IFC 임포터도 보를 건너뛴다), 장비는 0.3~2m 짜리
+    HVAC 캐비닛뿐이며, 개구부는 벽 로컬 좌표가 필요하다. 셋 다 **세어서** 보고한다 —
+    조용히 빠지면 물량이 말없이 줄어든다. 케이블트레이는 전용 설비 노드로 담긴다."""
     g = _geom({"beam": [{"kind": "polyline", "points": [[0, 0], [1000, 0]], "eid": "b:1"}],
                "tray": [{"kind": "polyline", "points": [[0, 0], [1000, 0]],
                          "elevation": 3000.0, "eid": "t:1"}],
@@ -442,26 +436,23 @@ def test_categories_pascal_cannot_hold_are_counted():
                "opening": [{"kind": "circle", "center": [500, 0], "radius": 450.0,
                             "eid": "o:1", "wall_indices": []}]})
     scene, rep = PB.to_pascal_scene(g)
-    assert rep["counts_out"] == {}
+    assert rep["counts_out"] == {"tray": 1}
     assert {u["category"]: u["reason"] for u in rep["unconvertible"]} == {
         "beam": "no_beam_node_in_pascal",
-        "tray": "no_cable_tray_node_in_pascal",
         "equipment": "hvac_cabinet_only",
         "opening": "no_host_wall"}
 
 
-def test_a_duct_outside_pascals_range_is_never_clamped_into_a_native_node():
-    """범위를 넘긴 값을 **깎아서** 내보내면 Pascal 에는 다른 크기의 덕트가 선다.
-    native 노드로는 내보내지 않고(그러면 zod 가 거부해 씬에서 사라진다) 치수를
-    그대로 실은 foreign 노드로 보낸다."""
+def test_a_small_duct_keeps_its_real_size():
+    """Pascal 기본 duct-segment 의 폭 하한은 4인치(101.6mm)다. 실측 환기평면의 100mm 덕트를
+    **깎아서** 내보내면 다른 크기의 덕트가 선다 — 전용 노드는 mm 그대로 싣는다."""
     rec = {"kind": "polyline", "points": [[0.0, 0.0], [1000.0, 0.0]], "eid": "d:1",
            "elevation": 2590.0, "width_mm": 100.0, "height_mm": 150.0}
     scene, rep = PB.to_pascal_scene(_geom({"duct": [rec]}))
-    assert _nodes_of(scene, "duct-segment") == []          # 깎아서 native 로 보내지 않는다
-    node = _nodes_of(scene, PB.FOREIGN_PREFIX + "duct")[0]
-    assert node["section"]["width_mm"] == 100.0            # 하한 101.6mm 로 올리지 않는다
-    assert node["outOfPascalRange"]["field"] == "width"
-    assert rep["foreign"] == {"duct": 1}
+    assert _nodes_of(scene, "duct-segment") == []
+    node = _nodes_of(scene, PB.MEP_NODE_PREFIX + "duct")[0]
+    assert (node["widthMm"], node["heightMm"]) == (100.0, 150.0)   # 하한 101.6mm 로 올리지 않는다
+    assert rep["foreign"] == {} and rep["unconvertible"] == []
 
 
 def test_a_column_outside_pascals_range_is_still_unconvertible():
@@ -514,8 +505,8 @@ def test_a_section_that_lives_at_top_level_still_becomes_a_command():
           "elevation": 77.95, "diameter": 15.9, "material": "PB"}
     g = _geom({"pipe": [pb]})
     scene, _ = PB.to_pascal_scene(g)
-    node = _nodes_of(scene, PB.FOREIGN_PREFIX + "pipe")[0]
-    node["section"]["diameter"] = 20.0                      # PB 20A 로 바꿨다
+    node = _nodes_of(scene, PB.MEP_NODE_PREFIX + "pipe")[0]
+    node["diameterMm"] = 20.0                               # PB 20A 로 바꿨다
     edits, rep = PB.scene_to_edits(g, scene)
     assert edits == {"p:pb": {"overrides": {"diameter": 20.0}}}
     assert rep["overrides"] == 1
@@ -531,7 +522,7 @@ def test_moving_a_duct_up_or_a_wall_to_another_level_becomes_a_command():
     low = _wall("w:2", [0.0, 0.0], [3000.0, 0.0], z=4200.0)
     g = _geom({"duct": [duct], "wall": [up, low]})
     scene, _ = PB.to_pascal_scene(g)
-    d = _nodes_of(scene, "duct-segment")[0]
+    d = _nodes_of(scene, PB.MEP_NODE_PREFIX + "duct")[0]
     d["path"] = [[p[0], 2.59, p[2]] for p in d["path"]]      # 2400 → 2590 으로 올렸다
     lv = sorted(_nodes_of(scene, "level"), key=lambda n: n["level"])
     w = next(n for n in _nodes_of(scene, "wall") if n["metadata"]["mep"]["eid"] == "w:1")
@@ -555,11 +546,11 @@ def test_an_unconvertible_member_is_never_read_as_a_deletion():
             "elevation": 3000.0}
     g = _geom({"wall": [_wall("w:1", [0.0, 0.0], [3000.0, 0.0]), tri], "tray": [tray]})
     scene, fwd = PB.to_pascal_scene(g)
-    assert len(fwd["unconvertible"]) == 2
+    assert len(fwd["unconvertible"]) == 1              # 사다리꼴 벽(트레이는 이제 전용 노드로 담긴다)
 
     edits, rep = PB.scene_to_edits(g, scene)
     assert edits == {}                                 # 아무것도 안 건드렸으면 명령도 없다
-    assert rep["not_exported"] == 2
+    assert rep["not_exported"] == 1
 
 
 def test_manual_eids_keep_the_floor_prefix_of_a_stacked_project():
@@ -656,25 +647,20 @@ def test_opening_whose_host_wall_vanished_is_counted():
 def test_mep_section_edited_in_pascal_beats_the_old_declaration():
     """`mep_dimensions` 는 `overrides` 를 먼저 본다. 최상위만 갱신하면 Pascal 에서
     100→150 으로 키운 것이 조용히 100 으로 남는다 — 별칭 키 전부에 적용해야 한다."""
-    if not hasattr(GC, "mep_dimensions"):
-        # 이 검사는 `geom_contract.mep_dimensions`(별칭·overrides 우선)를 시험한다.
-        # 그 계약이 아직 커밋되지 않은 트리에서는 시험할 대상이 없다.
-        raise __import__("unittest").SkipTest("geom_contract.mep_dimensions 가 없는 트리")
     for alias in ("diameter", "width", "outside_diameter_mm"):
         rec = {"kind": "polyline", "points": [[0.0, 0.0], [3000.0, 0.0]], "eid": "p:1",
                "elevation": 2600.0, "diameter": 100.0, "overrides": {alias: 100.0}}
         scene, _ = PB.to_pascal_scene(_geom({"pipe": [rec]}))
-        _nodes_of(scene, "pipe-segment")[0]["diameter"] = GC.mm_to_in(150.0)
+        _nodes_of(scene, PB.MEP_NODE_PREFIX + "pipe")[0]["diameterMm"] = 150.0
         back, _ = PB.from_pascal_scene(scene)
         r = back["elements"]["pipe"][0]
         assert GC.mep_dimensions("pipe", r, {})["diameter"] == 150.0, alias
 
 
-def test_real_mep_sizes_survive_as_foreign_nodes():
+def test_real_mep_sizes_go_as_dedicated_nodes_in_mm():
     """Pascal 의 기본 배관·덕트는 미국 주택 규격이라(배관 1.25~8인치, 덕트 높이
-    3인치 하한) **우리 PB 15.9mm 와 높이 54mm 덕트가 하나도 안 들어간다.**
-    버리는 대신 씬 스키마가 통째로 보존하는 foreign 노드로 내보낸다 — 치수는
-    범위에 맞춰 깎지 않고 **mm 그대로**."""
+    3인치 하한) **우리 PB 15.9mm 와 높이 54mm 덕트가 하나도 안 들어갔다.**
+    전용 설비 노드로 치수·계통·재질을 **mm 그대로** 싣고, 원본 곡선의 출처는 metadata 로 나른다."""
     pb = {"kind": "polyline", "points": [[0.0, 0.0], [3000.0, 0.0]], "eid": "p:pb",
           "elevation": 77.95, "diameter": 15.9, "nominal_size": "15A",
           "material": "PB", "system": "공급", "source_length_mm": 3000.0,
@@ -683,10 +669,9 @@ def test_real_mep_sizes_survive_as_foreign_nodes():
             "elevation": 2590.0, "width_mm": 110.0, "height_mm": 54.0, "system": "SA"}
     scene, rep = PB.to_pascal_scene(_geom({"pipe": [pb], "duct": [duct]}))
     assert rep["counts_out"] == {"pipe": 1, "duct": 1}
-    assert rep["foreign"] == {"pipe": 1, "duct": 1} and rep["unconvertible"] == []
-    node = next(n for n in scene["nodes"].values() if n["type"] == PB.FOREIGN_PREFIX + "pipe")
-    assert node["section"]["diameter"] == 15.9 and node["section"]["units"] == "mm"
-    assert node["nativeNodeType"] == "pipe-segment"
+    assert rep["foreign"] == {} and rep["unconvertible"] == []
+    node = next(n for n in scene["nodes"].values() if n["type"] == PB.MEP_NODE_PREFIX + "pipe")
+    assert (node["diameterMm"], node["system"], node["material"]) == (15.9, "공급", "PB")
 
     back, _ = PB.from_pascal_scene(scene)
     r = back["elements"]["pipe"][0]

@@ -88,7 +88,8 @@ def set_ifc_props(obj, rec):
         ("Revision",      "IfcText", str(PROVENANCE.get("revision") if PROVENANCE.get("revision") is not None else "")),
         ("Layer",         "IfcLabel",      rec.get("layer")),
         ("Level",         "IfcLabel",      rec.get("level")),
-        ("System",        "IfcLabel",      rec.get("system")),
+        # 계통은 선언이 이긴다 — Pascal 속성 창에서 고친 계통은 `overrides.system` 으로 저장된다.
+        ("System",        "IfcLabel",      (rec.get("overrides") or {}).get("system", rec.get("system"))),
         ("Region",        "IfcLabel",      rec.get("region_id")),
         ("Circuit",       "IfcLabel",      rec.get("circuit_id")),
         ("NominalSize",   "IfcLabel",      rec.get("nominal_size")),

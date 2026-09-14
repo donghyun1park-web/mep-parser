@@ -22,6 +22,9 @@ Pascal 쪽 계약(읽고 고정한 값, `packages/`):
   zone.ts        polygon: [x, z], name 필수, ceilingHeight: m
   duct-segment   path: [x, **y=바닥 위 높이**, z] m, shape, width/height/diameter: **인치**
   pipe-segment   path 동일, diameter: 인치(1.25~8), system: waste|vent
+                 → 우리 설비는 이 둘로 보내지 않는다(주택 규격 범위). 전용 노드
+                   `mep-parser:pipe|duct|tray`(path 동일, 단면 mm)로 보내고, 이 둘은 사람이
+                   Pascal 도구로 그렸을 때만 읽는다.
   level.ts       level(서수) · baseElevation(m, **누적 위에 더하는 오프셋**) · height(m)
   storey.ts      baseY_i = (직전 baseY + 직전 height) + baseElevation_i, level 오름차순
   ifc-converter  site → building → level → 부재. parentId 와 부모 children **양쪽** 기록
@@ -38,9 +41,11 @@ import geom_contract as GC
 PASCAL_DEFAULT_WALL_THICKNESS_M = 0.1
 PASCAL_DEFAULT_WALL_HEIGHT_M = 2.5
 
-# Pascal 이 모르는 타입의 노드 접두. 씬 스키마가 foreign 노드를 통째로
-# 보존하므로(BaseNode + loose) 우리 규격을 mm 그대로 담아 보낼 수 있다.
-FOREIGN_PREFIX = "mep-parser:"
+# 우리 설비 노드 종류 접두(`mep-parser:pipe|duct|tray`). 편집 화면 호스트가 이 종류를 **전용
+# 플러그인 노드**로 등록한다(`pascal_host/overlay/apps/editor/lib/mep-plugin`). 플러그인이 없는
+# Pascal 에서도 씬 스키마가 모르는 타입을 foreign 노드로 통째로 보존하므로 저장은 무손실이다.
+MEP_NODE_PREFIX = FOREIGN_PREFIX = "mep-parser:"
+MEP_PLUGIN_ID = "mep-parser:mep"          # 씬 `installedPlugins` — 플러그인 index.ts 와 같은 값
 
 # 벽 조각이 '이어져 있다' 고 볼 거리(mm). 이보다 벌어지면 다른 벽이다.
 WALL_JOIN_TOL_MM = 1.0
@@ -54,13 +59,12 @@ RECT_TOL_DEG = 1.0
 # 레벨을 **정의**하는 카테고리. MEP 는 여기 없다 — 덕트의 elevation 2590mm 는
 # 2.59m 짜리 층이 아니라 바닥 위 2.59m 다.
 LEVEL_CATS = ("wall", "column", "slab", "zone")
-MEP_CATS = ("duct", "pipe")
+MEP_CATS = ("duct", "pipe", "tray")
 
 # Pascal 에 대응 노드가 **없는** 카테고리. 조용히 버리지 않고 세어서 보고한다.
 # (beam 은 Pascal 자신의 IFC 임포터도 "Pascal has no `beam` node type yet" 이라며 건너뛴다.)
 NO_PASCAL_NODE = {
     "beam": "no_beam_node_in_pascal",
-    "tray": "no_cable_tray_node_in_pascal",
     # HvacEquipmentNode 는 furnace|air-handler|condenser **캐비닛**이고 치수가
     # 0.3~2m 로 묶여 있다(실측 지하3층: 장비 6개 전부 2.1~2.6m 로 초과).
     # 우리 equipment 는 임의 footprint 라 담을 그릇이 아니다.
@@ -70,12 +74,9 @@ NO_PASCAL_NODE = {
 # ★ Pascal 스키마의 **수치 범위**. zod 가 거부하면 그 노드는 씬에 안 올라온다 —
 #   범위를 넘긴 부재를 그냥 내보내면 "변환했다" 고 말해 놓고 Pascal 에서는
 #   사라진다. 넘기면 내보내지 않고 `out_of_pascal_range` 로 센다.
-#   (덕트 폭 하한 4인치 = 101.6mm — 실측 환기평면에 100mm 덕트가 있다.)
+#   (설비는 기본 duct/pipe-segment 가 아니라 mm 전용 노드로 가서 여기 없다 — 종전엔 덕트 폭
+#    하한 4인치 = 101.6mm 에 실측 환기평면의 100mm 덕트가 걸렸다.)
 _RANGE = {
-    ("duct-segment", "width"): (4.0, 60.0),
-    ("duct-segment", "height"): (3.0, 40.0),
-    ("duct-segment", "diameter"): (2.0, 48.0),
-    ("pipe-segment", "diameter"): (1.25, 8.0),
     ("zone", "ceilingHeight"): (0.1, None),
     ("column", "height"): (1e-9, None),
     ("column", "width"): (1e-9, None),
@@ -109,36 +110,23 @@ _PROVENANCE = ("eid", "eid_v1", "layer", "pairing", "confidence", "needs_review"
 
 
 def _dim_aliases(cat, key):
-    """그 치수를 담을 수 있는 키 전부(정식 키 + GUI 별칭). 표는 `geom_contract` 것이다.
-
-    ponytail: `MEP_DIM_ALIASES` 가 아직 없는 트리를 위한 폴백. 들어오면 지운다.
-    """
-    table = getattr(GC, "MEP_DIM_ALIASES", None)
-    if table is None:
-        return (key,)
-    return table.get(cat, {}).get(key, (key,))
+    """그 치수를 담을 수 있는 키 전부(정식 키 + GUI 별칭). 표는 `geom_contract` 것이다 —
+    원형 덕트·트레이의 지름(`ROUND_DIM_ALIASES`)까지."""
+    table = dict(GC.MEP_DIM_ALIASES.get(cat, {}))
+    if cat != "pipe":
+        table.update(GC.ROUND_DIM_ALIASES)
+    return table.get(key, (key,))
 
 
 def _dim_keys(cat):
-    """그 카테고리의 정식 치수 키들."""
-    table = getattr(GC, "MEP_DIM_ALIASES", None)
-    if table is not None:
-        return tuple(table.get(cat, {}))
-    return ("diameter",) if cat == "pipe" else ("width_mm", "height_mm")
+    """그 카테고리의 정식 치수 키들(덕트·트레이는 원형 지름 포함)."""
+    keys = tuple(GC.MEP_DIM_ALIASES.get(cat, {}))
+    return keys if cat == "pipe" else keys + tuple(GC.ROUND_DIM_ALIASES)
 
 
-def _mep_dims(cat, rec, params):
-    """MEP 단면 치수. 규약은 `geom_contract` 가 갖는다 — GUI 별칭 키(`width`/
-    `height`/`diameter_mm`)와 '치수 미해소' 판정이 거기 있다. 여기서 `rec["width_mm"]`
-    만 읽으면 별칭만 있는 레코드가 **조용히 기본값 400mm 덕트**가 된다.
-
-    ponytail: `mep_dimensions` 가 아직 없는 트리를 위한 폴백. 그 함수가 들어오면 지운다.
-    """
-    fn = getattr(GC, "mep_dimensions", None)
-    if fn is not None:
-        return fn(cat, rec, params)          # ContractError 는 호출자가 잡는다
-    keys = ("diameter",) if cat == "pipe" else ("width_mm", "height_mm")
-    return {k: float(rec.get(k) or GC.DEFAULT_DIMS[cat][k]) for k in keys}
+def _mep_attr(rec, key):
+    """계통·재질 같은 속성 — 선언(`overrides`)이 이긴다(치수와 같은 규약)."""
+    return (rec.get("overrides") or {}).get(key, rec.get(key))
 
 
 def _nid(prefix, *parts):
@@ -553,7 +541,7 @@ def to_pascal_scene(geometry, name=None):
         node["metadata"]["mep"] = _meta(zrec)
         add(zid, node, lid, "zone", zrec)
 
-    # ── MEP(덕트·배관) ────────────────────────────────────────────────────
+    # ── MEP(덕트·배관·트레이) — 전용 설비 노드 ──────────────────────────────
     #   path 는 [x, **높이**, y] — Y-up 이라 평면 y 가 셋째로 간다.
     for cat in MEP_CATS:
         for i, m in enumerate(el.get(cat) or []):
@@ -580,47 +568,30 @@ def to_pascal_scene(geometry, name=None):
                 y = GC.mm_to_m(elev - lz)
                 path = [[GC.mm_to_m(p[0]), y, GC.mm_to_m(p[1])] for p in pts]
             try:
-                dims = _mep_dims(cat, m, params)
+                section = GC.mep_section(cat, m, params)
             except GC.ContractError as exc:
                 bad(cat, m, "mep_dimensions_unresolved", detail=str(exc))
                 continue
-            need = ("diameter",) if cat == "pipe" else ("width_mm", "height_mm")
-            if any(dims.get(k) is None for k in need):
-                # footprint 모드처럼 공칭 단면이 없는 레코드 — 세그먼트로 못 만든다
+            need = ("diameter",) if section["shape"] == "round" else ("width_mm", "height_mm")
+            if any(section.get(k) is None for k in need):
+                # footprint 모드처럼 공칭 단면이 없는 레코드 — 경로로 못 만든다
                 bad(cat, m, "mep_dimensions_unresolved", detail="missing " + ",".join(need))
                 continue
-            native = "duct-segment" if cat == "duct" else "pipe-segment"
-            mid_ = _nid(native, eid)
-            if cat == "duct":
-                node = _node(mid_, native, lid,
-                             name=str(m.get("layer") or cat), children=[], path=path,
-                             shape="rect", width=GC.mm_to_in(dims["width_mm"]),
-                             height=GC.mm_to_in(dims["height_mm"]))
-            else:
-                node = _node(mid_, native, lid,
-                             name=str(m.get("layer") or cat), children=[], path=path,
-                             diameter=GC.mm_to_in(dims["diameter"]))
-            bounds = _out_of_range(node)
-            if bounds is not None:
-                # ★ Pascal 의 기본 MEP 노드는 미국 주택 규격이다(배관 1.25~8인치 =
-                #   DWV, 덕트 높이 3인치 하한). 우리 PB 15.9mm·높이 54mm 덕트는
-                #   **하나도 못 들어간다** — 실측: 난방 5경로·환기 41경로가 0개가 됐다.
-                #   그렇다고 버리면 안 된다. Pascal 의 씬 스키마는 **모르는 타입**을
-                #   `ForeignNodeEnvelope`(BaseNode + loose)로 받아 그대로 저장한다.
-                #   그래서 치수를 **mm 그대로** 실어 foreign 노드로 내보낸다 —
-                #   지금은 안 그려지지만 저장·왕복은 무손실이고, 전용 플러그인 노드가
-                #   들어오면 그 자리에서 그려진다. 범위에 맞춰 값을 깎지 않는다.
-                field, val, lo, hi = bounds
-                node = _node(mid_, FOREIGN_PREFIX + cat, lid,
-                             name=str(m.get("layer") or cat), children=[], path=path,
-                             section=dict(dims, units="mm"), nativeNodeType=native,
-                             outOfPascalRange={"field": field, "value_in": round(val, 4),
-                                               "min": lo, "max": hi})
-                report["foreign"][cat] = report["foreign"].get(cat, 0) + 1
+            # ★ Pascal 기본 duct/pipe-segment 는 미국 주택 규격이다(인치, 배관 1.25~8·덕트 높이
+            #   3인치 하한) — 실측: PB 15.9mm 난방 5경로·110×54mm 환기 41경로가 하나도 안
+            #   들어갔다. 값을 깎으면 다른 크기의 설비가 선다. 편집 화면 호스트가 등록하는 **전용
+            #   노드**로 모든 설비를 mm 단면·모양·회전·계통·재질 그대로 싣는다(트레이도 담긴다).
+            mid_ = _nid("mep-" + cat, eid)
+            dims = ({"diameterMm": section["diameter"]} if section["shape"] == "round"
+                    else {"widthMm": section["width_mm"], "heightMm": section["height_mm"]})
+            node = _node(mid_, MEP_NODE_PREFIX + cat, lid, name=str(m.get("layer") or cat),
+                         path=path, shape=section["shape"], sectionRoll=section["roll"],
+                         system=str(_mep_attr(m, "system") or ""),
+                         material=str(_mep_attr(m, "material") or ""), **dims)
             node["metadata"]["mep"] = _meta(m)
             add(mid_, node, lid, cat, m)
 
-    return {"nodes": nodes, "rootNodeIds": [site_id]}, report
+    return {"nodes": nodes, "rootNodeIds": [site_id], "installedPlugins": [MEP_PLUGIN_ID]}, report
 
 
 # ── 역변환 ────────────────────────────────────────────────────────────────
@@ -665,14 +636,39 @@ def from_pascal_scene(scene):
             if name in ov:
                 ov[name] = value
 
+    def set_attr(rec, key, value):
+        """단면 모양·회전·계통·재질. `overrides` 에 같은 키가 있으면 **함께** 갱신한다 —
+        소비자가 선언을 먼저 읽으므로(set_base 와 같은 함정) 최상위만 쓰면 편집이 사라진다."""
+        rec[key] = value
+        if key in rec["overrides"]:
+            rec["overrides"][key] = value
+
     def edited(what):
         report["edited"][what] = report["edited"].get(what, 0) + 1
 
+    def like_eid(n):
+        """새로 그린 노드가 층 접두를 물려받을 EID — 부모(개구부면 호스트 벽)나 같은 부모 아래 부재의 것."""
+        parent = n.get("parentId")
+        near = [nodes.get(parent) or {}] + [nodes[k] for k in sorted(nodes)
+                                             if nodes[k].get("parentId") == parent]
+        for x in near:
+            e = ((x.get("metadata") or {}).get("mep") or {}).get("eid")
+            if e:
+                return e
+        return ""
+
     def base(n):
-        """metadata 의 출처 + 되살릴 수 없는 필드를 뺀 레코드 뼈대."""
-        meta = (n.get("metadata") or {}).get("mep") or {}
+        """metadata 의 출처 + 되살릴 수 없는 필드를 뺀 레코드 뼈대.
+
+        ★ 출처(`metadata.mep`) 키가 아예 없는 노드는 Pascal 도구로 **새로 그린 것**이다. EID 가
+          없으면 변경 명령이 건너뛰어 **저장되지 않는다** — 수동 레코드(`wm:`·층 접두 승계)로
+          받고 원본 출처는 만들어 넣지 않는다. 우리가 내보낸 노드는 출처가 비어도 키가 있다."""
+        md = n.get("metadata") or {}
+        meta = md.get("mep") or {}
         rec = {k: meta[k] for k in _PROVENANCE if k in meta}
         rec["overrides"] = dict(rec.get("overrides") or {})
+        if "mep" not in md:
+            rec.update(eid=_manual_eid(like_eid(n), n["id"]), pairing="manual")
         return rec, meta
 
     elements = {}
@@ -860,17 +856,41 @@ def from_pascal_scene(scene):
                 report["path3d"] = report.get("path3d", 0) + 1
             else:
                 rec.pop("path3d", None)
-            sec = n.get("section")
-            if sec is not None:
-                # foreign 노드는 처음부터 mm 다 — 인치를 거치지 않는다.
-                for key in _dim_keys(cat):
-                    if sec.get(key) is not None:
-                        set_dim(rec, cat, key, float(sec[key]))
-            elif cat == "duct":
-                set_dim(rec, cat, "width_mm", GC.in_to_mm(n.get("width", 14)))
-                set_dim(rec, cat, "height_mm", GC.in_to_mm(n.get("height", 8)))
+            if any(n.get(k) is not None for k in ("diameterMm", "widthMm", "heightMm")):
+                # 전용 노드 — mm 단면·모양·회전·계통·재질이 그대로 온다(인치를 거치지 않는다).
+                shape = "round" if cat == "pipe" else (n.get("shape") or "rect")
+                if cat != "pipe" and (shape != "rect" or "section_shape" in rec["overrides"]):
+                    set_attr(rec, "section_shape", shape)
+                if shape == "round":
+                    set_dim(rec, cat, "diameter", float(n.get("diameterMm") or 0.0))
+                else:
+                    set_dim(rec, cat, "width_mm", float(n.get("widthMm") or 0.0))
+                    set_dim(rec, cat, "height_mm", float(n.get("heightMm") or 0.0))
+                for key, value in (("section_roll", float(n.get("sectionRoll") or 0.0)),
+                                   ("system", str(n.get("system") or "")),
+                                   ("material", str(n.get("material") or ""))):
+                    # 원본에 없던 속성을 빈 값으로 새로 붙이지 않는다(계약에 없는 값이 번진다).
+                    if value or key in rec or key in rec["overrides"]:
+                        set_attr(rec, key, value)
             else:
-                set_dim(rec, cat, "diameter", GC.in_to_mm(n.get("diameter", 2)))
+                if n.get("section") is not None:
+                    # 플러그인 전의 foreign 노드 — 처음부터 mm 다.
+                    for key in _dim_keys(cat):
+                        if n["section"].get(key) is not None:
+                            set_dim(rec, cat, key, float(n["section"][key]))
+                elif cat == "duct" and n.get("shape") == "round":
+                    # Pascal 기본 도구로 그린 원형 덕트(인치) — 우리 원형 덕트로 받는다.
+                    set_attr(rec, "section_shape", "round")
+                    set_dim(rec, cat, "diameter", GC.in_to_mm(n.get("diameter", 6)))
+                elif cat == "duct":
+                    if n.get("shape") == "oval":
+                        edited("oval_duct_as_rect")      # 우리 계약에 타원 단면이 없다 — 세어서 말한다
+                    set_dim(rec, cat, "width_mm", GC.in_to_mm(n.get("width", 14)))
+                    set_dim(rec, cat, "height_mm", GC.in_to_mm(n.get("height", 8)))
+                else:
+                    set_dim(rec, cat, "diameter", GC.in_to_mm(n.get("diameter", 2)))
+                if n.get("system") and not rec.get("system"):
+                    set_attr(rec, "system", str(n["system"]))
             out(cat, rec)
 
     geometry = {
@@ -997,13 +1017,27 @@ def scene_to_edits(geometry, scene):
             ov[z_key] = z1
         if cat in MEP_CATS:
             try:
-                d0, d1 = _mep_dims(cat, orig, params), _mep_dims(cat, now, params)
+                s0, s1 = GC.mep_section(cat, orig, params), GC.mep_section(cat, now, params)
             except GC.ContractError:
-                d0 = d1 = {}
-            for key, v in d1.items():
-                # 별칭 하나로 이미 나갔으면(`height`) 정식 키(`height_mm`)를 겹쳐 싣지 않는다
-                if key in d0 and abs(v - d0[key]) > _GEOM_TOL_MM and                         not any(a in ov for a in _dim_aliases(cat, key)):
-                    ov[key] = v
+                s0 = s1 = None
+            if s0 and s1:
+                if s0["shape"] != s1["shape"]:
+                    # 모양이 바뀌면 새 모양의 치수를 함께 선언한다 — 모양만 있는 선언은 쓸 수 없다.
+                    ov.setdefault("section_shape", s1["shape"])
+                    for key in (("diameter",) if s1["shape"] == "round" else ("width_mm", "height_mm")):
+                        if not any(a in ov for a in _dim_aliases(cat, key)):
+                            ov[key] = s1[key]
+                else:
+                    for key in ("diameter", "width_mm", "height_mm"):
+                        # 별칭 하나로 이미 나갔으면(`height`) 정식 키(`height_mm`)를 겹쳐 싣지 않는다
+                        if (key in s0 and key in s1 and abs(s1[key] - s0[key]) > _GEOM_TOL_MM
+                                and not any(a in ov for a in _dim_aliases(cat, key))):
+                            ov[key] = s1[key]
+                if abs(s1["roll"] - s0["roll"]) > 1e-9 and "section_roll" not in ov:
+                    ov["section_roll"] = s1["roll"]
+            for key in ("system", "material"):
+                if (_mep_attr(orig, key) or "") != (_mep_attr(now, key) or "") and key not in ov:
+                    ov[key] = _mep_attr(now, key) or ""
         if ov:
             edits[eid] = {"overrides": ov}
             report["overrides"] += 1

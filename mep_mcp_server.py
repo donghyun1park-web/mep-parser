@@ -277,7 +277,9 @@ def get_mep_diagnostics(json_path: str = DEFAULT_JSON) -> str:
     try:
         state = session_from_geometry(json_path).state()
         geometry = state['geometry']
-        records = [{'eid': record.get('eid'), 'category': category, 'system': record.get('system'),
+        # 계통은 선언이 이긴다 — 편집 화면에서 고친 계통은 `overrides.system` 으로 저장된다.
+        records = [{'eid': record.get('eid'), 'category': category,
+                    'system': (record.get('overrides') or {}).get('system', record.get('system')),
                     'source_refs': record.get('source_refs', []),
                     'source_handles': record.get('source_handles') or [ref.get('handle') for ref in record.get('source_refs', [])],
                     'review_reason': record.get('review_reason'),

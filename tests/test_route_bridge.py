@@ -74,3 +74,62 @@ def test_planar_arc_route_is_untouched_by_a_round_trip():
     scene, report = PB.to_pascal_scene(geo)
     assert not report.get("path3d")                                      # 평면 경로는 종전 그대로
     assert PB.scene_to_edits(geo, scene)[0] == {}
+
+
+# ── 전용 설비 노드(편집 화면 플러그인) ────────────────────────────────────────
+def test_dedicated_node_round_trip_carries_shape_roll_system_and_material():
+    rnd = {"eid": "d:r", "layer": "SA", "section_shape": "round", "diameter": 125.0, "elevation": 2500.0,
+           "system": "SA", "material": "GI", "points": [[0, 0], [2000, 0]]}
+    rect = {"eid": "d:q", "layer": "RA", "width_mm": 204.0, "height_mm": 60.0, "section_roll": 0.5,
+            "elevation": 2400.0, "system": "RA", "points": [[0, 1000], [2000, 1000]]}
+    geo = _geo(duct=[rnd, rect])
+    scene, _rep = PB.to_pascal_scene(geo)
+    r, q = _node(scene, "d:r"), _node(scene, "d:q")
+    assert (r["type"], r["shape"], r["diameterMm"], r["system"], r["material"]) == \
+        ("mep-parser:duct", "round", 125.0, "SA", "GI")
+    assert (q["shape"], q["widthMm"], q["heightMm"], q["sectionRoll"]) == ("rect", 204.0, 60.0, 0.5)
+    assert scene["installedPlugins"] == [PB.MEP_PLUGIN_ID]
+    assert PB.scene_to_edits(geo, scene)[0] == {}                        # 손대지 않으면 명령 0
+    back, _ = PB.from_pascal_scene(scene)
+    by = {x["eid"]: x for x in back["elements"]["duct"]}
+    assert GC.mep_section("duct", by["d:r"]) == {"diameter": 125.0, "shape": "round", "roll": 0.0}
+    assert GC.mep_section("duct", by["d:q"])["roll"] == 0.5
+
+
+def test_inspector_edits_become_declarations():
+    """속성 창에서 고친 모양·지름·계통·재질은 **선언**(`overrides`)으로 돌아온다 — EID 유지.
+    모양을 바꾸면 새 모양의 치수를 함께 싣는다(모양만 있는 선언은 쓸 수 없다)."""
+    from project_store import validate_edits
+    rect = {"eid": "d:q", "layer": "RA", "width_mm": 204.0, "height_mm": 60.0, "elevation": 2400.0,
+            "system": "RA", "points": [[0, 0], [2000, 0]]}
+    geo = _geo(duct=[rect])
+    scene, _ = PB.to_pascal_scene(geo)
+    _node(scene, "d:q").update(shape="round", diameterMm=160.0, system="EA", material="SUS")
+    edits, _ = PB.scene_to_edits(geo, scene)
+    validate_edits(edits)                                                # 저장 경로가 받는 모양
+    assert edits == {"d:q": {"overrides": {"section_shape": "round", "diameter": 160.0,
+                                           "system": "EA", "material": "SUS"}}}
+
+
+def test_a_run_drawn_with_pascals_own_tool_is_saved_as_a_manual_record():
+    """Pascal 기본 도구로 새로 그린 경로에는 EID 가 없다 — 변경 명령이 건너뛰면 **저장되지 않는다.**
+    수동 레코드로 받고(원본 출처를 만들어 넣지 않는다), 인치 원형 덕트는 mm 원형 덕트로, 입상은 그대로."""
+    rect = {"eid": "d:q", "layer": "RA", "width_mm": 204.0, "height_mm": 60.0, "elevation": 2400.0,
+            "points": [[0, 0], [2000, 0]]}
+    geo = _geo(duct=[rect])
+    scene, _ = PB.to_pascal_scene(geo)
+    parent = _node(scene, "d:q")["parentId"]
+    nid = "duct-segment_user00000001"
+    scene["nodes"][nid] = {"object": "node", "id": nid, "type": "duct-segment", "parentId": parent,
+                           "visible": True, "metadata": {},
+                           "path": [[0, 2.5, 3], [2, 2.5, 3], [2, 3.5, 3]],
+                           "shape": "round", "diameter": 6, "system": "supply"}
+    scene["nodes"][parent].setdefault("children", []).append(nid)
+    edits, report = PB.scene_to_edits(geo, scene)
+    (eid, cmd), = [(k, v) for k, v in edits.items() if v.get("added")]
+    rec = cmd["record"]
+    assert eid.startswith("wm:") and rec["pairing"] == "manual" and "source_refs" not in rec
+    assert GC.mep_section("duct", rec) == {"diameter": pytest.approx(6 * 25.4), "shape": "round", "roll": 0.0}
+    zs = [p[2] for p in GC.route_points("duct", rec)]
+    assert max(zs) - min(zs) == pytest.approx(1000.0)                   # 입상도 그대로
+    assert report["added"] == 1 and "d:q" not in edits

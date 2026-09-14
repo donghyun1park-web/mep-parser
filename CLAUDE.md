@@ -42,8 +42,8 @@
 | `tests/golden.json` | **실무 도면 회귀 다이제스트.** 도면은 고객 자료라 커밋하지 않고 경로만 `tests/golden.local.json`(gitignore)에 둔다. 도면이 없으면 `[skip]`. 갱신은 `python tests/test_golden.py --bless` |
 | `extractors.py` + `mep_macro/` | **FreeCAD 안에서만** 쓰는 라이브 자연어 모델링용 헬퍼(`freecad_live_addon`). 일반 파이프라인은 이걸 거치지 않는다 |
 | `FIX_SPEC.md` | 면선 페어링·곡선벽 개선의 이전 설계 기록. 현재 구현 여부는 코드와 회귀 테스트를 확인한다. |
-| `pascal_bridge.py` | **geometry.json ↔ Pascal(pascalorg/editor) 씬 그래프.** 벽·기둥·슬래브·zone·덕트·배관. 단위(mm↔m, 지름은 인치)·축(Pascal 은 Y-up)·고저(레벨 스택) 환산은 전부 `geom_contract` 를 부른다. Pascal 이 표현 못 하거나 스키마 범위를 넘긴 것은 `unconvertible` 로 **세어서 보고**한다 |
-| `pascal_host/` | **Pascal 편집 화면 호스트(3단계 첫 조각).** `PASCAL_COMMIT`(고정 커밋) · `overlay/`(체크아웃에 얹는 우리 파일 5개: `/mep` 페이지와 `/api/mep/*` 서버 측 프록시) · `run_host.py`(저장소 서버와 Pascal 을 함께 띄우는 실행기) |
+| `pascal_bridge.py` | **geometry.json ↔ Pascal(pascalorg/editor) 씬 그래프.** 벽·기둥·슬래브·zone·개구부와 설비(배관·덕트·트레이는 **전용 플러그인 노드**, 단면 mm). 단위(mm↔m)·축(Pascal 은 Y-up)·고저(레벨 스택) 환산은 전부 `geom_contract` 를 부른다. Pascal 이 표현 못 하거나 스키마 범위를 넘긴 것은 `unconvertible` 로 **세어서 보고**한다 |
+| `pascal_host/` | **Pascal 편집 화면 호스트(3단계 첫 조각).** `PASCAL_COMMIT`(고정 커밋) · `overlay/`(체크아웃에 얹는 우리 파일: `/mep` 페이지 · `/api/mep/*` 서버 측 프록시 · `lib/mep-plugin/` 설비 노드 플러그인) · `run_host.py`(저장소 서버와 Pascal 을 함께 띄우는 실행기) |
 | `docs/project_workflow.md` | 프로젝트 저장·복구·재연결·출력 검증 사용법과 현재 범위. |
 
 ## geometry.json 스키마
@@ -617,10 +617,8 @@ CIRCLE·ARC·SPLINE 만 알아서 216개가 `unhandled` 경고만 남기고 빠�
 | column | `column` | 직사각형 → 중심·폭·깊이·회전. 원형 → `round`+radius |
 | slab | `slab` | `elevation` 이 **상단**, 두께는 아래로 — 우리 z 규약과 **같다** |
 | zone | `zone` | 폴리곤 + `ceilingHeight`. **고저 필드가 없다**(레벨면에 붙는다) |
-| duct | `duct-segment` | `path` 는 [x, **높이**, 평면y] m, 단면은 **인치** |
-| pipe | `pipe-segment` | 지름 인치(1.25~8), DWV 전용 스키마 |
+| duct · pipe · tray | `mep-parser:duct` · `pipe` · `tray` (**전용 플러그인 노드**) | `path` 는 [x, **높이**, 평면y] m, 단면은 **mm** · 모양 · roll · 계통 · 재질(아래). 기본 `duct-segment`·`pipe-segment`(인치)는 사람이 Pascal 도구로 그렸을 때만 **읽는다** |
 | **beam** | **없음** | Pascal 자신의 IFC 임포터도 *"Pascal has no `beam` node type yet"* 이라며 건너뛴다 |
-| **tray** | **없음** | `lineset` 은 냉매 배관 쌍이지 케이블트레이가 아니다 |
 | **equipment** | (부적합) | `hvac-equipment` 는 furnace\|air-handler\|condenser **캐비닛**이고 치수가 0.3~2m 로 묶여 있다 |
 | opening | `door` / `window` | **벽의 자식**이고 좌표가 벽 로컬이다(아래) |
 
@@ -657,17 +655,33 @@ CIRCLE·ARC·SPLINE 만 알아서 216개가 `unhandled` 경고만 남기고 빠�
 41경로가 **전부 0개**가 됐다. 범위에 맞춰 값을 깎으면 다른 크기의 설비가 서므로
 그것도 답이 아니다.
 
-→ Pascal 의 씬 스키마는 **모르는 타입의 노드**를 `ForeignNodeEnvelope`(BaseNode +
-`.loose()`)로 받아 **통째로 저장**한다(`apps/editor/lib/graph-schema.ts`). 그래서
-범위 밖 MEP 는 `mep-parser:pipe`/`mep-parser:duct` 로 내보낸다 — 경로는 native 와
-같은 좌표(m·Y-up·레벨 로컬), 단면은 **mm 그대로**, 넘긴 값은 `outOfPascalRange` 에
-남긴다. 실측 검증: 45개 전부 `apiGraphSchema` 통과, 왕복에서 110×54·204×60 과
-계통·재질이 보존된다. 지금은 안 그려지고, 전용 플러그인 노드가 들어오면 그 자리에서
-그려진다. **구조 노드에는 이 대안을 두지 않는다** — 거기서는 범위 초과가 데이터
-오류지 규격 차이가 아니다.
+→ 모든 설비(배관·덕트·트레이)를 **전용 노드** `mep-parser:<카테고리>` 로 내보낸다. 편집 화면
+호스트가 그 종류를 Pascal 플러그인으로 등록해(`overlay/apps/editor/lib/mep-plugin/`, 씬의
+`installedPlugins: ["mep-parser:mep"]`) 3D·평면에 그리고 인스펙터에서 고친다. 필드는 `path`
+(native 와 같은 좌표: m·Y-up·레벨 로컬) + `shape`(round|rect) · `diameterMm` 또는 `widthMm`·
+`heightMm` · `sectionRoll` · `system` · `material` — 단면은 **mm 그대로**다. 플러그인이 없는
+Pascal 에서도 씬 스키마가 모르는 타입을 `ForeignNodeEnvelope`(BaseNode + `.loose()`)로 통째로
+저장하므로(`apps/editor/lib/graph-schema.ts`) 저장은 무손실이고, 플러그인 전의 foreign 노드
+(`section` 에 mm)도 계속 읽는다. **구조 노드에는 이 대안을 두지 않는다** — 거기서는 범위
+초과가 데이터 오류지 규격 차이가 아니다.
+
+★ **플러그인 단면은 Python 계약을 옮긴 것이다 — 따로 설계하지 않는다.** `section.ts` 는
+`geom_contract.section_axes`·`rect_rings`·`rect_parts` 의 TS 이식이다(Pascal 은 Y-up 이라
+축을 맞바꾼다). `test_plugin_section_rings_match_the_python_contract_under_the_axis_swap` 이
+Node 로 돌려 네 경로(조각 1·1·3·1)의 링을 1e-9 m 로 대조한다 — 화면의 덕트와 Blender·
+FreeCAD 의 덕트가 같은 단면 방향이어야 화면을 믿을 수 있다.
+
+★ **Pascal 도구로 새로 그린 노드는 수동 레코드로 저장한다.** 종전엔 레코드를 `metadata` 의
+출처로만 만들어, 새로 그린 노드는 EID 가 없어 `scene_to_edits` 가 건너뛰었다 — **화면에
+그렸는데 저장되지 않았다.** 출처 키(`metadata.mep`)가 **아예 없는** 노드가 새로 그린 것이다
+(우리가 내보낸 노드는 출처가 비어도 키가 있다). `base()` 가 `wm:` EID(부모 또는 같은 부모 아래
+부재의 층 접두 승계)와 `pairing="manual"` 을 붙이고 원본 출처는 만들어 넣지 않는다. 기본
+도구의 원형 덕트(인치)는 우리 원형 덕트(mm)로, 타원 덕트는 사각으로 받고 `oval_duct_as_rect`
+로 센다. 인스펙터에서 바꾼 모양·치수·roll·계통·재질은 `overrides` 로 돌아오고, **모양이 바뀌면
+새 모양의 치수를 함께** 선언한다(모양만 있는 선언은 쓸 수 없다).
 
 ★ **편집 결과는 전체 JSON 되돌리기로 저장하지 않는다.** 그러면 화면에 없는 것이
-전부 삭제로 보이고(변환 못 한 사다리꼴 벽·트레이·장비까지), 동시 수정·되돌리기가
+전부 삭제로 보이고(변환 못 한 사다리꼴 벽·장비까지), 동시 수정·되돌리기가
 revision 검사를 지나가지 못한다. `scene_to_edits(geometry, scene)` 가 **원본과
 대조해 변경 명령**을 내고 — 어휘는 이미 있는 `edits.json` 것 그대로(`deleted` ·
 `overrides` · `added`+`record`) — `project_server.save` 의 revision·검증·잠금을 탄다.
@@ -743,10 +757,10 @@ continue` 라 조용히 사라진 부재가 검사를 그냥 통과했다(위 �
 우리도 똑같이 벗긴다. 형상이 멀쩡해 보이는 종류의 오류라 검사에는 안 걸린다.
 
 ★ **zod 범위를 넘긴 노드는 내보내지 않는다.** Pascal 스키마는 수치에 상·하한이 있고
-(덕트 폭 4~60in · 높이 3~40in · 배관 지름 1.25~8in), 넘기면 `.parse()` 가 거부해 그
-노드는 **씬에 안 올라온다**. 그냥 내보내면 "변환했다" 고 말해 놓고 Pascal 에서는
-사라진다. `_RANGE` 로 미리 걸러 `out_of_pascal_range`(필드·값·한계)로 센다 —
-실측 환기평면의 **100mm 폭 덕트가 하한 101.6mm 에 걸린다.**
+(zone `ceilingHeight` · 기둥 치수 > 0 등), 넘기면 `.parse()` 가 거부해 그 노드는 **씬에 안
+올라온다**. 그냥 내보내면 "변환했다" 고 말해 놓고 Pascal 에서는 사라진다. `_RANGE` 로 미리
+걸러 `out_of_pascal_range`(필드·값·한계)로 센다. (설비는 전용 노드라 여기 없다 — 기본 덕트로
+보내던 때는 실측 환기평면의 100mm 폭 덕트가 하한 101.6mm 에 걸렸다.)
 
 실측:
 
@@ -754,7 +768,7 @@ continue` 라 조용히 사라진 부재가 검사를 그냥 통과했다(위 �
 |---|---|---|---|---|
 | 지하3층 건축평면 | 벽 667 · 기둥 80 · 슬래브 8 · 개구부 34 · 장비 6 | **777** (벽 660 · 기둥 80 · 슬래브 8 · 개구부 29) | 벽 7(사다리꼴) · 개구부 5(붙을 벽 없음) · 장비 6 | **1.5e-11 mm** |
 | 아파트 환기평면 | 덕트 45 · 장비 11 · 개구부 12 | **45** | 장비 11 · 개구부 12(벽 없는 도면) | **9.1e-13 mm** |
-| MEP 샘플 | 슬래브 1 · 덕트 1 · 배관 2 · 트레이 1 · 장비 2 | **4** | 트레이 1 · 장비 2 | **0** |
+| MEP 샘플 | 슬래브 1 · 덕트 1 · 배관 2 · 트레이 1 · 장비 2 | **5** (전용 노드 4 — 트레이 포함) | 장비 2 | **0** |
 
 두께·높이·`z_base`·`elevation` 불일치는 세 도면 모두 **0**, 되돌린 파일의
 `verify_geometry` 는 원본과 같다.
@@ -799,6 +813,10 @@ Pascal 의 `Editor` 는 영속화가 `onLoad`/`onSave` 어댑터 둘뿐이라 **
   메아리가 또 메아리를 불러 저장이 끝나지 않는다.
 - **사이드바 탭(장면 트리·작도·설정)을 넘겨야 한다.** 안 넘기면 편집기가 플러그인 탭만
   띄워 장면 트리가 없고, 다른 부재 속에 묻힌 벽은 고를 길이 없다(실측으로 겪음).
+- **보기 도구줄(`viewerToolbarLeft/Right` — 3D·2D·분할 전환)도 넘겨야 한다.** 안 넘기면
+  평면 편집 화면으로 갈 길이 없다 — 설비 경로 점 끌기와 평면 표시가 전부 2D 쪽이다(실측으로 겪음).
+- **설비 플러그인은 스냅샷을 불러오기 전에 등록한다**(`ensureMepPlugin()`). 적재가 등록된
+  스키마로 노드를 검사하기 때문이다.
 - **체크아웃이 고정 커밋이 아니거나 오버레이가 어긋나면 띄우지 않는다** — 다른 코드가 도는
   편집 화면으로 저장하면 무엇이 저장됐는지 아무도 모른다. Pascal 의 `next.config` 가
   `ignoreBuildErrors: true` 라 빌드는 타입 오류를 삼킨다 — 오버레이는 `tsc` 로 따로 검사한다.
@@ -816,6 +834,13 @@ r3 를 다시 불러오고 → 재열기 + DXF 재파싱 뒤 빌더가 쓸 두�
 메아리 거르기를 빼고 revision 비교로 바꾼 뒤 다시 잰 것: 두께 0.35 → 0.4 → 저장 요청
 **2번**(편집 162ms → r5 · 2초 뒤 메아리 63ms `no_changes`), 그 뒤 10초간 추가 요청 0 —
 저장 고리가 없다.
+
+**설비 전용 노드 화면 왕복(실측, `sample_mep.dxf`)**: 3D 에 슬래브·덕트·배관 2·트레이가 서고
+장면 트리에 `M-DUCT`·`M-PIPE`·`E-TRAY` 로 보인다(콘솔 오류 0). 인스펙터에서 폭 400 → **500mm**
+→ r1 `overrides.width_mm` · 계통 `SA` → r2 · 재질 `GI` → r3 · 모양 Rect → **Round** → r4
+(`section_shape: round` 와 `diameter: 500` 을 함께 선언) · `.mep` 폴더로 다시 열어도 r4 ·
+2D 에서 경로 첫 점을 끌어 2.5m 옮김 → r5, 원본 EID 가 사라지고 새 수동 레코드 `wm:…` 가
+원형 Ø500 · SA · GI 를 그대로 갖고 선다.
 
 ★ **저장 상태 표시는 브라우저 번역에서 뺀다(`translate="no"`).** Pascal 화면이 영어라
 브라우저가 자동 번역을 켜는데, 번역기가 텍스트 노드를 `<font>` 로 갈아 끼우면 React 가

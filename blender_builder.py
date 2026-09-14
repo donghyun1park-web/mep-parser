@@ -105,6 +105,8 @@ def prepare_payload(data):
             for key in ('system', 'circuit_id', 'source_layer', 'source_layers', 'layer', 'region_id',
                         'layout_id', 'assumptions', 'nominal_size'):
                 if key in rec: base[key] = rec[key]
+            if (rec.get('overrides') or {}).get('system') is not None:
+                base['system'] = rec['overrides']['system']      # 편집 화면에서 고친 계통(선언이 이긴다)
             material = (rec.get('overrides') or {}).get('material', rec.get('material'))
             if material is not None: base['material'] = material
             if cat in ('pipe', 'duct', 'tray'):

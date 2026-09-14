@@ -18,7 +18,11 @@ import { Hammer, Layers, Settings } from 'lucide-react'
 import Image from 'next/image'
 import { useCallback, useRef, useState } from 'react'
 import { countGraphNodes, isEmptyGraphOverwrite } from '@/lib/empty-graph-guard'
+import { ensureMepPlugin } from '@/lib/mep-plugin'
 import { BuildTab } from './build-tab'
+// 3D·2D·분할 전환(`ViewModeControl`)이 여기 있다. 안 넘기면 **평면 편집 화면으로 갈 길이 없다**
+// — 설비 경로 점 끌기와 평면 표시가 전부 2D 쪽이다(실측으로 겪음).
+import { CommunityViewerToolbarLeft, CommunityViewerToolbarRight } from './viewer-toolbar'
 
 // `SceneLoader` 와 같은 사이드바(장면 트리 · 작도 · 설정). 넘기지 않으면 편집기가
 // 플러그인 탭만 띄워 **장면 트리가 없다** — 벽 안에 묻힌 부재를 고를 길이 없어진다.
@@ -86,6 +90,9 @@ export function MepProjectLoader() {
   }, [])
 
   const handleLoad = useCallback(async () => {
+    // 우리 설비 부재 종류를 먼저 등록한다 — 적재가 등록된 스키마로 노드를 검사하므로,
+    // 늦으면 배관·덕트가 모르는 노드로 남아 그려지지 않는다.
+    await ensureMepPlugin()
     const response = await fetch('/api/mep/snapshot', { cache: 'no-store' })
     if (!response.ok) {
       setStatus({ kind: 'error', message: `프로젝트를 불러오지 못했습니다 (${response.status})` })
@@ -178,6 +185,8 @@ export function MepProjectLoader() {
         onSave={handleSave}
         projectId="mep-parser"
         sidebarTabs={SIDEBAR_TABS}
+        viewerToolbarLeft={<CommunityViewerToolbarLeft />}
+        viewerToolbarRight={<CommunityViewerToolbarRight />}
       />
     </div>
   )
