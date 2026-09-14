@@ -113,10 +113,27 @@ def extract_curve(entity, scale=1.0, chord_error_mm=.25, source_ref=None, max_po
             segments.extend(GC.polyline_segments(points))
         else:
             closed = bool(entity.closed if kind == 'LWPOLYLINE' else entity.is_closed)
-            vertices = list(entity.vertices_in_wcs()) if kind == 'LWPOLYLINE' else list(entity.points_in_wcs())
+            if kind == 'LWPOLYLINE':
+                vertices = list(entity.vertices_in_wcs())
+                bulges = [p[4] for p in entity]
+            else:
+                # Classic 2D POLYLINE stores XY in OCS and the shared elevation
+                # on the parent. points_in_wcs is not a supported Polyline API.
+                ocs = entity.ocs()
+                elevation = entity.dxf.elevation.z
+                vertices = [ocs.to_wcs((p.x, p.y, elevation)) for p in entity.points()]
+                bulges = [v.dxf.bulge for v in entity.vertices]
+            following = vertices[1:] + (vertices[:1] if closed else [])
+            if any(a == b and bulge for a, b, bulge in zip(vertices, following, bulges)):
+                raise ValueError('Bulged polyline edge has coincident endpoints')
             specs = []; exact = 0.0
             for i, part in enumerate(entity.virtual_entities()):
                 sub = extract_curve(part, scale, chord_error_mm, max_points=max_points)
+                if sub['source_length_mm'] == 0:
+                    # Repeated straight vertices produce zero-length LINEs.
+                    # Retain their source identity without a degenerate path edge.
+                    specs.append({'reverse': False, 'primitive': sub['source_geometry'][0]})
+                    continue
                 subpoints = [[p[0], p[1], sub['source_elevation_mm']] for p in sub['points']]
                 subsegs = GC.translate_segments(sub['path3d']['segments'], [0, 0, sub['source_elevation_mm']])
                 target = _xyz(vertices[i], scale)

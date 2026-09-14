@@ -902,6 +902,74 @@ def _angle_deg(u1, u2):
 
 _JOIN_LINE_SNAP = 5.0  # 끝점 공유 판정 거리(mm). LINE 연결 pre-join용.
 
+def recover_column_outlines(records):
+    """Recover only faces bounded by source linework, never a layer-wide hull.
+
+    Recovered outlines still require classification review. Open/nested linework
+    remains visible and source-addressable, and the build gate rejects it.
+    """
+    result, buckets = [], {}
+    for rec in records:
+        if rec.get("closed") or rec.get("kind") == "circle":
+            result.append(rec)
+            continue
+        key = json.dumps({k: rec.get(k) for k in
+                          ("layer", "z_base", "overrides", "_parse_opts", "level", "floor_id")},
+                         sort_keys=True)
+        buckets.setdefault(key, []).append(rec)
+
+    for rows in buckets.values():
+        faces, lines = [], []
+        if HAS_SHAPELY:
+            from shapely.geometry import LineString
+            from shapely.ops import polygonize
+            from shapely.errors import ShapelyError
+            try:
+                lines = [LineString(r["points"]) for r in rows]
+                edges = {tuple(sorted((tuple(a), tuple(b)))) for r in rows
+                         for a, b in zip(r["points"], r["points"][1:]) if a != b}
+                polygons = list(polygonize([LineString(edge) for edge in sorted(edges)]))
+                # Column consumers cannot represent holes. Do not fill a hole
+                # by also accepting the inner polygon yielded by polygonize.
+                shells = [Polygon(p.exterior) for p in polygons if p.interiors]
+                # Shared face boundaries can be spokes into a void. Unioning
+                # such faces would erase the void; retain that graph for review.
+                faces = [p for p in polygons if p.is_valid and p.area > 0
+                         and not any(s.covers(p) for s in shells)
+                         and not any(p is not q and p.boundary.intersection(q.boundary).length > 0
+                                     for q in polygons)]
+            except (ValueError, ShapelyError):
+                faces = []
+
+        used = set()
+        for face in sorted(faces, key=lambda p: p.bounds):
+            if face.geom_type != 'Polygon' or face.interiors:
+                continue
+            contributors = [i for i, line in enumerate(lines) if face.covers(line)]
+            if not contributors:
+                continue
+            source_rows = [rows[i] for i in contributors]
+            rec = copy.deepcopy(source_rows[0])
+            pts = [list(p) for p in face.exterior.coords]
+            rec.update(kind="polyline", closed=True, points=pts, centerline=pts,
+                       width_detected=face.bounds[2] - face.bounds[0], pairing="closed",
+                       needs_review=True, review_reason="column_outline_inferred")
+            rec.pop("confidence", None)
+            rec["_sigs"] = [s for r in source_rows for s in r.get("_sigs", [])]
+            rec["_span_sigs"] = [s for r in source_rows for s in r.get("_span_sigs", [])]
+            # Raw planar line signatures omit Z. Source planes must distinguish
+            # coincident XY outlines so an edit cannot hit columns on both levels.
+            rec["_span_sigs"].append(f"column-source-z:{float(rec.get('z_base') or 0)}")
+            result.append(rec)
+            used.update(contributors)
+        for i, original in enumerate(rows):
+            if i not in used:
+                rec = copy.deepcopy(original)
+                rec.update(needs_review=True, review_reason="column_boundary_unresolved")
+                result.append(rec)
+    return result
+
+
 def join_connected_lines(wall_records):
     """같은 레이어의 2점 LINE 레코드들 중 끝점이 이어지는 것을 다중점 폴리라인으로 병합.
     detect_wall_pairs 전에 실행. 개별 LINE export된 DXF의 벽 파편화 방지.
@@ -2631,70 +2699,7 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
     if _n_raw != _n_joined:
         print(f"  [join] LINE 연결: {_n_raw}개 → {_n_joined}개 레코드")
         
-    # --- [Column Bounding Box Grouping] ---
-    # FreeCAD DXF export groups 6 lines (4 outline + 2 X-lines) into one unique layer (e.g. Block_C_600X835)
-    # Group these lines by layer, and convert them to a single closed bounding box.
-    col_by_layer = {}
-    new_cols = []
-    for c in result["elements"]["column"]:
-        if c.get("closed") or c.get("kind") == "circle":
-            new_cols.append(c)
-        else:
-            layer = c.get("layer", "")
-            if layer:
-                col_by_layer.setdefault(layer, []).append(c)
-            else:
-                new_cols.append(c)
-                
-    for layer, recs in col_by_layer.items():
-        all_pts = []
-        for r in recs:
-            all_pts.extend(r.get("points", []))
-        if not all_pts:
-            continue
-            
-        try:
-            from shapely.geometry import MultiPoint
-            hull = MultiPoint(all_pts).convex_hull
-            if hull.geom_type == 'Polygon':
-                coords = list(hull.exterior.coords)
-                pts = [[c[0], c[1]] for c in coords]
-            else:
-                pts = None
-        except ImportError:
-            pts = None
-            
-        if not pts:
-            # Fallback to AABB if shapely fails or shape is invalid
-            min_x = min(p[0] for p in all_pts)
-            max_x = max(p[0] for p in all_pts)
-            min_y = min(p[1] for p in all_pts)
-            max_y = max(p[1] for p in all_pts)
-            pts = [[min_x, min_y], [max_x, min_y], [max_x, max_y], [min_x, max_y], [min_x, min_y]]
-            
-        # Get width estimate
-        xs = [p[0] for p in pts]
-        min_x, max_x = min(xs), max(xs)
-        
-        merged = {
-            "kind": "polyline",
-            "closed": True,
-            "points": pts,
-            "centerline": pts,
-            "width_detected": max_x - min_x,
-            "confidence": 1.0,
-            "pairing": "closed",
-            "layer": layer,
-            "z_base": recs[0].get("z_base", 0.0),
-            "overrides": recs[0].get("overrides", {}),
-            "_sigs": [sig for r in recs for sig in r.get("_sigs", [])],
-            "_span_sigs": [x for r in recs for x in (r.get("_span_sigs") or [])],
-        }
-        new_cols.append(merged)
-
-    
-    result["elements"]["column"] = new_cols
-    # --------------------------------------
+    result["elements"]["column"] = recover_column_outlines(result["elements"]["column"])
 
     # 좌표까지 같은 중복 부재 제거. 기둥·슬래브는 벽과 달리 페어링·병합을 안 거쳐
     # 중복을 흡수할 기회가 없다 — 실측: 같은 기둥 블록이 같은 자리에 두 번 들어가

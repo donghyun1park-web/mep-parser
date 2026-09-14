@@ -191,6 +191,8 @@ def verify_geometry(data, policy=None):
                 center = rec.get("center") or []
                 if len(center) < 2 or not all(math.isfinite(v) for v in center[:2]) or not math.isfinite(rec.get("radius", 0)) or rec.get("radius", 0) <= 0:
                     why = "잘못된 원형 기둥 중심/반지름"
+            elif cat == "column" and not rec.get("closed"):
+                why = "기둥 경계가 닫히지 않음 — 레이어 분류 또는 원본 경계 검토 필요"
             elif len(pts) < 2:
                 why = "정점 2개 미만"
             elif rec.get("closed") and len(pts) < 3:
