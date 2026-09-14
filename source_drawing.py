@@ -219,3 +219,34 @@ def build_source_drawing(sources, geometry):
                 for floor in floors for warning in floor["warnings"]]
     return {"schema_version": 1, "units": "mm", "status": status,
             "floors": floors, "warnings": warnings}
+
+
+def drawing_svg(floor, px=4096):
+    """한 층의 원본 선 → **북쪽이 위인** SVG 문자열(편집 화면의 guide 밑그림). bbox 가 없으면 None.
+
+    SVG 좌표는 (x, −y) 라 이미지 위쪽이 북쪽이다. Pascal guide 는 이미지 위쪽을 −Z(북쪽)에 깔고 다리는
+    평면 y 를 −Z 로 보내므로 **뒤집지 않고** 맞는다. 긴 변을 `px` 픽셀로 그려 확대해도 선이 읽힌다."""
+    box = floor.get("bbox")
+    if not box:
+        return None
+    minx, miny, maxx, maxy = box
+    w, h = max(maxx - minx, 1e-6), max(maxy - miny, 1e-6)
+    scale = px / max(w, h)
+    parts = ['<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="%s %s %s %s">'
+             % (max(1, round(w * scale)), max(1, round(h * scale)), _num(minx), _num(-maxy), _num(w), _num(h)),
+             # 선 굵기는 텍스처 픽셀로 ~4.5px — 1.2px 로 그렸더니 화면에 줄여 깔리면서 50% 투명도에 묻혀 안 보였다.
+             '<g fill="none" stroke="#374151" stroke-width="%s" stroke-linejoin="round" stroke-linecap="round">'
+             % _num(4.5 / scale)]
+    for p in floor.get("primitives") or []:
+        if p["kind"] == "circle":
+            x, y = p["center"]
+            parts.append('<circle cx="%s" cy="%s" r="%s"/>' % (_num(x), _num(-y), _num(p["radius"])))
+        elif len(p.get("points") or []) >= 2:
+            d = " ".join("%s,%s" % (_num(x), _num(-y)) for x, y in p["points"])
+            parts.append('<%s points="%s"/>' % ("polygon" if p.get("closed") else "polyline", d))
+    parts.append("</g></svg>")
+    return "".join(parts)
+
+
+def _num(v):
+    return ("%.3f" % (round(v, 3) + 0.0)).rstrip("0").rstrip(".") or "0"    # + 0.0: −0 을 0 으로

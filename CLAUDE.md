@@ -129,7 +129,7 @@ DXF 평면도에서 온 경로는 전부 dz = 0 이다.
 |---|---|
 | `path3d_segments` · `route_points` · `route_length` | 모든 빌더·물량·다리. `path3d` 가 없으면 (points, elevation) 의 직선 구간 — **v2 파일은 좌표를 하나도 옮기지 않는다** |
 | `mep_section` · `section_shape` | 단면 모양·치수·`section_roll`. 원형 덕트는 `section_shape: "round"` + `diameter` — 지름을 기본값으로 때우지 않는다 |
-| `rect_parts` · `rect_sweep_mesh` · `start_tangent` | 관 형상(아래 절) |
+| `rect_parts` · `rect_sweep_mesh` · `ROUND_SIDES` | 관 형상(아래 절) — 원형 관도 같은 링을 정다각형으로 |
 
 - `mep_paths.extract_curve` 가 원본을 읽는 순간 `path3d` 를 **샘플 점과 같은 방향**으로 낸다.
   타원은 `rational_bspline_from_ellipse` 로 정확한 NURBS, 거울 복사한 원호(돌출 −Z)는 돌출
@@ -158,10 +158,18 @@ Pascal `rectSectionAxes` 를 다리의 축 맞바꿈까지 반영해 옮긴 것)
 토막**으로 만든다 — 그 자리는 실제로 직관이 아니라 피팅이다. FreeCAD 는 토막을 합치고(실측:
 유효 솔리드 1개, 부피 비율 0.836 — 모서리 겹침만큼), Blender 는 한 객체의 여러 닫힌 셸로 싣는다.
 
-★ 원형 단면(배관·원형 덕트): 평면 직선 경로는 종전처럼 `Arch.makePipe`. 원호·스플라인·수직
-구간이 있으면 해석 곡선 와이어(`_route_wire`)를 **경로 시작 접선**(`start_tangent`)에 수직인 원으로
-직접 스윕한다 — `Arch.makePipe` 는 원을 첫 구간의 **현(chord)** 에 수직으로 놓아 곡선으로 시작하는
-관을 찌그러뜨린다(실측: R1000 사분원 NURBS 위 Ø100 덕트가 부피 70.7% = cos45°, 고친 뒤 1.0000).
+★ 원형 단면(배관·원형 덕트): 평면 직선 경로는 종전처럼 `Arch.makePipe`. 원호·스플라인·수직 구간이
+있으면 사각 덕트와 **같은 마이터 링**을 원에 내접한 정다각형(`GC.ROUND_SIDES` = 24변)으로 꿰매 평면
+면만의 관을 만든다(`GC.rect_parts(..., sides=)`, 부피는 원의 98.9%). `Arch.makePipe` 는 원을 첫 구간의
+**현(chord)** 에 수직으로 놓아 곡선으로 시작하는 관을 찌그러뜨리고(실측: R1000 사분원 위 Ø100 덕트 부피
+70.7%), 그걸 피하려고 쓰던 해석 와이어 `makePipeShell` 스윕은 **IFC 에서 깨졌다** — FreeCAD 1.1 실측:
+수직으로 꺾인 Ø20 입상관이 V107(비다양체 메시), R500 원호 Ø125 덕트는 IFC 단계에서 240초 넘게 멈췄다.
+형상 검사(부피·bbox)로는 안 드러나 **빌더 전체(FCStd 재열기 + IFC 재검사)** 로 잰다 — 고친 뒤 원호 덕트
+10초·입상관 6초, 혼합 환기 픽스처(110×54 · 204×60 경사 · Ø100 가지 · Ø125 원호 · Ø20 입상, 티 이음 1)가
+FCStd·IFC 둘 다 verified(43초). Blender 도 원형 경로를 **같은 정다각형 관 메시**로 싣는다(종전 원형 bevel
+곡선은 저장본 대조가 'Saved actual Z bounds differ' 로 막혔다). 관 메시의 `z_bounds_mm` 는 `z_range` 봉투가
+아니라 **실제 꼭짓점**에서 잰다 — 입상관 끝 단면은 수평이라 봉투보다 반지름만큼 낮다. 고친 뒤 같은
+혼합 환기 픽스처가 Blender 4.2 저장본 재열기까지 verified(EID 5개 전부).
 
 `mep_volume` 은 **사각·외곽선 duct/tray 만** 센다. 원형 단면은 스윕 몫(오차 0.07~0.1%)이고 장비는
 축선이 아니라 footprint 압출이라 '길이 × 단면' 기대식이 안 맞는다. 한쪽만 담으면
@@ -626,13 +634,28 @@ CIRCLE·ARC·SPLINE 만 알아서 216개가 `unhandled` 경고만 남기고 빠�
 | | 우리 | Pascal |
 |---|---|---|
 | 단위 | mm | **m**, 덕트·배관 지름만 **인치** |
-| 축 | Z-up, 평면 (x, y) | **Y-up** — 평면은 첫째·**셋째**, 둘째가 높이 |
+| 축 | Z-up, 평면 (x, y) | **Y-up** 오른손·북쪽 **−Z** — 평면은 첫째·**셋째(= −y)**, 둘째가 높이 |
 | 고저 | 부재의 `z_base`/`elevation` | **레벨**의 `level`·`baseElevation`·`height` |
 | 벽 | 다점 축선 · 닫힌 폴리곤 | `start`→`end` **한 구간** |
 | 기둥 | 닫힌 폴리곤 | 중심 + 폭·깊이 + **회전** |
 
 환산은 `geom_contract.mm_to_m`/`m_to_mm`/`mm_to_in`/`in_to_mm` 뿐이다. 다리 안에서
 `/1000`·`/25.4` 를 쓰지 말 것 — z 규약을 한 곳에 둔 것과 같은 이유다.
+
+★ **셋째 성분은 −y 다 — y 를 그대로 넣으면 건물이 거울상으로 선다.** Pascal 은 Y-up **오른손**
+좌표계이고 북쪽이 **world −Z** 다(`packages/mcp/README.md` "Coordinate conventions" · 평면 패널도
+`toSvgY(z) = z` 로 +Z 를 화면 아래로 그린다). (x, y, z) → (x, z, y) 는 행렬식 −1 인 **반사**라 종전
+다리로 보낸 모델은 좌우가 뒤집히고 북쪽이 아래로 갔다 — 좌표 왕복·명령 수·검사가 **전부 통과**하는
+종류라 방향으로 잰다(`test_the_bridge_is_a_rotation_not_a_mirror`: 반시계 L자 슬래브가 위에서 본
+화면 좌표 (X, −Z) 에서도 반시계). 지금은 (x, y, z) → (x, z, −y) **회전**이고 `_to_plan`/`_from_plan`
+하나로 옮긴다.
+- 기둥 `rotation` 은 Three.js `rotation.y` 라 로컬 +X 가 평면 수치 (cos, −sin) 으로 간다
+  (`column/floorplan.ts`: "plots at -rotation") — z = −y 에서는 우리 각도가 **그대로** rotation 이다.
+- 개구부 `position[2]` 는 벽 로컬 +Z 오프셋이고, 그 축은 우리 왼쪽 법선의 **반대**라 부호가 뒤집힌다.
+- 설비 단면: 회전은 외적을 보존하므로 `section.ts` 가 `geom_contract.section_axes` 식을 **그대로**
+  쓴다(반사일 때는 외적 순서를 뒤집어 맞췄었다). 같은 roll 값이 편집 화면과 빌더에서 같은 단면이다.
+- 이미 떠 있던 편집 화면이 옛 방향 씬으로 저장하면 전부 '이동' 으로 읽힐 수 있지만, 다리가 바뀌면
+  스냅샷 해시가 달라져 409(`SnapshotConflict`)로 막힌다 — 새로고침하면 된다.
 
 **카테고리 대응**
 
@@ -691,8 +714,8 @@ Pascal 에서도 씬 스키마가 모르는 타입을 `ForeignNodeEnvelope`(Base
 초과가 데이터 오류지 규격 차이가 아니다.
 
 ★ **플러그인 단면은 Python 계약을 옮긴 것이다 — 따로 설계하지 않는다.** `section.ts` 는
-`geom_contract.section_axes`·`rect_rings`·`rect_parts` 의 TS 이식이다(Pascal 은 Y-up 이라
-축을 맞바꾼다). `test_plugin_section_rings_match_the_python_contract_under_the_axis_swap` 이
+`geom_contract.section_axes`·`rect_rings`·`rect_parts` 의 TS 이식이다(다리의 (x,y,z)→(x,z,−y) 는
+회전이라 외적이 보존돼 식이 그대로다). `test_plugin_section_rings_match_the_python_contract_under_the_axis_swap` 이
 Node 로 돌려 네 경로(조각 1·1·3·1)의 링을 1e-9 m 로 대조한다 — 화면의 덕트와 Blender·
 FreeCAD 의 덕트가 같은 단면 방향이어야 화면을 믿을 수 있다.
 
@@ -763,6 +786,14 @@ MEP 는 평면 점 + `path3d` 를 본다. 고저와 단면은 **해소한 값끼
 벽의 **둘째 구간에 붙은 개구부가 호스트를 못 찾고 항상 사라진다**(실측으로 재현).
 호스트가 아예 없어졌으면 만들 수 없지만 **조용히 버리지도 않는다** —
 `dropped.opening_host_missing` 으로 센다.
+
+★ **벽을 지우면 그 개구부는 삭제가 아니라 연결 해제다.** Pascal 은 벽(구간)을 지울 때 자식인 문·창을
+함께 지운다. 그걸 삭제 명령으로 받으면 사람이 지우지 않은 개구부가 사라진다 — `scene_to_edits` 는
+**호스트 벽 노드도 함께 사라진** 개구부에는 명령을 내지 않고 `opening_unlinked` 로 센다. 개구부 레코드는
+남고, 재파싱의 `link_openings_to_walls` 가 붙일 벽을 다시 찾거나(가운데 구간만 지웠다면 남은 조각)
+못 찾으면 `no_host_reason` 을 적어 V106·`unconvertible` 로 검토 목록에 뜬다. 벽이 남아 있는데 개구부만
+사라졌으면 그것은 삭제다. (벽이 하나도 없으면 링크가 사유를 안 적고 돌아가던 것을 고쳐
+`no_walls_to_check` 가 붙는다.)
 
 ★ **왕복 검사는 '되돌아오지 않은 것' 을 건너뛰지 않는다.** 종전엔 `if b is None:
 continue` 라 조용히 사라진 부재가 검사를 그냥 통과했다(위 개구부 소실이 정확히
@@ -842,6 +873,17 @@ Pascal 의 `Editor` 는 영속화가 `onLoad`/`onSave` 어댑터 둘뿐이라 **
   평면 편집 화면으로 갈 길이 없다 — 설비 경로 점 끌기와 평면 표시가 전부 2D 쪽이다(실측으로 겪음).
 - **설비 플러그인은 스냅샷을 불러오기 전에 등록한다**(`ensureMepPlugin()`). 적재가 등록된
   스키마로 노드를 검사하기 때문이다.
+- **원본 DXF 는 guide 노드로 깐다**(`/api/mep/source?floor=<층>` → `ProjectServer /pascal/source.svg`).
+  `source_drawing.drawing_svg` 가 층 bbox 에 맞춘 **북쪽이 위인** SVG 를 그리고, 스냅샷이 층마다 guide 를
+  bbox 중심·`scale = 가로 m / 10`(Pascal guide 는 가로 10 m × scale 평면)으로 그 층의 레벨에 붙인다.
+  다리가 y 를 −Z 로 보내므로 뒤집지 않고 벽과 겹친다. ★ 스냅샷 지문은 **guide 를 넣기 전에** 잰다 —
+  적용이 원본 선 없이 같은 식으로 다시 재므로, guide 까지 재면 저장할 때마다 409 가 난다. 되돌리기는
+  guide 를 건너뛴다(부재가 아니다).
+- **검토 탭**(사이드바 '검토', `components/mep-review-tab.tsx`): 선택한 부재의 `metadata.mep` 출처(EID·
+  레이어·페어링·검토 사유·계통·재질)와 노드 치수·높이, `/api/mep/review` → `ProjectSession.pascal_review()`
+  의 검토 목록(검토 사유 · 붙일 벽이 없는 개구부 · 끊긴 이음)과 편집 화면에 못 보낸 부재. 목록을 누르면
+  그 EID 의 노드를 고른다. 조치할 것이 없는 사유(`wall_open_at_this_span`)는 싣지 않는다. 저장으로
+  revision 이 오르면 로더가 `mep:revision` 이벤트를 보내 목록을 다시 불러온다.
 - **체크아웃이 고정 커밋이 아니거나 오버레이가 어긋나면 띄우지 않는다** — 다른 코드가 도는
   편집 화면으로 저장하면 무엇이 저장됐는지 아무도 모른다. Pascal 의 `next.config` 가
   `ignoreBuildErrors: true` 라 빌드는 타입 오류를 삼킨다 — 오버레이는 `tsc` 로 따로 검사한다.

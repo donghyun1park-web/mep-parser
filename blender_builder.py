@@ -130,18 +130,22 @@ def prepare_payload(data):
                 route = GC.route_points(cat, rec)
                 if len(route) < 2 or sum(math.dist(a, b) for a, b in zip(route, route[1:])) <= 0:
                     raise ValueError(f'Empty {cat} path: {eid}')
-                if 'diameter' in section:            # 배관·원형 덕트 — 원형 bevel 곡선
-                    base.update(kind='curve', radius_m=section['diameter']/2000,
-                        points_m=[[(p[0]-origin[0])/1000, (p[1]-origin[1])/1000, p[2]/1000] for p in route])
-                    objects.append(base)
-                    continue
-                if not GC.is_planar_polyline_route(rec):
-                    # 수직·경사·곡선 사각 경로 — 공통 마이터 링으로 닫힌 관을 만든다. 기대 부피는
-                    # 샘플 꺾은선 길이 × 단면적이다(마이터 관에서 정확히 성립한다).
+                round_ = 'diameter' in section
+                if round_ or not GC.is_planar_polyline_route(rec):
+                    # 원형 단면(배관·원형 덕트)과 수직·경사·곡선 사각 경로 — 공통 마이터 링으로 닫힌 관을
+                    # 만든다. 원형은 원에 내접한 정다각형(`GC.ROUND_SIDES`) — FreeCAD 와 **같은 관**이다.
+                    # 기대 부피는 샘플 꺾은선 길이 × 단면적이다(마이터 관에서 정확히 성립한다).
                     from blender_verify import validate_mesh_payload
+                    if round_:
+                        d = section['diameter']
+                        w, h, roll, sides = d, d, 0.0, GC.ROUND_SIDES
+                        area = 0.5 * sides * (d / 2.0) ** 2 * math.sin(2 * math.pi / sides)
+                    else:
+                        w, h, roll, sides = section['width_mm'], section['height_mm'], section['roll'], None
+                        area = w * h
                     # 짧은 급꺾임은 뒤집히지 않게 직각 토막으로 나뉘어 온다 — 한 객체의 여러 닫힌 셸로 싣는다.
                     verts, faces = [], []
-                    for part in GC.rect_parts(route, section['width_mm'], section['height_mm'], section['roll']):
+                    for part in GC.rect_parts(route, w, h, roll, sides):
                         pv, pf = GC.rect_sweep_mesh(part)
                         faces += [[k + len(verts) for k in f] for f in pf]
                         verts += pv
@@ -149,10 +153,14 @@ def prepare_payload(data):
                     mesh = {'kind': 'mesh', 'faces': faces,
                             'vertices_m': [[(p[0]-origin[0])/1000, (p[1]-origin[1])/1000, (p[2]-origin[2])/1000]
                                            for p in verts],
-                            'expected_volume_m3': length * section['width_mm'] * section['height_mm'] / 1e9}
+                            'expected_volume_m3': length * area / 1e9}
                     validate_mesh_payload(mesh)
-                    base.update(mesh, sweep_width_mm=section['width_mm'], section_roll=section['roll'],
-                                geometry_method='route_mitre_sweep_3d')
+                    # ★ 높이 범위는 **관의 실제 꼭짓점**에서 잰다. `z_range` 는 경로 높이 ± 단면 반의 봉투라
+                    #   입상관 끝(수평 단면)보다 반지름만큼 높고, 저장본 대조가 'Saved actual Z bounds differ'
+                    #   로 막혔다(실측: 혼합 환기 픽스처).
+                    zs = [p[2] for p in verts]
+                    base.update(mesh, sweep_width_mm=w, section_roll=roll, z_bounds_mm=[min(zs), max(zs)],
+                                geometry_method='route_polygon_tube_3d' if round_ else 'route_mitre_sweep_3d')
                     objects.append(base)
                     continue
             if rec.get('kind') == 'circle':

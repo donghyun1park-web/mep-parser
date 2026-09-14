@@ -46,15 +46,17 @@ def test_blender_payload_follows_the_route_and_section():
     ox, oy = payload["origin_mm"][:2]
 
     riser = objs["p:riser"]
-    assert riser["kind"] == "curve" and riser["radius_m"] == pytest.approx(0.01)
-    zs = [p[2] for p in riser["points_m"]]
-    assert min(zs) == pytest.approx(0.1) and max(zs) == pytest.approx(1.1)      # 입상관이 눕지 않는다
-    assert riser["z_bounds_mm"] == pytest.approx([90.0, 1110.0])
+    assert riser["kind"] == "mesh" and riser["geometry_method"] == "route_polygon_tube_3d"
+    zs = [v[2] * 1000 + payload["origin_mm"][2] for v in riser["vertices_m"]]
+    assert min(zs) == pytest.approx(90.0) and max(zs) == pytest.approx(1100.0)   # 입상관이 눕지 않는다
+    # 저장본과 대조하는 높이 범위 = 관의 실제 꼭짓점(끝 단면은 1100 에서 수평이다 — 봉투 1110 이 아니다)
+    assert riser["z_bounds_mm"] == pytest.approx([min(zs), max(zs)])
 
     rnd = objs["d:round"]
-    assert rnd["kind"] == "curve" and rnd["radius_m"] == pytest.approx(0.0625)   # 원형 덕트 = 원형 bevel
-    assert all(abs(math.hypot(p[0] * 1000 + ox, p[1] * 1000 + oy - 500) - 500) < 1e-6
-               for p in rnd["points_m"])                                          # 원호가 원 위에 남는다
+    assert rnd["kind"] == "mesh" and len(rnd["vertices_m"]) % GC.ROUND_SIDES == 0   # FreeCAD 와 같은 정다각형 관
+    rings = GC.rect_parts(GC.route_points("duct", ROUND), 125.0, 125.0, 0.0, GC.ROUND_SIDES)
+    centers = [[sum(c) / len(ring) for c in zip(*ring)] for part in rings for ring in part]
+    assert all(abs(math.hypot(c[0], c[1] - 500) - 500) < 1e-6 for c in centers)  # 링 중심이 원호 위에 남는다
 
     sloped = objs["d:sloped"]
     assert sloped["kind"] == "mesh" and sloped["geometry_method"] == "route_mitre_sweep_3d"

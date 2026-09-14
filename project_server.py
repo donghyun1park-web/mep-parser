@@ -325,11 +325,52 @@ class ProjectSession:
     # 같은 함수를 부른다. 저장은 전체 JSON 되돌리기가 아니라 원본과 대조한 변경
     # 명령이고(`pascal_bridge.scene_to_edits`), 기존 save 의 revision·검증·잠금을 탄다.
     def pascal_snapshot(self):
-        from pascal_bridge import scene_sha256, to_pascal_scene
-        state = self.state()
+        from urllib.parse import quote
+        from pascal_bridge import add_source_guides, scene_sha256, to_pascal_scene
+        state = self.preview_state()                  # 원본 선까지(캐시된다) — guide 밑그림용
+        drawing = state['geometry'].pop('source_drawing', None)
         scene, report = to_pascal_scene(state['geometry'])
+        # ★ 지문은 guide 를 싣기 **전**에 잰다. 적용(`pascal_apply`)이 원본 선 없이 같은 식으로 다시 재므로,
+        #   guide 까지 넣고 재면 저장할 때마다 409 가 난다. guide 는 되돌리기가 건너뛰는 밑그림이다.
+        sha = scene_sha256(scene)
+        report['guides'] = add_source_guides(
+            scene, drawing, lambda floor: '/api/mep/source?floor=' + quote(str(floor.get('id')), safe=''))
         return {'project_id': state['project_id'], 'revision': state['revision'],
-                'snapshot_sha256': scene_sha256(scene), 'scene': scene, 'report': report}
+                'snapshot_sha256': sha, 'scene': scene, 'report': report}
+
+    def pascal_source_svg(self, floor_id):
+        """한 층의 원본 선 SVG(북쪽이 위). 층이 없거나 그릴 선이 없으면 KeyError."""
+        from source_drawing import drawing_svg
+        drawing = self.preview_state()['geometry'].get('source_drawing') or {}
+        floor = next((f for f in drawing.get('floors') or [] if str(f.get('id')) == str(floor_id)), None)
+        svg = drawing_svg(floor) if floor else None
+        if svg is None:
+            raise KeyError('no source drawing for floor %r' % floor_id)
+        return svg
+
+    def pascal_review(self):
+        """편집 화면의 검토 목록 — 사람이 봐야 할 부재(검토 사유 · 붙일 벽이 없는 개구부 · 끊긴 이음)와
+        Pascal 로 못 보낸 부재. 조치할 것이 없는 사유(문 자리에서 끊어 그린 벽)는 싣지 않는다."""
+        import geom_contract as GC
+        from pascal_bridge import to_pascal_scene
+        state = self.state()
+        elements = state['geometry'].get('elements') or {}
+        items = []
+        for cat, recs in elements.items():
+            for rec in recs:
+                reason = (rec.get('review_reason') or 'needs_review') if rec.get('needs_review') else None
+                if cat == 'opening' and rec.get('no_host_reason') in (
+                        'no_wall_on_this_line', 'no_wall_at_this_level', 'no_walls_to_check'):
+                    reason = reason or 'opening_' + rec['no_host_reason']
+                if reason:
+                    items.append({'category': cat, 'eid': rec.get('eid'), 'layer': rec.get('layer'),
+                                  'reason': reason})
+        for problem in GC.joint_problems(elements):
+            items.append({'category': 'joint', 'eid': (problem['eids'] or [None])[0],
+                          'eids': problem['eids'], 'reason': 'joint_' + problem['problem']})
+        _scene, report = to_pascal_scene(state['geometry'])
+        return {'project_id': state['project_id'], 'revision': state['revision'], 'items': items,
+                'unconvertible': report['unconvertible']}
 
     def pascal_apply(self, scene, expected_revision, project_id, snapshot_sha256, op_id,
                      dry_run=False):
@@ -421,7 +462,7 @@ class ProjectServer:
 
             def do_GET(self):
                 path = urlsplit(self.path).path
-                if path not in ('/state','/preview','/pascal/snapshot'):
+                if path not in ('/state','/preview','/pascal/snapshot','/pascal/source.svg','/pascal/review'):
                     self.reply(404, {'error':'Unknown endpoint'})
                     return
                 if not self.authorized(preview=path == '/preview'):
@@ -429,6 +470,18 @@ class ProjectServer:
                 try:
                     if path == '/pascal/snapshot':
                         self.reply(200, session.pascal_snapshot())
+                        return
+                    if path == '/pascal/review':
+                        self.reply(200, session.pascal_review())
+                        return
+                    if path == '/pascal/source.svg':
+                        floor = parse_qs(urlsplit(self.path).query).get('floor', [''])[0]
+                        try:
+                            svg = session.pascal_source_svg(floor)
+                        except KeyError as exc:
+                            self.reply(404, {'error': str(exc)})
+                            return
+                        self.reply(200, svg, 'image/svg+xml')
                         return
                     state = session.state() if path == '/state' else session.preview_state()
                     if path == '/state':

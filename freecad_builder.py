@@ -890,7 +890,7 @@ def _pipe_solid(pts, radius, elev):
     return result
 
 
-def _rect_solid(route, width, height, roll=0.0):
+def _rect_solid(route, width, height, roll=0.0, sides=None):
     """사각 단면 관(덕트·트레이) — `geom_contract.rect_rings` 로 만든 **평면 면**만의 솔리드.
 
     ★ 종전 `MakePipeShell` 스윕은 단면을 +Z → 진행방향 **최소 회전**으로 놓았다. 그래서
@@ -903,7 +903,7 @@ def _rect_solid(route, width, height, roll=0.0):
     ★ 부피는 샘플 꺾은선 길이 × 단면적과 **정확히** 같다 — 마이터 관의 성질이다.
     """
     solids = []
-    for part in GC.rect_parts(route, width, height, roll):
+    for part in GC.rect_parts(route, width, height, roll, sides):
         verts, faces = GC.rect_sweep_mesh(part)
         V = [App.Vector(*p) for p in verts]
         solid = Part.Solid(Part.Shell([Part.Face(Part.makePolygon([V[k] for k in f] + [V[f[0]]]))
@@ -922,40 +922,6 @@ def _rect_solid(route, width, height, roll=0.0):
     except Exception:
         pass
     return shape
-
-
-def _route_wire(cat, el):
-    """계약 v3 경로 → Part.Wire(절대 z). 원호·스플라인은 **해석 곡선 그대로** 넘긴다 —
-    샘플 꺾은선으로 스윕하면 코너마다 이음매가 생기고 원본 곡률을 잃는다."""
-    segs = GC.translate_segments(GC.path3d_segments(el), [0.0, 0.0, GC.base_z(cat, el)])
-    edges = []
-    for s in segs:
-        if s["type"] == "line":
-            a, b = App.Vector(*s["start"]), App.Vector(*s["end"])
-            if (b - a).Length > 1e-6:
-                edges.append(Part.LineSegment(a, b).toShape())
-        elif s["type"] == "arc":
-            # 세 점 원호로는 전원을 못 만든다 — 1.5π 를 넘으면 반으로 나눈다.
-            parts = 2 if GC.arc_sweep(s) > 1.5 * math.pi else 1
-            for k in range(parts):
-                t0, t1 = k / parts, (k + 1) / parts
-                edges.append(Part.Arc(App.Vector(*GC.arc_point(s, t0)),
-                                      App.Vector(*GC.arc_point(s, (t0 + t1) / 2.0)),
-                                      App.Vector(*GC.arc_point(s, t1))).toShape())
-        else:
-            degree, poles, knots, weights = GC.nurbs_definition(s)
-            uniq, mults = [], []
-            for k in knots:
-                if uniq and abs(k - uniq[-1]) <= 1e-12:
-                    mults[-1] += 1
-                else:
-                    uniq.append(k)
-                    mults.append(1)
-            curve = Part.BSplineCurve()
-            curve.buildFromPolesMultsKnots([App.Vector(*p) for p in poles], mults, uniq,
-                                           False, degree, weights)
-            edges.append(curve.toShape())
-    return Part.Wire(edges) if edges else None
 
 
 def _equip_solid(pts, elev, default_h=1000.0):
@@ -1000,9 +966,8 @@ def build_mep(doc, mep_elements, params=None):
 
     계약 v3: 경로는 `GC.path3d_segments`/`GC.route_points`, 단면은 `GC.mep_section`
     하나다 — Blender·Pascal 이 같은 함수를 쓴다.
-    - 원형 단면(배관·원형 덕트)은 `Arch.makePipe` 가 축선을 스윕한다(실측: 직선합 대비
-      체적 오차 0.07%). 평면 직선 경로는 종전처럼 2D 와이어를 elevation 에 올리고,
-      원호·스플라인·수직 구간이 있으면 해석 곡선 와이어(`_route_wire`)를 준다.
+    - 원형 단면(배관·원형 덕트): 평면 직선 경로는 `Arch.makePipe`(실측: 직선합 대비 체적 오차
+      0.07%), 원호·스플라인·수직 구간이 있으면 정다각형 마이터 관(`_rect_solid(..., sides=)`).
     - 사각 단면은 `_rect_solid` — 공통 마이터 링으로 만든 평면 면 솔리드.
     - 외곽선 덕트(footprint)와 장비는 평면 외곽 압출 그대로다.
     """
@@ -1042,16 +1007,14 @@ def build_mep(doc, mep_elements, params=None):
                         ax.Placement.Base.z = elev
                         obj = Arch.makePipe(ax, diameter=section["diameter"])
                     elif section["shape"] == "round":
-                        # ★ `Arch.makePipe` 는 원 단면을 첫 구간의 **현(chord)** 에 수직으로 놓는다
-                        #   (DraftGeomUtils.vec). 첫 구간이 원호·스플라인이면 단면이 기울어 관이
-                        #   찌그러진다 — FreeCAD 1.1 실측: R1000 사분원 NURBS 위 Ø100 덕트가 부피
-                        #   70.7%(= cos45°), 높이 방향 크기 190. 경로 시작 **접선**에 수직인 원으로
-                        #   해석 곡선 와이어를 직접 스윕한다(모서리는 둥근 전이).
-                        wire = _route_wire(cat, el)
-                        start = GC.route_points(cat, el)[0]
-                        circle = Part.Wire(Part.makeCircle(section["diameter"] / 2.0, App.Vector(*start),
-                                                           App.Vector(*GC.start_tangent(GC.path3d_segments(el)))))
-                        shape = wire.makePipeShell([circle], True, True, 2)
+                        # ★ `Arch.makePipe` 는 원 단면을 첫 구간의 **현(chord)** 에 수직으로 놓아 원호·스플라인
+                        #   으로 시작하는 관을 찌그러뜨린다(실측: R1000 사분원 위 Ø100 덕트 부피 70.7%). 그렇다고
+                        #   해석 와이어를 `makePipeShell` 로 직접 스윕하면 **IFC 에서 깨진다** — FreeCAD 1.1 실측:
+                        #   수직으로 꺾인 Ø20 입상관이 V107(비다양체 메시), R500 원호 Ø125 덕트는 IFC 단계에서
+                        #   240초 넘게 멈췄다. 사각 덕트와 **같은 마이터 링**을 원에 내접한 정다각형으로 꿰매
+                        #   평면 면만의 관을 만든다(`GC.ROUND_SIDES` 변, 부피는 원의 98.9%).
+                        d = section["diameter"]
+                        shape = _rect_solid(GC.route_points(cat, el), d, d, 0.0, sides=GC.ROUND_SIDES)
                     else:
                         route = GC.route_points(cat, el)
                         length = sum(math.dist(a, b) for a, b in zip(route, route[1:]))

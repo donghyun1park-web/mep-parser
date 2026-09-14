@@ -737,9 +737,9 @@ def mep_section(category, rec, params=None):
 def section_axes(direction, roll=0.0):
     """사각 단면의 (폭 축, 높이 축).
 
-    Pascal `rectSectionAxes` 를 우리 축으로 옮긴 것이다 — roll 0 에서 폭은 수평이고
-    연직 구간은 world X 로 떨어진다. 다리가 (x,y,z) → (x,z,y) 로 축을 맞바꿔도
-    **같은 roll 값이 같은 단면**을 뜻하도록 거울상까지 반영했다."""
+    roll 0 에서 폭은 수평이고 연직 구간은 world X 로 떨어진다. 다리가 (x,y,z) → (x,z,−y)
+    (Pascal Y-up·북쪽 −Z — 거울상이 아닌 회전)로 옮기면 플러그인 `section.ts` 와 **같은 roll 값이
+    같은 단면**이다(tests/test_pascal_host.py 가 좌표로 대조한다)."""
     d = _unit(_p3(direction))
     w0 = _cross(d, _UP)
     w0 = [1.0, 0.0, 0.0] if _norm(w0) < 1e-4 else _unit(w0)
@@ -769,16 +769,27 @@ def _dedup3(points, tol=1e-6):
     return pts
 
 
-def _rect_corners(p, w, h, hw, hh):
-    return [_add(p, _add(_mul(w, sx * hw), _mul(h, sy * hh)))
-            for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
+ROUND_SIDES = 24     # 원형 관을 평면 면으로 만들 때의 변 수 — IFC 에서 닫힌 메시로 남는다(부피는 원의 98.9%)
 
 
-def _rect_ring_list(pts, width, height, roll, closed):
+def _profile(width, height, sides=None):
+    """단면 윤곽 (u, v) — 사각은 네 모서리(종전 순서 그대로), `sides` 면 내접 정다각형."""
+    hw, hh = 0.5 * float(width), 0.5 * float(height)
+    if not sides:
+        return [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)]
+    return [(hw * math.cos(2 * math.pi * k / sides), hh * math.sin(2 * math.pi * k / sides))
+            for k in range(int(sides))]
+
+
+def _ring_points(p, w, h, profile):
+    return [_add(p, _add(_mul(w, u), _mul(h, v))) for u, v in profile]
+
+
+def _rect_ring_list(pts, width, height, roll, closed, sides=None):
     """(내부) 한 조각의 링. 끝은 직각, 꺾인 점은 마이터, closed 면 고리(첫 링을 끝에 한 번 더)."""
     n = len(pts)
     dirs = [_unit(_sub(pts[(i + 1) % n], pts[i])) for i in range(n if closed else n - 1)]
-    hw, hh = float(width) / 2.0, float(height) / 2.0
+    profile = _profile(width, height, sides)
 
     def mitre(p, a, b, w, h, along):
         # (w, h) 는 `along`(a 또는 b)에 수직인 단면 — 그 방향으로 이등분면에 투영한다.
@@ -787,11 +798,11 @@ def _rect_ring_list(pts, width, height, roll, closed):
             raise ContractError("route reverses direction (180 degree turn)")
         nrm = _unit(m)
         return [_sub(c, _mul(along, _dot(_sub(c, p), nrm) / _dot(along, nrm)))
-                for c in _rect_corners(p, w, h, hw, hh)]
+                for c in _ring_points(p, w, h, profile)]
 
     w0, h0 = section_axes(dirs[0], roll)
     w, h = w0, h0
-    rings = [mitre(pts[0], dirs[-1], dirs[0], w, h, dirs[0]) if closed else _rect_corners(pts[0], w, h, hw, hh)]
+    rings = [mitre(pts[0], dirs[-1], dirs[0], w, h, dirs[0]) if closed else _ring_points(pts[0], w, h, profile)]
     for i in range(1, n if closed else n - 1):
         a, b = dirs[i - 1], dirs[i]
         rings.append(mitre(pts[i], a, b, w, h, a))
@@ -803,12 +814,12 @@ def _rect_ring_list(pts, width, height, roll, closed):
             raise ContractError("closed rectangular route twists around its loop")
         rings.append([list(p) for p in rings[0]])
     else:
-        rings.append(_rect_corners(pts[-1], w, h, hw, hh))
+        rings.append(_ring_points(pts[-1], w, h, profile))
     return rings
 
 
-def rect_rings(points, width, height, roll=0.0):
-    """사각 단면을 경로 따라 옮긴 링들(각 4점, mm). 끝은 직각, 꺾인 점은 마이터.
+def rect_rings(points, width, height, roll=0.0, sides=None):
+    """사각 단면을 경로 따라 옮긴 링들(각 4점, mm — `sides` 면 원형 관의 정다각형). 끝은 직각, 꺾인 점은 마이터.
 
     ★ 단면 방향은 첫 구간의 `section_axes` 를 **최소 회전으로 전달**한다 — 구간마다
       새로 정하면 연직 구간에서 world X 로 떨어져 비틀리고, 그러면 꺾인 점의 두
@@ -820,7 +831,7 @@ def rect_rings(points, width, height, roll=0.0):
     if len(pts) < 2:
         return []
     closed = len(pts) > 3 and math.dist(pts[0], pts[-1]) <= 1e-6
-    return _rect_ring_list(pts[:-1] if closed else pts, width, height, roll, closed)
+    return _rect_ring_list(pts[:-1] if closed else pts, width, height, roll, closed, sides)
 
 
 def inverted_segments(rings, points, closed=None):
@@ -833,12 +844,12 @@ def inverted_segments(rings, points, closed=None):
     bad = []
     for i in range(n if closed else n - 1):
         d = _unit(_sub(body[(i + 1) % n], body[i]))
-        if any(_dot(_sub(rings[i + 1][k], rings[i][k]), d) <= 1e-6 for k in range(4)):
+        if any(_dot(_sub(rings[i + 1][k], rings[i][k]), d) <= 1e-6 for k in range(len(rings[i]))):
             bad.append(i)
     return bad
 
 
-def rect_parts(points, width, height, roll=0.0):
+def rect_parts(points, width, height, roll=0.0, sides=None):
     """사각 관을 **뒤집히지 않는 조각들**로 — [링 목록, ...]. 빌더는 이것을 쓴다.
 
     ★ 짧은 구간에서 급하게 꺾이면 양 끝 마이터 면이 단면 안에서 교차해 관이 뒤집힌다
@@ -849,32 +860,32 @@ def rect_parts(points, width, height, roll=0.0):
     pts = _dedup3(points)
     if len(pts) < 2:
         return []
-    whole = rect_rings(pts, width, height, roll)
+    whole = rect_rings(pts, width, height, roll, sides)
     if not inverted_segments(whole, pts):
         return [whole]
     # 닫힌 고리도 첫 점에서 끊어 열린 꺾은선으로 조각낸다(드문 경우).
-    open_rings = _rect_ring_list(pts, width, height, roll, False)
+    open_rings = _rect_ring_list(pts, width, height, roll, False, sides)
     bad = set(inverted_segments(open_rings, pts, closed=False))
     dirs = [_unit(_sub(b, a)) for a, b in zip(pts, pts[1:])]
     frames = [section_axes(dirs[0], roll)]
     for a, b in zip(dirs, dirs[1:]):
         w, h = frames[-1]
         frames.append((_rotate_min(w, a, b), _rotate_min(h, a, b)))
-    hw, hh = float(width) / 2.0, float(height) / 2.0
+    profile = _profile(width, height, sides)
     parts, cur = [], None
     for i in range(len(dirs)):
         if i in bad:
             if cur is not None:
-                cur.append(_rect_corners(pts[i], *frames[i - 1], hw, hh))
+                cur.append(_ring_points(pts[i], *frames[i - 1], profile))
                 parts.append(cur)
                 cur = None
-            parts.append([_rect_corners(pts[i], *frames[i], hw, hh),
-                          _rect_corners(pts[i + 1], *frames[i], hw, hh)])
+            parts.append([_ring_points(pts[i], *frames[i], profile),
+                          _ring_points(pts[i + 1], *frames[i], profile)])
             continue
         if cur is None:
-            cur = [_rect_corners(pts[i], *frames[i], hw, hh)]
+            cur = [_ring_points(pts[i], *frames[i], profile)]
         if i == len(dirs) - 1 or (i + 1) in bad:
-            cur.append(_rect_corners(pts[i + 1], *frames[i], hw, hh))
+            cur.append(_ring_points(pts[i + 1], *frames[i], profile))
             parts.append(cur)
             cur = None
         else:
@@ -892,58 +903,26 @@ def _signed_volume(verts, faces):
 
 
 def rect_sweep_mesh(rings):
-    """링 → 닫힌 사각 관 메시(verts, 사각형 faces). 면 방향은 바깥쪽.
+    """링 → 닫힌 관 메시(verts, faces — 옆면은 사각형, 뚜껑은 링 다각형). 면 방향은 바깥쪽.
 
     `rect_rings` 가 닫힌 경로로 표시한 링(첫 링 == 끝 링)은 고리로 잇고 뚜껑을 달지 않는다."""
     closed = len(rings) > 2 and all(math.dist(p, q) <= 1e-9 for p, q in zip(rings[0], rings[-1]))
     body = rings[:-1] if closed else rings
-    m = len(body)
+    m, n = len(body), len(body[0])
     verts = [list(p) for ring in body for p in ring]
     faces = []
     for i in range(m if closed else m - 1):
-        o, q = 4 * i, 4 * ((i + 1) % m)
-        for k in range(4):
-            k2 = (k + 1) % 4
+        o, q = n * i, n * ((i + 1) % m)
+        for k in range(n):
+            k2 = (k + 1) % n
             faces.append([o + k, o + k2, q + k2, q + k])
     if not closed:
-        last = 4 * (m - 1)
-        faces.append([3, 2, 1, 0])
-        faces.append([last, last + 1, last + 2, last + 3])
+        last = n * (m - 1)
+        faces.append(list(reversed(range(n))))
+        faces.append([last + k for k in range(n)])
     if _signed_volume(verts, faces) < 0:
         faces = [list(reversed(f)) for f in faces]
     return verts, faces
-
-
-# ── 네이티브 빌더용 해석 곡선 접근자(FreeCAD 가 원호·스플라인을 샘플 없이 만든다) ──
-def arc_sweep(s):
-    """원호 회전각(라디안, (0, 2π])."""
-    return _arc_frame(s)[4]
-
-
-def arc_point(s, fraction):
-    """원호 위 점 — 회전각의 `fraction`(0~1) 자리."""
-    c, u, v, r, theta = _arc_frame(s)
-    a = theta * float(fraction)
-    return _add(c, _add(_mul(u, r * math.cos(a)), _mul(v, r * math.sin(a))))
-
-
-def nurbs_definition(s):
-    """스플라인 → (차수, 제어점, 매듭, 가중치). 정합성 검사를 거친 값이다."""
-    return _nurbs(s)
-
-
-def start_tangent(segments):
-    """경로 시작점의 **접선** 단위벡터. 원 단면을 여기에 수직으로 놓는다 — 첫 구간의
-    현(chord)에 수직으로 놓으면 곡선으로 시작하는 관이 기울어 찌그러진다."""
-    s = segments[0]
-    if s["type"] == "line":
-        return _unit(_sub(_p3(s["end"]), _p3(s["start"])))
-    if s["type"] == "arc":
-        return _arc_frame(s)[2]                       # d/dt(c + r(cos t·u + sin t·v)) at 0 ∝ v
-    p, ctrl, knots, w = _nurbs(s)
-    t0, t1 = knots[p], knots[len(ctrl)]
-    dt = (t1 - t0) * 1e-7
-    return _unit(_sub(_nurbs_point(p, ctrl, knots, w, t0 + dt), _nurbs_point(p, ctrl, knots, w, t0)))
 
 
 # ── 폴리곤 감김 정규화 ─────────────────────────────────────────────────────

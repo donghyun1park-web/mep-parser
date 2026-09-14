@@ -30,9 +30,11 @@ def test_pipe_source_path_and_contract_z_preserved():
     payload = BB.prepare_payload(data)
     pipe = next(o for o in payload["objects"] if o["eid"] == "pipe:generic")
     ox, oy, oz = payload["origin_mm"]
-    assert pipe["kind"] == "curve" and pipe["radius_m"] == 0.0095
-    assert pipe["z_bounds_mm"] == [82.0, 101.0]
-    assert [[p[0] * 1000 + ox, p[1] * 1000 + oy] for p in pipe["points_m"]] == data["elements"]["pipe"][0]["points"]
+    assert pipe["kind"] == "mesh" and pipe["geometry_method"] == "route_polygon_tube_3d"   # FreeCAD 와 같은 정다각형 관
+    assert pipe["sweep_width_mm"] == 19.0
+    assert pipe["z_bounds_mm"] == pytest.approx([82.0, 101.0])                  # 계약 z(중심축 ± 반지름) 그대로
+    assert min(v[2] * 1000 + oz for v in pipe["vertices_m"]) == pytest.approx(82.0)
+    assert pipe["source_points_mm"] == data["elements"]["pipe"][0]["points"]
     assert pipe["source_refs"] == [{"handle": "ABC"}]
     assert data == source(), "Export preparation must not mutate the source contract"
 
@@ -88,9 +90,9 @@ def test_translated_rotated_source_keeps_length_and_section():
                               x * math.sin(theta) + y * math.cos(theta) - 8e6] for x, y in rec["points"]]
     first, second = BB.prepare_payload(data), BB.prepare_payload(transformed)
     a, b = first["objects"][0], second["objects"][0]
-    length = lambda obj: sum(math.dist(p, q) for p, q in zip(obj["points_m"], obj["points_m"][1:]))
-    assert length(a) == pytest.approx(length(b), abs=1e-9)
-    assert a["radius_m"] == b["radius_m"]
+    # 관 부피 = 경로 길이 × 단면적 — 옮기고 돌려도 길이·단면이 같으면 같다.
+    assert a["expected_volume_m3"] == pytest.approx(b["expected_volume_m3"], rel=1e-9)
+    assert a["sweep_width_mm"] == b["sweep_width_mm"]
 
 
 def test_floor_layers_require_explicit_source_slab_and_thicknesses():

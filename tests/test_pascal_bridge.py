@@ -92,7 +92,7 @@ def test_rectangular_closed_wall_survives_as_an_axis():
     assert rep["closed_as_axis"] == 1
     node = _nodes_of(scene, "wall")[0]
     assert node["thickness"] == 0.6                      # 짧은 변이 두께
-    assert sorted([node["start"], node["end"]]) == [[0.0, 0.3], [2.0, 0.3]]
+    assert sorted([node["start"], node["end"]]) == [[0.0, -0.3], [2.0, -0.3]]   # z = −y
 
     back, _ = PB.from_pascal_scene(scene)
     r = back["elements"]["wall"][0]
@@ -188,7 +188,7 @@ def test_column_keeps_its_rectangle_and_its_angle():
     assert abs(node["rotation"] - rot) < 1e-9
     assert node["crossSection"] == "rectangular"
     assert (round(node["width"], 9), round(node["depth"], 9)) == (0.6, 0.4)
-    assert [round(v, 9) for v in node["position"]] == [1.0, 0.0, 2.0]   # [x, 높이, 평면 y]
+    assert [round(v, 9) for v in node["position"]] == [1.0, 0.0, -2.0]  # [x, 높이, −평면 y]
     assert node["height"] == 3.0
 
     back, _ = PB.from_pascal_scene(scene)
@@ -206,7 +206,7 @@ def test_round_column_stays_round():
     scene, _ = PB.to_pascal_scene(_geom({"column": [rec]}))
     n = _nodes_of(scene, "column")[0]
     assert n["crossSection"] == "round" and n["radius"] == 0.25
-    assert n["position"] == [1.0, 0.0, 2.0]
+    assert n["position"] == [1.0, 0.0, -2.0]
 
     back, _ = PB.from_pascal_scene(scene)
     r = back["elements"]["column"][0]
@@ -244,15 +244,16 @@ def test_slab_elevation_is_the_top_face():
 
 
 def test_duct_section_is_mm_and_the_plan_y_goes_third():
-    """Pascal 은 Y-up 이다 — path 의 둘째가 높이, 셋째가 평면 y. 뒤바꾸면 덕트가
-    바닥에 눕는다. 설비는 전용 노드로 가고 단면은 **mm 그대로**다(인치로 깎지 않는다)."""
+    """Pascal 은 Y-up 이다 — path 의 둘째가 높이, 셋째가 **−평면 y**. 뒤바꾸면 덕트가 바닥에
+    눕고, 부호를 안 뒤집으면 건물이 거울상으로 선다(Pascal 은 북쪽이 −Z 인 오른손 좌표계).
+    설비는 전용 노드로 가고 단면은 **mm 그대로**다(인치로 깎지 않는다)."""
     rec = {"kind": "polyline", "closed": False, "eid": "d:1", "layer": "SA",
            "points": [[0.0, 0.0], [3000.0, 0.0], [3000.0, 2000.0]],
            "elevation": 2590.0, "width_mm": 200.0, "height_mm": 200.0}
     scene, rep = PB.to_pascal_scene(_geom({"duct": [rec]}))
     n = _nodes_of(scene, PB.MEP_NODE_PREFIX + "duct")[0]
     assert rep["counts_out"] == {"duct": 1}
-    assert n["path"] == [[0.0, 2.59, 0.0], [3.0, 2.59, 0.0], [3.0, 2.59, 2.0]]
+    assert n["path"] == [[0.0, 2.59, 0.0], [3.0, 2.59, 0.0], [3.0, 2.59, -2.0]]   # 북쪽 2m = −Z
     assert n["shape"] == "rect"
     assert (n["widthMm"], n["heightMm"]) == (200.0, 200.0)
     assert PB.MEP_PLUGIN_ID in scene["installedPlugins"]
@@ -404,7 +405,7 @@ def test_opening_keeps_its_offset_and_its_overshoot():
     scene, rep = PB.to_pascal_scene(_geom({"wall": [w], "opening": [off, past]}))
     assert rep["opening_past_wall_end"] == 1
     pos = {n["metadata"]["mep"]["eid"]: n["position"] for n in _nodes_of(scene, "window")}
-    assert pos["o:off"][2] == 0.125                   # 셋째 성분 = 중심면 오프셋
+    assert pos["o:off"][2] == -0.125                  # 셋째 성분 = 벽 로컬 +Z 오프셋(우리 왼쪽의 반대)
     assert pos["o:past"][0] == 2.4                    # 구간 밖이라도 자르지 않는다
 
     back, _ = PB.from_pascal_scene(scene)
@@ -644,6 +645,56 @@ def test_opening_whose_host_wall_vanished_is_counted():
     assert rep["dropped"]["opening_host_missing"] == 1
 
 
+def _delete_with_children(scene, nid):
+    """Pascal 처럼 노드를 지우면 자식(문·창)도 함께 지운다."""
+    node = scene["nodes"].pop(nid)
+    parent = scene["nodes"].get(node.get("parentId"))
+    if parent and nid in (parent.get("children") or []):
+        parent["children"].remove(nid)
+    for child in [k for k, n in list(scene["nodes"].items()) if n.get("parentId") == nid]:
+        _delete_with_children(scene, child)
+
+
+def test_deleting_a_wall_leaves_its_openings_unlinked_not_deleted():
+    """★ 벽을 지우면 Pascal 이 자식인 개구부도 함께 지운다. 그걸 삭제 명령으로 받으면 사람이 지우지
+    않은 개구부가 사라진다 — **연결 해제**로 남기고, 재파싱의 링크가 붙일 벽이 없다고 말하게 한다."""
+    import dxf_parser as dp
+    g = _geom({"wall": [_wall("w:1", [0.0, 0.0], [4000.0, 0.0])],
+               "opening": [_opening("o:1", (1500.0, 0.0))]})
+    scene, _ = PB.to_pascal_scene(g)
+    _delete_with_children(scene, _nodes_of(scene, "wall")[0]["id"])
+    edits, rep = PB.scene_to_edits(g, scene)
+    assert edits == {"w:1": {"deleted": True}} and rep["opening_unlinked"] == 1
+    rest = {"wall": [], "opening": [dict(r) for r in g["elements"]["opening"]]}
+    dp.link_openings_to_walls(rest, g.get("params") or {})
+    assert rest["opening"][0]["wall_indices"] == [] and rest["opening"][0].get("no_host_reason")
+    _scene, fwd = PB.to_pascal_scene(dict(g, elements=rest))
+    assert [(u["eid"], u["reason"]) for u in fwd["unconvertible"]] == [("o:1", "no_host_wall")]
+
+
+def test_deleting_only_the_opening_is_still_a_deletion():
+    g = _geom({"wall": [_wall("w:1", [0.0, 0.0], [4000.0, 0.0])],
+               "opening": [_opening("o:1", (1500.0, 0.0))]})
+    scene, _ = PB.to_pascal_scene(g)
+    _delete_with_children(scene, _nodes_of(scene, "window")[0]["id"])
+    edits, rep = PB.scene_to_edits(g, scene)
+    assert edits == {"o:1": {"deleted": True}} and rep["opening_unlinked"] == 0
+
+
+def test_an_opening_on_a_deleted_wall_segment_is_unlinked_while_the_wall_splits():
+    """가운데 구간을 지우면 벽은 두 조각으로 나뉘고(delete + add 둘), 그 구간의 개구부는 지우지 않는다."""
+    w = _wall("w:1", [0.0, 0.0], [3000.0, 0.0])
+    w["centerline"] = [[0.0, 0.0], [3000.0, 0.0], [3000.0, 3000.0], [6000.0, 3000.0]]
+    g = _geom({"wall": [w], "opening": [_opening("o:mid", (3000.0, 1500.0))]})
+    scene, _ = PB.to_pascal_scene(g)
+    mid = sorted(_nodes_of(scene, "wall"), key=lambda n: n["metadata"]["mep"]["seg"])[1]
+    assert _nodes_of(scene, "window")[0]["parentId"] == mid["id"]
+    _delete_with_children(scene, mid["id"])
+    edits, rep = PB.scene_to_edits(g, scene)
+    assert "o:mid" not in edits and rep["opening_unlinked"] == 1
+    assert edits["w:1"] == {"deleted": True} and sum(1 for e in edits.values() if e.get("added")) == 2
+
+
 def test_mep_section_edited_in_pascal_beats_the_old_declaration():
     """`mep_dimensions` 는 `overrides` 를 먼저 본다. 최상위만 갱신하면 Pascal 에서
     100→150 으로 키운 것이 조용히 100 으로 남는다 — 별칭 키 전부에 적용해야 한다."""
@@ -722,3 +773,19 @@ def test_sample_drawings_round_trip_without_moving():
                 if "elevation" in r and cat in PB.MEP_CATS:
                     assert abs(r["elevation"] - b["elevation"]) < 1e-9, (fn, cat)
     assert {"wall", "column", "slab"} <= seen, seen
+
+
+
+def test_the_bridge_is_a_rotation_not_a_mirror():
+    """★ 평면 y 를 그대로 z 에 넣으면 행렬식 −1 — 건물이 **거울상**으로 선다(좌우가 뒤집히고 북쪽이
+    아래로 간다). 형상·왕복·검사는 전부 통과하는 종류라 방향으로 잰다: Pascal 은 Y-up 오른손 좌표계,
+    북쪽 −Z 라 위에서 내려다보면 화면 좌표가 (X, −Z) 다. 반시계 방향 슬래브는 거기서도 반시계여야 한다."""
+    ring = [[0.0, 0.0], [4000.0, 0.0], [4000.0, 1000.0], [1000.0, 1000.0], [1000.0, 3000.0], [0.0, 3000.0]]  # L자
+    slab = {"kind": "polyline", "closed": True, "points": ring, "z_base": 0.0, "eid": "s:L", "layer": "S"}
+    scene, _ = PB.to_pascal_scene(_geom({"slab": [slab]}))
+    poly = _nodes_of(scene, "slab")[0]["polygon"]
+    screen = [(x, -z) for x, z in poly]
+    area2 = sum(a[0] * b[1] - b[0] * a[1] for a, b in zip(screen, screen[1:] + screen[:1]))
+    assert area2 > 0                                     # 반시계 그대로 — 거울상이면 음수
+    back, _ = PB.from_pascal_scene(scene)
+    assert back["elements"]["slab"][0]["points"] == ring

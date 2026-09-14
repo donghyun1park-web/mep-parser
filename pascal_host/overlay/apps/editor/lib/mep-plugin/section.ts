@@ -1,6 +1,6 @@
 // 계약 v3 사각 단면 규약의 TS 사본 — `geom_contract.section_axes` · `rect_parts` 와 **같은 식**이다.
-// 좌표는 Pascal 레벨 로컬 m(Y-up). Pascal `rectSectionAxes`(UP = +Y)를 그대로 쓰는데, 다리의
-// 축 맞바꿈 (x,y,z)→(x,z,y) 은 거울상이라 파이썬 링을 맞바꾼 것과 좌표가 정확히 같다
+// 좌표는 Pascal 레벨 로컬 m(Y-up). 다리는 (x,y,z)→(x,z,−y) 로 옮기는데(북쪽 −Z, 거울상이 아닌 회전)
+// 회전은 외적을 보존하므로 파이썬 식을 **그대로** 옮기면 링이 좌표까지 같다
 // (tests/test_pascal_host.py 가 두 구현을 좌표로 대조한다). 규칙은 파이썬 쪽에서만 바꾼다.
 export type V3 = [number, number, number]
 
@@ -26,12 +26,12 @@ function unit(a: V3): V3 {
   return [a[0] / n, a[1] / n, a[2] / n]
 }
 
-/** Pascal `rectSectionAxes`: roll 0 에서 폭은 수평(UP × dir), 연직 구간은 world X. */
+/** `geom_contract.section_axes` 그대로: roll 0 에서 폭은 수평(dir × UP), 연직 구간은 world X. */
 export function sectionAxes(direction: V3, roll = 0): { width: V3; height: V3 } {
   const d = unit(direction)
-  let x = cross([0, 1, 0], d)
+  let x = cross(d, [0, 1, 0])
   x = norm(x) < 1e-4 ? [1, 0, 0] : unit(x)
-  const z = unit(cross(x, d))
+  const z = unit(cross(d, x))
   const c = Math.cos(roll)
   const s = Math.sin(roll)
   return { width: add(mul(x, c), mul(z, s)), height: add(mul(x, -s), mul(z, c)) }

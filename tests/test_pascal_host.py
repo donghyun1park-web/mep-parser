@@ -77,7 +77,7 @@ def test_plugin_section_rings_match_the_python_contract_under_the_axis_swap(tmp_
           [p2[0] + 1000 * math.cos(2 * t), p2[1] + 1000 * math.sin(2 * t), 2400]], 200.0, 100.0, 0.0),
         ([[0, 0, 0], [1000, 0, 0], [1000, 1000, 0], [0, 1000, 0], [0, 0, 0]], 100.0, 60.0, 0.0),
     ]
-    swap = lambda p: [p[0] / 1000.0, p[2] / 1000.0, p[1] / 1000.0]     # 우리 mm Z-up → Pascal m Y-up
+    swap = lambda p: [p[0] / 1000.0, p[2] / 1000.0, -p[1] / 1000.0]    # 우리 mm Z-up → Pascal m Y-up(북쪽 −Z)
     expected = [[[[swap(c) for c in ring] for ring in part] for part in GC.rect_parts(pts, w, h, roll)]
                 for pts, w, h, roll in routes]
     inputs = [[[swap(p) for p in pts], w / 1000.0, h / 1000.0, roll] for pts, w, h, roll in routes]

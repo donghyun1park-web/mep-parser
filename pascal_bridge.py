@@ -8,8 +8,10 @@ Pascal 은 우리와 같은 모형을 쓴다 — 축선/폴리곤 + 치수. 다�
    환산은 `geom_contract` 에만 있다. 여기서 `/1000`·`/25.4` 를 쓰지 않는다.
 2. 고저 — 우리는 부재의 `z_base`/`elevation`, Pascal 은 **레벨**의 스택
    (`level`·`baseElevation`·`height`). MEP 의 고저는 층이 아니라 **레벨 위 높이**다.
-3. 축 — Pascal 은 **Y-up**. 평면은 (첫째, 셋째) 성분이고 둘째가 높이다
-   (`column.position[2]`·`duct.path[2]` 가 평면 좌표라는 것을 소비자 코드로 확인).
+3. 축 — Pascal 은 **Y-up** 오른손 좌표계, 북쪽이 **−Z** 다. 평면은 (첫째, 셋째) 성분이고 둘째가
+   높이다(`column.position[2]`·`duct.path[2]` 가 평면 좌표라는 것을 소비자 코드로 확인).
+   ★ 셋째는 **−y** 다. y 를 그대로 z 에 넣으면 행렬식 −1 인 **거울상**이라 3D 건물의 좌우가
+   뒤집히고 북쪽이 아래로 간다(형상·왕복·검사는 전부 통과한다). `_to_plan`/`_from_plan` 하나로 옮긴다.
 
 ★ 좌표는 metadata 에 넣지 않는다. 넣으면 왕복이 통과해도 컨테이너가 통과한
   것이지 변환이 통과한 게 아니다. metadata 는 출처(eid·layer·검토사유)만.
@@ -199,6 +201,16 @@ def _corners(pts):
     return p, side
 
 
+def _to_plan(p):
+    """우리 평면 (x, y) mm → Pascal 평면 [x, z] m. **z = −y**(북쪽 −Z). `0.0 -` 는 −0.0 을 막는다."""
+    return [GC.mm_to_m(p[0]), 0.0 - GC.mm_to_m(p[1])]
+
+
+def _from_plan(p):
+    """Pascal 평면 [x, z] m → 우리 평면 (x, y) mm. `_to_plan` 의 역."""
+    return [GC.m_to_mm(p[0]), 0.0 - GC.m_to_mm(p[1])]
+
+
 def _rect_axis(pts):
     """닫힌 직사각형 → (centerline, thickness_mm). 짧은 변 중점을 잇는 것이 축선."""
     got = _corners(pts)
@@ -232,9 +244,10 @@ def _rect_from_axis(centerline, thickness_mm):
 def _rect_box(pts):
     """닫힌 직사각형 → (cx, cy, width_mm, depth_mm, rotation_rad). 기둥용.
 
-    Pascal 의 기둥 평면은 로컬 +X 를 **rotation 만큼 CCW** 돌린 것이다
-    (`column/floorplan.ts` 가 `rotatePlanVector(v, -rotation)` 을 쓰는데 그 함수는
-    시계방향 회전이라 부호가 두 번 뒤집힌다). 여기와 `_box_corners` 가 그 한 쌍이다."""
+    Pascal 의 `rotation` 은 Three.js `rotation.y` 라 로컬 +X 가 평면 수치 (x, z) 에서
+    **(cos, −sin)** 으로 간다(`column/floorplan.ts`: "plots at -rotation so SVG-CW maps to
+    Three.js-CCW"). 다리의 z = −y 에서는 그 방향이 우리 평면의 (cos, sin) — 즉 우리 각도가
+    **그대로** rotation 이다. 여기와 `_box_corners` 가 그 한 쌍이다."""
     got = _corners(pts)
     if got is None:
         return None
@@ -416,8 +429,7 @@ def to_pascal_scene(geometry, name=None):
             wid = _nid("wall", eid, s)
             node = _node(
                 wid, "wall", lid, name=str(w.get("layer") or "wall"), children=[],
-                start=[GC.mm_to_m(axis[s][0]), GC.mm_to_m(axis[s][1])],
-                end=[GC.mm_to_m(axis[s + 1][0]), GC.mm_to_m(axis[s + 1][1])],
+                start=_to_plan(axis[s]), end=_to_plan(axis[s + 1]),
                 thickness=GC.mm_to_m(thickness),
                 height=GC.mm_to_m(GC.height_of(w, params, "wall")),
                 frontSide="unknown", backSide="unknown")
@@ -454,7 +466,9 @@ def to_pascal_scene(geometry, name=None):
         sub = op.get("subtype")
         oid = _nid("door" if sub == "door" else "window", eid)
         # 문의 중심 높이는 height/2(바닥 기준), 창은 sill + height/2 — 같은 식이다.
-        pos = [GC.mm_to_m(u), GC.mm_to_m(sill + height / 2.0), GC.mm_to_m(offset)]
+        # 셋째 성분은 벽 로컬 +Z(= 벽 방향의 Three.js 회전으로 돌린 +Z)다. z = −y 에서 그 축은 우리
+        # 왼쪽 법선의 **반대**라 부호가 뒤집힌다.
+        pos = [GC.mm_to_m(u), GC.mm_to_m(sill + height / 2.0), 0.0 - GC.mm_to_m(offset)]
         if sub == "door":
             node = _node(oid, "door", wid, name=str(op.get("layer") or "door"),
                          children=[], position=pos, rotation=[0, 0, 0],
@@ -496,7 +510,7 @@ def to_pascal_scene(geometry, name=None):
                     "radius": GC.mm_to_m(max(wmm, dmm) / 2.0)}
         node = _node(
             cid, "column", lid, name=str(c.get("layer") or "column"),
-            position=[GC.mm_to_m(cx), GC.mm_to_m(z0 - lz), GC.mm_to_m(cy)],
+            position=[GC.mm_to_m(cx), GC.mm_to_m(z0 - lz), 0.0 - GC.mm_to_m(cy)],
             rotation=rot, crossSection=shape, height=GC.mm_to_m(z1 - z0),
             # ★ 기본값은 **장식용**이다(round-rings 주춧돌 + 기둥머리 + 목이 잘록한
             #   샤프트). 구조 기둥에 그대로 두면 그리스 신전이 선다 — Pascal 자신의
@@ -518,7 +532,7 @@ def to_pascal_scene(geometry, name=None):
         lz, lid = _level_for(top, levels)
         sid = _nid("slab", eid)
         node = _node(sid, "slab", lid, name=str(s.get("layer") or "slab"),
-                     polygon=[[GC.mm_to_m(p[0]), GC.mm_to_m(p[1])] for p in pts],
+                     polygon=[_to_plan(p) for p in pts],
                      holes=[], elevation=GC.mm_to_m(top - lz),
                      thickness=GC.mm_to_m(GC.thickness_of(s, params, "slab")))
         node["metadata"]["mep"] = _meta(s)
@@ -537,14 +551,14 @@ def to_pascal_scene(geometry, name=None):
         lz, lid = _level_for(GC.base_z("zone", zrec), levels)
         zid = _nid("zone", eid)
         node = _node(zid, "zone", lid, name=str(zrec.get("layer") or "Zone %d" % (i + 1)),
-                     polygon=[[GC.mm_to_m(p[0]), GC.mm_to_m(p[1])] for p in pts],
+                     polygon=[_to_plan(p) for p in pts],
                      ceilingHeight=GC.mm_to_m(z1 - z0), autoFromWalls=False,
                      boundaryWallIds=[], spaceRole="generic")
         node["metadata"]["mep"] = _meta(zrec)
         add(zid, node, lid, "zone", zrec)
 
     # ── MEP(덕트·배관·트레이) — 전용 설비 노드 ──────────────────────────────
-    #   path 는 [x, **높이**, y] — Y-up 이라 평면 y 가 셋째로 간다.
+    #   path 는 [x, **높이**, −y] — Y-up 이라 평면이 셋째로 가고, 북쪽이 −Z 라 부호가 뒤집힌다.
     for cat in MEP_CATS:
         for i, m in enumerate(el.get(cat) or []):
             eid = m.get("eid") or "%s:%d" % (cat, i)
@@ -563,12 +577,12 @@ def to_pascal_scene(geometry, name=None):
                 bad(cat, m, "path3d_invalid", detail=str(exc))
                 continue
             if dz_lo != 0.0 or dz_hi != 0.0:
-                path = [[GC.mm_to_m(q[0]), GC.mm_to_m(q[2] - lz), GC.mm_to_m(q[1])]
+                path = [[GC.mm_to_m(q[0]), GC.mm_to_m(q[2] - lz), 0.0 - GC.mm_to_m(q[1])]
                         for q in GC.route_points(cat, m, PASCAL_CHORD_MM)]
                 report["path3d"] = report.get("path3d", 0) + 1
             else:
                 y = GC.mm_to_m(elev - lz)
-                path = [[GC.mm_to_m(p[0]), y, GC.mm_to_m(p[1])] for p in pts]
+                path = [[GC.mm_to_m(p[0]), y, 0.0 - GC.mm_to_m(p[1])] for p in pts]
             try:
                 section = GC.mep_section(cat, m, params)
             except GC.ContractError as exc:
@@ -695,21 +709,21 @@ def from_pascal_scene(scene):
         runs, tail = [], None
         for item in segs:
             n = item[2]
-            head_pt = [GC.m_to_mm(n["start"][0]), GC.m_to_mm(n["start"][1])]
+            head_pt = _from_plan(n["start"])
             if tail is not None and math.dist(tail, head_pt) <= WALL_JOIN_TOL_MM:
                 runs[-1].append(item)
             else:
                 runs.append([item])
-            tail = [GC.m_to_mm(n["end"][0]), GC.m_to_mm(n["end"][1])]
+            tail = _from_plan(n["end"])
         if len(runs) > 1:
             report["wall_split_by_deletion"] += len(runs) - 1
 
         for ri, run in enumerate(runs):
             first = run[0][2]
             rec, meta = base(first)
-            axis = [[GC.m_to_mm(first["start"][0]), GC.m_to_mm(first["start"][1])]]
+            axis = [_from_plan(first["start"])]
             for _s, _i, n in run:
-                axis.append([GC.m_to_mm(n["end"][0]), GC.m_to_mm(n["end"][1])])
+                axis.append(_from_plan(n["end"]))
             rec["kind"] = "polyline"
             rec["closed"] = bool(meta.get("closed"))
             set_base(rec, "z_base", z_of.get(lid, 0.0))
@@ -749,16 +763,15 @@ def from_pascal_scene(scene):
             #   구간에 붙은 개구부가 호스트를 못 찾고 **말없이 사라진다**.
             for _s, nid, n in run:
                 wall_index_of[nid] = idx
-                wall_axis_of[nid] = [[GC.m_to_mm(n["start"][0]), GC.m_to_mm(n["start"][1])],
-                                     [GC.m_to_mm(n["end"][0]), GC.m_to_mm(n["end"][1])]]
+                wall_axis_of[nid] = [_from_plan(n["start"]), _from_plan(n["end"])]
             out("wall", rec)
 
     # ── 나머지 노드 ───────────────────────────────────────────────────────
     for nid in sorted(nodes):
         n = nodes[nid]
         t = n.get("type")
-        if t in ("site", "building", "level", "wall"):
-            continue
+        if t in ("site", "building", "level", "wall", "guide"):
+            continue                                # guide 는 원본 밑그림이지 부재가 아니다
         rec, meta = base(n)
         lz = z_of.get(n.get("parentId"), 0.0)
 
@@ -769,13 +782,13 @@ def from_pascal_scene(scene):
             set_base(rec, "z_base", z0)
             if meta.get("kind") == "circle":
                 rec["kind"] = "circle"
-                rec["center"] = [GC.m_to_mm(pos[0]), GC.m_to_mm(pos[2])]
+                rec["center"] = _from_plan([pos[0], pos[2]])
                 rec["radius"] = GC.m_to_mm(n.get("radius", 0.22))
             else:
                 rec["kind"] = "polyline"
                 rec["closed"] = True
                 rec["points"] = GC.ccw(_box_corners(
-                    GC.m_to_mm(pos[0]), GC.m_to_mm(pos[2]),
+                    *_from_plan([pos[0], pos[2]]),
                     GC.m_to_mm(n.get("width", 0.44)), GC.m_to_mm(n.get("depth", 0.44)),
                     n.get("rotation", 0.0)))
             if abs(h_mm - GC.height_of(rec, params, "column")) > 0.5:
@@ -786,8 +799,7 @@ def from_pascal_scene(scene):
         elif t == "slab":
             rec["kind"] = "polyline"
             rec["closed"] = True
-            rec["points"] = [[GC.m_to_mm(p[0]), GC.m_to_mm(p[1])]
-                             for p in n.get("polygon") or []]
+            rec["points"] = [_from_plan(p) for p in n.get("polygon") or []]
             set_base(rec, "z_base", lz + GC.m_to_mm(n.get("elevation", 0.0)))
             th = GC.m_to_mm(n.get("thickness", 0.05))
             if abs(th - GC.thickness_of(rec, params, "slab")) > 0.5:
@@ -798,8 +810,7 @@ def from_pascal_scene(scene):
         elif t == "zone":
             rec["kind"] = "polyline"
             rec["closed"] = True
-            rec["points"] = [[GC.m_to_mm(p[0]), GC.m_to_mm(p[1])]
-                             for p in n.get("polygon") or []]
+            rec["points"] = [_from_plan(p) for p in n.get("polygon") or []]
             set_base(rec, "z_base", lz)
             ch = GC.m_to_mm(n.get("ceilingHeight", 2.7))
             if abs(ch - GC.height_of(rec, params, "zone")) > 0.5:
@@ -823,7 +834,7 @@ def from_pascal_scene(scene):
             length = math.hypot(dx, dy) or 1.0
             width = GC.m_to_mm(n.get("width", 0.9))
             height = GC.m_to_mm(n.get("height", 2.1))
-            off = GC.m_to_mm(pos[2])
+            off = 0.0 - GC.m_to_mm(pos[2])          # 벽 로컬 +Z 는 우리 왼쪽 법선의 반대(정변환 참조)
             rec["kind"] = meta.get("kind", "circle")
             rec["center"] = [x0 + dx / length * u - dy / length * off,
                              y0 + dy / length * u + dx / length * off]
@@ -848,13 +859,13 @@ def from_pascal_scene(scene):
             path = n.get("path") or []
             rec["kind"] = "polyline"
             rec["closed"] = False
-            rec["points"] = [[GC.m_to_mm(p[0]), GC.m_to_mm(p[2])] for p in path]
+            rec["points"] = [_from_plan([p[0], p[2]]) for p in path]
             z0_mm = lz + GC.m_to_mm(path[0][1] if path else 0.0)
             set_base(rec, "elevation", z0_mm)
             if len({round(p[1], 9) for p in path}) > 1:
                 # 점마다 높이가 다르다 — 계약 v3 `path3d`(z 는 elevation 에서의 상대값)로 담는다.
                 rec["path3d"] = {"segments": GC.polyline_segments(
-                    [[GC.m_to_mm(p[0]), GC.m_to_mm(p[2]), lz + GC.m_to_mm(p[1]) - z0_mm] for p in path])}
+                    [_from_plan([p[0], p[2]]) + [lz + GC.m_to_mm(p[1]) - z0_mm] for p in path])}
                 report["path3d"] = report.get("path3d", 0) + 1
             else:
                 rec.pop("path3d", None)
@@ -993,10 +1004,18 @@ def scene_to_edits(geometry, scene):
              for r in recs if r.get("eid")}
 
     edits, report = {}, {"deleted": 0, "moved": 0, "overrides": 0, "added": 0,
-                         "not_exported": 0}
+                         "not_exported": 0, "opening_unlinked": 0}
     for eid, nids in sorted(exported.items()):
         cat, orig = before[eid]
         if all(nid not in scene.get("nodes", {}) for nid in nids):
+            hosts = {expected["nodes"][nid].get("parentId") for nid in nids} if cat == "opening" else set()
+            if hosts and all(h not in scene.get("nodes", {}) for h in hosts):
+                # ★ 벽(또는 그 구간)을 지우면 Pascal 이 자식인 개구부를 **함께** 지운다. 그걸 삭제로 받으면
+                #   사람이 지우지 않은 개구부가 사라진다 — **연결 해제**로 남긴다. 재파싱의 링크가 붙일 벽을
+                #   다시 찾고, 없으면 `no_host_reason` 으로 검토 목록에 뜬다. 개구부만 지운 것은 벽이 남아
+                #   있어 구분된다(벽과 개구부를 따로 둘 다 지운 것도 여기로 온다 — 지우는 쪽이 보수적이다).
+                report["opening_unlinked"] += 1
+                continue
             edits[eid] = {"deleted": True}          # 사람이 지운 것만 삭제다
             report["deleted"] += 1
             continue
@@ -1056,6 +1075,34 @@ def scene_to_edits(geometry, scene):
     report["not_exported"] = len(before) - len(exported)
     report["forward"], report["reverse"] = fwd, rev
     return edits, report
+
+
+def add_source_guides(scene, drawing, url_for):
+    """원본 DXF 선을 레벨마다 **guide 노드**로 깐다 — 편집 대상이 아닌 밑그림이라 되돌리기가 건너뛴다.
+
+    Pascal guide 는 가로 `10 m × scale` 평면에 이미지 위쪽이 −Z(북쪽)로 놓인다. 원본 선을 북쪽이 위인
+    SVG(`source_drawing.drawing_svg`, 층 bbox 에 딱 맞춘 크기)로 그리고 bbox 가로를 `10 m × scale` 로
+    두면 벽과 겹친다. 층은 z 가 닿는 가장 높은 레벨에 붙인다. 붙인 수를 돌려준다."""
+    nodes = scene.get("nodes") or {}
+    levels = sorted((n for n in nodes.values() if n.get("type") == "level"), key=lambda n: n.get("level", 0))
+    if not levels:
+        return 0
+    stack = list(zip(_z_of_levels(levels), levels))
+    added = 0
+    for floor in (drawing or {}).get("floors") or []:
+        box = floor.get("bbox")
+        if not box or box[2] - box[0] <= 0 or box[3] - box[1] <= 0:
+            continue
+        z = float(floor.get("z") or 0.0)
+        lz, level = next(((lz, lv) for lz, lv in reversed(stack) if lz <= z + 1e-6), stack[0])
+        x, zz = _to_plan(((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0))
+        gid = _nid("guide", floor.get("id"))
+        nodes[gid] = _node(gid, "guide", level["id"], name="원본 %s" % (floor.get("label") or floor.get("id")),
+                           url=url_for(floor), position=[x, GC.mm_to_m(z - lz), zz], rotation=[0, 0, 0],
+                           scale=GC.mm_to_m(box[2] - box[0]) / 10.0, opacity=50, scaleReference=None)
+        level.setdefault("children", []).append(gid)
+        added += 1
+    return added
 
 
 def scene_sha256(scene):

@@ -6,7 +6,11 @@
 // `/api/mep/*` 만 부르므로 토큰이 브라우저로 **가지 않는다**(`NEXT_PUBLIC_` 금지).
 import { NextResponse } from 'next/server'
 
-type MepPath = '/pascal/snapshot' | '/pascal/apply'
+type MepPath =
+  | '/pascal/snapshot'
+  | '/pascal/apply'
+  | '/pascal/review'
+  | `/pascal/source.svg?floor=${string}`
 
 export async function forwardToMepProject(path: MepPath, init: RequestInit): Promise<NextResponse> {
   const base = process.env.MEP_PROJECT_URL

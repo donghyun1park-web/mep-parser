@@ -1883,7 +1883,13 @@ def link_openings_to_walls(elements, params):
             op['dims_assumed'] = assumed
         else:
             op.pop('dims_assumed', None)
-    if not openings or not walls:
+    if not openings:
+        return
+    if not walls:
+        # 잴 벽이 하나도 없다 — 사유 없이 돌아가면 V106 이 '사유 불명' 으로 묶는다(벽을 전부 지운
+        # 편집 뒤에도 같은 자리로 온다). 아래 루프의 마지막 갈래와 같은 사유를 적는다.
+        for op in openings:
+            op["no_host_reason"] = "no_walls_to_check"
         return
     default_w = float(params.get("wall", {}).get("width", 200.0))
     for op in openings:

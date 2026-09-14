@@ -14,18 +14,19 @@ import {
   type SceneGraph,
   type SidebarTab,
 } from '@pascal-app/editor'
-import { Hammer, Layers, Settings } from 'lucide-react'
+import { ClipboardList, Hammer, Layers, Settings } from 'lucide-react'
 import Image from 'next/image'
 import { useCallback, useRef, useState } from 'react'
 import { countGraphNodes, isEmptyGraphOverwrite } from '@/lib/empty-graph-guard'
 import { ensureMepPlugin } from '@/lib/mep-plugin'
 import { BuildTab } from './build-tab'
+import { MepReviewTab } from './mep-review-tab'
 // 3D·2D·분할 전환(`ViewModeControl`)이 여기 있다. 안 넘기면 **평면 편집 화면으로 갈 길이 없다**
 // — 설비 경로 점 끌기와 평면 표시가 전부 2D 쪽이다(실측으로 겪음).
 import { CommunityViewerToolbarLeft, CommunityViewerToolbarRight } from './viewer-toolbar'
 
-// `SceneLoader` 와 같은 사이드바(장면 트리 · 작도 · 설정). 넘기지 않으면 편집기가
-// 플러그인 탭만 띄워 **장면 트리가 없다** — 벽 안에 묻힌 부재를 고를 길이 없어진다.
+// `SceneLoader` 와 같은 사이드바(장면 트리 · 작도 · 설정)에 **검토** 탭을 더한다. 넘기지 않으면
+// 편집기가 플러그인 탭만 띄워 **장면 트리가 없다** — 벽 안에 묻힌 부재를 고를 길이 없어진다.
 // (`scene-loader.tsx` 의 SIDEBAR_TABS 를 옮긴 것. 그쪽이 내보내지 않아 복사한다.)
 const tabIcon = (src: string) => (
   <Image alt="" className="h-8 w-8 object-contain" height={32} src={src} width={32} />
@@ -46,6 +47,15 @@ const SIDEBAR_TABS: (SidebarTab & { component: React.ComponentType })[] = [
     mobileDefaultSnap: 0.5,
     mobileIcon: <Hammer className="h-5 w-5" />,
     icon: tabIcon('/icons/build.webp'),
+  },
+  {
+    // 선택한 부재의 출처·치수·높이 + 검토 목록(원본 밑그림·저장 상태와 한 화면)
+    id: 'mep-review',
+    label: '검토',
+    component: MepReviewTab,
+    mobileDefaultSnap: 0.5,
+    mobileIcon: <ClipboardList className="h-5 w-5" />,
+    icon: <ClipboardList className="h-7 w-7" />,
   },
   {
     id: 'settings',
@@ -87,6 +97,8 @@ export function MepProjectLoader() {
     // 노드마다 기본값을 채워 넣어 우리 씬과 서명이 같아질 수 없고(실측: 매번 전송),
     // 저장소가 명령 0개로 `no_changes` 를 돌려주며 revision 을 올리지 않는다.
     if (applyToEditor) applySceneGraphToEditor(snap.scene)
+    // 검토 탭이 새 revision 의 목록을 다시 불러온다.
+    window.dispatchEvent(new CustomEvent('mep:revision', { detail: snap.revision }))
   }, [])
 
   const handleLoad = useCallback(async () => {

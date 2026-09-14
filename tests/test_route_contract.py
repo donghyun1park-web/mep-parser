@@ -195,24 +195,6 @@ def test_closed_rect_loop_is_mitred_all_round_without_caps():
     assert GC._signed_volume(verts, faces) == pytest.approx(4000 * 100 * 60, rel=1e-9)
 
 
-def test_native_builder_accessors_give_the_analytic_curve():
-    seg = _arc()
-    assert GC.arc_sweep(seg) == pytest.approx(math.pi / 2)
-    assert _close(GC.arc_point(seg, 0.5), [1000 * math.cos(math.pi / 4), 1000 * math.sin(math.pi / 4), 0], 1e-9)
-    degree, poles, knots, weights = GC.nurbs_definition(_quarter_circle_nurbs())
-    assert degree == 2 and len(poles) == 3 and weights[1] == pytest.approx(math.sqrt(0.5))
-
-
-@pytest.mark.parametrize("seg, want", [
-    ({"type": "line", "start": [0, 0, 0], "end": [0, 0, 5]}, [0, 0, 1]),
-    (_arc(), [0, 1, 0]),                              # (1000,0) 에서 반시계로 출발 → +y
-    (_quarter_circle_nurbs(), [0, 1, 0]),             # 첫 제어 다각형 방향 = 접선
-])
-def test_start_tangent_is_the_curve_tangent_not_the_chord(seg, want):
-    """`Arch.makePipe` 는 현(chord)에 수직으로 단면을 놓아 곡선 시작 관을 찌그러뜨렸다."""
-    assert _close(GC.start_tangent([seg]), want, 1e-6)
-
-
 def _sharp_route():
     """실측 사고 형상: 폭 200mm 덕트가 188mm 구간 양 끝에서 118° 씩 꺾인다."""
     t1 = math.radians(118)
