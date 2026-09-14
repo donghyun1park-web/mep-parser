@@ -15,6 +15,7 @@ FreeCAD·shapely 의존 없음(순수 표준 라이브러리) — 그래야 단�
 """
 
 import bisect
+import hashlib
 import math
 
 # v3: MEP 경로가 `path3d`(직선·원호·스플라인 구간, 점마다 높이)를 갖는다. mm·Z-up 은
@@ -507,6 +508,158 @@ def route_length(rec):
 def route_length_basis(rec):
     return ("evaluated_curve_approximation"
             if any(s["type"] == "spline" for s in path3d_segments(rec)) else "analytic")
+
+
+# ── MEP 이음(joint) — 연결은 **명시적 증거**로만 만든다 ────────────────────────
+# 도면이 실제로 이어 그린 곳만 이음이다: 경로 끝이 다른 경로 끝과 **같은 점**(엘보·레듀서·티·
+# 크로스)이거나, 다른 경로의 안쪽 **위에** 놓인 곳(가지 — 줄기는 `tap`). 가까운 끝(틈)·교차·
+# 다른 높이·다른 카테고리는 이음이 아니다 — 가까운 것을 잇는 일은 선언(`connect_gap=`)으로만
+# 한다(SA 와 RA 끝이 스치는 자리를 이으면 두 계통이 하나가 된다). 레코드가
+# `joints: [{id, port, at_mm?}]` 를 들고, 같은 id 를 든 레코드끼리가 한 이음이다 — 구성원이 id 를
+# 들고 다니므로 이동·분할로 EID 가 바뀌어도 끊어지지 않고, 끊긴 이음은 `joint_problems` 가 말한다.
+JOINT_PORTS = ("start", "end", "tap")
+JOINT_COINCIDENT_MM = 0.001     # '같은 점' — 파서가 이음을 **만드는** 허용치(틈을 메우는 거리가 아니다)
+JOINT_TOL_MM = 1.0              # 선언된 이음의 구성원이 아직 만나는가 — 편집 뒤 **검사** 허용치
+
+
+def _joint_id(category, point):
+    key = "|".join([category] + ["%.3f" % (round(float(v), 3) + 0.0) for v in point])
+    return "j:" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+
+
+def _polyline_nearest(pts, q):
+    """(거리, 시작부터의 길이) — 꺾은선 위에서 q 에 가장 가까운 점."""
+    best, run = (math.inf, 0.0), 0.0
+    for a, b in zip(pts, pts[1:]):
+        ab = _sub(b, a)
+        length = _norm(ab)
+        t = 0.0 if length <= _EPS else max(0.0, min(1.0, _dot(_sub(q, a), ab) / (length * length)))
+        d = math.dist(_add(a, _mul(ab, t)), q)
+        if d < best[0]:
+            best = (d, run + t * length)
+        run += length
+    return best
+
+
+def _polyline_at(pts, s):
+    """꺾은선 시작에서 길이 s 인 점(길이를 넘으면 끝점)."""
+    for a, b in zip(pts, pts[1:]):
+        length = math.dist(a, b)
+        if s <= length:
+            return _add(a, _mul(_sub(b, a), s / length if length > _EPS else 0.0))
+        s -= length
+    return list(pts[-1])
+
+
+def route_port_point(category, rec, port, at_mm=None):
+    """이음 구성원의 절대 3D 위치(mm) — 경로 시작·끝, 또는 `route_points` 를 따라 `at_mm` 인 점."""
+    pts = route_points(category, rec)
+    if port == "start":
+        return list(pts[0])
+    if port == "end":
+        return list(pts[-1])
+    return _polyline_at(pts, float(at_mm))
+
+
+def assign_joints(elements, tol_mm=JOINT_COINCIDENT_MM):
+    """배관·덕트·트레이에 이음(`joints`)을 쓰고 요약 {joints, taps, by_degree} 를 돌려준다.
+
+    카테고리마다 따로 본다. 끝끼리 `tol_mm` 안이면 한 무리이고, 그 점이 다른 경로의 안쪽(끝에서
+    `tol_mm` 넘게 떨어진 곳) 위에 있으면 그 경로가 `tap`(`at_mm` = `route_points` 를 따른 길이)으로
+    든다. 구성원이 둘 이상일 때만 이음이다. id 는 이음 점에서 나오므로 같은 도면을 다시 파싱하면
+    같다. **파싱 직후 레코드에만** 쓴다 — 있던 `joints` 는 지우고 다시 쓴다."""
+    if not tol_mm > 0:
+        raise ContractError("joint tolerance must be positive")
+    summary = {"joints": 0, "taps": 0, "by_degree": {}}
+    for cat in ROUTE_CATS:
+        routes = []
+        for rec in elements.get(cat) or []:
+            rec.pop("joints", None)
+            if rec.get("geometry_mode") == "footprint":
+                continue
+            try:
+                pts = route_points(cat, rec)
+            except (ContractError, KeyError, TypeError, ValueError):
+                continue                          # 끊긴 경로는 V010 몫이다
+            if len(pts) >= 2:
+                box = ([min(p[k] for p in pts) for k in range(3)], [max(p[k] for p in pts) for k in range(3)])
+                routes.append((rec, pts, sum(math.dist(a, b) for a, b in zip(pts, pts[1:])), box))
+        cells, groups = {}, []
+        for i, (rec, pts, _length, _box) in enumerate(routes):
+            if rec.get("closed"):
+                continue
+            for port, p in (("start", pts[0]), ("end", pts[-1])):
+                cell = tuple(math.floor(v / tol_mm) for v in p)
+                near = [groups[k] for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
+                        for k in cells.get((cell[0] + dx, cell[1] + dy, cell[2] + dz), ())
+                        if math.dist(groups[k][0][3], p) <= tol_mm]
+                if near:
+                    near[0].append((i, port, None, p))
+                else:
+                    cells.setdefault(cell, []).append(len(groups))
+                    groups.append([(i, port, None, p)])
+        # ponytail: 가지 판정은 무리 × 경로(상자 선별 뒤 꺾은선) — 도면당 수백~수천 경로면 충분하다.
+        for group in groups:
+            point, ended = group[0][3], {m[0] for m in group}
+            members = list(group)
+            for j, (_rec, pts, length, (lo, hi)) in enumerate(routes):
+                if j in ended or any(point[k] < lo[k] - tol_mm or point[k] > hi[k] + tol_mm for k in range(3)):
+                    continue
+                d, s = _polyline_nearest(pts, point)
+                if d <= tol_mm and tol_mm < s < length - tol_mm:
+                    members.append((j, "tap", s, point))
+            if len(members) < 2:
+                continue
+            jid = _joint_id(cat, point)
+            for idx, port, s, _p in members:
+                ref = {"id": jid, "port": port}
+                if port == "tap":
+                    ref["at_mm"] = round(s, 3)
+                routes[idx][0].setdefault("joints", []).append(ref)
+            degree = str(sum(2 if m[1] == "tap" else 1 for m in members))
+            summary["joints"] += 1
+            summary["taps"] += sum(1 for m in members if m[1] == "tap")
+            summary["by_degree"][degree] = summary["by_degree"].get(degree, 0) + 1
+    return summary
+
+
+def mep_joints(elements):
+    """이음 id → 구성원 [(카테고리, 레코드, port, at_mm)] — 레코드의 `joints` 에서 모은 파생값."""
+    out = {}
+    for cat in ROUTE_CATS:
+        for rec in elements.get(cat) or []:
+            for ref in rec.get("joints") or []:
+                out.setdefault(str(ref.get("id") or ""), []).append(
+                    (cat, rec, ref.get("port"), ref.get("at_mm")))
+    return out
+
+
+def joint_problems(elements, tol_mm=JOINT_TOL_MM):
+    """선언된 이음의 문제 [{joint, problem, eids[, distance_mm]}] — 보고만 하고 고치지 않는다.
+
+    `single_member` 상대가 지워졌다 · `members_apart` 이동·편집으로 구성원이 더는 만나지 않는다 ·
+    `bad_member` id·포트가 틀렸거나 경로·가지 위치를 풀 수 없다."""
+    problems = []
+    for jid, members in sorted(mep_joints(elements).items()):
+        item = {"joint": jid, "eids": [rec.get("eid") for _c, rec, _p, _a in members]}
+        points = []
+        try:
+            for cat, rec, port, at in members:
+                if not jid or port not in JOINT_PORTS or (port == "tap") != (at is not None):
+                    raise ValueError("bad joint reference")
+                points.append(route_port_point(cat, rec, port, at))
+                if port == "tap" and not 0.0 <= float(at) <= route_length(rec) + tol_mm:
+                    raise ValueError("tap outside route")
+        except (ContractError, KeyError, TypeError, ValueError):
+            problems.append(dict(item, problem="bad_member"))
+            continue
+        if len(members) < 2:
+            problems.append(dict(item, problem="single_member"))
+            continue
+        spread = max(math.dist(a, b) for a in points for b in points)
+        if spread > tol_mm:
+            problems.append(dict(item, problem="members_apart", distance_mm=round(spread, 3)))
+    return problems
 
 
 def reverse_segments(segments):

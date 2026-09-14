@@ -2612,6 +2612,12 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
             print(f"  [MEP 연결] {_c}: {_v['before']}개 → {_v['after']}개 "
                   f"(틈 {_v['gap_mm']:.0f}mm 이내, 이어붙인 길이 합 {_v['bridged_mm']:.0f}mm)")
 
+    # [설비] 이음 — 제도자가 실제로 이어 그린 곳(끝 일치·가지)만 기록한다. 가까운 것은 잇지 않는다.
+    _joints = _GC.assign_joints(result["elements"])
+    if _joints["joints"]:
+        result["mep_joints"] = _joints
+        print(f"  [MEP 이음] {_joints['joints']}개 (가지 {_joints['taps']}개, 가지 수별 {_joints['by_degree']})")
+
     # [Phase 1-pre] 개별 LINE 연결: 끝점 공유 2점 레코드 → 다중점 폴리라인 병합
     _n_raw = len(result["elements"]["wall"])
     result["elements"]["wall"] = join_connected_lines(result["elements"]["wall"])

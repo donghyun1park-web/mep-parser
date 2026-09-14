@@ -106,7 +106,9 @@ _PROVENANCE = ("eid", "eid_v1", "layer", "pairing", "confidence", "needs_review"
                "system", "material", "nominal_size", "placement", "dimension_basis",
                "dimension_status", "geometry_mode", "region_id", "level", "floor_id",
                "source_refs", "source_geometry", "source_length_mm", "sampled_length_mm",
-               "length_basis", "source_elevation_mm", "curve_chord_error_mm", "_sigs")
+               "length_basis", "source_elevation_mm", "curve_chord_error_mm", "_sigs",
+               # 이음 구성원 id — 레코드가 들고 다녀야 옮겨도(delete+add) 이음이 끊기지 않는다
+               "joints")
 
 
 def _dim_aliases(cat, key):
@@ -892,6 +894,11 @@ def from_pascal_scene(scene):
                 if n.get("system") and not rec.get("system"):
                     set_attr(rec, "system", str(n["system"]))
             out(cat, rec)
+        else:
+            # Pascal 도구로 놓은 피팅·단말·장비·가구 — 우리 계약에 자리가 없어 저장하지 않는다.
+            # 조용히 버리지 않고 종류별로 센다(화면에는 남아 있는데 저장소에는 없다).
+            key = "pascal_node:%s" % t
+            report["dropped"][key] = report["dropped"].get(key, 0) + 1
 
     geometry = {
         "source": head.get("source"),

@@ -457,6 +457,8 @@ def apply_mep_profile(doc, result, profile):
                 if any(refs.intersection(_signature({k: v for k, v in s.items() if k != 'reverse'}) for s in gap['source_refs']) for gap in report['gaps']):
                     rec['needs_review'] = True; rec['review_reason'] = 'mep_source_gap'
         elements[row['category']].extend(built)
+    # 이음 — 원본이 실제로 이어 그린 곳(끝 일치·가지)만. 틈은 위 `gaps` 로 보고할 뿐 잇지 않는다.
+    topology['joints'] = GC.assign_joints(elements, profile['endpoint_tolerance_mm'])
     # Apply the same selected region to legacy architectural results; never clip.
     excluded_categories = Counter()
     for category, records in list(elements.items()):

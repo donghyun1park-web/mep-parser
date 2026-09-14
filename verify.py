@@ -287,6 +287,9 @@ def _check_mep(data, policy):
                     scope.append(dict(info, reason="geometry outside selected region"))
             if rec.get("needs_review") or rec.get("dimension_basis") == "assumed" or rec.get("assumptions"):
                 review.append(dict(info, reason=rec.get("review_reason") or "assumed dimensions or installation conditions"))
+    # 이음 — 지워진 상대·떨어진 구성원. 파싱 직후에는 없고 편집 뒤에 드러난다(잇거나 끊지 않는다).
+    for problem in GC.joint_problems(data.get("elements") or {}):
+        review.append(dict(problem, category="joint", reason="joint_" + problem["problem"]))
     diagnostics = data.get("mep_diagnostics") or {}
     coverage = diagnostics.get("source_coverage") or {}
     if coverage:

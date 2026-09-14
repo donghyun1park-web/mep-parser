@@ -261,6 +261,11 @@ def build_stack(spec, base_dir=".", dry_run=False):
                 _shift(r, cat, dx, dy, float(lv['z']))
                 r["level"] = lid
                 r["eid"] = f"{lid}:{r['eid']}"      # 같은 DXF 를 두 층에 쓰면 충돌한다
+                for _j in r.get("joints") or []:
+                    # 이음 id 도 층마다 따로다(이음 점 좌표에서 나와 같은 DXF 면 같다). 편집으로
+                    # 저장된 수동 레코드는 이미 붙어 온다 — 한 번만 붙인다.
+                    if str(_j.get("id", "")).count(":") == 1:
+                        _j["id"] = f"{lid}:{_j['id']}"
                 if r.get("eid_v1"):
                     r["eid_v1"] = f"{lid}:{r['eid_v1']}"
                 out["elements"].setdefault(cat, []).append(r)

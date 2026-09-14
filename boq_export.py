@@ -174,11 +174,7 @@ def aggregate(data):
                 area = _poly_area(pts) - sum(_poly_area(h) for h in m.get("holes") or [])
                 footprints.append([label, m.get("eid") or m.get("layer", ""), dims["height_mm"], round(area / 1e6, 6)])
                 continue
-            if "diameter" in dims:                   # 배관 · 원형 덕트(v3)
-                size = f"{dims['diameter']:g}" if cat == "pipe" else f"Ø{dims['diameter']:g}"
-            else:
-                size = f"{dims['width_mm']:g}x{dims['height_mm']:g}"
-            key = (label, size)
+            key = (label, _size_label(cat, dims))
             g = mg.setdefault(key, {"count": 0, "len": 0.0})
             g["count"] += 1
             length = m.get("source_length_mm")
@@ -194,7 +190,49 @@ def aggregate(data):
     out["MEP"] = (["구분", "규격(mm)", "개수", "길이(m)"], rows, tot)
     out["MEP 외곽"] = (["구분", "원본 식별자", "높이(mm)", "평면 면적(㎡)"], footprints,
                        ["합계", "", "", round(sum(r[3] for r in footprints), 6)])
+
+    # ── MEP 이음: 형식·규격별 개수 — 도면이 실제로 이어 그린 곳(`joints`)만 센다 ──
+    #   같은 규격이 곧게 이어진 곳은 피팅이 아니라 선을 끊어 그린 자리라 세지 않는다.
+    from geom_contract import ContractError, mep_joints, route_points
+    fg = {}
+    for members in mep_joints(els).values():
+        if len(members) < 2:
+            continue                                  # 끊긴 이음 — V012 가 말한다
+        legs, outward, sizes = 0, [], set()
+        try:
+            for c, rec, port, _at in members:
+                sizes.add(_size_label(c, mep_dimensions(c, rec, params)))
+                if port == "tap":
+                    legs += 2                         # 줄기는 지나가며 양쪽으로 센다
+                    continue
+                legs += 1
+                pts = route_points(c, rec)
+                a, b = (pts[0], pts[1]) if port == "start" else (pts[-1], pts[-2])
+                v = [b[i] - a[i] for i in range(3)]
+                norm = math.sqrt(sum(x * x for x in v)) or 1.0
+                outward.append([x / norm for x in v])
+        except (ContractError, KeyError, TypeError, ValueError, IndexError):
+            continue
+        if legs == 2 and len(outward) == 2:
+            straight = sum(p * q for p, q in zip(*outward)) < -math.cos(math.radians(1.0))
+            if straight and len(sizes) == 1:
+                continue
+            kind = "레듀서" if straight else "엘보"
+        else:
+            kind = {3: "티", 4: "크로스"}.get(legs, f"분기{legs}")
+        cat = members[0][0]
+        key = ({"pipe": "배관", "duct": "덕트", "tray": "트레이"}.get(cat, cat), kind, "/".join(sorted(sizes)))
+        fg[key] = fg.get(key, 0) + 1
+    rows = [[k[0], k[1], k[2], count] for k, count in sorted(fg.items())]
+    out["MEP 이음"] = (["구분", "형식", "규격(mm)", "개수"], rows, ["합계", "", "", sum(r[3] for r in rows)])
     return out
+
+
+def _size_label(cat, dims):
+    """규격 표기 — 배관은 외경, 원형 덕트는 Ø지름, 사각은 폭x높이. 길이 표와 이음 표가 같이 쓴다."""
+    if "diameter" in dims:                   # 배관 · 원형 덕트(v3)
+        return f"{dims['diameter']:g}" if cat == "pipe" else f"Ø{dims['diameter']:g}"
+    return f"{dims['width_mm']:g}x{dims['height_mm']:g}"
 
 
 def export_boq_xlsx(data, path, title=None):

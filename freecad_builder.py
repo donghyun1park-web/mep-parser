@@ -95,6 +95,8 @@ def set_ifc_props(obj, rec):
         ("NominalSize",   "IfcLabel",      rec.get("nominal_size")),
         ("SourceRefs",    "IfcText",       json.dumps(rec.get("source_refs") or [], ensure_ascii=False)),
         ("SourceLength",  "IfcReal",       rec.get("source_length_mm")),
+        # 이음 — 같은 id 를 든 부재끼리 도면에서 이어 그려졌다(`geom_contract.assign_joints`).
+        ("Joints",        "IfcText",       json.dumps(rec["joints"], ensure_ascii=False) if rec.get("joints") else None),
         ("Assumptions",   "IfcText",       json.dumps(rec.get("assumptions") or [], ensure_ascii=False)),
         ("MemberName",    "IfcLabel",      sec.get("name") or rec.get("member_name")),
         ("Section",       "IfcLabel",      sec.get("size")),
