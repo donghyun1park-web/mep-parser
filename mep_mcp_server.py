@@ -226,6 +226,32 @@ def inspect_mep_source(dxf_path: str) -> str:
 
 
 @mcp.tool()
+def confirm_mep_connection(candidate_id: str, expected_revision: int, json_path: str = DEFAULT_JSON,
+                           confirmed: bool = True, reviewed_by_user: bool = False, reason: str = '') -> str:
+    """Record that a person confirmed one connection candidate as a real fitting joint, or undo that.
+
+    Geometry never changes: only a joint with basis "bridged" is written. The drawing's own centerlines stay
+    as drawn. On reparse a candidate that no longer exists is reported as orphaned instead of applied.
+    reviewed_by_user must reflect an actual review of that location, never an agent inference.
+    """
+    if reviewed_by_user is not True:
+        return json.dumps({'error': 'user_review_required',
+                           'message': 'Review the candidate location in the 3D preview before confirming.'})
+    try:
+        session = session_from_geometry(json_path)
+        state = session.confirm_bridge(candidate_id, expected_revision, session.store.read()['project_id'],
+                                       confirmed, reason)
+        atomic_json(json_path, state['geometry'])
+        net = state['geometry'].get('mep_connectivity') or {}
+        return json.dumps({'project_id': state['project_id'], 'revision': state['revision'],
+                           'bridges': net.get('bridges', {}), 'summary': net.get('summary', {})}, ensure_ascii=False)
+    except RevisionConflict as exc:
+        return json.dumps({'error': 'revision_conflict', 'current_revision': exc.current_revision})
+    except Exception as exc:
+        return json.dumps({'error': str(exc)}, ensure_ascii=False)
+
+
+@mcp.tool()
 def measure_mep_outline_widths(rule: dict, json_path: str = DEFAULT_JSON, source_id: str = 'main',
                                region_bounds_mm: list | None = None) -> str:
     """Measure the plan width of every centerline one MEP layer rule selects, from its two parallel outline lines.

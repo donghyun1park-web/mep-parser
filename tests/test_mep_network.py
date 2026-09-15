@@ -58,7 +58,23 @@ def test_other_system_meeting_is_a_conflict_and_each_end_takes_only_its_nearest_
     assert {(e["eid"], e["port"]): e["status"] for e in net["open_ends"]}[("d:far", "start")] == "open"
 
 
-def test_project_state_and_editor_review_carry_connection_candidates(tmp_path):
+def test_a_confirmed_candidate_becomes_a_bridged_joint_and_a_vanished_one_is_reported():
+    from mep_network import apply_bridges
+    g = _geom(duct=[_duct("d:c", [[0, 3000], [1000, 3000]]), _duct("d:d", [[1200, 3000], [2000, 3000]])])
+    net = analyze(g)
+    (cand,) = net["candidates"]
+    report = apply_bridges(g, [{"id": cand["id"]}, {"id": "gap:deadbeef12"}], net["candidates"])
+    assert report == {"applied": [cand["id"]], "orphaned": [{"id": "gap:deadbeef12", "reason": "candidate_gone"}]}
+    refs = [d["joints"][0] for d in g["elements"]["duct"]]
+    assert {r["id"] for r in refs} == {"j:" + cand["id"].split(":")[1]}
+    assert [r["port"] for r in refs] == ["end", "start"]
+    assert all(r["basis"] == "bridged" and r["gap_mm"] == 200.0 for r in refs)
+    # 선언한 틈만큼 떨어진 것은 '구성원이 떨어졌다' 가 아니다 — 사람이 잇겠다고 declare 한 자리다.
+    assert GC.joint_problems(g["elements"]) == []
+    assert analyze(g)["summary"]["groups"] == 1                     # 확정 뒤에는 한 계통으로 센다
+
+
+def _duct_project(tmp_path):
     import ezdxf
     from project_server import ProjectSession
     from project_store import ProjectStore
@@ -66,8 +82,30 @@ def test_project_state_and_editor_review_carry_connection_candidates(tmp_path):
     for a, b in (((0, 0), (1000, 0)), ((1200, 0), (2000, 0))):
         doc.modelspace().add_line(a, b, dxfattribs={"layer": "DUCT"})
     doc.saveas(tmp_path / "mep.dxf")
-    session = ProjectSession(ProjectStore(tmp_path / "unit.mep").create([{"id": "main", "path": str(tmp_path / "mep.dxf")}]))
+    return ProjectSession(ProjectStore(tmp_path / "unit.mep").create([{"id": "main", "path": str(tmp_path / "mep.dxf")}]))
+
+
+def test_project_state_and_editor_review_carry_connection_candidates(tmp_path):
+    session = _duct_project(tmp_path)
     net = session.state()["geometry"]["mep_connectivity"]
     (cand,) = net["candidates"]
     assert cand["kind"] == "straight" and net["summary"]["groups_with_candidates"] == 1
     assert any(i["category"] == "mep_gap" and i["eids"] == cand["eids"] for i in session.pascal_review()["items"])
+
+
+def test_a_confirmation_is_stored_by_candidate_id_and_survives_reopening(tmp_path):
+    from project_server import ProjectSession
+    from project_store import ProjectStore
+    session = _duct_project(tmp_path)
+    state = session.state()
+    (cand,) = state["geometry"]["mep_connectivity"]["candidates"]
+    after = session.confirm_bridge(cand["id"], state["revision"], state["project_id"])
+    assert after["geometry"]["mep_connectivity"]["bridges"]["applied"] == [cand["id"]]
+    assert all(any(j.get("basis") == "bridged" for j in d.get("joints") or [])
+               for d in after["geometry"]["elements"]["duct"])
+    reopened = ProjectSession(ProjectStore(tmp_path / "unit.mep")).state()      # 종료 → 재열기
+    net = reopened["geometry"]["mep_connectivity"]
+    assert net["bridges"]["applied"] == [cand["id"]] and net["summary"]["groups"] == 1
+    undone = session.confirm_bridge(cand["id"], reopened["revision"], reopened["project_id"], confirmed=False)
+    assert undone["geometry"]["mep_connectivity"]["bridges"]["applied"] == []
+    assert undone["geometry"]["mep_connectivity"]["summary"]["groups"] == 2

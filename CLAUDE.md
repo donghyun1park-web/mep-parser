@@ -334,7 +334,16 @@ id 는 이음 점 좌표에서 나와 재파싱해도 같고(다층은 `stack_bu
 - 붙는 곳: `ProjectSession._parse`(실패하면 `summary.error`) · 미리보기 검토 대기(간섭 다음 '연결 후보'·'계통 충돌')
   · 평면 탭(빨간 점 = 끊긴 끝, 주황 점선 = 후보, 빨간 점선 = 충돌) · Pascal 검토 탭(`mep_gap`) · MCP
   `get_review_items`·`get_mep_diagnostics` · GUI 로그('원본 반영 N/N' 과 따로).
-- 2단계(미구현): 선언한 거리 안의 후보를 사람이 확정하면 `joints` 에 `basis: "bridged"` 로 기록.
+- **2단계 — 사람이 확정한 후보만 이음이 된다.** 확정은 **프로젝트 파일의 `bridges`**(후보 id)에 저장한다.
+  수정 사이드카에 두지 않는 이유는 열쇠가 부재 EID 하나인데 후보는 **두 부재의 짝**이고, 상대 EID 가 값 안에
+  들어가면 `edits_to_local` 이 키만 옮겨 다층에서 층 접두가 어긋나기 때문이다(월드 EID 로 남는다).
+  - 재파싱마다 `mep_network.apply_bridges` 가 **그때의 후보 목록과 대조**해 적용한다. 도면이 바뀌어 후보가
+    사라지면 적용하지 않고 `mep_connectivity.bridges.orphaned`(사유 `candidate_gone`)로 말한다 — 후보 id 는
+    두 EID·포트·종류에서 나오므로, 없던 이음이 조용히 남지 않는다.
+  - 기록되는 것은 `joints` 참조뿐이다(**형상·좌표 불변**): `{id, port, basis: "bridged", gap_mm}` · 가지는 `at_mm`.
+    `joint_problems` 는 선언한 틈까지는 `members_apart` 로 보고하지 않는다 — 떨어져 있는 것이 정상인 이음이다.
+  - 부르는 곳: `ProjectSession.confirm_bridge`(취소도 같은 함수) · MCP `confirm_mep_connection`(`reviewed_by_user`
+    필요). 미리보기 검토 목록에 후보는 뜨지만 **확정 버튼은 아직 없다**.
 
 ### ★ 벽 병합은 '합치면 한쪽이 사라지는 속성' 을 먼저 본다
 `merge_collinear_walls` 는 합친 뒤 **한쪽 레코드의 값을 그대로 쓴다.** 그래서

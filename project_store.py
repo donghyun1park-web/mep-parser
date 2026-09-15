@@ -140,7 +140,8 @@ class ProjectStore:
                 normalized.append(self._normalize_source(source, ids))
                 ids.add(normalized[-1]['id'])
             state = dict(schema_version=1, project_id=str(uuid.uuid4()), revision=0,
-                         sources=normalized, options=options or {}, edits_by_floor={sid:{} for sid in ids}, decisions=[])
+                         sources=normalized, options=options or {}, edits_by_floor={sid:{} for sid in ids},
+                         decisions=[], bridges=[])
             atomic_json(self.path, state)
         return self
 
@@ -182,6 +183,12 @@ class ProjectStore:
             raise ValueError('edits refer to an unknown floor')
         for edits in data['edits_by_floor'].values():
             validate_edits(edits)
+        # 사람이 확정한 설비 이음 후보(id 만 저장한다 — 형상·치수는 재파싱이 다시 만든다).
+        if not isinstance(data.get('bridges', []), list):
+            raise ValueError('bridges must be a list')
+        for bridge in data.get('bridges', []):
+            if not isinstance(bridge, dict) or not isinstance(bridge.get('id'), str) or not bridge['id']:
+                raise ValueError('each confirmed connection needs a candidate id')
         json.dumps(data, allow_nan=False)
         return data
 
@@ -235,6 +242,18 @@ class ProjectStore:
             after['edits_by_floor'] = self.local_edits(edits, before)
             if decisions:
                 after['decisions'].extend(decisions)
+            return self._commit(before, after)
+
+    def set_bridges(self, bridges, expected_revision, project_id, decisions=None):
+        """확정한 이음 후보 목록을 통째로 바꾼다. 수정 사이드카와 달리 **층 접두가 없는 월드 EID** 기준이라
+        프로젝트 파일에 둔다 — 후보는 부재 하나가 아니라 두 부재의 짝이고, 상대 EID 가 값 안에 들어간다."""
+        with self.locked():
+            before = self.read()
+            self.check_revision(before, expected_revision, project_id)
+            after = copy.deepcopy(before)
+            after['bridges'] = copy.deepcopy(list(bridges))
+            if decisions:
+                after['decisions'].extend(copy.deepcopy(decisions))
             return self._commit(before, after)
 
     def update_sources(self, sources, options, expected_revision, project_id, decisions=None, *, edits_by_floor=None):

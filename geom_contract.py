@@ -664,8 +664,15 @@ def joint_problems(elements, tol_mm=JOINT_TOL_MM):
         if len(members) < 2:
             problems.append(dict(item, problem="single_member"))
             continue
+        # 사람이 확정한 이음(`basis: "bridged"`)은 **떨어져 있는 것이 정상**이다 — 도면이 피팅 자리에서 끊어
+        # 그린 틈을 사람이 잇겠다고 선언한 것이므로, 선언한 틈(`gap_mm`)까지는 벌어짐으로 보고하지 않는다.
+        allowance = tol_mm
+        for _cat, rec, _port, _at in members:
+            for ref in rec.get("joints") or []:
+                if str(ref.get("id")) == jid and ref.get("basis") == "bridged":
+                    allowance = max(allowance, float(ref.get("gap_mm") or 0.0) + tol_mm)
         spread = max(math.dist(a, b) for a in points for b in points)
-        if spread > tol_mm:
+        if spread > allowance:
             problems.append(dict(item, problem="members_apart", distance_mm=round(spread, 3)))
     return problems
 

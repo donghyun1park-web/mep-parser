@@ -70,15 +70,52 @@ def _shape(a, b, width, reach):
     return None
 
 
-def _entry(kind, gap, a, ra, b_xy, rb, b_port, corner):
+def _entry(kind, gap, a, ra, b_xy, rb, b_port, corner, at_mm=None):
     eids = [ra["rec"].get("eid"), rb["rec"].get("eid")]
     key = kind + "|" + "|".join(sorted(["%s:%s" % (eids[0], a["port"]), "%s:%s" % (eids[1], b_port)]))
     pts = [a["xy"]] + ([corner] if corner else []) + [b_xy]
-    return {"id": "gap:" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:12], "kind": kind, "category": ra["cat"],
-            "systems": [ra["system"], rb["system"]], "eids": eids, "ports": [a["port"], b_port],
-            "points": [[round(float(p[0]), 1), round(float(p[1]), 1)] for p in pts], "gap_mm": round(gap, 1),
-            "sizes": [ra["size"], rb["size"]], "size_change": ra["size"] != rb["size"],
-            "level": ra["rec"].get("level")}
+    entry = {"id": "gap:" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:12], "kind": kind, "category": ra["cat"],
+             "systems": [ra["system"], rb["system"]], "eids": eids, "ports": [a["port"], b_port],
+             "points": [[round(float(p[0]), 1), round(float(p[1]), 1)] for p in pts], "gap_mm": round(gap, 1),
+             "sizes": [ra["size"], rb["size"]], "size_change": ra["size"] != rb["size"],
+             "level": ra["rec"].get("level")}
+    if at_mm is not None:
+        entry["at_mm"] = round(float(at_mm), 3)     # 가지(tee)가 줄기의 어디에 붙는가 — 이음 기록에 그대로 쓴다
+    return entry
+
+
+def apply_bridges(geometry, bridges, candidates):
+    """사람이 확정한 이음 후보를 `joints` 로 기록한다 → {"applied", "orphaned"}. **형상은 그대로다.**
+
+    확정은 후보 id 로 저장한다(프로젝트 파일의 `bridges`). id 는 두 부재의 EID·포트·종류에서 나오므로 도면이
+    바뀌어 그 후보가 사라지면 **적용하지 않고** `orphaned` 로 말한다 — 없던 이음이 조용히 남지 않게. 기록한
+    이음 참조는 `basis: "bridged"` 와 선언한 틈(`gap_mm`)을 들고 다니고, `geom_contract.joint_problems` 는 그
+    틈까지는 '구성원이 떨어졌다' 로 보고하지 않는다."""
+    by_eid = {}
+    for cat in GC.ROUTE_CATS:
+        for rec in (geometry.get("elements") or {}).get(cat) or []:
+            if rec.get("eid"):
+                by_eid.setdefault(str(rec["eid"]), []).append(rec)
+    live = {str(c["id"]): c for c in candidates or []}
+    applied, orphaned = [], []
+    for bridge in bridges or []:
+        bid = str((bridge or {}).get("id") or "")
+        current = live.get(bid)
+        if current is None:
+            orphaned.append({"id": bid, "reason": "candidate_gone"})
+            continue
+        members = [by_eid.get(str(eid)) or [] for eid in current["eids"]]
+        if any(len(m) != 1 for m in members):
+            orphaned.append({"id": bid, "reason": "record_missing_or_ambiguous"})
+            continue
+        jid = "j:" + bid.split(":", 1)[-1]
+        for rec, port in zip([m[0] for m in members], current["ports"]):
+            ref = {"id": jid, "port": port, "basis": "bridged", "gap_mm": current["gap_mm"]}
+            if port == "tap":
+                ref["at_mm"] = float(current.get("at_mm") or 0.0)
+            rec.setdefault("joints", []).append(ref)
+        applied.append(bid)
+    return {"applied": applied, "orphaned": orphaned}
 
 
 def analyze(geometry):
@@ -182,12 +219,12 @@ def analyze(geometry):
                     continue                    # 나란히 겹친 구간은 가지가 아니다
                 along, gap = line.project(p), math.dist(a["xy"], (p.x, p.y))
                 if gap > 1e-6 and rb["w"] / 2 < along < line.length - rb["w"] / 2 and (best is None or gap < best[0]):
-                    best = (gap, j, (p.x, p.y))
+                    best = (gap, j, (p.x, p.y), along)
         if best:
-            gap, j, xy = best
+            gap, j, xy, along = best
             used.add(k)
             a["status"] = "tee"
-            candidates.append(_entry("tee", gap, a, ra, xy, runs[j], "tap", None))
+            candidates.append(_entry("tee", gap, a, ra, xy, runs[j], "tap", None, at_mm=along))
             links.append((a["run"], j))
 
     shells = []

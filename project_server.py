@@ -66,10 +66,18 @@ class ProjectSession:
             # 간섭 목록은 검토 보조다 — 실패해도 모델·수정은 막지 않되, 못 만든 사실은 남긴다.
             data['clash_review'] = {'items': [], 'summary': {'total': 0, 'error': f'{type(exc).__name__}: {exc}'}}
         try:
-            from mep_network import analyze
-            data['mep_connectivity'] = analyze(data)
+            from mep_network import analyze, apply_bridges
+            net = analyze(data)
+            # 확정한 이음을 기록하고 **그 뒤 상태**를 다시 센다 — 확정한 자리가 화면에 계속 '끊긴 끝'·'후보' 로
+            # 남으면 사람이 같은 자리를 두 번 확인한다.
+            report = apply_bridges(data, manifest.get('bridges') or [], net.get('candidates'))
+            if report['applied']:
+                net = analyze(data)
+            net['bridges'] = report
+            data['mep_connectivity'] = net
         except Exception as exc:
             data['mep_connectivity'] = {'candidates': [], 'conflicts': [], 'open_ends': [],
+                                        'bridges': {'applied': [], 'orphaned': []},
                                         'summary': {'error': f'{type(exc).__name__}: {exc}'}}
         return data
 
@@ -404,6 +412,23 @@ class ProjectSession:
                 return {'dry_run': True, 'project_id': project_id, 'revision': expected_revision}
             self.store.check_revision(self.store.refresh_inputs(), expected_revision, project_id)
             self.store.replace_edits(captured, expected_revision, project_id, decisions=decisions)
+            return self.state()
+
+    def confirm_bridge(self, candidate_id, expected_revision, project_id, confirmed=True, reason=''):
+        """이음 후보를 사람이 확정(또는 취소)한다. 형상은 바뀌지 않고 `joints` 에만 기록된다."""
+        with self._mutex:
+            manifest = self.store.refresh_inputs()
+            self.store.check_revision(manifest, expected_revision, project_id)
+            if confirmed:
+                live = {c['id'] for c in ((self.state()['geometry'].get('mep_connectivity') or {}).get('candidates') or [])}
+                if candidate_id not in live:
+                    raise ValueError('Unknown connection candidate: ' + str(candidate_id))
+            kept = [b for b in (manifest.get('bridges') or []) if b.get('id') != candidate_id]
+            if confirmed:
+                kept.append({'id': str(candidate_id), 'reason': str(reason)[:500]})
+            self.store.set_bridges(kept, expected_revision, project_id,
+                                   decisions=[{'action': 'confirm_bridge' if confirmed else 'unconfirm_bridge',
+                                               'candidate_id': str(candidate_id), 'revision': expected_revision}])
             return self.state()
 
     def import_legacy(self, path, expected_revision, project_id):
