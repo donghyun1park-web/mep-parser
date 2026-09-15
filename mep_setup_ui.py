@@ -156,11 +156,12 @@ class MepSetupDialog:
         self.arch_vars = {}
         for i, (key, label, values) in enumerate([
             ('layer', '원본 레이어', [r['name'] for r in self.layers]), ('category', '역할', ['wall', 'column', 'ignore']),
-            ('height_mm', '높이 mm (선택)', None), ('width_mm', '벽 기본 두께 mm (선택)', None)]):
+            ('height_mm', '높이 mm (선택)', None), ('width_mm', '벽 기본 두께 mm (선택)', None),
+            ('pair_min_mm', '벽면 짝 최소 간격 mm (벽, 비우면 50)', None)]):
             self.arch_vars[key] = self._entry(form, label, i, values, width=50)
-        ttk.Button(form, text='레이어 분류 추가 / 수정', command=self._add_architecture).grid(row=4, column=0, columnspan=2, pady=8)
-        self.arch_tree = ttk.Treeview(self.architecture_tab, columns=('pattern', 'category', 'height', 'width'), show='headings', height=10)
-        for key, label in [('pattern', '레이어 규칙'), ('category', '역할'), ('height', '높이 mm'), ('width', '기본 두께 mm')]:
+        ttk.Button(form, text='레이어 분류 추가 / 수정', command=self._add_architecture).grid(row=5, column=0, columnspan=2, pady=8)
+        self.arch_tree = ttk.Treeview(self.architecture_tab, columns=('pattern', 'category', 'height', 'width', 'pair_min'), show='headings', height=10)
+        for key, label in [('pattern', '레이어 규칙'), ('category', '역할'), ('height', '높이 mm'), ('width', '기본 두께 mm'), ('pair_min', '짝 최소 간격 mm')]:
             self.arch_tree.heading(key, text=label)
         self.arch_tree.pack(fill='x', padx=16, pady=8)
         ttk.Button(self.architecture_tab, text='선택 건축 규칙 삭제', command=self._delete_architecture).pack(anchor='e', padx=16)
@@ -168,7 +169,8 @@ class MepSetupDialog:
     def _refresh_architecture(self):
         self.arch_tree.delete(*self.arch_tree.get_children())
         for i, r in enumerate(self.architecture_rules):
-            self.arch_tree.insert('', 'end', iid=str(i), values=(r['pattern'], r['category'], r.get('height_mm', ''), r.get('width_mm', '')))
+            self.arch_tree.insert('', 'end', iid=str(i), values=(r['pattern'], r['category'], r.get('height_mm', ''),
+                                                                  r.get('width_mm', ''), r.get('pair_min_mm', '')))
 
     def _add_architecture(self):
         try:
@@ -179,7 +181,7 @@ class MepSetupDialog:
             if row['category'] not in ('wall', 'column', 'ignore'):
                 raise ValueError('벽·기둥·제외 중 역할을 선택하세요.')
             from drawing_units import positive_scale
-            for key in ('height_mm', 'width_mm'):
+            for key in ('height_mm', 'width_mm', 'pair_min_mm'):
                 if self.arch_vars[key].get().strip():
                     row[key] = positive_scale(self.arch_vars[key].get())
             self.architecture_rules = [r for r in self.architecture_rules if r['pattern'] != row['pattern']] + [row]

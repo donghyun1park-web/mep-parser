@@ -815,6 +815,12 @@ def _box_record(cx, cy, w, h, rot_deg):
     return _tag_sig({"kind": "polyline", "closed": True, "points": pts})
 
 
+def _width_from_block_name(name):
+    """창호 블록 이름 끝의 '-폭'(D-900 · XREF…$0$W-1800). 300~6000mm 밖이면 폭이 아니다."""
+    m = re.search(r"-(\d{3,4})$", str(name or ""))
+    return float(m.group(1)) if m and 300 <= int(m.group(1)) <= 6000 else None
+
+
 def insert_to_records(insert, scale, category, attrs):
     """INSERT → geometry 레코드 리스트.
     1) virtual_entities()로 블록 내부 형상을 실좌표 explode → entity_to_record.
@@ -859,8 +865,14 @@ def insert_to_records(insert, scale, category, attrs):
         circ = [r for r in exploded if r["kind"] == "circle"]
         if circ:
             return circ
-        return [_tag_sig({"kind": "circle", "center": [round(cx, 3), round(cy, 3)],
-                 "radius": round((size or 900.0) / 2.0, 3)})]
+        # 창호 블록은 이름이 폭을 말한다(D-900 · PD-750 · FSD-1100 · W-1800). 규칙에 폭이 없으면 그것을 쓴다 —
+        # 종전엔 전부 900 이었다(실측: 750·1000·1100 문 8개가 모두 900).
+        named = _width_from_block_name(insert.dxf.name) if size is None else None
+        marker = {"kind": "circle", "center": [round(cx, 3), round(cy, 3)],
+                  "radius": round((size or named or 900.0) / 2.0, 3)}
+        if named:
+            marker["width_source"] = "block_name"
+        return [_tag_sig(marker)]
     if category == "slab":
         # 계단코어 등: 닫힌 폴리라인(윤곽선)만 슬래브로. 내부 LINE들(A-STAIR 등) 제외.
         closed = [r for r in exploded
@@ -1890,6 +1902,90 @@ def drop_tiny_openings(elements, min_size=None):
     return dropped
 
 
+def _opening_center(op):
+    if op.get("kind") == "circle" and op.get("center"):
+        return float(op["center"][0]), float(op["center"][1])
+    pts = op.get("points") or []
+    if not pts:
+        return None
+    x0, y0, x1, y1 = _bbox(pts)
+    return (x0 + x1) / 2.0, (y0 + y1) / 2.0
+
+
+def drop_opening_fragments(elements):
+    """문·창 기호의 조각과 좌표까지 같은 중복 개구부를 버린다. 반환 {레이어: 개수}.
+
+    블록 문(원 마커)이 선 자리에 같은 문의 문짝·문틀 폴리라인이 레이어 규칙으로 따로 개구부가 되고, 선이
+    중복되면 그것도 둘이 된다(실측: 폭 150·180mm 조각 8개 = 4곳 × 2, 전부 900mm 블록 문 폭 안). 크기만으로는
+    못 자른다 — 50~200mm 는 설비 슬리브(원)와 겹친다. 그래서 **자기 폭의 두 배 이상인 개구부의 폭 안에 든 선
+    조각(원이 아닌 것)** 과, 좌표까지 같은 중복(`_geom_key` — '중복 부재' 절과 같은 열쇠)만 버린다.
+    실측(지하3층): 1912mm 양개문 틀 안의 문짝선(868·874mm, 점 2개) 8개 — 틀이 이미 같은 void 를 뚫는다."""
+    info = [(op, _opening_center(op), _opening_extent(op), float(op.get("z_base") or 0.0))
+            for op in elements.get("opening", [])]
+    keep, dropped, seen = [], {}, set()
+    for op, c, ext, z in info:
+        if c is not None:
+            key = _geom_key(op)
+            fragment = key in seen or (op.get("kind") != "circle" and any(
+                o is not op and cc is not None and e >= 2.0 * ext and math.dist(cc, c) <= e / 2.0
+                and abs(zz - z) < FLOOR_TOL_MM for o, cc, e, zz in info))
+            if fragment:
+                lay = op.get("layer") or "(블록)"
+                dropped[lay] = dropped.get(lay, 0) + 1
+                continue
+            seen.add(key)
+        keep.append(op)
+    elements["opening"] = keep
+    return dropped
+
+
+NESTED_PAIR_MAX_DIFF_MM = 50.0   # 같은 레이어에서 이 두께 차 안에 겹쳐 선 벽은 한 벽의 안쪽 선이다
+NESTED_PAIR_CONTAIN = 0.9        # 작은 벽 평면이 큰 벽 평면에 이 비율 이상 들어가야 '겹쳐 섰다'
+
+
+def collapse_nested_wall_pairs(walls, params):
+    """같은 레이어에서 한 벽 **안에** 겹쳐 선 벽을 버리고 바깥 면(가장 두꺼운 것)을 남긴다. → (남은 벽, {레이어: 수})
+
+    실무 칸막이는 벽면 두 줄에 보드·마감 선을 10~20mm 안쪽으로 한 줄씩 더 그린다(실측: 칸막이 선 간격 10mm
+    66곳 · 20mm 36곳 · 100mm 30곳). 그 선들이 서로 짝지어 같은 자리에 80·90·100mm 벽이 겹쳐 서거나, 선이
+    중복된 만큼 좌표까지 같은 벽이 선다. 형상은 멀쩡해 보이지만 물량·간섭이 그만큼 부푼다(실측: 칸막이
+    55개 중 38개가 겹친 안쪽 짝·중복).
+
+    ★ **같은 레이어 · 두께 차 ≤ NESTED_PAIR_MAX_DIFF_MM** 일 때만이다. 다른 레이어가 같은 벽을 다른 두께로
+      그린 것(A-CON 450 ∥ 상부골조 400)은 도면을 봐야 하므로 고르지 않는다('중복 부재' 절). 두께가 크게 다른
+      겹침(두 칸막이의 바깥선끼리 짝지은 440mm 덩어리와 그 안의 100mm 벽)도 둘 다 남긴다."""
+    if not HAS_SHAPELY:
+        return walls, {}
+    from shapely.geometry import LineString
+    from shapely.strtree import STRtree
+    cand = []
+    for i, w in enumerate(walls):
+        axis = w.get("centerline") or w.get("points") or []
+        if w.get("pairing") != "paired" or w.get("closed") or len(axis) < 2:
+            continue
+        width = _GC.width_of(w, params, "wall")
+        fp = LineString([p[:2] for p in axis]).buffer(width / 2, cap_style=2, join_style=2)
+        if fp.area > 0:
+            cand.append((i, w, width, fp))
+    if not cand:
+        return walls, {}
+    tree = STRtree([c[3] for c in cand])
+    kept, drop, dropped = set(), set(), {}
+    for k in sorted(range(len(cand)), key=lambda n: (-cand[n][2], str(cand[n][1].get("eid")))):
+        i, w, width, fp = cand[k]
+        for j in (int(n) for n in tree.query(fp)):
+            big = cand[j]
+            if (j in kept and big[1].get("layer") == w.get("layer") and big[2] - width <= NESTED_PAIR_MAX_DIFF_MM
+                    and abs(float(big[1].get("z_base") or 0.0) - float(w.get("z_base") or 0.0)) < FLOOR_TOL_MM
+                    and big[3].intersection(fp).area >= NESTED_PAIR_CONTAIN * fp.area):
+                drop.add(i)
+                dropped[w.get("layer", "")] = dropped.get(w.get("layer", ""), 0) + 1
+                break
+        else:
+            kept.add(k)
+    return [w for i, w in enumerate(walls) if i not in drop], dropped
+
+
 def link_openings_to_walls(elements, params):
     """각 opening이 교차하는 벽 index 목록을 opening["wall_indices"]에 기록.
 
@@ -2500,7 +2596,8 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         if explicit_scale is not None:
             mep_profile['unit_scale_to_mm'] = explicit_scale
         architecture_rules = [(r['pattern'], r['category'],
-                               {k: r[v] for k, v in (('height', 'height_mm'), ('width', 'width_mm')) if v in r})
+                               dict({k: r[v] for k, v in (('height', 'height_mm'), ('width', 'width_mm')) if v in r},
+                                    **({'_opts': {'pair_min': r['pair_min_mm']}} if 'pair_min_mm' in r else {})))
                               for r in mep_profile.get('architecture_layers', [])]
         rules = architecture_rules + list(rules)
     doc = ezdxf.readfile(dxf_path)
@@ -2808,6 +2905,13 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
             + ", ".join(f"{k}({v})" for k, v in sorted(_tiny.items())[:4]))
         print(f"  [개구부] 조각 {sum(_tiny.values())}개 드롭(<{OPENING_MIN_SIZE_MM:.0f}mm): "
               + ", ".join(f"{k}({v})" for k, v in sorted(_tiny.items())[:4]))
+    _frag = drop_opening_fragments(result["elements"])
+    if _frag:
+        result["opening_fragments_dropped"] = _frag
+        _msg = (f"문·창 기호 조각·중복 개구부 {sum(_frag.values())}개 드롭(더 큰 개구부 폭 안의 선 조각 · 같은 자리 중복): "
+                + ", ".join(f"{k}({v})" for k, v in sorted(_frag.items())[:4]))
+        result["warnings"].append(_msg)
+        print("  [개구부] " + _msg)
     if mep_profile is not None:
         from mep_profile import apply_mep_profile
         with open(dxf_path, 'rb') as source_stream:
@@ -2856,6 +2960,15 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         result.setdefault("duplicate_geometry_dropped", {})["wall"] = _wall_dups
         print(f"  [wall] EID·좌표까지 같은 중복 {sum(_wall_dups.values())}개 드롭: "
               f"{_wall_dups} (남은 것 {len(_wall_keep)}개)")
+    # 같은 레이어 벽 안에 겹쳐 선 안쪽 짝(칸막이 보드·마감선). 위와 같은 이유로 링크·수정 주입보다 앞이다.
+    result["elements"]["wall"], _nested = collapse_nested_wall_pairs(result["elements"].get("wall", []), params)
+    if _nested:
+        result["nested_pairs_collapsed"] = _nested
+        _msg = (f"같은 레이어 벽 안에 겹쳐 선 안쪽 짝 {sum(_nested.values())}개 드롭(두께 차 ≤ "
+                f"{NESTED_PAIR_MAX_DIFF_MM:.0f}mm — 보드·마감선끼리 짝지은 것): "
+                + ", ".join(f"{k}({v})" for k, v in sorted(_nested.items())[:4]))
+        result["warnings"].append(_msg)
+        print("  [wall] " + _msg)
 
     # EID 는 수정 주입보다 **먼저** 부여한다 — `apply_edits` 가 EID 로 찾기 때문.
     # 산정 입력(_sigs·_span_sigs)은 레코드 생성 시점에 붙으므로 여기서 계산해도

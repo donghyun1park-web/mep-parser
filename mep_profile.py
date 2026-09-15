@@ -134,9 +134,13 @@ def validate_profile(profile, source_sha256=None):
             re.compile(row['pattern'])
         except re.error as exc:
             raise ValueError('Invalid architectural pattern: ' + str(exc)) from None
-        for key in ('height_mm', 'width_mm'):
+        for key in ('height_mm', 'width_mm', 'pair_min_mm'):
             if key in row:
                 row[key] = _number(row[key], key, True)
+        if row['category'] == 'wall':
+            # 면선 짝 최소 간격. 칸막이의 보드·마감선(벽면 10~20mm 안쪽)끼리 짝지어 폭 10mm '벽' 이 되지
+            # 않게 한다(실측: 칸막이 47개 중 40개). 전역 기본 1mm 는 밀착 철골용이라 건축 배경에는 안 맞는다.
+            row.setdefault('pair_min_mm', 50.0)
     rules = out.setdefault('layers', [])
     if not isinstance(rules, list) or (not rules and not architecture):
         raise ValueError('At least one MEP layer mapping is required')

@@ -47,17 +47,17 @@
     "counts": {
       "column": 80,
       "equipment": 6,
-      "opening": 34,
+      "opening": 26,
       "slab": 8,
-      "wall": 667
+      "wall": 662
     },
     "duplicate_geometry_dropped": {
       "column": 13,
       "wall": 10
     },
     "eid_collisions": {},
-    "eid_count": 795,
-    "eid_hash": "9a689f487457",
+    "eid_count": 782,
+    "eid_hash": "7b3710b54384",
     "face_coverage_pct": 98,
     "floors": [
       0
@@ -65,8 +65,8 @@
     "member_schedule": {},
     "needs_review": 161,
     "openings_dims_assumed": {
-      "height": 34,
-      "sill": 34
+      "height": 26,
+      "sill": 26
     },
     "small_openings_dropped": 244,
     "thin_pairs": {
@@ -74,7 +74,7 @@
       "상부골조": 2
     },
     "wall_pairing": {
-      "paired": 475,
+      "paired": 470,
       "single": 0,
       "single_offset": 154
     },
@@ -83,13 +83,13 @@
       "100": 16,
       "150": 1,
       "20": 3,
-      "200": 310,
+      "200": 308,
       "220": 1,
-      "250": 123,
+      "250": 121,
       "30": 24,
       "300": 35,
       "350": 2,
-      "400": 34,
+      "400": 33,
       "420": 1,
       "450": 41,
       "460": 2,
