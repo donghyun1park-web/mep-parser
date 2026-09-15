@@ -114,7 +114,10 @@ def apply_bridges(geometry, bridges, candidates):
             if port == "tap":
                 ref["at_mm"] = float(current.get("at_mm") or 0.0)
             rec.setdefault("joints", []).append(ref)
-        applied.append(bid)
+        # 확정한 자리는 다음 재파싱부터 **후보 목록에서 사라진다**(이미 이어진 끝이므로). 그래서 화면이 확정한
+        # 이음을 보여 주고 취소까지 하려면 후보 내용을 여기에 실어 보내야 한다 — id 만으로는 위치를 못 찾는다.
+        applied.append({k: current[k] for k in ("id", "kind", "category", "systems", "eids", "ports",
+                                                "points", "gap_mm", "level") if k in current})
     return {"applied": applied, "orphaned": orphaned}
 
 

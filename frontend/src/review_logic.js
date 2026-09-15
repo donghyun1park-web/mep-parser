@@ -42,15 +42,22 @@ export function buildReviewEntries(elements={}, report={}, clashes=[], connectiv
     });
   });
   // 설비 이음 후보·계통 충돌은 간섭 다음, 받은 순서 그대로. 후보는 모델에 쓰지 않았다 — 확정은 사람이 한다.
-  [...(connectivity?.candidates||[]), ...(connectivity?.conflicts||[]).map(c=>({...c,conflict:true}))].forEach((gap, order) => {
+  // 확정한 이음은 다음 파싱부터 후보에서 빠지므로 `bridges.applied` 로 따로 싣는다 — 취소할 자리가 화면에 있어야 한다.
+  const gapRows=[...(connectivity?.bridges?.applied||[]).map(b=>({...b,confirmed:true})),
+                 ...(connectivity?.candidates||[]),
+                 ...(connectivity?.conflicts||[]).map(c=>({...c,conflict:true}))];
+  gapRows.forEach((gap, order) => {
     const at=(gap.points||[[0,0]])[0], systems=(gap.systems||[]).map(s=>s??'계통 없음'), sizes=gap.sizes||[], eids=gap.eids||[];
     const kind=GAP_KIND[gap.kind]||gap.kind, size=sizes[0]===sizes[1]?(sizes[0]||''):sizes.join(' → ');
     const where=`틈 ${Math.round(gap.gap_mm)}mm · (${Math.round(at[0])}, ${Math.round(at[1])}) ↔ ${eids[1]||''}`;
     entries.push({
-      key:`gap:${gap.id}`, kind:'gap', eid:eids[0]||null, category:gap.conflict?'계통 충돌':'연결 후보', order,
+      key:`gap:${gap.id}`, kind:'gap', eid:eids[0]||null, order,
+      category:gap.conflict?'계통 충돌':gap.confirmed?'확정한 이음':'연결 후보',
       floor:gap.level!=null?String(gap.level):'', action:'select',
+      confirm:gap.conflict?null:{id:gap.id, confirmed:!!gap.confirmed},
       reason:gap.conflict?`다른 계통 끝이 ${kind}형으로 맞닿음 · ${systems.join(' ↔ ')} · ${where} — 도면 확인`
-        :`${kind} 이음 후보 · ${where} · ${[gap.systems?.[0],size].filter(Boolean).join(' ')}${gap.size_change?' · 규격 바뀜':''}`,
+        :`${gap.confirmed?`${kind} 이음으로 확정함`:`${kind} 이음 후보`} · ${where} · `
+         +`${[gap.systems?.[0],size].filter(Boolean).join(' ')}${gap.size_change?' · 규격 바뀜':''}`,
     });
   });
   for (const category of Object.keys(elements).sort()) {

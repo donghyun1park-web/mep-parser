@@ -683,11 +683,36 @@ function renderReview(){
   reviewFloor.value=floors.includes(keepFloor)?keepFloor:''; reviewCategory.value=categories.includes(keepCategory)?keepCategory:'';
   const shown=entries.filter(x=>(!reviewFloor.value||x.floor===reviewFloor.value)&&(!reviewCategory.value||x.category===reviewCategory.value));
   document.getElementById('reviewCount').textContent=shown.length;
-  document.getElementById('reviewList').innerHTML=shown.length?shown.map(x=>`<button class="review-item" data-eid="${escHtml(x.eid||'')}" data-orphan="${escHtml(x.orphan||'')}"><b>${escHtml(x.eid||x.orphan||x.kind)}</b> · ${escHtml(x.category)}${x.floor?' · 층 '+escHtml(x.floor):''}<small>${escHtml(x.reason)}</small></button>`).join(''):'없음';
+  document.getElementById('reviewList').innerHTML=shown.length?shown.map(reviewRowHtml).join(''):'없음';
+}
+function reviewRowHtml(x){
+  const head=`<button class="review-item" data-eid="${escHtml(x.eid||'')}" data-orphan="${escHtml(x.orphan||'')}"><b>${escHtml(x.eid||x.orphan||x.kind)}</b> · ${escHtml(x.category)}${x.floor?' · 층 '+escHtml(x.floor):''}<small>${escHtml(x.reason)}</small></button>`;
+  // 이음 확정은 서버(프로젝트)에 저장된다 — 독립 HTML 로 연 미리보기에는 저장할 곳이 없어 버튼을 두지 않는다.
+  if(!x.confirm||!RUNTIME) return head;
+  return `<div class="review-row">${head}<button class="confirm-gap" data-gap="${escHtml(x.confirm.id)}"`
+    +` data-confirmed="${x.confirm.confirmed?'1':''}">${x.confirm.confirmed?'확정 취소':'이음 확정'}</button></div>`;
+}
+async function confirmGap(id,confirmed){
+  setSaveStatus('saving','저장 중…');
+  try{
+    const response=await apiPost('/bridges',{project_id:RUNTIME.project_id,expected_revision:RUNTIME.revision,
+      candidate_id:id,confirmed});
+    RUNTIME.revision=response.revision;
+    if(response.geometry&&response.geometry.elements)
+      BASE_ELEMENTS=MepEdit.deriveBaseElements(response.geometry.elements,response.edits||{},excludedEditIds(response.geometry.edits_report));
+    mergeServerPresentation(response);
+    syncEffective();
+    setSaveStatus('saved','서버에 저장됨');
+  }catch(error){
+    setSaveStatus('error','이음 확정 실패 — 프로젝트는 그대로입니다: '+error.message);
+  }
+  renderReview();
 }
 reviewFloor.addEventListener('change',renderReview); reviewCategory.addEventListener('change',renderReview);
 document.getElementById('reviewList').addEventListener('click',ev=>{
   if(ACTION_LOCK) return;
+  const gap=ev.target.closest('.confirm-gap');
+  if(gap){ confirmGap(gap.dataset.gap,!gap.dataset.confirmed); return; }
   const row=ev.target.closest('.review-item'); if(!row) return;
   if(row.dataset.eid){ setTab(false); selectEid(row.dataset.eid,{focus:true}); }
   else {

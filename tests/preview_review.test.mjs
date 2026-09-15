@@ -70,6 +70,15 @@ test('connection candidates follow clashes, name the gap and partner, and confli
     [['clash','d:a','간섭'],['gap','d:a','연결 후보'],['gap','d:sa','계통 충돌'],['element','w:9','wall']]);
   assert.match(rows[1].reason,/엘보 이음 후보 · 틈 212mm · \(1000, 0\) ↔ d:b · SA 110×54 → 204×60 · 규격 바뀜/);
   assert.match(rows[2].reason,/직선형으로 맞닿음 · SA ↔ RA · 틈 200mm/);
+  assert.deepEqual(rows.map(x=>x.confirm),[undefined,{id:'g1',confirmed:false},null,undefined]);
+});
+
+test('a confirmed joint stays listed so it can be undone, even though it left the candidate list', () => {
+  const connectivity={candidates:[],conflicts:[],bridges:{applied:[{id:'g1',kind:'straight',eids:['d:c','d:d'],
+    systems:['SA','SA'],sizes:['110×54','110×54'],gap_mm:200,points:[[1000,3000],[1200,3000]]}]}};
+  const [row]=buildReviewEntries({},{},[],connectivity);
+  assert.deepEqual([row.kind,row.category,row.eid,row.confirm],['gap','확정한 이음','d:c',{id:'g1',confirmed:true}]);
+  assert.match(row.reason,/직선 이음으로 확정함 · 틈 200mm · \(1000, 3000\) ↔ d:d · SA 110×54/);
 });
 
 test('review queue excludes resolved records unless their acknowledgement is stale', () => {

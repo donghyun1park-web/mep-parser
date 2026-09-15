@@ -342,8 +342,11 @@ id 는 이음 점 좌표에서 나와 재파싱해도 같고(다층은 `stack_bu
     두 EID·포트·종류에서 나오므로, 없던 이음이 조용히 남지 않는다.
   - 기록되는 것은 `joints` 참조뿐이다(**형상·좌표 불변**): `{id, port, basis: "bridged", gap_mm}` · 가지는 `at_mm`.
     `joint_problems` 는 선언한 틈까지는 `members_apart` 로 보고하지 않는다 — 떨어져 있는 것이 정상인 이음이다.
-  - 부르는 곳: `ProjectSession.confirm_bridge`(취소도 같은 함수) · MCP `confirm_mep_connection`(`reviewed_by_user`
-    필요). 미리보기 검토 목록에 후보는 뜨지만 **확정 버튼은 아직 없다**.
+  - 부르는 곳: 미리보기 검토 목록의 **'이음 확정'·'확정 취소' 버튼**(`POST /bridges` → 프로젝트 토큰) ·
+    `ProjectSession.confirm_bridge`(취소도 같은 함수) · MCP `confirm_mep_connection`(`reviewed_by_user` 필요).
+  - 확정한 이음은 다음 파싱부터 **후보에서 빠지므로**(이미 이어진 끝이다) `bridges.applied` 가 후보 내용을 그대로
+    실어 보내고, 검토 목록에 '확정한 이음' 행으로 남는다 — 취소할 자리가 화면에 있어야 한다.
+  - 서버 없이 연 독립 HTML 미리보기에는 저장할 곳이 없어 버튼을 그리지 않는다(수정 사이드카와 같은 규약).
 
 ### ★ 벽 병합은 '합치면 한쪽이 사라지는 속성' 을 먼저 본다
 `merge_collinear_walls` 는 합친 뒤 **한쪽 레코드의 값을 그대로 쓴다.** 그래서

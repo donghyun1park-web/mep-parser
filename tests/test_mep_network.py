@@ -64,7 +64,11 @@ def test_a_confirmed_candidate_becomes_a_bridged_joint_and_a_vanished_one_is_rep
     net = analyze(g)
     (cand,) = net["candidates"]
     report = apply_bridges(g, [{"id": cand["id"]}, {"id": "gap:deadbeef12"}], net["candidates"])
-    assert report == {"applied": [cand["id"]], "orphaned": [{"id": "gap:deadbeef12", "reason": "candidate_gone"}]}
+    assert report["orphaned"] == [{"id": "gap:deadbeef12", "reason": "candidate_gone"}]
+    # 확정하면 후보 목록에서 빠지므로, 화면이 '확정한 이음' 을 보여 주려면 위치·부재가 함께 와야 한다.
+    (done,) = report["applied"]
+    assert (done["id"], done["kind"], done["eids"], done["gap_mm"]) == (cand["id"], "straight", ["d:c", "d:d"], 200.0)
+    assert done["points"] == cand["points"]
     refs = [d["joints"][0] for d in g["elements"]["duct"]]
     assert {r["id"] for r in refs} == {"j:" + cand["id"].split(":")[1]}
     assert [r["port"] for r in refs] == ["end", "start"]
@@ -93,6 +97,29 @@ def test_project_state_and_editor_review_carry_connection_candidates(tmp_path):
     assert any(i["category"] == "mep_gap" and i["eids"] == cand["eids"] for i in session.pascal_review()["items"])
 
 
+def test_the_preview_route_confirms_a_candidate_with_the_project_token(tmp_path):
+    import json as _json
+    import urllib.request
+    session = _duct_project(tmp_path)
+    with session.serve() as server:
+        def request(path, payload=None):
+            headers = {"Authorization": "Bearer " + server.token}
+            if payload is not None:
+                headers["Content-Type"] = "application/json"
+            req = urllib.request.Request(server.base_url + path, headers=headers,
+                                         data=None if payload is None else _json.dumps(payload).encode())
+            with urllib.request.urlopen(req) as response:
+                return _json.load(response)
+        state = request("/state")
+        (cand,) = state["geometry"]["mep_connectivity"]["candidates"]
+        saved = request("/bridges", {"project_id": state["project_id"], "expected_revision": state["revision"],
+                                     "candidate_id": cand["id"], "confirmed": True})
+    assert saved["revision"] == state["revision"] + 1
+    assert [b["id"] for b in saved["geometry"]["mep_connectivity"]["bridges"]["applied"]] == [cand["id"]]
+    assert all(any(j.get("basis") == "bridged" for j in d.get("joints") or [])
+               for d in saved["geometry"]["elements"]["duct"])
+
+
 def test_a_confirmation_is_stored_by_candidate_id_and_survives_reopening(tmp_path):
     from project_server import ProjectSession
     from project_store import ProjectStore
@@ -100,12 +127,13 @@ def test_a_confirmation_is_stored_by_candidate_id_and_survives_reopening(tmp_pat
     state = session.state()
     (cand,) = state["geometry"]["mep_connectivity"]["candidates"]
     after = session.confirm_bridge(cand["id"], state["revision"], state["project_id"])
-    assert after["geometry"]["mep_connectivity"]["bridges"]["applied"] == [cand["id"]]
+    assert [b["id"] for b in after["geometry"]["mep_connectivity"]["bridges"]["applied"]] == [cand["id"]]
     assert all(any(j.get("basis") == "bridged" for j in d.get("joints") or [])
                for d in after["geometry"]["elements"]["duct"])
     reopened = ProjectSession(ProjectStore(tmp_path / "unit.mep")).state()      # 종료 → 재열기
     net = reopened["geometry"]["mep_connectivity"]
-    assert net["bridges"]["applied"] == [cand["id"]] and net["summary"]["groups"] == 1
+    assert [b["id"] for b in net["bridges"]["applied"]] == [cand["id"]] and net["summary"]["groups"] == 1
+    assert net["candidates"] == []                                             # 확정한 자리는 후보에서 빠진다
     undone = session.confirm_bridge(cand["id"], reopened["revision"], reopened["project_id"], confirmed=False)
     assert undone["geometry"]["mep_connectivity"]["bridges"]["applied"] == []
     assert undone["geometry"]["mep_connectivity"]["summary"]["groups"] == 2

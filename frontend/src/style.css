@@ -76,6 +76,10 @@ html,body{margin:0;height:100%;overflow:hidden;font-family:"Segoe UI",sans-serif
 #view2d .op{fill:#e08040;opacity:.85}
 #view2d .hnd{fill:#ffd24a;stroke:#000;stroke-width:1;cursor:grab}
 #view2d .snap{fill:none;stroke:#5fd08a;stroke-width:2}
+.review-row{display:flex;align-items:stretch;gap:4px}
+.review-row .review-item{flex:1}
+.confirm-gap{flex:none;padding:0 8px;border:1px solid #47506b;border-radius:4px;background:#2b3345;color:#d8dee9;cursor:pointer;white-space:nowrap}
+.confirm-gap:hover{background:#39425a}
 #view2d .orphan-old{fill:none;stroke:#ff6b6b;stroke-width:35;stroke-dasharray:80 45;opacity:.8;pointer-events:none}
 #view2d .gap-cand,#view2d .gap-conflict{fill:none;stroke-width:2.5;vector-effect:non-scaling-stroke;pointer-events:none}
 #view2d .gap-cand{stroke:#ffa94d;stroke-dasharray:8 5}

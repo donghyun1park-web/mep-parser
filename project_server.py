@@ -696,7 +696,7 @@ class ProjectServer:
 
             def do_POST(self):
                 path = urlsplit(self.path).path
-                if path not in ('/edits', '/discard', '/relink', '/defer', '/pascal/apply', '/source-units'):
+                if path not in ('/edits', '/discard', '/relink', '/defer', '/pascal/apply', '/source-units', '/bridges'):
                     self.reply(404, {'error':'Unknown endpoint'})
                     return
                 if not self.authorized():
@@ -718,6 +718,10 @@ class ProjectServer:
                     elif path == '/source-units':
                         result = session.configure_units(body['unit_scale_to_mm'], *common,
                             body.get('source_id', 'main'), source_sha256=body['source_sha256'])
+                    elif path == '/bridges':
+                        # 설비 이음 후보 확정·취소 — 형상은 안 바뀌고 `joints` 에만 기록된다.
+                        result = session.confirm_bridge(body['candidate_id'], *common,
+                                                        bool(body.get('confirmed', True)))
                     elif path == '/pascal/apply':
                         result = session.pascal_apply(body['scene'], *common, body['snapshot_sha256'],
                                                       body['op_id'], bool(body.get('dry_run', False)))
