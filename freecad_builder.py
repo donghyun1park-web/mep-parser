@@ -1097,7 +1097,7 @@ def check_clashes(struct_objs, mep_objs, vol_tol=1.0):
         return clashes
 
     # Broad-phase: BoundBox 교차 여부 확인 (cheap)
-    def _bb(obj):
+    def _shape_bb(obj):
         try:
             s = getattr(obj, "Shape", None)
             if s is None or not s.isValid():
@@ -1108,18 +1108,17 @@ def check_clashes(struct_objs, mep_objs, vol_tol=1.0):
                 return None
             if bb.XLength <= 0 and bb.YLength <= 0 and bb.ZLength <= 0:
                 return None  # 퇴화 bounding box
-            return bb
+            return s, bb
         except Exception:
             return None
 
-    for so in struct_objs:
-        sbb = _bb(so)
-        if sbb is None:
-            continue
-        for mo in mep_objs:
-            mbb = _bb(mo)
-            if mbb is None:
-                continue
+    # ★ 형상·경계상자는 **객체당 한 번만** 읽는다. 종전엔 안쪽 루프에서 설비 것을 다시 읽어 Arch 객체의
+    #   Shape 접근이 구조체 × 설비 번(실측 70 × 42 = 2,940) 일어났다 — 개구부를 뺀 파라메트릭 벽은 접근할
+    #   때마다 비싸다. 실측(통합 빌드): 간섭 단계 522.4초, 같은 170쌍을 저장본에서 재면 68.7초였다.
+    struct_shapes = [(o, sb[0], sb[1]) for o in struct_objs if (sb := _shape_bb(o))]
+    mep_shapes = [(o, sb[0], sb[1]) for o in mep_objs if (sb := _shape_bb(o))]
+    for so, s_shape, sbb in struct_shapes:
+        for mo, m_shape, mbb in mep_shapes:
             # AABB 겹침 확인. ★ `intersected()` 는 교차 **상자**를 돌려주고 늘 참이라 거르지 못했다 — 불리언은
             #   `intersect()` 다. 실측(단위세대 통합 모델): 벽 70 × 설비 42 = 2,940쌍 전부 common() 161.6초 →
             #   168쌍 68.7초, 간섭 14건 그대로.
@@ -1130,8 +1129,6 @@ def check_clashes(struct_objs, mep_objs, vol_tol=1.0):
                 continue
             CLASH_STATS["pairs_checked"] += 1
             try:
-                s_shape = so.Shape
-                m_shape = mo.Shape
                 common = s_shape.common(m_shape)
                 if common.Volume > vol_tol:
                     # 객체 이름(Wall_21)만으로는 현장에서 찾을 수 없다 — 원본 EID 와 겹친 부피의 중심을 함께 남긴다.
