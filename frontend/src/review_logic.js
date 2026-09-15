@@ -27,7 +27,9 @@ function diagnosticText(value) {
   return value.message || value.reason || value.code || JSON.stringify(value);
 }
 
-export function buildReviewEntries(elements={}, report={}, clashes=[]) {
+const GAP_KIND={straight:'직선',elbow:'엘보',tee:'티'};
+
+export function buildReviewEntries(elements={}, report={}, clashes=[], connectivity={}) {
   const entries=[];
   // 간섭은 목록 맨 앞에, 받은 순서(조치 종류 → 위치) 그대로 — 건축 분류 확인 수십 건에 묻히지 않게.
   (clashes || []).forEach((clash, order) => {
@@ -37,6 +39,18 @@ export function buildReviewEntries(elements={}, report={}, clashes=[]) {
       floor:clash.level!=null?String(clash.level):'', action:'select', struct:s.eid||null,
       reason:`${clash.action} · (${Math.round(at[0])}, ${Math.round(at[1])}) z ${Math.round(z[0])}~${Math.round(z[1])} · `
         +`${s.category||''} ${s.eid||''}${s.width_mm!=null?` 두께 ${s.width_mm}mm`:''} ↔ ${[m.system,m.size].filter(Boolean).join(' ')}`,
+    });
+  });
+  // 설비 이음 후보·계통 충돌은 간섭 다음, 받은 순서 그대로. 후보는 모델에 쓰지 않았다 — 확정은 사람이 한다.
+  [...(connectivity?.candidates||[]), ...(connectivity?.conflicts||[]).map(c=>({...c,conflict:true}))].forEach((gap, order) => {
+    const at=(gap.points||[[0,0]])[0], systems=(gap.systems||[]).map(s=>s??'계통 없음'), sizes=gap.sizes||[], eids=gap.eids||[];
+    const kind=GAP_KIND[gap.kind]||gap.kind, size=sizes[0]===sizes[1]?(sizes[0]||''):sizes.join(' → ');
+    const where=`틈 ${Math.round(gap.gap_mm)}mm · (${Math.round(at[0])}, ${Math.round(at[1])}) ↔ ${eids[1]||''}`;
+    entries.push({
+      key:`gap:${gap.id}`, kind:'gap', eid:eids[0]||null, category:gap.conflict?'계통 충돌':'연결 후보', order,
+      floor:gap.level!=null?String(gap.level):'', action:'select',
+      reason:gap.conflict?`다른 계통 끝이 ${kind}형으로 맞닿음 · ${systems.join(' ↔ ')} · ${where} — 도면 확인`
+        :`${kind} 이음 후보 · ${where} · ${[gap.systems?.[0],size].filter(Boolean).join(' ')}${gap.size_change?' · 규격 바뀜':''}`,
     });
   });
   for (const category of Object.keys(elements).sort()) {
@@ -70,10 +84,10 @@ export function buildReviewEntries(elements={}, report={}, clashes=[]) {
       entries.push({key:`stale:${eid}`,kind:'stale',eid:null,category:'stale',floor:'',
         reason:'이전 검토 또는 수정의 원본 형상이 변경됨',action:'open-orphan',orphan:eid});
   const categoryOrder=['wall','column','slab','beam','zone','opening','pipe','duct','tray','equipment'];
-  const rank=entry=>entry.kind==='clash'?-1:entry.kind==='element'?0:1;
+  const rank=entry=>({clash:-2,gap:-1,element:0})[entry.kind]??1;
   const catRank=entry=>{ const index=categoryOrder.indexOf(entry.category); return index<0?999:index; };
   return entries.sort((a,b)=> rank(a)-rank(b) ||
-    (a.kind==='clash'&&b.kind==='clash' ? a.order-b.order :
+    (a.kind===b.kind&&(a.kind==='clash'||a.kind==='gap') ? a.order-b.order :
     a.floor.localeCompare(b.floor,undefined,{numeric:true}) ||
     catRank(a)-catRank(b) || a.key.localeCompare(b.key)));
 }

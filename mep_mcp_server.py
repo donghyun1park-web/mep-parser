@@ -177,6 +177,7 @@ def get_review_items(json_path: str = DEFAULT_JSON) -> str:
                     "overrides": item.get("overrides", {}),
                 })
     clash = data.get("clash_review") or {}
+    net = data.get("mep_connectivity") or {}
     out = {
         "project": data.get("project"),
         "edits_report": data.get("edits_report", {}),
@@ -184,9 +185,13 @@ def get_review_items(json_path: str = DEFAULT_JSON) -> str:
         "review_elements": review_elements,
         # 구조체 × 설비 교차 — 위치(at·z)·부재 EID·조치. 모델을 고치지 않는다(판단은 사람).
         "clash_review": {"summary": clash.get("summary", {}), "items": (clash.get("items") or [])[:50]},
+        # 설비 연결 — 원본 반영(source_coverage)과 따로. 이음 후보는 모델에 쓰지 않았다(확정은 사람).
+        "mep_connectivity": {"summary": net.get("summary", {}), "candidates": (net.get("candidates") or [])[:50],
+                             "conflicts": (net.get("conflicts") or [])[:20]},
         "summary": (f"{len(suggestions)} unmapped layer/block(s), "
                     f"{len(review_elements)} element(s) need review, "
-                    f"{(clash.get('summary') or {}).get('total', 0)} clash candidate(s)."),
+                    f"{(clash.get('summary') or {}).get('total', 0)} clash candidate(s), "
+                    f"{(net.get('summary') or {}).get('candidates', 0)} MEP connection candidate(s)."),
     }
     return json.dumps(out, indent=2, ensure_ascii=False)
 
@@ -341,7 +346,10 @@ def apply_mep_profile_proposal(proposal_id: str, expected_revision: int,
 
 @mcp.tool()
 def get_mep_diagnostics(json_path: str = DEFAULT_JSON) -> str:
-    """Read source coverage, unresolved geometry/size/topology and review items. Never repairs or approves them."""
+    """Read source coverage, connectivity (runs, open ends, connection candidates) and review items.
+
+    Coverage 'complete' only means every selected source entity is represented; connectivity is reported separately.
+    Connection candidates are never applied. Never repairs or approves anything."""
     try:
         state = session_from_geometry(json_path).state()
         geometry = state['geometry']
@@ -356,6 +364,7 @@ def get_mep_diagnostics(json_path: str = DEFAULT_JSON) -> str:
                    if record.get('needs_review') or record.get('review_required') or record.get('edit_diagnostics')]
         return json.dumps({'project_id': state['project_id'], 'revision': state['revision'],
             'mep_diagnostics': geometry.get('mep_diagnostics', {}),
+            'mep_connectivity': geometry.get('mep_connectivity', {}),
             'review_elements': records, 'warnings': geometry.get('warnings', [])}, ensure_ascii=False)
     except Exception as exc:
         return json.dumps({'error': str(exc)}, ensure_ascii=False)

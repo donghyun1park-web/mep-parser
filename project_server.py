@@ -65,6 +65,12 @@ class ProjectSession:
         except Exception as exc:
             # 간섭 목록은 검토 보조다 — 실패해도 모델·수정은 막지 않되, 못 만든 사실은 남긴다.
             data['clash_review'] = {'items': [], 'summary': {'total': 0, 'error': f'{type(exc).__name__}: {exc}'}}
+        try:
+            from mep_network import analyze
+            data['mep_connectivity'] = analyze(data)
+        except Exception as exc:
+            data['mep_connectivity'] = {'candidates': [], 'conflicts': [], 'open_ends': [],
+                                        'summary': {'error': f'{type(exc).__name__}: {exc}'}}
         return data
 
     def state(self):
@@ -510,6 +516,13 @@ class ProjectSession:
             items.append({'category': 'clash', 'eid': clash['mep']['eid'], 'layer': clash['struct'].get('layer'),
                           'eids': [clash['struct']['eid'], clash['mep']['eid']], 'reason': clash['action'],
                           'at': clash['at'], 'z': clash['z']})
+        from mep_network import KIND_LABELS
+        net = state['geometry'].get('mep_connectivity') or {}
+        for gap in net.get('candidates', []) + [dict(c, conflict=True) for c in net.get('conflicts', [])]:
+            kind = KIND_LABELS.get(gap['kind'], gap['kind'])
+            items.append({'category': 'mep_gap', 'eid': gap['eids'][0], 'eids': gap['eids'], 'at': gap['points'][0],
+                          'reason': (f"다른 계통 끝이 {kind}형으로 맞닿음({' ↔ '.join(map(str, gap['systems']))}) — 도면 확인"
+                                     if gap.get('conflict') else f"{kind} 이음 후보 · 틈 {gap['gap_mm']:.0f}mm (확정 아님)")})
         _scene, report = to_pascal_scene(state['geometry'])
         return {'project_id': state['project_id'], 'revision': state['revision'], 'items': items,
                 'unconvertible': report['unconvertible']}

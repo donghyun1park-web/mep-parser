@@ -10,6 +10,7 @@ const DATA = JSON.parse(document.getElementById('mep-data').textContent);
 const RUNTIME = DATA.project_runtime || null;
 let EDITS_REPORT=DATA.edits_report || {};
 let CLASH_REVIEW=DATA.clash_review || {};
+let CONNECTIVITY=DATA.mep_connectivity || {};
 function excludedEditIds(report){ return [...((report||{}).orphaned||[]),...((report||{}).ambiguous||[])]; }
 let BASE_ELEMENTS = MepEdit.deriveBaseElements(DATA.elements || {},DATA.project_edits || {},excludedEditIds(DATA.edits_report));
 let CANONICAL_PRESENTATION = MepEdit.clone(DATA.elements || {});
@@ -465,6 +466,7 @@ function mergeServerPresentation(response){
   const elements=response.geometry&&response.geometry.elements; if(!elements) return;
   EDITS_REPORT=response.geometry.edits_report || {};
   CLASH_REVIEW=response.geometry.clash_review || {};
+  CONNECTIVITY=response.geometry.mep_connectivity || {};
   orphanSuggestions=((response.geometry.edits_report)||{}).relink_suggestions||[];
   renderOrphans();
 }
@@ -672,7 +674,7 @@ sectionInput.addEventListener('input',ev=>{
 
 const reviewFloor=document.getElementById('reviewFloor'), reviewCategory=document.getElementById('reviewCategory');
 function renderReview(){
-  const entries=buildReviewEntries(EFFECTIVE_ELEMENTS,EDITS_REPORT,CLASH_REVIEW.items||[]);
+  const entries=buildReviewEntries(EFFECTIVE_ELEMENTS,EDITS_REPORT,CLASH_REVIEW.items||[],CONNECTIVITY);
   const floors=[...new Set(entries.map(x=>x.floor).filter(Boolean))].sort();
   const categories=[...new Set(entries.map(x=>x.category).filter(Boolean))].sort();
   const keepFloor=reviewFloor.value, keepCategory=reviewCategory.value;
@@ -826,6 +828,13 @@ function render2(){
     e.dataset.eid=rec.eid; g2.appendChild(e);
   }
   const k=px2world();
+  // 설비 연결(보기 전용) — 끊긴 끝 · 이음 후보(확정 아님) · 다른 계통 끝 맞닿음. 모델은 바뀌지 않는다.
+  for(const gap of [...(CONNECTIVITY.candidates||[]),...(CONNECTIVITY.conflicts||[]).map(c=>({...c,conflict:true}))]){
+    if(!onEditFloor({level:gap.level})||(gap.points||[]).length<2) continue;
+    g2.appendChild(mk2('polyline',{points:gap.points.map(p=>p[0]+','+p[1]).join(' '),class:gap.conflict?'gap-conflict':'gap-cand'}));
+  }
+  for(const end of CONNECTIVITY.open_ends||[])
+    if(onEditFloor({level:end.level})) g2.appendChild(mk2('circle',{cx:end.at[0],cy:end.at[1],r:5*k,class:'mep-end '+end.status}));
   for(const rec of wallsAll()){
     if(!onEditFloor(rec) || sel2.indexOf(rec.eid)<0 || isDel(rec)) continue;
     const cl=clOf(rec);

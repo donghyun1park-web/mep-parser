@@ -669,6 +669,16 @@ class App:
             kinds = " · ".join(f"{LABELS.get(k, k)} {n}" for k, n in (clash.get("by_kind") or {}).items())
             self._log(f"  [간섭 후보] {clash.get('total', 0)}건 ({kinds}) — 위치는 3D 미리보기 '검토 대기' 맨 앞"
                       + (f" · 계산 실패: {clash['error']}" if clash.get("error") else ""))
+        net = (self.data.get("mep_connectivity") or {}).get("summary") or {}
+        if net.get("runs") or net.get("error"):
+            # '완전' 은 원본 반영에만 붙인다 — 선택한 원본을 다 담아도 계통은 끊겨 있을 수 있다.
+            cov = self.data.get("source_coverage") or {}
+            self._log(f"  [설비 연결] 조각 {net.get('runs', 0)} · 이어진 무리 {net.get('groups', 0)} · "
+                      f"끊긴 끝 {net.get('open_ends', 0)} · 이음 후보 {net.get('candidates', 0)}"
+                      f"(모두 확정하면 {net.get('groups_with_candidates', 0)}무리)"
+                      + (f" · 계통 충돌 {net['conflicts']}" if net.get("conflicts") else "")
+                      + (f" · 원본 반영 {cov.get('represented')}/{cov.get('selected')}" if cov else "")
+                      + (f" · 계산 실패: {net['error']}" if net.get("error") else ""))
         sugg = self.data.get("suggestions", [])
         applied = [s for s in sugg if s.get("applied")]
         if applied:

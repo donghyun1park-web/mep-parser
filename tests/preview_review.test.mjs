@@ -58,6 +58,20 @@ test('clash rows lead the review queue in the given order and select the MEP ele
   assert.match(rows[0].reason, /\(2500, 100\) z 2250~2550 · wall A:w:1 두께 200mm ↔ SA 400×300/);
 });
 
+test('connection candidates follow clashes, name the gap and partner, and conflicts name both systems', () => {
+  const connectivity={
+    candidates:[{id:'g1',kind:'elbow',eids:['d:a','d:b'],systems:['SA','SA'],sizes:['110×54','204×60'],size_change:true,
+      gap_mm:212.1,points:[[1000,0],[1150,0],[1150,150]]}],
+    conflicts:[{id:'g2',kind:'straight',eids:['d:sa','d:ra'],systems:['SA','RA'],sizes:['110×54','110×54'],
+      gap_mm:200,points:[[1000,5000],[1200,5000]]}]};
+  const clashes=[{id:'c',action:'벽 관통',at:[0,0],z:[0,1],struct:{eid:'w:1'},mep:{eid:'d:a'}}];
+  const rows=buildReviewEntries({wall:[{eid:'w:9',needs_review:true}]},{},clashes,connectivity);
+  assert.deepEqual(rows.map(x=>[x.kind,x.eid,x.category]),
+    [['clash','d:a','간섭'],['gap','d:a','연결 후보'],['gap','d:sa','계통 충돌'],['element','w:9','wall']]);
+  assert.match(rows[1].reason,/엘보 이음 후보 · 틈 212mm · \(1000, 0\) ↔ d:b · SA 110×54 → 204×60 · 규격 바뀜/);
+  assert.match(rows[2].reason,/직선형으로 맞닿음 · SA ↔ RA · 틈 200mm/);
+});
+
 test('review queue excludes resolved records unless their acknowledgement is stale', () => {
   const elements={wall:[
     {eid:'done',review_required:true,review_resolved:true,edit_diagnostics:['old diagnostic']},
