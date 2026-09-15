@@ -525,6 +525,27 @@ def verify_build(data, build_stats, ifc_path=None, policy=None, stage=None):
         el = data.get("elements") or {}
         xs = [p[0] for c in _STRUCT_CATS for r in (el.get(c) or []) for p in _pts(r)]
         ys = [p[1] for c in _STRUCT_CATS for r in (el.get(c) or []) for p in _pts(r)]
+        for cat in _STRUCT_CATS:
+            for rec in el.get(cat) or []:
+                if rec.get('kind') == 'circle':
+                    x, y = rec['center'][:2]
+                    radius = rec['radius']
+                    xs.extend((x - radius, x + radius))
+                    ys.extend((y - radius, y + radius))
+        # Compare the native whole-model envelope with the whole input. A pipe
+        # outside a small column is valid, even when it exceeds the column bbox.
+        for cat in ('pipe', 'duct', 'tray'):
+            for rec in el.get(cat) or []:
+                if rec.get('geometry_mode') == 'footprint':
+                    points, pad = rec.get('points') or [], 0
+                else:
+                    points = GC.route_points(cat, rec)
+                    dims = GC.mep_dimensions(cat, rec, data.get('params'))
+                    pad = math.hypot(dims.get('diameter', dims.get('width_mm', 0)),
+                                     dims.get('height_mm', 0)) / 2
+                for p in points:
+                    xs.extend((p[0] - pad, p[0] + pad))
+                    ys.extend((p[1] - pad, p[1] + pad))
         if xs:
             want = max(max(xs)-min(xs), max(ys)-min(ys))
             got = max(bb[3]-bb[0], bb[4]-bb[1])

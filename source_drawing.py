@@ -7,6 +7,7 @@ import ezdxf
 
 from dxf_parser import entity_to_record
 from element_id import raw_entity_sig
+from drawing_units import option_scale, unit_review, uses_legacy_units
 
 
 MAX_PRIMITIVES = 50_000
@@ -142,7 +143,14 @@ def _floor(source, level):
         floor["warnings"].append(f"Could not read {name}: {type(exc).__name__}")
         return floor
 
-    scale = 1000.0 if doc.header.get("$INSUNITS", 0) == 6 else 1.0
+    options = source.get('options') or {}
+    review = unit_review(doc, option_scale(options), legacy=options.get('mep_profile') is None,
+                         legacy_header=uses_legacy_units(source))
+    floor['unit_review'] = review
+    floor['warnings'].extend(review['warnings'])
+    scale = review['effective_scale_to_mm']
+    if scale is None:
+        return floor
     omitted = Counter()
     point_count = 0
     primitive_index = 0

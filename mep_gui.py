@@ -340,6 +340,7 @@ class App:
         f.pack(fill="x", padx=8)
         ttk.Button(f, text="프로젝트 열기", command=self._open_project).pack(side="left", padx=4)
         ttk.Button(f, text="(1) Scan drawing", command=self._do_scan).pack(side="left", padx=4)
+        ttk.Button(f, text="도면 단위 확인", command=lambda: self._do_mep_setup(units_only=True)).pack(side="left", padx=4)
         ttk.Button(f, text="설비 도면 설정 · Codex 제안", command=self._do_mep_setup).pack(side="left", padx=4)
         ttk.Button(f, text="(2) Parse -> geometry.json", command=self._do_parse).pack(side="left", padx=4)
         ttk.Button(f, text="(2b) 누락 진단",
@@ -756,7 +757,7 @@ class App:
             self.project_server.close()
         self.root.destroy()
 
-    def _do_mep_setup(self):
+    def _do_mep_setup(self, units_only=False):
         dxf = self._ensure_dxf()
         if not dxf:
             return
@@ -784,18 +785,19 @@ class App:
         selected_session = self.project_session
         def scanned(inventory):
             from mep_setup_ui import MepSetupDialog
+            from drawing_units_ui import UnitSetupDialog
             self._set_buttons('!disabled')
             def saved(state):
                 if self.project_session is selected_session:
                     self._parse_done(state['geometry'], dxf)
                 else:
                     self._log(f"별도 설비 프로젝트 revision {state['revision']} 저장 완료: {dxf}")
-            MepSetupDialog(self.root, selected_session, inventory, saved)
+            dialog = UnitSetupDialog if units_only else MepSetupDialog
+            dialog(self.root, selected_session, inventory, saved)
         def run():
             try:
-                from mep_profile import inspect_mep_source
-                saved_profile = selected_session.store.read()['sources'][0].get('options', {}).get('mep_profile') or {}
-                inventory = inspect_mep_source(dxf, unit_scale_to_mm=saved_profile.get('unit_scale_to_mm'))
+                source_id = selected_session.store.read()['sources'][0]['id']
+                inventory = selected_session.source_units(source_id)['inventory']
                 self.root.after(0, lambda: scanned(inventory))
             except Exception as exc:
                 self.root.after(0, lambda msg=str(exc): (self._log(msg), self._set_buttons('!disabled'), messagebox.showerror('설비 분석 실패', msg)))

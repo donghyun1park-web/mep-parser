@@ -21,9 +21,11 @@ class ProjectSession:
 
     def _parse_source(self, source, edits):
         import dxf_parser as parser
+        from drawing_units import uses_legacy_units
         rules = parser.load_layer_map(source['layer_map']) if source.get('layer_map') else parser.DEFAULT_LAYER_RULES
         block = parser.load_layer_map(source['block_map']) if source.get('block_map') else parser.DEFAULT_BLOCK_RULES
         options = dict(source.get('options') or {})
+        options['legacy_units'] = uses_legacy_units(source)
         if source.get('height') is not None:
             options['level_height'] = source['height']
         if source.get('schedule'):
@@ -38,10 +40,12 @@ class ProjectSession:
             data = self._parse_source(sources[0], manifest['edits_by_floor']['main'])
         else:
             from stack_build import build_stack
+            from drawing_units import uses_legacy_units
             levels = []
             for source in sources:
                 level = dict(source, source=source['path'], edits=manifest['edits_by_floor'].get(source['id'], {}))
                 level['options'] = dict(source.get('options') or {})
+                level['options']['legacy_units'] = uses_legacy_units(source)
                 if source.get('schedule'):
                     from schedule_io import load_schedule_xlsx
                     level['options']['ext_schedule'] = load_schedule_xlsx(source['schedule'])
@@ -113,6 +117,33 @@ class ProjectSession:
             raise ValueError('Unknown source identity')
         return source
 
+    @staticmethod
+    def _hold_unit_edits(manifest, source_id, old_scale, new_scale):
+        """Preserve edits as orphans when geometry-based IDs can collide across scales."""
+        import math
+        # ezdxf's inch conversion differs from 25.4 by floating-point rounding.
+        if old_scale is not None and new_scale is not None and math.isclose(old_scale, new_scale, rel_tol=1e-9):
+            return {}
+        edits = manifest['edits_by_floor'].get(source_id, {})
+        held, remapped = {}, {}
+        for eid, edit in edits.items():
+            if edit.get('added'):
+                edit['review_resolved'] = False
+                edit.pop('_review_signature', None)
+                held[eid] = edit
+            elif eid.partition(':')[2].startswith('unit-r') and edit.get('_unit_source_eid'):
+                held[eid] = edit
+            else:
+                prefix, _, suffix = eid.partition(':')
+                key = f'{prefix}:unit-r{manifest["revision"] + 1}-{suffix}'
+                while key in edits or key in held:
+                    key += '-' + secrets.token_hex(4)
+                edit['_unit_source_eid'] = eid
+                held[key] = edit
+                remapped[eid] = key
+        manifest['edits_by_floor'][source_id] = held
+        return remapped
+
     def configure_source(self, profile, expected_revision, project_id, source_id='main', proposal_id=None):
         """Validate and parse a candidate before atomically saving project-local MEP settings."""
         from mep_profile import validate_profile
@@ -121,20 +152,90 @@ class ProjectSession:
             self.store.check_revision(manifest, expected_revision, project_id)
             proposed = copy.deepcopy(manifest)
             source = self._profile_source(proposed, source_id)
-            normalized = validate_profile(profile, source_sha256=fingerprint(source['path']))
-            source.setdefault('options', {})['mep_profile'] = normalized
+            from drawing_units import option_scale, unit_review, uses_legacy_units
+            previous_explicit = option_scale(source.get('options') or {})
+            candidate = copy.deepcopy(profile)
+            options = source.setdefault('options', {})
+            if candidate.get('unit_scale_to_mm') is None and options.get('unit_scale_to_mm') is not None:
+                candidate['unit_scale_to_mm'] = options['unit_scale_to_mm']
+            normalized = validate_profile(candidate, source_sha256=fingerprint(source['path']))
+            held_edits = {}
+            if previous_explicit != normalized.get('unit_scale_to_mm') or uses_legacy_units(source):
+                import ezdxf
+                doc = ezdxf.readfile(source['path'])
+                before_scale = unit_review(doc, previous_explicit, legacy=True,
+                    legacy_header=uses_legacy_units(source))['effective_scale_to_mm']
+                after_scale = unit_review(doc, normalized.get('unit_scale_to_mm'))['effective_scale_to_mm']
+                held_edits = self._hold_unit_edits(proposed, source_id, before_scale, after_scale)
+            options.pop('unit_scale_to_mm', None)
+            options['mep_profile'] = normalized
             try:
                 self._parse(proposed)
             except Exception as exc:
                 raise ValueError('MEP candidate cannot be parsed; project was not changed: ' + str(exc)) from exc
             self.store.check_revision(self.store.refresh_inputs(), expected_revision, project_id)
             decision = {'action': 'apply_mep_profile', 'source_id': source_id,
-                        'revision': expected_revision, 'source_sha256': normalized['source_sha256']}
+                        'revision': expected_revision, 'source_sha256': normalized['source_sha256'],
+                        'unit_edits_held': held_edits}
             if proposal_id:
                 decision['proposal_id'] = proposal_id
             self.store.update_sources(proposed['sources'], proposed['options'], expected_revision,
-                                      project_id, decisions=[decision])
+                                      project_id, decisions=[decision], edits_by_floor=proposed['edits_by_floor'])
             return self.state()
+
+    def configure_units(self, scale, expected_revision, project_id, source_id='main', *, source_sha256):
+        """Save reviewed source units without requiring a MEP mapping or losing edits."""
+        import ezdxf
+        from drawing_units import positive_scale, option_scale, unit_review, uses_legacy_units
+        scale = positive_scale(scale)
+        with self._mutex:
+            manifest = self.store.refresh_inputs()
+            self.store.check_revision(manifest, expected_revision, project_id)
+            proposed = copy.deepcopy(manifest)
+            source = self._profile_source(proposed, source_id)
+            actual_hash = fingerprint(source['path'])
+            if source_sha256 != actual_hash:
+                raise ValueError('Source SHA256 hash changed; review source units again')
+            options = source.setdefault('options', {})
+            doc = ezdxf.readfile(source['path'])
+            before = unit_review(doc, option_scale(options), legacy=options.get('mep_profile') is None,
+                                 legacy_header=uses_legacy_units(source))
+            profile = options.get('mep_profile')
+            factor = None
+            if profile is not None:
+                if profile.get('region'):
+                    old_scale = before['effective_scale_to_mm']
+                    if old_scale is None:
+                        raise ValueError('Previous region units unknown; review the MEP region first')
+                    factor = scale / old_scale
+                    # Preserve the exact source-space selection; physical sections/heights
+                    # and user edits already in mm must not be multiplied.
+                    profile['region']['bounds_mm'] = [v * factor for v in profile['region']['bounds_mm']]
+                profile['unit_scale_to_mm'] = scale
+                options.pop('unit_scale_to_mm', None)
+            else:
+                options['unit_scale_to_mm'] = scale
+            held_edits = self._hold_unit_edits(proposed, source_id, before['effective_scale_to_mm'], scale)
+            self._parse(proposed)
+            self.store.check_revision(self.store.refresh_inputs(), expected_revision, project_id)
+            decision = {'action': 'set_source_units', 'source_id': source_id, 'source_sha256': actual_hash,
+                        'previous_scale_to_mm': before['effective_scale_to_mm'], 'unit_scale_to_mm': scale,
+                        'region_scale_factor': factor, 'unit_edits_held': held_edits}
+            self.store.update_sources(proposed['sources'], proposed['options'], expected_revision,
+                                      project_id, decisions=[decision], edits_by_floor=proposed['edits_by_floor'])
+            return self.state()
+
+    def source_units(self, source_id='main'):
+        from drawing_units import option_scale, uses_legacy_units
+        from mep_profile import inspect_mep_source
+        with self._mutex:
+            manifest = self.store.refresh_inputs()
+            source = self._profile_source(manifest, source_id)
+            inventory = inspect_mep_source(source['path'], option_scale(source.get('options') or {}),
+                                           legacy_units=uses_legacy_units(source))
+            self.store.check_revision(self.store.refresh_inputs(), manifest['revision'], manifest['project_id'])
+            return {'project_id': manifest['project_id'], 'revision': manifest['revision'],
+                    'source_id': source_id, 'inventory': inventory}
 
     def propose_mep_profile(self, profile, expected_revision, project_id, source_id='main', reason=''):
         """Save a reviewable proposal. Never changes a profile, geometry or review acknowledgement."""
@@ -462,12 +563,16 @@ class ProjectServer:
 
             def do_GET(self):
                 path = urlsplit(self.path).path
-                if path not in ('/state','/preview','/pascal/snapshot','/pascal/source.svg','/pascal/review'):
+                if path not in ('/state','/preview','/pascal/snapshot','/pascal/source.svg','/pascal/review','/source-units'):
                     self.reply(404, {'error':'Unknown endpoint'})
                     return
                 if not self.authorized(preview=path == '/preview'):
                     return
                 try:
+                    if path == '/source-units':
+                        source_id = parse_qs(urlsplit(self.path).query).get('source_id', ['main'])[0]
+                        self.reply(200, session.source_units(source_id))
+                        return
                     if path == '/pascal/snapshot':
                         self.reply(200, session.pascal_snapshot())
                         return
@@ -499,7 +604,7 @@ class ProjectServer:
 
             def do_POST(self):
                 path = urlsplit(self.path).path
-                if path not in ('/edits', '/discard', '/relink', '/defer', '/pascal/apply'):
+                if path not in ('/edits', '/discard', '/relink', '/defer', '/pascal/apply', '/source-units'):
                     self.reply(404, {'error':'Unknown endpoint'})
                     return
                 if not self.authorized():
@@ -518,6 +623,9 @@ class ProjectServer:
                         result = session.discard(body['eid'], *common)
                     elif path == '/defer':
                         result = session.defer(body['eid'], *common)
+                    elif path == '/source-units':
+                        result = session.configure_units(body['unit_scale_to_mm'], *common,
+                            body.get('source_id', 'main'), source_sha256=body['source_sha256'])
                     elif path == '/pascal/apply':
                         result = session.pascal_apply(body['scene'], *common, body['snapshot_sha256'],
                                                       body['op_id'], bool(body.get('dry_run', False)))

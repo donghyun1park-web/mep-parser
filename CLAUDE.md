@@ -48,6 +48,13 @@
 | `docs/project_workflow.md` | 프로젝트 저장·복구·재연결·출력 검증 사용법과 현재 범위. |
 
 ## geometry.json 스키마
+
+### 도면 단위와 기존 프로젝트
+
+- `drawing_units.py`는 헤더/명시 배율/기존 프로젝트 정책을 조사·파서·원본 겹쳐보기에 공통 적용한다. 새 `ProjectStore` source는 `unit_policy: "header"`를 저장한다. 그 필드가 없는 기존 프로젝트의 일반 건축 도면은 종전의 metre=1000/나머지=1 배율을 유지하며, 이를 `legacy_header_policy`로 표시한다. MEP 프로필의 기존 배율 해석은 유지한다.
+- `configure_units`는 원본 해시와 revision을 검사하고 단위·영역·수정 이력을 함께 저장한다. mm로 정의한 레이어 규격, 블록 대체 치수와 높이는 원본 배율로 곱하지 않는다. 원호/타원 샘플링 허용오차도 mm로 환산한다. 일반 건축 원호의 기존 `ARC_MAX_SEGS` 상한은 남아 있으므로 매우 큰 반지름에서 보편적인 5mm 상한을 보장하지 않는다.
+- 단위 변경은 좌표 기반 EID의 다른 원본 재사용을 일으킬 수 있다. `configure_units`와 `configure_source`는 배율 변경 시 기존 원본 수정을 `c:unit-r<revision>-<old-id>` 같은 예약된 고아 EID로 보존한다. 자동 재연결하지 않는다. 수동 추가 객체는 mm 좌표를 유지하고 검토 승인을 다시 요구한다. 프로젝트를 열기만 해서는 새 헤더 정책으로 변환하지 않는다.
+
 ```json
 {
   "source": "plan.dxf",

@@ -405,16 +405,16 @@ def _arc_segments(radius, span_rad):
     return min(n, ARC_MAX_SEGS)
 
 
-def arc_to_points(cx, cy, r, a0, a1):
+def arc_to_points(cx, cy, r, a0, a1, unit_scale=1.0):
     a0r, a1r = math.radians(a0), math.radians(a1)
     if a1r < a0r:
         a1r += 2 * math.pi
-    n = _arc_segments(r, a1r - a0r)
+    n = _arc_segments(r * unit_scale, a1r - a0r)
     return [(cx + r * math.cos(a0r + (a1r - a0r) * i / n),
              cy + r * math.sin(a0r + (a1r - a0r) * i / n)) for i in range(n + 1)]
 
 
-def lwpolyline_points(e):
+def lwpolyline_points(e, unit_scale=1.0):
     pts, vertices, closed = [], list(e.get_points("xyb")), e.closed
     n = len(vertices)
     for i in range(n):
@@ -422,18 +422,18 @@ def lwpolyline_points(e):
         pts.append((x, y))
         if bulge and (i < n - 1 or closed):
             x2, y2, _ = vertices[(i + 1) % n]
-            pts.extend(_bulge_points(x, y, x2, y2, bulge)[1:-1])
+            pts.extend(_bulge_points(x, y, x2, y2, bulge, unit_scale)[1:-1])
     return pts, closed
 
 
-def _bulge_points(x1, y1, x2, y2, bulge):
+def _bulge_points(x1, y1, x2, y2, bulge, unit_scale=1.0):
     chord = math.hypot(x2 - x1, y2 - y1)
     if chord == 0 or bulge == 0:
         return [(x1, y1), (x2, y2)]
     sagitta = bulge * chord / 2.0
     r = ((chord / 2.0) ** 2 + sagitta ** 2) / (2 * abs(sagitta))
     theta = 4 * math.atan(abs(bulge))
-    n = _arc_segments(r, theta)   # LWPOLYLINE bulge 도 같은 오차 규칙
+    n = _arc_segments(r * unit_scale, theta)   # LWPOLYLINE bulge 도 같은 오차 규칙
     mx, my = (x1 + x2) / 2.0, (y1 + y2) / 2.0
     dx, dy = (x2 - x1) / chord, (y2 - y1) / chord
     h = math.sqrt(max(r * r - (chord / 2.0) ** 2, 0.0))
@@ -525,7 +525,7 @@ def entity_to_record(e, scale, opts=None):
         return _tag_sig({"kind": "polyline", "closed": False, "layer": layer,
                 "points": [[s.x * scale, s.y * scale], [d.x * scale, d.y * scale]]})
     if t == "LWPOLYLINE":
-        pts, closed = lwpolyline_points(e)
+        pts, closed = lwpolyline_points(e, scale)
         elev = float(getattr(e.dxf, "elevation", 0.0) or 0.0)
         return _tag_sig({"kind": "polyline", "closed": closed, "layer": layer,
                 "points": [P(p[0], p[1], elev) for p in pts]})
@@ -545,7 +545,7 @@ def entity_to_record(e, scale, opts=None):
     if t == "ARC":
         c = e.dxf.center
         # 호는 OCS 평면 안에서 샘플링한 뒤 각 점을 WCS 로 변환(뒤집힌 평면도 정확)
-        pts = arc_to_points(c.x, c.y, e.dxf.radius, e.dxf.start_angle, e.dxf.end_angle)
+        pts = arc_to_points(c.x, c.y, e.dxf.radius, e.dxf.start_angle, e.dxf.end_angle, scale)
         # arc 식별자 보존: 문 스윙 호 판별(classify_geometry)에 사용
         return _tag_sig({"kind": "polyline", "closed": False, "layer": layer, "from_arc": True,
                 "arc_radius": e.dxf.radius * scale,
@@ -556,7 +556,7 @@ def entity_to_record(e, scale, opts=None):
         # **곡선 위의 점**을 주고 부분 타원(start/end param)도 그대로 따라간다.
         # 좌표는 WCS 라 xf 를 거치지 않는다(SPLINE 과 같은 이유).
         try:
-            pts = [[q.x * scale, q.y * scale] for q in e.flattening(ELLIPSE_SAG)]
+            pts = [[q.x * scale, q.y * scale] for q in e.flattening(ELLIPSE_SAG / scale)]
         except Exception:
             return None
         if len(pts) < 2:
@@ -854,14 +854,13 @@ def insert_to_records(insert, scale, category, attrs):
                  if r["kind"] == "circle" or (r["kind"] == "polyline" and r.get("closed"))]
         if solid:
             return solid
-        return [_box_record(cx, cy, (size or 400.0) * scale,
-                            (size or 400.0) * scale, rot)]
+        return [_box_record(cx, cy, size or 400.0, size or 400.0, rot)]
     if category == "opening":
         circ = [r for r in exploded if r["kind"] == "circle"]
         if circ:
             return circ
         return [_tag_sig({"kind": "circle", "center": [round(cx, 3), round(cy, 3)],
-                 "radius": round((size or 900.0) * scale / 2.0, 3)})]
+                 "radius": round((size or 900.0) / 2.0, 3)})]
     if category == "slab":
         # 계단코어 등: 닫힌 폴리라인(윤곽선)만 슬래브로. 내부 LINE들(A-STAIR 등) 제외.
         closed = [r for r in exploded
@@ -878,8 +877,7 @@ def insert_to_records(insert, scale, category, attrs):
                 xs = [p[0] for p in r["points"]]; ys = [p[1] for p in r["points"]]
                 return (max(xs) - min(xs)) * (max(ys) - min(ys))
             return [max(closed, key=_area)]
-        return [_box_record(cx, cy, (size or 800.0) * scale,
-                            (size or 800.0) * scale, rot)]
+        return [_box_record(cx, cy, size or 800.0, size or 800.0, rot)]
     # wall/zone 등: 열린 선도 포함
     return [r for r in exploded if r["kind"] == "polyline"]
 
@@ -2484,7 +2482,7 @@ def apply_member_schedule(msp, layers, elements):
 def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAMS,
           use_ai=False, use_vision=False, api_key=None, ai_threshold=0.8,
           ext_schedule=None, member_schedule=None, edits=None, level_height=None,
-          mep_profile=None):
+          mep_profile=None, unit_scale_to_mm=None, legacy_units=False):
     """DXF → geometry.json dict.
     use_ai: 텍스트 LLM 분류 + 고신뢰 자동적용. use_vision: Vision 폴백.
     ai_threshold: best_classification confidence 이 값 초과면 자동 카테고리 적용.
@@ -2492,22 +2490,26 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         주어지면 DXF 내부 추출본과 병합(외부 우선) 후 벽 끊김 매칭에 사용.
     member_schedule: 부재일람표 레이어명 목록(CLI --member-schedule).
         layer_map 의 opts `schedule=<레이어>` 와 합집합으로 쓰인다."""
+    from drawing_units import option_scale, unit_review
+    explicit_scale = option_scale({'mep_profile': mep_profile, 'unit_scale_to_mm': unit_scale_to_mm})
     if mep_profile is not None:
-        from mep_profile import validate_profile, scale_to_mm
+        from mep_profile import validate_profile
         with open(dxf_path, 'rb') as source_stream:
             source_hash = hashlib.sha256(source_stream.read()).hexdigest()
         mep_profile = validate_profile(mep_profile, source_hash)
+        if explicit_scale is not None:
+            mep_profile['unit_scale_to_mm'] = explicit_scale
     doc = ezdxf.readfile(dxf_path)
     msp = doc.modelspace()
-    scale = 1000.0 if doc.header.get("$INSUNITS", 0) == 6 else 1.0
-    if mep_profile is not None:
-        scale = scale_to_mm(doc, mep_profile.get('unit_scale_to_mm'))
-        if scale is None:
-            raise ValueError('Unknown DXF units; provide unit_scale_to_mm')
+    review = unit_review(doc, explicit_scale, legacy=mep_profile is None,
+                         legacy_header=legacy_units and mep_profile is None)
+    scale = review['effective_scale_to_mm']
+    if scale is None:
+        raise ValueError('Unknown DXF units; provide unit_scale_to_mm')
     result = {"source": dxf_path, "units": "mm", "scale_applied": scale, "params": params,
               "elements": {"wall": [], "column": [], "slab": [], "zone": [], "opening": [],
                            "pipe": [], "duct": [], "tray": [], "equipment": []},
-              "warnings": []}
+              "warnings": list(review['warnings']), "unit_review": review}
     unmapped, unmapped_blocks, n_inserts, unmapped_recs = {}, {}, 0, {}
     ignored = {}            # ignore 규칙으로 버린 것: {레이어: 개수}
     _dim_skipped = {}       # from=dim 레이어에서 '진짜 치수선' 이라 건너뛴 수

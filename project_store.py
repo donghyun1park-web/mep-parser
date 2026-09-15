@@ -126,6 +126,7 @@ class ProjectStore:
                     raise ValueError('Source IDs must be unique nonempty strings')
                 ids.add(sid)
                 source.setdefault('options', {})
+                source.setdefault('unit_policy', 'header')
                 source.setdefault('z', 0)
                 source.setdefault('offset', [0, 0])
                 source['fingerprints'] = {}
@@ -214,7 +215,7 @@ class ProjectStore:
                 after['decisions'].extend(decisions)
             return self._commit(before, after)
 
-    def update_sources(self, sources, options, expected_revision, project_id, decisions=None):
+    def update_sources(self, sources, options, expected_revision, project_id, decisions=None, *, edits_by_floor=None):
         with self.locked():
             before = self.read()
             self.check_revision(before, expected_revision, project_id)
@@ -222,6 +223,8 @@ class ProjectStore:
                 raise ValueError('Changing source identities requires a new project')
             after = copy.deepcopy(before)
             after['sources'], after['options'] = copy.deepcopy(sources), copy.deepcopy(options)
+            if edits_by_floor is not None:
+                after['edits_by_floor'] = copy.deepcopy(edits_by_floor)
             if decisions:
                 after['decisions'].extend(copy.deepcopy(decisions))
             return self._commit(before, after)

@@ -7,7 +7,7 @@ import math
 import re
 
 import ezdxf
-from ezdxf import units
+from drawing_units import scale_to_mm, unit_review
 import geom_contract as GC
 from mep_paths import extract_curve, join_paths, _signature
 
@@ -25,18 +25,6 @@ def _number(value, label, positive=False):
     if not math.isfinite(value) or (positive and value <= 0):
         raise ValueError(label + ': finite ' + ('positive ' if positive else '') + 'number required')
     return value
-
-
-def scale_to_mm(doc, explicit=None):
-    if explicit is not None:
-        return _number(explicit, 'unit_scale_to_mm', True)
-    code = int(doc.header.get('$INSUNITS', 0))
-    if code == 0:
-        return None
-    try:
-        return float(units.conversion_factor(code, units.MM))
-    except (ValueError, TypeError, ZeroDivisionError):
-        return None
 
 
 def validate_profile(profile, source_sha256=None):
@@ -253,15 +241,28 @@ def _region_candidates(boxes):
     return result
 
 
-def inspect_mep_source(dxf_path, unit_scale_to_mm=None):
+def inspect_mep_source(dxf_path, unit_scale_to_mm=None, *, legacy_units=False):
     path = Path(dxf_path); source_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-    doc = ezdxf.readfile(path); scale = scale_to_mm(doc, unit_scale_to_mm); issues = []; layers = {}; boxes = []
+    doc = ezdxf.readfile(path); issues = []; layers = {}; boxes = []
+    review = unit_review(doc, unit_scale_to_mm, legacy_header=legacy_units)
+    scale = review['effective_scale_to_mm']
+    measurements, annotations = [], []
     for entity, ref, appearance in _expanded(doc, issues):
         name = appearance['layer']
         row = layers.setdefault(name, {'name': name, 'count': 0, 'entity_types': Counter(),
                                        'colors': set(), 'linetypes': set(), 'bounds_mm': None})
         row['count'] += 1; row['entity_types'][ref['type']] += 1
         row['colors'].add(appearance['color']); row['linetypes'].add(appearance['linetype'])
+        # Samples are evidence to compare, never an automatic inference from a label.
+        if entity is not None and entity.dxftype() == 'LINE' and len(measurements) < 12:
+            length = (entity.dxf.end - entity.dxf.start).magnitude
+            if math.isfinite(length) and length > 0:
+                measurements.append({'source_refs': [ref], 'layer': name, 'raw_length': length,
+                                     'length_mm': length * scale if scale is not None else None})
+        if entity is not None and entity.dxftype() in ('TEXT', 'MTEXT') and len(annotations) < 12:
+            text = entity.plain_text() if entity.dxftype() == 'MTEXT' else entity.dxf.text
+            if re.search(r'\d\s*(?:[xX×]|mm\b|cm\b|m\b|Φ|Ø)', text):
+                annotations.append({'source_refs': [ref], 'layer': name, 'text': text[:160]})
         if scale is not None and entity is not None and entity.dxftype() in CURVES:
             try:
                 rec = extract_curve(entity, scale, 2., ref, max_points=10000)
@@ -273,9 +274,10 @@ def inspect_mep_source(dxf_path, unit_scale_to_mm=None):
     for row in layers.values():
         row['entity_types'] = dict(row['entity_types']); row['colors'] = sorted(row['colors']); row['linetypes'] = sorted(row['linetypes'])
         all_bounds = _union_bounds(all_bounds, row['bounds_mm'])
-    warnings = ['Unknown DXF units; an explicit unit_scale_to_mm is required'] if scale is None else []
+    warnings = review['warnings']
     return {'source': str(path.resolve()), 'source_sha256': source_hash, 'INSUNITS': int(doc.units),
             'insunits': int(doc.units), 'scale_to_mm': scale, 'bounds_mm': all_bounds,
+            'unit_review': review, 'unit_evidence': {'measurements': measurements, 'annotations': annotations},
             'layers': [layers[k] for k in sorted(layers)], 'regions': _region_candidates(boxes),
             'warnings': warnings, 'issues': issues, 'scope': 'Read-only inventory; regions and layer roles require selection'}
 

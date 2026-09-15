@@ -217,6 +217,44 @@ def inspect_mep_source(dxf_path: str) -> str:
 
 
 @mcp.tool()
+def get_source_units(json_path: str = DEFAULT_JSON, source_id: str = 'main') -> str:
+    """Read header/saved units, source-bound length samples and project revision. No changes.
+
+    Annotation numbers are review evidence, not automatic proof of the drawing's unit.
+    """
+    try:
+        return json.dumps(session_from_geometry(json_path).source_units(source_id), ensure_ascii=False)
+    except RevisionConflict as exc:
+        return json.dumps({'error': 'revision_conflict', 'current_revision': exc.current_revision})
+    except Exception as exc:
+        return json.dumps({'error': str(exc)}, ensure_ascii=False)
+
+
+@mcp.tool()
+def set_source_units(unit_scale_to_mm: float, expected_revision: int, project_id: str,
+                     source_sha256: str, json_path: str = DEFAULT_JSON, source_id: str = 'main',
+                     reviewed_by_user: bool = False) -> str:
+    """Save explicitly reviewed units through the same ProjectSession operation as the GUI/HTTP.
+
+    Use get_source_units to obtain the source hash and revision. reviewed_by_user must reflect actual
+    review of this concrete scale. This does not approve element geometry or engineering performance.
+    """
+    if reviewed_by_user is not True:
+        return json.dumps({'error': 'user_review_required', 'message': 'Review header and actual length before saving units.'})
+    try:
+        session = session_from_geometry(json_path)
+        state = session.configure_units(unit_scale_to_mm, expected_revision, project_id,
+                                        source_id, source_sha256=source_sha256)
+        atomic_json(json_path, state['geometry'])
+        return json.dumps({'project_id': state['project_id'], 'revision': state['revision'],
+                           'unit_review': state['geometry'].get('unit_review')}, ensure_ascii=False)
+    except RevisionConflict as exc:
+        return json.dumps({'error': 'revision_conflict', 'current_revision': exc.current_revision})
+    except Exception as exc:
+        return json.dumps({'error': str(exc)}, ensure_ascii=False)
+
+
+@mcp.tool()
 def get_mep_profile(json_path: str = DEFAULT_JSON) -> str:
     """Read current project revision, saved MEP profiles and pending Codex proposals. No changes."""
     try:

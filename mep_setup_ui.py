@@ -131,9 +131,12 @@ class MepSetupDialog:
         ttk.Button(left, text='선택 규칙 삭제', command=self._delete_mapping).pack(anchor='e', pady=3)
 
     def _build_levels(self):
+        from drawing_units_ui import unit_summary
         form = ttk.Frame(self.level_tab)
         form.pack(anchor='nw', padx=18, pady=12)
         ttk.Label(form, text='모든 높이는 바닥 구조 슬라브 윗면 기준입니다. 원본의 설치 높이가 없으면 입력값이 모델링 가정으로 기록됩니다.', wraplength=950).grid(row=0, column=0, columnspan=3, sticky='w', pady=8)
+        self.unit_summary = tk.StringVar(value=unit_summary(self.inventory))
+        ttk.Label(form, textvariable=self.unit_summary, wraplength=930).grid(row=11, column=0, columnspan=3, sticky='w', pady=8)
         self.level_vars = {}
         for i, (key, label) in enumerate([
             ('structural_slab_top_mm', '바닥 구조 슬라브 윗면 mm'), ('floor_to_floor_mm', '층간 높이 mm'), ('slab_thickness_mm', '슬라브 두께 mm'),
@@ -217,9 +220,8 @@ class MepSetupDialog:
 
     def _rescan_units(self):
         try:
-            scale = float(self.level_vars['unit_scale_to_mm'].get())
-            if scale <= 0:
-                raise ValueError('단위 배율은 0보다 커야 합니다.')
+            from drawing_units import positive_scale
+            scale = positive_scale(self.level_vars['unit_scale_to_mm'].get())
         except ValueError as exc:
             messagebox.showerror('단위 확인', str(exc), parent=self.win)
             return
@@ -240,6 +242,8 @@ class MepSetupDialog:
             self._failed('분석 중 원본 도면이 바뀌었습니다. 설정 창을 다시 여세요.')
             return
         self.inventory = inventory
+        from drawing_units_ui import unit_summary
+        self.unit_summary.set(unit_summary(inventory))
         self.regions = inventory.get('regions', [])
         self.region_names = ['전체 도면 (여러 배치가 있으면 영역을 선택하세요)'] + [f"{r['id']} · {r.get('label', r['id'])}" for r in self.regions] + ['직접 지정 (아래 범위 mm)']
         self.region_select.configure(values=self.region_names)
