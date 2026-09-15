@@ -45,6 +45,19 @@ test('review queue is deterministic, deduplicated, and keeps actionable state', 
   ]);
 });
 
+test('clash rows lead the review queue in the given order and select the MEP element', () => {
+  const clashes=[
+    {id:'b',kind:'wall_penetration',action:'벽 관통 — 슬리브·개구 확인',at:[2500,100],z:[2250,2550],level:'B',
+     struct:{eid:'A:w:1',category:'wall',width_mm:200},mep:{eid:'B:d:1',system:'SA',size:'400×300'}},
+    {id:'a',kind:'under_wall',action:'바닥 매립 설비가 벽 아래를 지남',at:[1000,100],z:[70,86],
+     struct:{eid:'A:w:1',category:'wall',width_mm:200},mep:{eid:'A:p:1',size:'Ø15.9'}}];
+  const elements={wall:[{eid:'A:w:9',needs_review:true,review_reason:'thin_pair'}]};
+  const rows=buildReviewEntries(elements,{},clashes);
+  assert.deepEqual(rows.map(x=>[x.kind,x.eid,x.category]),
+    [['clash','B:d:1','간섭'],['clash','A:p:1','간섭'],['element','A:w:9','wall']]);
+  assert.match(rows[0].reason, /\(2500, 100\) z 2250~2550 · wall A:w:1 두께 200mm ↔ SA 400×300/);
+});
+
 test('review queue excludes resolved records unless their acknowledgement is stale', () => {
   const elements={wall:[
     {eid:'done',review_required:true,review_resolved:true,edit_diagnostics:['old diagnostic']},

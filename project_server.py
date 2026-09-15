@@ -59,6 +59,12 @@ class ProjectSession:
         data['project'] = {'project_id':manifest['project_id'], 'revision':manifest['revision'],
                            'folder':str(self.store.folder), 'changed_inputs':self.store.changed_inputs(manifest)}
         data['project_edits'] = edits
+        try:
+            from clash_review import find_clashes
+            data['clash_review'] = find_clashes(data)
+        except Exception as exc:
+            # 간섭 목록은 검토 보조다 — 실패해도 모델·수정은 막지 않되, 못 만든 사실은 남긴다.
+            data['clash_review'] = {'items': [], 'summary': {'total': 0, 'error': f'{type(exc).__name__}: {exc}'}}
         return data
 
     def state(self):
@@ -500,6 +506,10 @@ class ProjectSession:
         for problem in GC.joint_problems(elements):
             items.append({'category': 'joint', 'eid': (problem['eids'] or [None])[0],
                           'eids': problem['eids'], 'reason': 'joint_' + problem['problem']})
+        for clash in (state['geometry'].get('clash_review') or {}).get('items', []):
+            items.append({'category': 'clash', 'eid': clash['mep']['eid'], 'layer': clash['struct'].get('layer'),
+                          'eids': [clash['struct']['eid'], clash['mep']['eid']], 'reason': clash['action'],
+                          'at': clash['at'], 'z': clash['z']})
         _scene, report = to_pascal_scene(state['geometry'])
         return {'project_id': state['project_id'], 'revision': state['revision'], 'items': items,
                 'unconvertible': report['unconvertible']}

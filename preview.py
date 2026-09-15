@@ -91,6 +91,7 @@ def build_html(data):
         "width_conflicts": data.get("width_conflicts", []),
         "qa": data.get("qa", {}),
         "edits_report": data.get("edits_report", {}),
+        "clash_review": data.get("clash_review", {}),
         "project_runtime": data.get("project_runtime"),
         "project_edits": data.get("project_edits", {}),
         "source_drawing": data.get("source_drawing", {"status":"unavailable","floors":[],"warnings":["원본 DXF가 연결되지 않았습니다."]}),

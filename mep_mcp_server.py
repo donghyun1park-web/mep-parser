@@ -176,13 +176,17 @@ def get_review_items(json_path: str = DEFAULT_JSON) -> str:
                     "edit_diagnostics": item.get("edit_diagnostics", []),
                     "overrides": item.get("overrides", {}),
                 })
+    clash = data.get("clash_review") or {}
     out = {
         "project": data.get("project"),
         "edits_report": data.get("edits_report", {}),
         "unmapped_suggestions": suggestions,
         "review_elements": review_elements,
+        # 구조체 × 설비 교차 — 위치(at·z)·부재 EID·조치. 모델을 고치지 않는다(판단은 사람).
+        "clash_review": {"summary": clash.get("summary", {}), "items": (clash.get("items") or [])[:50]},
         "summary": (f"{len(suggestions)} unmapped layer/block(s), "
-                    f"{len(review_elements)} element(s) need review."),
+                    f"{len(review_elements)} element(s) need review, "
+                    f"{(clash.get('summary') or {}).get('total', 0)} clash candidate(s)."),
     }
     return json.dumps(out, indent=2, ensure_ascii=False)
 

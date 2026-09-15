@@ -9,6 +9,7 @@ import { linearMepGeometry, footprintMepGeometry, mepPropertyKeys } from './mep_
 const DATA = JSON.parse(document.getElementById('mep-data').textContent);
 const RUNTIME = DATA.project_runtime || null;
 let EDITS_REPORT=DATA.edits_report || {};
+let CLASH_REVIEW=DATA.clash_review || {};
 function excludedEditIds(report){ return [...((report||{}).orphaned||[]),...((report||{}).ambiguous||[])]; }
 let BASE_ELEMENTS = MepEdit.deriveBaseElements(DATA.elements || {},DATA.project_edits || {},excludedEditIds(DATA.edits_report));
 let CANONICAL_PRESENTATION = MepEdit.clone(DATA.elements || {});
@@ -463,6 +464,7 @@ function mergeServerMetadata(canonical){
 function mergeServerPresentation(response){
   const elements=response.geometry&&response.geometry.elements; if(!elements) return;
   EDITS_REPORT=response.geometry.edits_report || {};
+  CLASH_REVIEW=response.geometry.clash_review || {};
   orphanSuggestions=((response.geometry.edits_report)||{}).relink_suggestions||[];
   renderOrphans();
 }
@@ -670,7 +672,7 @@ sectionInput.addEventListener('input',ev=>{
 
 const reviewFloor=document.getElementById('reviewFloor'), reviewCategory=document.getElementById('reviewCategory');
 function renderReview(){
-  const entries=buildReviewEntries(EFFECTIVE_ELEMENTS,EDITS_REPORT);
+  const entries=buildReviewEntries(EFFECTIVE_ELEMENTS,EDITS_REPORT,CLASH_REVIEW.items||[]);
   const floors=[...new Set(entries.map(x=>x.floor).filter(Boolean))].sort();
   const categories=[...new Set(entries.map(x=>x.category).filter(Boolean))].sort();
   const keepFloor=reviewFloor.value, keepCategory=reviewCategory.value;

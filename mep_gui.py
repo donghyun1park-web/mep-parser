@@ -663,6 +663,12 @@ class App:
                   f"blocks {bk.get('inserts',0)} (unmapped {bk.get('unmapped',0)})")
         for w in self.data.get("warnings", []):
             self._log(f"  [warn] {w}")
+        clash = (self.data.get("clash_review") or {}).get("summary") or {}
+        if clash.get("total") or clash.get("error"):
+            from clash_review import LABELS
+            kinds = " · ".join(f"{LABELS.get(k, k)} {n}" for k, n in (clash.get("by_kind") or {}).items())
+            self._log(f"  [간섭 후보] {clash.get('total', 0)}건 ({kinds}) — 위치는 3D 미리보기 '검토 대기' 맨 앞"
+                      + (f" · 계산 실패: {clash['error']}" if clash.get("error") else ""))
         sugg = self.data.get("suggestions", [])
         applied = [s for s in sugg if s.get("applied")]
         if applied:

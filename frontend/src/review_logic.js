@@ -27,8 +27,18 @@ function diagnosticText(value) {
   return value.message || value.reason || value.code || JSON.stringify(value);
 }
 
-export function buildReviewEntries(elements={}, report={}) {
+export function buildReviewEntries(elements={}, report={}, clashes=[]) {
   const entries=[];
+  // 간섭은 목록 맨 앞에, 받은 순서(조치 종류 → 위치) 그대로 — 건축 분류 확인 수십 건에 묻히지 않게.
+  (clashes || []).forEach((clash, order) => {
+    const s=clash.struct||{}, m=clash.mep||{}, at=clash.at||[0,0], z=clash.z||[0,0];
+    entries.push({
+      key:`clash:${clash.id}`, kind:'clash', eid:m.eid||null, category:'간섭', order,
+      floor:clash.level!=null?String(clash.level):'', action:'select', struct:s.eid||null,
+      reason:`${clash.action} · (${Math.round(at[0])}, ${Math.round(at[1])}) z ${Math.round(z[0])}~${Math.round(z[1])} · `
+        +`${s.category||''} ${s.eid||''}${s.width_mm!=null?` 두께 ${s.width_mm}mm`:''} ↔ ${[m.system,m.size].filter(Boolean).join(' ')}`,
+    });
+  });
   for (const category of Object.keys(elements).sort()) {
     for (const record of elements[category] || []) {
       const diagnostics=(record.edit_diagnostics || record.diagnostics || []).map(diagnosticText).filter(Boolean);
@@ -60,11 +70,12 @@ export function buildReviewEntries(elements={}, report={}) {
       entries.push({key:`stale:${eid}`,kind:'stale',eid:null,category:'stale',floor:'',
         reason:'이전 검토 또는 수정의 원본 형상이 변경됨',action:'open-orphan',orphan:eid});
   const categoryOrder=['wall','column','slab','beam','zone','opening','pipe','duct','tray','equipment'];
-  const rank=entry=>entry.kind==='element'?0:1;
+  const rank=entry=>entry.kind==='clash'?-1:entry.kind==='element'?0:1;
   const catRank=entry=>{ const index=categoryOrder.indexOf(entry.category); return index<0?999:index; };
   return entries.sort((a,b)=> rank(a)-rank(b) ||
+    (a.kind==='clash'&&b.kind==='clash' ? a.order-b.order :
     a.floor.localeCompare(b.floor,undefined,{numeric:true}) ||
-    catRank(a)-catRank(b) || a.key.localeCompare(b.key));
+    catRank(a)-catRank(b) || a.key.localeCompare(b.key)));
 }
 
 export function deriveSectionRange(elements={}, floors=[], zRange) {

@@ -29,6 +29,7 @@
 | `source_drawing.py` | 원본 DXF 도형을 읽는 표시 전용 경로. 층별 원본에 조립 오프셋을 적용하며 미지원·제한 생략을 표시한다. IFC 입력 형상을 바꾸지 않는다. |
 | `project_store.py` + `project_server.py` | **수정의 단일 저장소.** 프로젝트 revision, 원자적 저장·백업·복구, 층별 로컬 EID, GUI/브라우저/MCP 공통 처리, 인증된 PC 내부 HTTP 연결. |
 | `edit_review.py` | 수동 편집 뒤 접합 틈·겹침·개구부 연결 진단. 원본 좌표는 자동 보정하지 않는다. |
+| `clash_review.py` | **간섭 검토 목록.** 구조체(벽·기둥·슬래브·보) × 설비 경로의 교차를 2.5D 로 한 곳씩 — 위치·부재 EID·조치 구분. 프로젝트 상태(`geometry.clash_review`)·미리보기 검토 목록·Pascal 검토 탭·MCP 가 같이 쓴다 |
 | `artifact_validation.py` + `freecad_runner.py` | 실행별 산출물 영수증과 실제 IFC 재검사. 입력 해시·EID/GlobalId·형상·체적·층·QA 속성을 대조한다. |
 | `mep_gui.py` | **현장용 GUI** (Phase 2.5): 파일선택→스캔→파싱→**3D 미리보기(브라우저)**→needs_review 수정→3D빌드 (tkinter, 무의존) |
 | `run_gui.bat` | GUI 더블클릭 런처 (CLI 불필요) |
@@ -81,6 +82,27 @@
   '설비 도면 설정'·'도면 단위 확인'이 도면을 먼저 고른다.
 - 회귀: `tests/test_same_floor_sources.py`, 합성 도면 벽 + 다른 도면 덕트가 한 층에서 FreeCAD/IFC verified·간섭 1
   (`test_same_floor_drawings_share_one_storey_and_clash_natively`).
+
+### ★ 간섭은 **위치·부재·조치** 목록으로 — FreeCAD 결과는 이름과 부피뿐이었다
+종전 출력은 빌드 로그 `[CLASH] 간섭 14건` 과 build.json 의 `Wall_21 ↔ Duct_14 · 244803.1 mm³` 뿐이었다. 3D
+미리보기·검토 목록에는 간섭이 없었고(검토 대기는 건축 분류 확인 97건이 채웠다), 이름에서 원본 부재를 찾으려면
+영수증을 뒤져야 했다. 현장 담당자가 "어디를 보라는 것인가" 에 답이 없었다.
+
+- `clash_review.find_clashes(geometry)`: 평면 교차 + 높이 범위(2.5D). 벽·기둥·슬래브·보는 수직 압출, 설비는
+  `route_points` 구간마다 높이 범위를 가진 띠라서 수직·경사 구간도 구간별로 맞는다. 한 부재를 두 번 지나면 두 줄.
+  폭·높이·경로는 빌더와 같은 함수(`width_of`·`z_range`·`mep_section`·`route_points`·`beam_rings`)만 쓴다.
+- 항목: `id`(부재 EID·설비 EID·위치에서 나와 재파싱해도 같다) · `kind`/`action` · `at`(x, y) · `z` · `crossing_mm` ·
+  `struct{eid, category, layer, width_mm}` · `mep{eid, category, system, size}` · `level`.
+- 조치 구분은 **형상으로만** 가른다(레이어 이름을 추측하지 않는다): 슬래브 → 슬리브·방수 · 기둥/보 → 경로 변경 ·
+  벽 두께 < 50mm → 면선 오결합 의심 · 벽 바닥 위 300mm 안에서 끝나는 설비 → 벽 하부 통과(문 하부 경로·벽 선시공
+  확인) · 그 밖의 벽 → 관통(슬리브·개구). 문·창 개구부 안을 지나는 것은 빼고 `through_openings` 로 센다.
+- 붙는 곳: `ProjectSession._parse` → `geometry.clash_review`(실패하면 `summary.error` — 모델·수정은 막지 않는다) ·
+  미리보기 '검토 대기' 맨 앞(분류 '간섭', 누르면 설비 부재 선택) · Pascal 검토 탭(`pascal_review` 의 clash) · MCP
+  `get_review_items.clash_review` · GUI 파싱 로그 요약. FreeCAD `check_clashes` 항목에도 `struct_eids`·`mep_eids`·
+  `center_mm` 이 붙고 로그에 30건까지 찍힌다.
+- 실측(실무 단위세대 난방·환기 통합 모델): **24건을 0.1초에** — RA Ø100 벽 관통 6 · 난방 코일 벽 하부 통과 4 ·
+  두께 10mm '벽' 오결합 의심 14(난방 12 · SA 2). 같은 모델의 FreeCAD 불리언 간섭 14쌍과 위치가 전부 대응한다
+  (FreeCAD 는 체인으로 합친 벽 단위라 쌍이 적다). 그 FreeCAD 통합 빌드는 1,138.6초였다.
 
 ```json
 {

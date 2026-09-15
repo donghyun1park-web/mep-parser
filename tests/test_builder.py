@@ -548,4 +548,8 @@ def test_same_floor_drawings_share_one_storey_and_clash_natively(tmp_path):
     _, stats = _build(str(geometry), str(tmp_path / "out"))
     assert stats["built"]["floors"] == 1 and stats["built"]["mep"] == 1, stats["built"]
     assert stats["status"] == "verified", stats
-    assert len(stats["clashes"]) == 1, stats["clashes"]
+    (clash,) = stats["clashes"]
+    # 객체 이름만으로는 현장에서 못 찾는다 — 원본 EID 와 겹친 자리의 중심(mm)이 같이 나온다.
+    assert clash["struct_eids"] and all(e.startswith("A:") for e in clash["struct_eids"]), clash
+    assert clash["mep_eids"] and all(e.startswith("B:") for e in clash["mep_eids"]), clash
+    assert abs(clash["center_mm"][0] - 2500) <= 1 and abs(clash["center_mm"][1] - 100) <= 1, clash

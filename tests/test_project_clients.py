@@ -32,7 +32,7 @@ def test_gui_save_refreshes_from_canonical_project(tmp_path):
     app.data = first['geometry']
     sess.edit(eid, {'overrides':{'height':4110}},0,first['project_id'])
     app._save()
-    saved = json.loads(Path(app.geom_path).read_text())
+    saved = json.loads(Path(app.geom_path).read_text(encoding='utf-8'))    # 프로젝트는 UTF-8 로 쓴다(간섭 조치 문구 등 한글)
     assert saved['project']['revision'] == 1
     assert saved['elements']['wall'][0]['overrides']['height'] == 4110
 

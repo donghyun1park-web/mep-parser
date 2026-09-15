@@ -1127,8 +1127,13 @@ def check_clashes(struct_objs, mep_objs, vol_tol=1.0):
                 m_shape = mo.Shape
                 common = s_shape.common(m_shape)
                 if common.Volume > vol_tol:
+                    # 객체 이름(Wall_21)만으로는 현장에서 찾을 수 없다 — 원본 EID 와 겹친 부피의 중심을 함께 남긴다.
+                    c = common.BoundBox.Center
                     clashes.append({"struct": so.Label, "mep": mo.Label,
-                                    "volume_mm3": round(common.Volume, 1)})
+                                    "volume_mm3": round(common.Volume, 1),
+                                    "struct_eids": AV.source_eids(BUILT_RECORDS[so.Name]) if so.Name in BUILT_RECORDS else [],
+                                    "mep_eids": AV.source_eids(BUILT_RECORDS[mo.Name]) if mo.Name in BUILT_RECORDS else [],
+                                    "center_mm": [round(c.x), round(c.y), round(c.z)]})
             except Exception:
                 pass
     return clashes
@@ -1355,6 +1360,9 @@ def _main_impl():
     clashes = check_clashes(struct_objs, mep_objs)
     if clashes:
         print(f"  [CLASH] 간섭 {len(clashes)}건")
+        for c in clashes[:30]:
+            print(f"    {c['struct']} {','.join(c['struct_eids'])} <-> {c['mep']} {','.join(c['mep_eids'])}"
+                  f" @ {c['center_mm']} ({c['volume_mm3']} mm3)")
     else:
         print("  [CLASH] 간섭 없음")
 
@@ -1460,8 +1468,9 @@ def _main_impl():
         "invalid_shapes": n_err,
         "bbox": _bbox,
         "openings_void": n_voids, "opening_leaves": n_leaf,
-        "clashes": [{"struct": c.get("struct"), "mep": c.get("mep"),
-                     "volume_mm3": c.get("volume_mm3")} for c in (clashes or [])],
+        "clashes": [{"struct": c.get("struct"), "mep": c.get("mep"), "volume_mm3": c.get("volume_mm3"),
+                     "struct_eids": c.get("struct_eids", []), "mep_eids": c.get("mep_eids", []),
+                     "center_mm": c.get("center_mm")} for c in (clashes or [])],
     }
 
     _stats_path = os.path.abspath(out_base + ".build.json")
