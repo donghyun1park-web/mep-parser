@@ -187,6 +187,20 @@ FCStd·IFC 둘 다 verified(43초). Blender 도 원형 경로를 **같은 정다
 아니라 **실제 꼭짓점**에서 잰다 — 입상관 끝 단면은 수평이라 봉투보다 반지름만큼 낮다. 고친 뒤 같은
 혼합 환기 픽스처가 Blender 4.2 저장본 재열기까지 verified(EID 5개 전부).
 
+★ **관 면이 수만 개면 FreeCAD 는 형상 만들기가 아니라 Arch 후처리에서 멈춘다.** 실무 난방 도면(PB Ø15.9 5경로 ·
+원호 R90~100 · 링 1,867개 × 24변 = 44,698면)이 900초 제한에서 시간 초과했다(MEP 생성 149.8초 · recompute
+270.8초 · 임시 IFC 120MB, 미검증). 원인 둘 다 **면을 바꾸지 않고** 없앴다:
+- Base 가 있는 Arch 컴포넌트는 recompute 마다(저장본 재열기 검증 포함) `removeSplitter` 와, 수평 투영 면을
+  **하나씩 fuse** 하는 면적 계산(`ArchComponent.computeAreas`)을 다시 돈다 — 면 수의 제곱이다. MEP 형상은
+  **Base 없이** `Arch.makeComponent()` 에 직접 싣는다(Base 가 없으면 Arch 가 형상을 건드리지 않는다).
+- IFC 직렬화(`SERIALIZE` → IfcAdvancedBrep)는 `removeSplitter` 를 또 돌고 같은 형상에 파일이 13배다. 평면 면만인
+  MEP 형상(`FACETED_EXPORT`)은 면 그대로 IfcFacetedBrep 로 쓴다 — 곡면이 있는 `Arch.makePipe` 만 직렬화한다.
+
+실측(같은 입력·같은 링): recompute 270.8 → **0초**, 전체 **416.5초에 FCStd·IFC 둘 다 verified**, FCStd 53.5 → 39.2MB,
+IFC 120.5 → **9.4MB**. 5경로 부피·bbox 가 `rect_sweep_mesh` 계산값과 같고(부피 차 < 0.001mm³) IFC 재검사 부피 차는
+1e-9 수준이다. 남은 최대 구간은 MEP 형상 생성(189초, 여유 메모리 0.6GB 에서 잰 값)이다. 24변·현오차 0.5mm
+규약은 그대로다 — 바꾸려면 같은 형상 검증부터 한다.
+
 `mep_volume` 은 **사각·외곽선 duct/tray 만** 센다. 원형 단면은 스윕 몫(오차 0.07~0.1%)이고 장비는
 축선이 아니라 footprint 압출이라 '길이 × 단면' 기대식이 안 맞는다. 한쪽만 담으면
 셈이 어긋난다(실측: 장비가 built 에만 들어가 MEP 샘플 비율이 3.78 이었다 → 1.0000).

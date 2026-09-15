@@ -977,6 +977,7 @@ _MEP_IFC_TYPE = {
 
 
 MEP_VOLUME = {}      # 축선×단면 으로 기대한 부피 대 실제로 만든 부피
+FACETED_EXPORT = set()   # 평면 면만으로 만든 MEP 객체 이름 — IFC 에 면 그대로(IfcFacetedBrep) 쓴다
 
 
 def _footprint_solid(rec, bottom, height):
@@ -1005,6 +1006,7 @@ def build_mep(doc, mep_elements, params=None):
     objs, src = [], []
     MEP_VOLUME.clear()
     MEP_VOLUME.update({"expected_mm3": 0.0, "built_mm3": 0.0})
+    FACETED_EXPORT.clear()
     for cat in ("pipe", "duct", "tray", "equipment"):
         for i, el in enumerate(mep_elements.get(cat, [])):
             label = f"{cat.capitalize()}_{i}"
@@ -1062,9 +1064,13 @@ def build_mep(doc, mep_elements, params=None):
                         continue
                     if counted:
                         MEP_VOLUME["built_mm3"] += shape.Volume
-                    feat = doc.addObject("Part::Feature", f"MepShape_{cat}_{i}")
-                    feat.Shape = shape
-                    obj = Arch.makeComponent(feat)
+                    # ★ Base 없이 형상을 직접 싣는다. Base 가 있으면 Arch 가 recompute 마다(저장본 재열기
+                    #   포함) removeSplitter 와, 수평 투영 면을 **하나씩 fuse** 하는 면적 계산을 다시 돈다 —
+                    #   관 면이 수천 개면 제곱으로 느려진다(실측: 난방 Ø15.9 한 경로 3,242면 recompute 4.09초
+                    #   → 0초, 면·부피 그대로). Base 가 없으면 Arch 는 형상을 건드리지 않는다.
+                    obj = Arch.makeComponent()
+                    obj.Shape = shape
+                    FACETED_EXPORT.add(obj.Name)
                 if obj is None:
                     continue
                 obj.IfcType = _MEP_IFC_TYPE[cat]
@@ -1365,8 +1371,7 @@ def _main_impl():
     for _o in doc.Objects:
         _lbl = getattr(_o, "Label", "")
         if _lbl.startswith(("WallAxis", "SlabBase", "ColBase", "BeamBase",
-                            "PipeAxis", "MepShape",
-                            "SpaceShape", "_wall_")):
+                            "PipeAxis", "SpaceShape", "_wall_")):
             try:
                 _o.Visibility = False
                 _n_hidden += 1
@@ -1527,7 +1532,12 @@ def _main_impl():
                 def precise_representation(*args, **kwargs):
                     kwargs["tessellation"] = 0.00001
                     if kwargs.get("preferences"):
-                        kwargs["preferences"] = dict(kwargs["preferences"], SERIALIZE=True)
+                        # 평면 면만인 MEP 관은 면 그대로(IfcFacetedBrep) 쓴다. 직렬화(IfcAdvancedBrep)는
+                        # removeSplitter 를 한 번 더 돌고 같은 형상에 파일이 13배다(실측: 난방 한 경로
+                        # 3,242면 8.4MB → 0.63MB). 곡면이 있는 형상만 직렬화가 정확하다.
+                        obj = args[2] if len(args) > 2 else kwargs.get("obj")
+                        kwargs["preferences"] = dict(kwargs["preferences"],
+                                                     SERIALIZE=getattr(obj, "Name", None) not in FACETED_EXPORT)
                     return original_representation(*args, **kwargs)
                 exporter.getRepresentation = precise_representation
             try:

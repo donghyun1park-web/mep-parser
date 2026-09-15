@@ -520,3 +520,6 @@ def test_bent_round_duct_preserves_line_path_through_native_ifc(tmp_path):
     assert stats["fcstd_validation"]["reopened"]
     assert stats["verify_ifc"]["status"] == "ok"
     assert stats["status"] == "verified", stats
+    # 평면 면만인 관은 면 그대로 나간다 — 직렬화 BREP 는 같은 형상에 파일이 13배였다(실무 난방 IFC 120MB).
+    ifc = (tmp_path / "out.ifc").read_text(encoding="utf-8", errors="ignore")
+    assert "IFCFACETEDBREP(" in ifc and "IFCADVANCEDBREP(" not in ifc
