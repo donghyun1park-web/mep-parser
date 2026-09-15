@@ -48,6 +48,22 @@ def _load_builder():
 FB = _load_builder()
 
 
+def test_opening_rollback_failure_stops_build_instead_of_becoming_a_host_warning():
+    doc, host, cutter = _mock.MagicMock(), _mock.MagicMock(), _mock.MagicMock()
+    host.Name = "Wall"
+    host.Subtractions = []
+    host.Shape.Volume = 100
+    host.Shape.common.return_value.Volume = 25
+    host.Shape.cut.return_value.isNull.return_value = False
+    host.Shape.cut.return_value.isValid.return_value = True
+    host.Shape.cut.return_value.Volume = 75
+    doc.recompute.side_effect = RuntimeError("synthetic recompute failure")
+    with _mock.patch.object(FB, "_opening_solids", return_value=(cutter, None, None)), \
+            _mock.patch.object(FB, "OPENING_RESULTS", []):
+        with unittest.TestCase().assertRaises(FB.OpeningRollbackError):
+            FB.build_openings(doc, [{"eid": "o:test", "wall_indices": [0]}], {0: [host]}, {})
+
+
 def test_folded_chain_retains_exact_source_members_per_piece():
     a = {"eid": "a", "points": [[0, 0], [5000, 0]]}
     b = {"eid": "b", "points": [[5000, 0], [1000, 0], [1000, 1000]]}
@@ -440,3 +456,67 @@ def test_bent_duct_survives_the_ifc_export():
     mv = st["mep_volume"]
     assert mv["built_mm3"] > mv["expected_mm3"] * 0.9, mv
     assert "FCSTD_DST:" in log and "IFC_DST:" in log, log[-400:]
+
+
+def test_failed_opening_does_not_poison_later_arch_subtractions(tmp_path):
+    """A cutter consuming a short host must not poison later partial cuts."""
+    _skip_if_no_freecad()
+    import geom_contract as GC
+    walls = [
+        _w([[0, 90], [205, 90]], eid="w:short-a", width_detected=180),
+        _w([[205, 0], [205, 180]], eid="w:short-b", width_detected=410),
+        _w([[400, 0], [400, 2000]], eid="w:long", width_detected=90),
+    ]
+    for wall in walls:
+        wall.update(z_base=0, overrides={"height": 2600})
+    openings = [
+        {"eid": "o:large", "kind": "circle", "center": [180, -40],
+         "width": 900, "radius": 450, "host_dir": [0, 1],
+         "host_width": 410, "wall_indices": [0, 1, 2]},
+        {"eid": "o:small", "kind": "circle", "center": [90, -20],
+         "width": 180, "radius": 90, "host_dir": [1, 0],
+         "host_width": 180, "wall_indices": [0, 1]},
+    ]
+    openings.append(dict(openings[1], eid="o:small-repeat"))
+    data = {"contract": GC.contract_block(), "units": "mm",
+            "params": {"wall": {"height": 2800, "width": 200}},
+            "floors": [{"z": 0, "label": "L1"}],
+            "elements": {"wall": walls, "opening": openings}}
+    geometry = tmp_path / "geometry.json"
+    geometry.write_text(json.dumps(data), encoding="utf-8")
+    _, stats = _build(str(geometry), str(tmp_path / "out"))
+    results = {r["eid"]: r for r in stats["opening_results"]}
+    assert results["o:large"]["failed_hosts"]  # preserve the unresolved full cut
+    assert len(results["o:small"]["cuts"]) == 2, results
+    assert not results["o:small"]["failed_hosts"]
+    assert len(results["o:small-repeat"]["already_void"]) == 2
+    assert not results["o:small-repeat"]["failed_hosts"]
+    assert stats["fcstd_validation"]["reopened"]
+    assert stats["fcstd_validation"]["recomputed"]
+    assert stats["verify_ifc"]["status"] == "ok"
+    assert stats["status"] == "verified", stats
+
+
+def test_bent_round_duct_preserves_line_path_through_native_ifc(tmp_path):
+    _skip_if_no_freecad()
+    import math
+    import geom_contract as GC
+    data = {"contract": GC.contract_block(), "units": "mm",
+            "floors": [{"z": 0, "label": "L1"}],
+            "elements": {"duct": [{"eid": "d:round-bends", "kind": "polyline",
+                "points": [[0, 0], [8000, 2000]],  # deliberately stale display cache
+                "path3d": {"segments": [
+                    {"type": "line", "start": [0, 0, 0], "end": [4000, 0, 0]},
+                    {"type": "line", "start": [4000, 0, 0], "end": [4000, 2000, 0]},
+                    {"type": "line", "start": [4000, 2000, 0], "end": [8000, 2000, 0]}]},
+                "section_shape": "round", "diameter": 125, "elevation": 2500}]}}
+    geometry = tmp_path / "geometry.json"
+    geometry.write_text(json.dumps(data), encoding="utf-8")
+    _, stats = _build(str(geometry), str(tmp_path / "out"))
+    # A straight-segment contract has mitered joins, not invented elbow arcs.
+    area = GC.ROUND_SIDES * (125 / 2) ** 2 * math.sin(2 * math.pi / GC.ROUND_SIDES) / 2
+    product = stats["expected_products"][0]
+    assert math.isclose(product["volume_mm3"], area * 10000, rel_tol=1e-8)
+    assert stats["fcstd_validation"]["reopened"]
+    assert stats["verify_ifc"]["status"] == "ok"
+    assert stats["status"] == "verified", stats

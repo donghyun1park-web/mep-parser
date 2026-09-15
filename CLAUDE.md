@@ -55,6 +55,14 @@
 - `configure_units`는 원본 해시와 revision을 검사하고 단위·영역·수정 이력을 함께 저장한다. mm로 정의한 레이어 규격, 블록 대체 치수와 높이는 원본 배율로 곱하지 않는다. 원호/타원 샘플링 허용오차도 mm로 환산한다. 일반 건축 원호의 기존 `ARC_MAX_SEGS` 상한은 남아 있으므로 매우 큰 반지름에서 보편적인 5mm 상한을 보장하지 않는다.
 - 단위 변경은 좌표 기반 EID의 다른 원본 재사용을 일으킬 수 있다. `configure_units`와 `configure_source`는 배율 변경 시 기존 원본 수정을 `c:unit-r<revision>-<old-id>` 같은 예약된 고아 EID로 보존한다. 자동 재연결하지 않는다. 수동 추가 객체는 mm 좌표를 유지하고 검토 승인을 다시 요구한다. 프로젝트를 열기만 해서는 새 헤더 정책으로 변환하지 않는다.
 
+### 프로젝트 원본 분류와 혼합 단면
+
+- MEP profile v1의 선택적 `architecture_layers`는 `pattern/category(wall,column,ignore)/height_mm/width_mm`를 기존 건축 분류 앞에 적용한다. INSERT는 부모 레이어의 명시 규칙을 먼저 적용한다. 직접 도형과 INSERT의 원본 시그니처를 페어링 후 대조해 대표 레이어가 달라져도 검토 표시를 유지한다. 저장은 기존 `configure_source` 경로를 사용한다.
+- FreeCAD 개구부는 Arch `Subtractions`에 영구 저장한다. recompute나 절삭 검증이 실패하면 이전 연결과 형상을 복원하고 새 보조 객체를 제거한다. 복원 실패는 출력 중단 오류이며, 전량 절삭 등 원래의 미해결 host 경고를 지우지 않는다.
+- MEP layer의 `section_shape: round`는 `diameter_mm`를 사용한다. `source_handles`, `source_refs`(handle와 전체 insert_path), `entity_types`, `block_pattern`은 레이어/색상/선종류와 AND 조건이다. 여러 규칙에 매칭되거나 명시한 출처가 없으면 조용히 첫 규칙을 적용하지 않고 실패한다.
+- `equipment/outline`은 source symbol envelope이며 `role: equipment|terminal`과 높이를 가진다. 장비 계약은 하단 기준이므로 경로 중심 높이 계산에서 반높이를 뺀다. 닫힌 원본 하나는 본체 하나로 보존하고, 열린 경계는 INSERT 인스턴스를 넘어서 연결하지 않는다. 중첩 기호·겹친 본체는 수량 검토가 필요하다. 포트나 장비 제품 상세는 생성하지 않는다.
+- 선택 영역은 이번 프로필에서 재생성하지 않은 기존 설비에도 적용한다. coverage는 선택한 MEP 원본만 집계하며 건축 전체의 완전성을 평가한 값이 아니다. 고객 도면의 레이어명·핸들·영역·현장 규격은 공개 코드가 아니라 로컬 프로필에 보관한다.
+
 ```json
 {
   "source": "plan.dxf",
@@ -166,7 +174,7 @@ Pascal `rectSectionAxes` 를 다리의 축 맞바꿈까지 반영해 옮긴 것)
 토막**으로 만든다 — 그 자리는 실제로 직관이 아니라 피팅이다. FreeCAD 는 토막을 합치고(실측:
 유효 솔리드 1개, 부피 비율 0.836 — 모서리 겹침만큼), Blender 는 한 객체의 여러 닫힌 셸로 싣는다.
 
-★ 원형 단면(배관·원형 덕트): 평면 직선 경로는 종전처럼 `Arch.makePipe`. 원호·스플라인·수직 구간이
+★ 원형 단면(배관·원형 덕트): 단일 평면 직선만 `Arch.makePipe`를 사용한다. 꺾임·원호·스플라인·수직 구간이
 있으면 사각 덕트와 **같은 마이터 링**을 원에 내접한 정다각형(`GC.ROUND_SIDES` = 24변)으로 꿰매 평면
 면만의 관을 만든다(`GC.rect_parts(..., sides=)`, 부피는 원의 98.9%). `Arch.makePipe` 는 원을 첫 구간의
 **현(chord)** 에 수직으로 놓아 곡선으로 시작하는 관을 찌그러뜨리고(실측: R1000 사분원 위 Ø100 덕트 부피
@@ -581,7 +589,7 @@ Blender > Preferences > Get Extensions > "Bonsai" 설치 → File > Import > IFC
 ```
 MEP 는 `IfcPipeSegment`/`IfcDuctSegment`/`IfcCableCarrierSegment`/`IfcDistributionElement`
 로 나가므로 뷰어에서 계통별 필터·물량이 된다(종전엔 전부 `IfcBuildingElementProxy` 였다).
-배관은 `Arch.makePipe` 가 축선을 스윕한다 — 다점 폴리라인 한 객체, 코너는 마이터.
+배관의 단일 평면 직선은 `Arch.makePipe`, 다점 경로는 공통 정다각형 마이터 관으로 생성한다.
 빌더가 `Pset_MEPParser` 로 QA 속성을 함께 내보내므로 뷰어에서 부재를 클릭하면
 `EID` · `Layer` · `MemberName` · `Section` · `Pairing` · `WidthDetected` ·
 `NeedsReview` · `ReviewReason` 이 보인다. **`NeedsReview=True` 로 필터하면 얇은

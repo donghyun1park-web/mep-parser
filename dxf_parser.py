@@ -2499,6 +2499,10 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         mep_profile = validate_profile(mep_profile, source_hash)
         if explicit_scale is not None:
             mep_profile['unit_scale_to_mm'] = explicit_scale
+        architecture_rules = [(r['pattern'], r['category'],
+                               {k: r[v] for k, v in (('height', 'height_mm'), ('width', 'width_mm')) if v in r})
+                              for r in mep_profile.get('architecture_layers', [])]
+        rules = architecture_rules + list(rules)
     doc = ezdxf.readfile(dxf_path)
     msp = doc.modelspace()
     review = unit_review(doc, explicit_scale, legacy=mep_profile is None,
@@ -2520,12 +2524,16 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
     _rule_layer = {}        # 블록 안쪽 레이어 → 규칙을 정한 INSERT 레이어(집합)
     unmapped_block_recs = {}      # 블록명 → explode 기하 샘플(제안 통계용)
     unmapped_block_entities = {}  # 블록명 → INSERT 엔티티(AI 자동적용 재추출용)
+    project_classification_sigs = set()
     for e in msp:
         # [Phase 2] INSERT: 블록명 분류 → explode/마커. 레이어 폴백.
         if e.dxftype() == "INSERT":
             n_inserts += 1
             bname = e.dxf.get("name", "") or ""
-            cat, attrs = classify(bname, block_rules) if block_rules else (None, {})
+            cat, attrs = classify(e.dxf.layer, architecture_rules) if mep_profile else (None, {})
+            project_classified = cat is not None
+            if cat is None:
+                cat, attrs = classify(bname, block_rules) if block_rules else (None, {})
             if cat is None:
                 cat, attrs = classify(e.dxf.layer, rules)  # 레이어 폴백
             if cat == "ignore":
@@ -2553,6 +2561,8 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
                 continue
             elev = _entity_elevation(e, scale)
             for rec in insert_to_records(e, scale, cat, attrs):
+                if project_classified:
+                    project_classification_sigs.update(rec.get('_sigs', []))
                 if attrs:
                     rec["overrides"] = _pub_attrs(attrs)
                     if attrs.get("_opts"):
@@ -2607,6 +2617,8 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
             else:
                 result["warnings"].append(f"unhandled {e.dxftype()} @ {e.dxf.layer}")
             continue
+        if mep_profile and classify(e.dxf.layer, architecture_rules)[0] is not None:
+            project_classification_sigs.update(rec.get('_sigs', []))
         if attrs:
             rec["overrides"] = _pub_attrs(attrs)
             if attrs.get("_opts"):
@@ -2808,6 +2820,9 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         prefix = ELEMENT_EID_PREFIX.get(_cat, _cat[:1])
         for _rec in _recs:
             sigs = _rec.pop("_sigs", None) or [raw_entity_sig(_rec)]
+            if project_classification_sigs.intersection(sigs):
+                _rec['needs_review'] = True
+                _rec['review_reason'] = 'project_architecture_classification'
             span = [x for x in (_rec.pop("_span_sigs", None) or []) if x]
             _rec["source_signatures"] = list(sigs)
             _rec.pop("_parse_opts", None)      # 파서 전용 — 출력에는 싣지 않는다

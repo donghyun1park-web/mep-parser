@@ -583,6 +583,42 @@ def cut_window_into_wall(doc, wall_obj, op, params, tag="live", add_leaf=True):
     return out
 
 
+class OpeningRollbackError(RuntimeError):
+    """A host could not be restored; exporting the document is unsafe."""
+
+
+def _persist_opening_cut(doc, obj, cutter, name):
+    """Persist an Arch cut, restoring its graph on failed recomputation."""
+    before = obj.Shape.copy()
+    previous = list(obj.Subtractions)
+    void = None
+    try:
+        void = doc.addObject("Part::Feature", name)
+        void.Shape = cutter
+        obj.Subtractions = previous + [void]
+        doc.recompute()
+        cut = obj.Shape
+        if cut.isNull() or not cut.isValid() or before.Volume - cut.Volume <= 1e-6:
+            raise ValueError("Arch subtraction failed to remove host volume")
+        void.Visibility = False
+        return cut
+    except Exception:
+        try:
+            obj.Subtractions = previous
+            if void is not None:
+                doc.removeObject(void.Name)
+            doc.recompute()
+            restored = obj.Shape
+            tolerance = max(1e-6, before.Volume * 1e-9)
+            if (restored.isNull() or not restored.isValid()
+                    or abs(restored.Volume - before.Volume) > tolerance
+                    or before.Volume - restored.common(before).Volume > tolerance):
+                raise ValueError("host geometry differs after rollback")
+        except Exception as exc:
+            raise OpeningRollbackError(f"Cannot restore opening host {obj.Name}: {exc}") from exc
+        raise
+
+
 def build_openings(doc, openings, wall_idx_map, params):
     """[Phase D] 문/창 3D. 사각형 void 로 벽 cut + 문짝/창틀 솔리드(IfcDoor/Window).
     - subtype='door'  : 바닥~height 개구, 얇은 문짝 판.
@@ -650,14 +686,7 @@ def build_openings(doc, openings, wall_idx_map, params):
                     # Arch exporters regenerate wall solids from the baseline. A
                     # Shape assignment alone loses the opening during IFC export.
                     # Persist the cutter in Arch's subtraction graph instead.
-                    void = doc.addObject("Part::Feature", f"OpeningVoid_{oi}_{wi}")
-                    void.Shape = cutter
-                    obj.Subtractions = list(obj.Subtractions) + [void]
-                    doc.recompute()
-                    void.Visibility = False
-                    cut = obj.Shape
-                    if cut.isNull() or not cut.isValid() or before - cut.Volume <= 1e-6:
-                        raise ValueError("Arch subtraction failed to remove host volume")
+                    cut = _persist_opening_cut(doc, obj, cutter, f"OpeningVoid_{oi}_{wi}")
                     applied[obj.Name] = (cutter if obj.Name not in applied
                                          else applied[obj.Name].fuse(cutter))
                     seen.add(obj.Name)
@@ -668,6 +697,8 @@ def build_openings(doc, openings, wall_idx_map, params):
                     result["cuts"].append({"host_name": obj.Label, "host_eids": host_eids,
                         "before_volume_mm3": before, "after_volume_mm3": cut.Volume,
                         "removed_volume_mm3": before-cut.Volume})
+                except OpeningRollbackError:
+                    raise
                 except Exception as exc:
                     result["failed_hosts"].append({"wall_index": wi, "error": str(exc)})
             if objects and not changed:
@@ -966,8 +997,8 @@ def build_mep(doc, mep_elements, params=None):
 
     계약 v3: 경로는 `GC.path3d_segments`/`GC.route_points`, 단면은 `GC.mep_section`
     하나다 — Blender·Pascal 이 같은 함수를 쓴다.
-    - 원형 단면(배관·원형 덕트): 평면 직선 경로는 `Arch.makePipe`(실측: 직선합 대비 체적 오차
-      0.07%), 원호·스플라인·수직 구간이 있으면 정다각형 마이터 관(`_rect_solid(..., sides=)`).
+    - 원형 단면(배관·원형 덕트): 단일 평면 직선만 `Arch.makePipe`를 사용한다.
+      꺾임·곡선·수직 구간은 정다각형 마이터 관(`_rect_solid(..., sides=)`)으로 만든다.
     - 사각 단면은 `_rect_solid` — 공통 마이터 링으로 만든 평면 면 솔리드.
     - 외곽선 덕트(footprint)와 장비는 평면 외곽 압출 그대로다.
     """
@@ -976,13 +1007,14 @@ def build_mep(doc, mep_elements, params=None):
     MEP_VOLUME.update({"expected_mm3": 0.0, "built_mm3": 0.0})
     for cat in ("pipe", "duct", "tray", "equipment"):
         for i, el in enumerate(mep_elements.get(cat, [])):
-            elev = GC.base_z(cat, el)
-            footprint = el.get("geometry_mode") == "footprint"
-            pts = (el.get("points") if footprint else el.get("centerline") or el.get("points")) or []
-            if len(pts) < 2:
-                continue
             label = f"{cat.capitalize()}_{i}"
             try:
+                elev = GC.base_z(cat, el)
+                footprint = el.get("geometry_mode") == "footprint"
+                pts = ((el.get("points") or []) if cat == "equipment" or footprint
+                       else GC.route_points(cat, el))
+                if len(pts) < 2:
+                    continue
                 obj = shape = None
                 counted = False          # 기대 부피를 넣은 것만 실제 부피를 더한다(한쪽만 담으면 셈이 어긋난다)
                 if cat == "equipment":
@@ -999,14 +1031,17 @@ def build_mep(doc, mep_elements, params=None):
                     shape, counted = _footprint_solid(el, GC.z_range(cat, el, params)[0], h), True
                 else:
                     section = GC.mep_section(cat, el, params)
-                    if section["shape"] == "round" and GC.is_planar_polyline_route(el):
+                    if section["shape"] == "round" and len(pts) == 2 and GC.is_planar_polyline_route(el):
                         ax = make_wire([[p[0], p[1]] for p in pts], bool(el.get("closed")), doc=doc,
                                        label=f"{cat.capitalize()}Axis_{i}")
                         if ax is None:
                             continue
-                        ax.Placement.Base.z = elev
+                        ax.Placement.Base.z = pts[0][2]
                         obj = Arch.makePipe(ax, diameter=section["diameter"])
                     elif section["shape"] == "round":
+                        # Arch also invents curved elbows on bent line paths; their
+                        # IFC serialization can exceed 900s. Keep the contract's
+                        # line vertices with the same miter rings used for 3D paths.
                         # ★ `Arch.makePipe` 는 원 단면을 첫 구간의 **현(chord)** 에 수직으로 놓아 원호·스플라인
                         #   으로 시작하는 관을 찌그러뜨린다(실측: R1000 사분원 위 Ø100 덕트 부피 70.7%). 그렇다고
                         #   해석 와이어를 `makePipeShell` 로 직접 스윕하면 **IFC 에서 깨진다** — FreeCAD 1.1 실측:
@@ -1496,12 +1531,15 @@ def _main_impl():
                     return original_representation(*args, **kwargs)
                 exporter.getRepresentation = precise_representation
             try:
+                print(f"[8/8] IFC export: {len(build_stats['expected_products'])} products", flush=True)
+                export_started = _time.perf_counter()
                 exporter.export([building], tmp_ifc)
             finally:
                 if original_representation:
                     exporter.getRepresentation = original_representation
                 if original_attributes:
                     exporter.exportIfcAttributes = original_attributes
+            print(f"  IFC export complete ({_time.perf_counter() - export_started:.1f}s); verifying", flush=True)
             report = V.verify_build(original_data, build_stats, tmp_ifc, stage="post_export")
             build_stats["verify_ifc"] = report.to_dict()
             if report.failed and not allow_errors:

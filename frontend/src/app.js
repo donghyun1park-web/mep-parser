@@ -4,7 +4,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { buildReviewEntries, deriveSectionRange, floorKeyOf, isZVisible, reconcileSection, uniqueByEid, fitDistance, recordOnEditFloor, editBackdropState } from './review_logic.js';
 import { screenToDrawing, drawingUnitsPerPixel } from './svg_coordinates.js';
-import { sourceSampleCurve, mepPropertyKeys } from './mep_preview_geometry.js';
+import { linearMepGeometry, footprintMepGeometry, mepPropertyKeys } from './mep_preview_geometry.js';
 
 const DATA = JSON.parse(document.getElementById('mep-data').textContent);
 const RUNTIME = DATA.project_runtime || null;
@@ -18,7 +18,7 @@ window.addEventListener('error', e => {
     document.getElementById('err').style.display='block';
 });
 
-const {gcDim,gcZRange,gcWidthOf,gcCcw,gcBeamRings,gcMepDimensions} = globalThis.MepContract;
+const {gcDim,gcZRange,gcWidthOf,gcCcw,gcBeamRings,gcMepDimensions,gcSectionShape} = globalThis.MepContract;
 
 const S = 0.001;                  // mm -> m
 const CX = DATA.center[0], CY = DATA.center[1];
@@ -161,30 +161,24 @@ function buildMepLinear(rec, cat){
         ring.forEach((p,i)=>{ const xy=toM(p); if(i) hole.lineTo(...xy); else hole.moveTo(...xy); });
         hole.closePath(); shape.holes.push(hole);
       }
-      addMesh(new THREE.ExtrudeGeometry(shape,{depth:(range[1]-range[0])*S,bevelEnabled:false}),cat,rec,range[0]*S);
+      addMesh(footprintMepGeometry(THREE,shape,range,S),cat,rec,range[0]*S);
       return;
     }
     const raw=rec.points||rec.centerline;
     if(!raw||raw.length<2) throw new Error('Centerline is missing');
     const pts=raw.filter((point,index)=>!index||Math.hypot(point[0]-raw[index-1][0],point[1]-raw[index-1][1])>1e-8);
-    if(cat==='pipe'){
-      const vectors=pts.map(p=>new THREE.Vector3(...toM(p),0));
-      addMesh(new THREE.TubeGeometry(sourceSampleCurve(THREE,vectors),vectors.length-1,dims.diameter*S/2,16,false),cat,rec,elev);
-      return;
-    }
-    for(let i=0;i<pts.length-1;i++){
-      const a=toM(pts[i]),b=toM(pts[i+1]),dx=b[0]-a[0],dy=b[1]-a[1],len=Math.hypot(dx,dy);
-      if(len<1e-9) continue;
-      const m=addMesh(new THREE.BoxGeometry(len,dims.width_mm*S,dims.height_mm*S),cat,rec,elev);
-      m.position.x=(a[0]+b[0])/2; m.position.y=(a[1]+b[1])/2; m.rotation.z=Math.atan2(dy,dx);
+    const vectors=pts.map(p=>new THREE.Vector3(...toM(p),0));
+    for(const piece of linearMepGeometry(THREE,vectors,dims,S)){
+      const m=addMesh(piece.geometry,cat,rec,elev);
+      [m.position.x,m.position.y]=piece.position; m.rotation.z=piece.rotation;
     }
   } catch(error) {
     mepRenderWarnings.push(`${rec.eid||rec.layer||cat}: 3D 표시 보류 · ${error.message}`);
   }
 }
 function buildEquip(rec){
-  const pts=rec.points||[]; const z0=(rec.elevation||rec.z_base||0)*S;
-  if(pts.length>=3){ const geo=new THREE.ExtrudeGeometry(shapeFrom(pts),{depth:1.0,bevelEnabled:false}); addMesh(geo,'equipment',rec,z0); }
+  const pts=rec.points||[], range=gcZRange('equipment',rec,P);
+  if(pts.length>=3){ const geo=footprintMepGeometry(THREE,shapeFrom(pts),range,S); addMesh(geo,'equipment',rec,range[0]*S); }
 }
 
 function rebuild(){
@@ -391,7 +385,7 @@ document.getElementById('apply').addEventListener('click', ()=>{
     reviewResolved:document.getElementById('e_review').checked
   });
   if(['pipe','duct','tray'].includes(cat)) {
-    const [widthKey,heightKey]=mepPropertyKeys(cat), ov=e.added?e.record.overrides:e.overrides;
+    const [widthKey,heightKey]=mepPropertyKeys(cat,gcSectionShape(cat,rec)), ov=e.added?e.record.overrides:e.overrides;
     if(ov){ delete ov.width; delete ov.height; if(Number.isFinite(w)) ov[widthKey]=w; if(heightKey&&Number.isFinite(h)) ov[heightKey]=h; }
   }
   edits[eid]=e;

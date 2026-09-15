@@ -53,6 +53,11 @@ class MepSetupDialog:
         self._build_mapping()
         self._build_levels()
         self._build_proposals()
+        self.source_tab, self.architecture_tab = ttk.Frame(self.tabs), ttk.Frame(self.tabs)
+        self.tabs.insert(1, self.source_tab, text='설비 원본 필터')
+        self.tabs.insert(2, self.architecture_tab, text='건축 분류')
+        self._build_source_filters()
+        self._build_architecture()
         self.status = tk.StringVar(value='원본 SHA-256: ' + inventory['source_sha256'][:20])
         ttk.Label(self.win, textvariable=self.status, wraplength=1050).pack(anchor='w', padx=12, pady=6)
         controls = ttk.Frame(self.win)
@@ -110,9 +115,9 @@ class MepSetupDialog:
         form.pack(side='right', fill='y', padx=8)
         self.rule_vars = {}
         for i, (key, label, values) in enumerate([
-            ('category', '형상', ['pipe', 'duct', 'tray']), ('system', '계통 / 회로', ['heating', 'SA', 'RA', 'OA', 'EA']),
-            ('representation', '원본 표현', ['centerline', 'outline']), ('diameter_mm', '실외경 mm (배관)', None),
-            ('width_mm', '폭 mm (덕트)', None), ('height_mm', '높이 mm (덕트)', None),
+            ('category', '형상', ['pipe', 'duct', 'tray', 'equipment']), ('system', '계통 / 회로', ['heating', 'SA', 'RA', 'OA', 'EA']),
+            ('representation', '원본 표현', ['centerline', 'outline']), ('diameter_mm', '실외경 mm (원형)', None),
+            ('width_mm', '폭 mm (사각)', None), ('height_mm', '높이 mm (사각/기구)', None),
             ('nominal_size', '공칭 규격 (예: 15A)', None), ('material', '재질', ['PB', 'PVC', 'steel']),
             ('placement', '설치 기준', ['source', 'center', 'slab_soffit', 'foam_top']),
             ('center_elevation_mm', '중심 높이 mm', None), ('dimension_basis', '치수 근거', ['user', 'assumed', 'annotation']),
@@ -121,6 +126,7 @@ class MepSetupDialog:
         for key, value in {'category': 'pipe', 'system': 'heating', 'representation': 'centerline', 'material': 'PB', 'placement': 'foam_top', 'dimension_basis': 'assumed'}.items():
             self.rule_vars[key].set(value)
         ttk.Button(form, text='선택 레이어에 설정 추가', command=self._add_mapping).grid(row=13, column=0, columnspan=2, pady=5)
+        ttk.Button(form, text='선택 규칙 수정', command=self._update_mapping).grid(row=14, column=0, columnspan=2, pady=3)
         self.map_tree = ttk.Treeview(left, columns=('pattern', 'category', 'system', 'dimension', 'placement'), show='headings', height=5)
         for key, label, width in [('pattern', '저장할 규칙', 250), ('category', '형상', 55), ('system', '계통', 65), ('dimension', '치수 mm', 85), ('placement', '설치', 105)]:
             self.map_tree.heading(key, text=label)
@@ -129,6 +135,61 @@ class MepSetupDialog:
         self.map_tree.pack(fill='x')
         self.map_tree.bind('<<TreeviewSelect>>', self._select_mapping)
         ttk.Button(left, text='선택 규칙 삭제', command=self._delete_mapping).pack(anchor='e', pady=3)
+
+    def _build_source_filters(self):
+        ttk.Label(self.source_tab, text='영역·레이어 탭에서 규칙을 선택하고 이 필터를 지정하세요. 원본이 두 규칙에 동시에 해당하면 저장을 차단합니다.\n원형 덕트: duct + centerline + round + 실외경. 말단/장비: equipment + outline + 높이. 기호 외곽은 검토용 형상입니다.', wraplength=920).pack(anchor='w', padx=16, pady=15)
+        form = ttk.Frame(self.source_tab); form.pack(anchor='nw', padx=12)
+        for i, (key, label, values) in enumerate([
+            ('section_shape', '단면 형태', ['rect', 'round']), ('role', '기구 역할', ['equipment', 'terminal']),
+            ('block_pattern', '블록명 정규식 (선택)', None), ('entity_types', '원본 유형 (쉼표 구분)', None),
+            ('source_handles', '원본 핸들 (쉼표 구분)', None)]):
+            self.rule_vars[key] = self._entry(form, label, i, values, width=48)
+        self.source_filter_status = tk.StringVar(value='원본 필터가 없으면 레이어·색상·선종류로 선택합니다.')
+        ttk.Label(self.source_tab, textvariable=self.source_filter_status, wraplength=920).pack(anchor='w', padx=16, pady=15)
+        ttk.Button(self.source_tab, text='선택 규칙 수정', command=self._update_mapping).pack(anchor='w', padx=16)
+
+    def _build_architecture(self):
+        self.architecture_rules = []
+        ttk.Label(self.architecture_tab, text='현재 프로젝트에서만 레이어 역할을 지정합니다. 전역 레이어맵은 바뀌지 않습니다.\n벽·기둥 구분과 높이는 원본을 확인한 뒤 입력하세요. 결과는 부재 검토 대상으로 남습니다. 중첩 블록은 현재 건축 파서의 INSERT 레이어 기준을 따릅니다.', wraplength=920).pack(anchor='w', padx=16, pady=15)
+        form = ttk.Frame(self.architecture_tab); form.pack(anchor='nw', padx=12)
+        self.arch_vars = {}
+        for i, (key, label, values) in enumerate([
+            ('layer', '원본 레이어', [r['name'] for r in self.layers]), ('category', '역할', ['wall', 'column', 'ignore']),
+            ('height_mm', '높이 mm (선택)', None), ('width_mm', '벽 기본 두께 mm (선택)', None)]):
+            self.arch_vars[key] = self._entry(form, label, i, values, width=50)
+        ttk.Button(form, text='레이어 분류 추가 / 수정', command=self._add_architecture).grid(row=4, column=0, columnspan=2, pady=8)
+        self.arch_tree = ttk.Treeview(self.architecture_tab, columns=('pattern', 'category', 'height', 'width'), show='headings', height=10)
+        for key, label in [('pattern', '레이어 규칙'), ('category', '역할'), ('height', '높이 mm'), ('width', '기본 두께 mm')]:
+            self.arch_tree.heading(key, text=label)
+        self.arch_tree.pack(fill='x', padx=16, pady=8)
+        ttk.Button(self.architecture_tab, text='선택 건축 규칙 삭제', command=self._delete_architecture).pack(anchor='e', padx=16)
+
+    def _refresh_architecture(self):
+        self.arch_tree.delete(*self.arch_tree.get_children())
+        for i, r in enumerate(self.architecture_rules):
+            self.arch_tree.insert('', 'end', iid=str(i), values=(r['pattern'], r['category'], r.get('height_mm', ''), r.get('width_mm', '')))
+
+    def _add_architecture(self):
+        try:
+            layer = self.arch_vars['layer'].get().strip()
+            if layer not in {r['name'] for r in self.layers}:
+                raise ValueError('목록에서 원본 레이어를 선택하세요.')
+            row = {'pattern': '^' + re.escape(layer) + '$', 'category': self.arch_vars['category'].get()}
+            if row['category'] not in ('wall', 'column', 'ignore'):
+                raise ValueError('벽·기둥·제외 중 역할을 선택하세요.')
+            from drawing_units import positive_scale
+            for key in ('height_mm', 'width_mm'):
+                if self.arch_vars[key].get().strip():
+                    row[key] = positive_scale(self.arch_vars[key].get())
+            self.architecture_rules = [r for r in self.architecture_rules if r['pattern'] != row['pattern']] + [row]
+            self._refresh_architecture()
+        except ValueError as exc:
+            messagebox.showerror('건축 분류 확인', str(exc), parent=self.win)
+
+    def _delete_architecture(self):
+        selected = set(map(int, self.arch_tree.selection()))
+        self.architecture_rules = [r for i, r in enumerate(self.architecture_rules) if i not in selected]
+        self._refresh_architecture()
 
     def _build_levels(self):
         from drawing_units_ui import unit_summary
@@ -192,6 +253,8 @@ class MepSetupDialog:
 
     def _load_profile(self, profile):
         self.mappings = copy.deepcopy(profile.get('layers', []))
+        self.architecture_rules = copy.deepcopy(profile.get('architecture_layers', []))
+        self._refresh_architecture()
         levels = profile.get('levels', {})
         defaults = {'structural_slab_top_mm': 0, 'floor_to_floor_mm': '', 'slab_thickness_mm': '',
                     'impact_insulation': '', 'foamed_concrete': '', 'screed': '',
@@ -255,20 +318,40 @@ class MepSetupDialog:
         self.status.set('단위 변경에 따라 영역을 초기화했습니다. 모델링 영역을 다시 선택하세요.')
         self._draw_regions()
 
+    def _rule_from_form(self):
+        rule = {key: value.get().strip() for key, value in self.rule_vars.items() if value.get().strip()}
+        for key in ('diameter_mm', 'width_mm', 'height_mm', 'center_elevation_mm'):
+            if key in rule:
+                rule[key] = float(rule[key])
+        if 'color' in rule:
+            rule['color'] = int(rule['color'])
+        for key in ('entity_types', 'source_handles'):
+            if key in rule:
+                rule[key] = [x.strip().upper() for x in rule[key].split(',') if x.strip()]
+        return rule
+
+    def _update_mapping(self):
+        try:
+            selected = self.map_tree.selection()
+            if len(selected) != 1:
+                raise ValueError('수정할 규칙 한 개를 선택하세요.')
+            index = int(selected[0])
+            row = {k: copy.deepcopy(v) for k, v in self.mappings[index].items() if k not in self.rule_vars}
+            row.update(self._rule_from_form())
+            self.mappings[index] = row
+            self._refresh_mappings()
+            self.map_tree.selection_set(str(index))
+        except ValueError as exc:
+            messagebox.showerror('설정 확인', str(exc), parent=self.win)
+
     def _add_mapping(self):
         try:
-            rule = {key: value.get().strip() for key, value in self.rule_vars.items() if value.get().strip()}
-            for key in ('diameter_mm', 'width_mm', 'height_mm', 'center_elevation_mm'):
-                if key in rule:
-                    rule[key] = float(rule[key])
-            if 'color' in rule:
-                rule['color'] = int(rule['color'])
+            rule = self._rule_from_form()
             selected = self.layer_tree.selection()
             if not selected:
                 raise ValueError('원본 레이어를 먼저 선택하세요.')
             for index in selected:
                 pattern = '^' + re.escape(self.layers[int(index)]['name']) + '$'
-                self.mappings = [m for m in self.mappings if not (m['pattern'] == pattern and m.get('color') == rule.get('color') and m.get('linetype') == rule.get('linetype'))]
                 self.mappings.append(dict(rule, pattern=pattern))
             self._refresh_mappings()
         except ValueError as exc:
@@ -277,7 +360,7 @@ class MepSetupDialog:
     def _refresh_mappings(self):
         self.map_tree.delete(*self.map_tree.get_children())
         for i, rule in enumerate(self.mappings):
-            dimension = rule.get('diameter_mm') if rule['category'] == 'pipe' else f"{rule.get('width_mm', '?')} × {rule.get('height_mm', '?')}"
+            dimension = rule.get('diameter_mm') if rule['category'] == 'pipe' or rule.get('section_shape') == 'round' else f"{rule.get('width_mm', '?')} × {rule.get('height_mm', '?')}"
             self.map_tree.insert('', 'end', iid=str(i), values=(rule['pattern'], rule['category'], rule.get('system', ''), dimension, rule.get('placement', 'source')))
 
     def _select_mapping(self, _event):
@@ -285,7 +368,9 @@ class MepSetupDialog:
         if selected:
             rule = self.mappings[int(selected[0])]
             for key, var in self.rule_vars.items():
-                var.set(str(rule.get(key, '')))
+                value = rule.get(key, '')
+                var.set(', '.join(value) if isinstance(value, list) else str(value))
+            self.source_filter_status.set(f"선택 규칙: {rule['pattern']} / 정확한 블록 인스턴스 출처 {len(rule.get('source_refs', []))}개 유지. 원본 핸들은 원본 해시에 연결됩니다.")
 
     def _delete_mapping(self):
         removed = set(map(int, self.map_tree.selection()))
@@ -319,7 +404,7 @@ class MepSetupDialog:
                 break
 
     def _form_profile(self):
-        if not self.mappings:
+        if not self.mappings and not self.architecture_rules:
             raise ValueError('모델링할 레이어를 최소 한 개 설정하세요.')
         values = {key: float(var.get()) for key, var in self.level_vars.items() if var.get().strip()}
         if values.get('unit_scale_to_mm') != self.inventory.get('scale_to_mm'):
@@ -327,6 +412,8 @@ class MepSetupDialog:
         profile = {'version': 1, 'source_sha256': self.inventory['source_sha256'], 'layers': copy.deepcopy(self.mappings),
                    'levels': {key: values[key] for key in ('structural_slab_top_mm', 'floor_to_floor_mm', 'slab_thickness_mm') if key in values},
                    'floor_layers': [{'role': key, 'thickness_mm': values[key]} for key in ('impact_insulation', 'foamed_concrete', 'screed') if key in values]}
+        if self.architecture_rules:
+            profile['architecture_layers'] = copy.deepcopy(self.architecture_rules)
         for key in ('unit_scale_to_mm', 'curve_chord_error_mm', 'endpoint_tolerance_mm', 'gap_review_mm'):
             if key in values:
                 profile[key] = values[key]

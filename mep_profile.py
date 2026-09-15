@@ -15,6 +15,54 @@ CURVES = {'LINE', 'ARC', 'CIRCLE', 'LWPOLYLINE', 'POLYLINE', 'SPLINE', 'ELLIPSE'
 MAX_ENTITIES = 100000
 
 
+def _ref_key(ref):
+    return (ref['handle'].upper(), tuple((p['handle'].upper(), p['block'], p['array_index'])
+                                       for p in ref['insert_path']))
+
+
+def _validate_filters(row):
+    for field in ('source_handles', 'entity_types'):
+        if field in row:
+            values = row[field]
+            if not isinstance(values, list) or not values or any(not isinstance(v, str) or not v.strip() for v in values):
+                raise ValueError(field + ' must be a nonempty string list')
+            row[field] = list(dict.fromkeys(v.upper() for v in values))
+    if any(not re.fullmatch(r'[0-9A-F]+', h) for h in row.get('source_handles', [])):
+        raise ValueError('source_handles must contain DXF handles')
+    if any(t not in CURVES for t in row.get('entity_types', [])):
+        raise ValueError('Unsupported entity_types filter')
+    if 'block_pattern' in row:
+        if not isinstance(row['block_pattern'], str) or not row['block_pattern']:
+            raise ValueError('block_pattern must be nonempty')
+        try:
+            re.compile(row['block_pattern'])
+        except re.error as exc:
+            raise ValueError('Invalid block_pattern: ' + str(exc)) from None
+    if 'source_refs' in row:
+        refs = row['source_refs']
+        if not isinstance(refs, list) or not refs:
+            raise ValueError('source_refs must be a nonempty list')
+        for ref in refs:
+            if (not isinstance(ref, dict) or not isinstance(ref.get('handle'), str)
+                    or not re.fullmatch(r'[0-9a-fA-F]+', ref['handle']) or not isinstance(ref.get('insert_path'), list)):
+                raise ValueError('source_refs require handle and exact insert_path')
+            for part in ref['insert_path']:
+                if (not isinstance(part, dict) or not isinstance(part.get('handle'), str)
+                        or not re.fullmatch(r'[0-9a-fA-F]+', part['handle']) or not isinstance(part.get('block'), str)
+                        or type(part.get('array_index')) is not int or part['array_index'] < 0):
+                    raise ValueError('Invalid source_refs insert_path')
+
+
+def _matches(row, pattern, ref, appearance):
+    return (bool(pattern.search(appearance['layer']))
+            and (row.get('color') is None or row['color'] == appearance['color'])
+            and (row.get('linetype') is None or row['linetype'].upper() == appearance['linetype'])
+            and ('entity_types' not in row or ref['type'] in row['entity_types'])
+            and ('source_handles' not in row or ref['handle'].upper() in row['source_handles'])
+            and ('source_refs' not in row or _ref_key(ref) in {_ref_key(r) for r in row['source_refs']})
+            and ('block_pattern' not in row or any(re.search(row['block_pattern'], p['block'], re.I) for p in ref['insert_path'])))
+
+
 def _number(value, label, positive=False):
     if isinstance(value, bool):
         raise ValueError(label + ': boolean is not a number')
@@ -74,8 +122,23 @@ def validate_profile(profile, source_sha256=None):
             raise ValueError('Floor layer roles must be supported and unique')
         seen.add(role)
         row['thickness_mm'] = _number(row.get('thickness_mm'), 'floor layer thickness', True)
-    rules = out.get('layers')
-    if not isinstance(rules, list) or not rules:
+    architecture = out.get('architecture_layers', [])
+    if not isinstance(architecture, list):
+        raise ValueError('architecture_layers must be a list')
+    for row in architecture:
+        if not isinstance(row, dict) or row.get('category') not in ('wall', 'column', 'ignore'):
+            raise ValueError('Architectural layer category must be wall, column or ignore')
+        if not isinstance(row.get('pattern'), str) or not row['pattern']:
+            raise ValueError('Architectural layer pattern required')
+        try:
+            re.compile(row['pattern'])
+        except re.error as exc:
+            raise ValueError('Invalid architectural pattern: ' + str(exc)) from None
+        for key in ('height_mm', 'width_mm'):
+            if key in row:
+                row[key] = _number(row[key], key, True)
+    rules = out.setdefault('layers', [])
+    if not isinstance(rules, list) or (not rules and not architecture):
         raise ValueError('At least one MEP layer mapping is required')
     for row in rules:
         if not isinstance(row, dict) or not isinstance(row.get('pattern'), str) or not row['pattern']:
@@ -85,13 +148,21 @@ def validate_profile(profile, source_sha256=None):
         except re.error as exc:
             raise ValueError('Invalid layer pattern: ' + str(exc)) from None
         cat = row.get('category')
-        if cat not in ('pipe', 'duct', 'tray'):
-            raise ValueError('MEP profile category must be pipe, duct or tray')
+        if cat not in ('pipe', 'duct', 'tray', 'equipment'):
+            raise ValueError('MEP profile category must be pipe, duct, tray or equipment')
+        _validate_filters(row)
         if not isinstance(row.get('system'), str) or not row['system'].strip():
             raise ValueError('A MEP system name is required')
         row.setdefault('representation', 'centerline')
-        if row['representation'] not in ('centerline', 'outline') or (row['representation'] == 'outline' and cat == 'pipe'):
-            raise ValueError('Outline representation is available for duct/tray only')
+        if row['representation'] not in ('centerline', 'outline') or (row['representation'] == 'outline' and cat == 'pipe') or (cat == 'equipment' and row['representation'] != 'outline'):
+            raise ValueError('Equipment requires outline; pipe requires centerline')
+        shape = row.get('section_shape', 'round' if cat == 'pipe' else 'rect')
+        if shape not in ('round', 'rect') or (cat == 'pipe' and shape != 'round') or (row['representation'] == 'outline' and shape == 'round'):
+            raise ValueError('Invalid section_shape for this representation')
+        if cat == 'equipment':
+            row.setdefault('role', 'equipment')
+            if row['role'] not in ('equipment', 'terminal'):
+                raise ValueError('Equipment role must be equipment or terminal')
         row.setdefault('dimension_basis', 'assumed')
         if row['dimension_basis'] not in ('user', 'assumed', 'annotation'):
             raise ValueError('Unsupported dimension_basis')
@@ -101,7 +172,7 @@ def validate_profile(profile, source_sha256=None):
         for key in ('diameter_mm', 'width_mm', 'height_mm'):
             if row.get(key) is not None:
                 row[key] = _number(row[key], key, True)
-        required = ('diameter_mm',) if cat == 'pipe' else (('height_mm',) if row['representation'] == 'outline' else ('width_mm', 'height_mm'))
+        required = ('diameter_mm',) if shape == 'round' else (('height_mm',) if row['representation'] == 'outline' else ('width_mm', 'height_mm'))
         if any(row.get(k) is None for k in required):
             raise ValueError('Physical outside dimensions required: ' + ', '.join(required))
         if row.get('color') is not None:
@@ -112,7 +183,7 @@ def validate_profile(profile, source_sha256=None):
             raise ValueError('linetype must be a nonempty name')
         if row['placement'] == 'center':
             row['center_elevation_mm'] = _number(row.get('center_elevation_mm'), 'center_elevation_mm')
-        height = row['diameter_mm'] if cat == 'pipe' else row['height_mm']
+        height = row['diameter_mm'] if shape == 'round' else row['height_mm']
         GC.mep_elevation(row['placement'], height, levels, layers,
                          row.get('center_elevation_mm', 0.))
     return out
@@ -300,8 +371,14 @@ def _assign(record, row, index, profile):
                dimension_status='assumed' if row['dimension_basis'] == 'assumed' else 'specified',
                placement=row['placement'], _profile_rule=index,
                region_id=(profile.get('region') or {}).get('id', 'whole_drawing'))
-    if cat == 'pipe':
+    if cat == 'equipment':
+        height = rec['height'] = row['height_mm']
+        rec['role'] = row['role']
+        rec['model_representation'] = 'source_symbol_envelope'
+    elif row.get('section_shape', 'round' if cat == 'pipe' else 'rect') == 'round':
         rec['diameter'] = row['diameter_mm']; height = rec['diameter']
+        if cat != 'pipe':
+            rec['section_shape'] = 'round'
     else:
         if row.get('width_mm') is not None:
             rec['width_mm'] = row['width_mm']
@@ -309,11 +386,17 @@ def _assign(record, row, index, profile):
     rec['elevation'] = GC.mep_elevation(row['placement'], height, profile['levels'], profile['floor_layers'],
                                       rec.get('source_elevation_mm', 0.) if row['placement'] == 'source' else row.get('center_elevation_mm'))
     rec['elevation_source'] = 'source' if row['placement'] == 'source' else 'profile'
+    if cat == 'equipment':
+        # Equipment's datum is bottom; mep_elevation returns route centre.
+        if row['placement'] != 'source':
+            rec['elevation'] -= height / 2
+        rec['overrides'] = {'height': height}
+        rec['needs_review'] = True; rec['review_reason'] = 'equipment_symbol_envelope'
     if row.get('material'):
         rec.setdefault('overrides', {})['material'] = row['material']
     if row['dimension_basis'] == 'assumed':
         rec['needs_review'] = True; rec['review_reason'] = 'mep_dimensions_assumed'
-        rec['dims_assumed'] = ['diameter'] if cat == 'pipe' else ['width_mm', 'height_mm']
+        rec['dims_assumed'] = ['height'] if cat == 'equipment' else ['diameter'] if 'diameter' in rec else ['width_mm', 'height_mm']
     return rec
 
 
@@ -386,6 +469,47 @@ def _outlines(records, issues, endpoint_tolerance_mm):
     return output, len(records) - len(covered) + len(partial)
 
 
+def _equipment_outlines(records, issues, tolerance):
+    """Closed source bodies retain identity even when their displayed envelopes overlap."""
+    groups = defaultdict(list)
+    for record in records:
+        # A complete source loop is one body. Open edges may form a body within
+        # the same INSERT instance, but never by joining two device instances.
+        ref = record['source_refs'][0]
+        key = ('closed', _ref_key(ref)) if record.get('closed') else ('open', _signature(ref['insert_path']))
+        groups[key].append(record)
+    output, lost = [], 0
+    used = set()
+    for group in groups.values():
+        built, omitted = _outlines(group, issues, tolerance)
+        lost += omitted
+        for rec in built:
+            refs = {_ref_key(r) for r in rec['source_refs']}
+            if rec.get('holes') or used.intersection(refs):
+                raise ValueError('Ambiguous equipment outline; select an explicit closed body')
+            used.update(refs)
+        output.extend(built)
+    return output, lost
+
+
+def _equipment_overlaps(output, issues):
+    from shapely.geometry import Polygon
+    polygons = [Polygon(r['points']) for r in output]
+    from shapely.strtree import STRtree
+    tree = STRtree(polygons)
+    for i, polygon in enumerate(polygons):
+        for j in tree.query(polygon):
+            j = int(j)
+            if j <= i or polygon.intersection(polygons[j]).area <= 1e-6:
+                continue
+            a, b = GC.z_range('equipment', output[i]), GC.z_range('equipment', output[j])
+            if min(a[1], b[1]) <= max(a[0], b[0]):
+                continue
+            issues.append({'code': 'EQUIPMENT_OVERLAP', 'severity': 'warning',
+                'reason': 'Source symbol envelopes overlap; separate bodies retained, quantity requires review',
+                'source_refs': output[i]['source_refs'] + output[j]['source_refs']})
+
+
 def apply_mep_profile(doc, result, profile):
     source_hash = hashlib.sha256(Path(result['source']).read_bytes()).hexdigest()
     profile = validate_profile(profile, source_hash)
@@ -394,14 +518,15 @@ def apply_mep_profile(doc, result, profile):
         raise ValueError('Unknown DXF units; provide unit_scale_to_mm')
     issues = []; grouped = defaultdict(list); selected = represented = omitted = outside = 0
     rules = [(re.compile(r['pattern'], re.I), r) for r in profile['layers']]
+    seen = [set() for _ in rules]
     for entity, ref, appearance in _expanded(doc, issues):
-        match = next(((i, row) for i, (pattern, row) in enumerate(rules)
-                      if pattern.search(appearance['layer']) and
-                      (row.get('color') is None or row['color'] == appearance['color']) and
-                      (row.get('linetype') is None or row['linetype'].upper() == appearance['linetype'])), None)
-        if match is None:
+        matches = [(i, row) for i, (pattern, row) in enumerate(rules) if _matches(row, pattern, ref, appearance)]
+        if not matches:
             continue
-        index, row = match
+        if len(matches) > 1:
+            raise ValueError('Ambiguous overlapping source mappings for handle ' + ref['handle'])
+        index, row = matches[0]
+        seen[index].add(_ref_key(ref))
         ref['source_sha256'] = source_hash
         if entity is None:
             selected += 1; omitted += 1; continue
@@ -424,9 +549,20 @@ def apply_mep_profile(doc, result, profile):
             continue
         rec['layer'] = appearance['layer']
         grouped[index].append(_assign(rec, row, index, profile))
+    for index, (_, row) in enumerate(rules):
+        missing_handles = set(row.get('source_handles', [])) - {r[0] for r in seen[index]}
+        missing_refs = {_ref_key(r) for r in row.get('source_refs', [])} - seen[index]
+        if missing_handles or missing_refs:
+            raise ValueError(f'Explicit source filter did not match: rule {index}, handles {sorted(missing_handles)}, refs {len(missing_refs)}')
     elements = result['elements']
-    for category in ('pipe', 'duct', 'tray'):
-        elements[category] = []
+    rebuilt_categories = set()
+    if any(row['category'] in ('pipe', 'duct', 'tray') for _, row in rules):
+        rebuilt_categories.update(('pipe', 'duct', 'tray'))
+        for category in ('pipe', 'duct', 'tray'):
+            elements[category] = []
+    if any(row['category'] == 'equipment' for _, row in rules):
+        rebuilt_categories.add('equipment')
+        elements['equipment'] = []
     topology = {'branchpoints': [], 'gaps': [], 'endpoints': [], 'source_paths': 0, 'connected_paths': 0}
     build_groups = []
     outline_groups = {}
@@ -436,7 +572,7 @@ def apply_mep_profile(doc, result, profile):
             continue
         for rec in records:
             key = tuple(rec.get(k) for k in ('category', 'system', 'height_mm', 'elevation',
-                                             'material', 'placement', 'dimension_basis', 'region_id'))
+                                             'material', 'placement', 'dimension_basis', 'region_id', 'role', 'height'))
             if key not in outline_groups:
                 outline_groups[key] = (index, [])
             outline_groups[key][1].append(rec)
@@ -444,7 +580,8 @@ def apply_mep_profile(doc, result, profile):
     for index, records in build_groups:
         row = profile['layers'][index]
         if row['representation'] == 'outline':
-            built, lost = _outlines(records, issues, profile['endpoint_tolerance_mm']); omitted += lost; represented += len(records) - lost
+            builder = _equipment_outlines if row['category'] == 'equipment' else _outlines
+            built, lost = builder(records, issues, profile['endpoint_tolerance_mm']); omitted += lost; represented += len(records) - lost
         else:
             built, report = join_paths(records, profile['endpoint_tolerance_mm'], profile['gap_review_mm'])
             represented += len(records)
@@ -459,18 +596,20 @@ def apply_mep_profile(doc, result, profile):
                 if any(refs.intersection(_signature({k: v for k, v in s.items() if k != 'reverse'}) for s in gap['source_refs']) for gap in report['gaps']):
                     rec['needs_review'] = True; rec['review_reason'] = 'mep_source_gap'
         elements[row['category']].extend(built)
+    if 'equipment' in rebuilt_categories:
+        _equipment_overlaps(elements['equipment'], issues)
     # 이음 — 원본이 실제로 이어 그린 곳(끝 일치·가지)만. 틈은 위 `gaps` 로 보고할 뿐 잇지 않는다.
     topology['joints'] = GC.assign_joints(elements, profile['endpoint_tolerance_mm'])
     # Apply the same selected region to legacy architectural results; never clip.
     excluded_categories = Counter()
     for category, records in list(elements.items()):
-        if category in ('pipe', 'duct', 'tray'):
+        if category in rebuilt_categories:
             continue
         keep = []
         for rec in records:
             points = rec.get('points') or []
             if rec.get('kind') == 'circle':
-                x, y = rec['center']; radius = rec['radius']; points = [[x - radius, y - radius], [x + radius, y + radius]]
+                x, y = rec['center'][:2]; radius = rec['radius']; points = [[x - radius, y - radius], [x + radius, y + radius]]
             state = _region_status(_bounds(points), profile.get('region'))
             if state == 'inside':
                 keep.append(rec)
@@ -481,12 +620,18 @@ def apply_mep_profile(doc, result, profile):
                                    'reason': 'Architectural element crosses region; omitted without clipping',
                                    'category': category, 'layer': rec.get('layer'), 'bounds_mm': _bounds(points)})
         elements[category] = keep
+    for row in profile.get('architecture_layers', []):
+        for rec in elements.get(row['category'], []):
+            if re.search(row['pattern'], rec.get('layer', ''), re.I):
+                rec['needs_review'] = True
+                rec['review_reason'] = 'project_architecture_classification'
     for gap in topology['gaps']:
         issues.append(dict(gap, code='SOURCE_GAP', severity='warning', reason='Nearby source endpoints remain disconnected'))
     for branch in topology['branchpoints']:
         issues.append(dict(branch, code='SOURCE_BRANCH', severity='warning', reason='Branch preserved as separate paths; no arbitrary circuit route'))
     coverage = {'selected': selected, 'represented': represented, 'omitted': omitted,
-                'outside_region': outside, 'complete': omitted == 0, 'basis': 'source entity instances'}
+                'outside_region': outside, 'complete': omitted == 0, 'basis': 'source entity instances',
+                'scope': 'selected MEP rules only; architectural completeness is not evaluated'}
     scope = {'region': profile.get('region'), 'excluded_architecture': dict(excluded_categories),
              'coordinates': 'WCS millimetres; analytic source retained; curve and coincidence tolerances reported',
              'source_gap_policy': 'report_only_no_repair', 'design_approved': False}

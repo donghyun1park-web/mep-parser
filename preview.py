@@ -40,7 +40,7 @@ def _asset(name):
 
 def contract_script():
     # The Python geometry contract remains the only source of dimension rules.
-    return _GC.js_constants() + "\nglobalThis.MepContract = {gcDim,gcMepDimensions,gcZRange,gcWidthOf,gcCcw,gcBeamRings};"
+    return _GC.js_constants() + "\nglobalThis.MepContract = {gcDim,gcSectionShape,gcMepDimensions,gcZRange,gcWidthOf,gcCcw,gcBeamRings};"
 
 
 if sys.stdout is not None and getattr(sys.stdout, "encoding", None) \

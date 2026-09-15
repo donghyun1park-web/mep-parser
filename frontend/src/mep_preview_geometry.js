@@ -22,8 +22,27 @@ export function sourceSampleCurve(THREE, points) {
   return new SourceCurve();
 }
 
-export function mepPropertyKeys(category) {
-  if(category==='pipe') return ['diameter',null];
+export function linearMepGeometry(THREE, points, dimensions, scale) {
+  if(dimensions.diameter!==undefined) {
+    const geometry=new THREE.TubeGeometry(sourceSampleCurve(THREE,points),points.length-1,dimensions.diameter*scale/2,16,false);
+    return [{geometry,position:[0,0],rotation:0}];
+  }
+  const pieces=[];
+  for(let i=0;i<points.length-1;i++) {
+    const a=points[i],b=points[i+1],dx=b.x-a.x,dy=b.y-a.y,len=Math.hypot(dx,dy);
+    if(len<1e-9) continue;
+    pieces.push({geometry:new THREE.BoxGeometry(len,dimensions.width_mm*scale,dimensions.height_mm*scale),
+      position:[(a.x+b.x)/2,(a.y+b.y)/2],rotation:Math.atan2(dy,dx)});
+  }
+  return pieces;
+}
+
+export function footprintMepGeometry(THREE, shape, range, scale) {
+  return new THREE.ExtrudeGeometry(shape,{depth:(range[1]-range[0])*scale,bevelEnabled:false});
+}
+
+export function mepPropertyKeys(category, shape='rect') {
+  if(category==='pipe'||shape==='round') return ['diameter',null];
   if(category==='duct'||category==='tray') return ['width_mm','height_mm'];
   return ['width',category==='slab'?'thickness':'height'];
 }
