@@ -342,6 +342,7 @@ class App:
         ttk.Button(f, text="(1) Scan drawing", command=self._do_scan).pack(side="left", padx=4)
         ttk.Button(f, text="도면 단위 확인", command=lambda: self._do_mep_setup(units_only=True)).pack(side="left", padx=4)
         ttk.Button(f, text="설비 도면 설정 · Codex 제안", command=self._do_mep_setup).pack(side="left", padx=4)
+        ttk.Button(f, text="같은 층 도면 추가(설비)", command=self._do_add_source).pack(side="left", padx=4)
         ttk.Button(f, text="(2) Parse -> geometry.json", command=self._do_parse).pack(side="left", padx=4)
         ttk.Button(f, text="(2b) 누락 진단",
                    command=self._do_diag).pack(side="left", padx=4)
@@ -757,7 +758,80 @@ class App:
             self.project_server.close()
         self.root.destroy()
 
+    def _do_add_source(self):
+        """같은 층에 공종 도면(난방·환기 등)을 겹친다 — 건축은 기준 도면에서만, 이 도면에서는 설비만 담는다."""
+        if not self.project_session:
+            messagebox.showinfo('프로젝트 필요', '먼저 기준(건축) 도면을 Parse 하거나 프로젝트를 여세요.')
+            return
+        path = filedialog.askopenfilename(title='같은 층에 겹칠 설비 도면(DXF)', filetypes=[('DXF', '*.dxf')])
+        if not path:
+            return
+        session = self.project_session
+        self._set_buttons('disabled')
+        self._log(f'같은 층 도면 추가: {os.path.basename(path)} — 이 도면에서는 설비 부재만 담습니다…')
+        def run():
+            try:
+                manifest = session.store.read()
+                state = session.add_source(path, manifest['revision'], manifest['project_id'])
+                base = manifest['sources'][0]['path']
+                self.root.after(0, lambda: (self._log(f"추가 완료(revision {state['revision']}). 이 도면의 설비 레이어는 "
+                                                      "'설비 도면 설정'에서 도면을 골라 저장하세요."),
+                                            self._parse_done(state['geometry'], base)))
+            except Exception as exc:
+                self.root.after(0, lambda msg=str(exc): (self._log(msg), self._set_buttons('!disabled'),
+                                                         messagebox.showerror('도면 추가 실패', msg)))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _do_source_setup(self, session, units_only=False):
+        """원본이 여럿인 프로젝트 — 도면을 골라 그 원본의 단위·설비 설정을 연다."""
+        sources = session.store.read()['sources']
+        source_id = self._pick_source(sources)
+        if source_id is None:
+            return
+        source = next(s for s in sources if s['id'] == source_id)
+        self._set_buttons('disabled')
+        self._log(f"{os.path.basename(source['path'])}: 원본의 영역·레이어·단위를 분석하고 있습니다…")
+        def scanned(inventory):
+            from mep_setup_ui import MepSetupDialog
+            from drawing_units_ui import UnitSetupDialog
+            self._set_buttons('!disabled')
+            def saved(state):
+                if self.project_session is session:
+                    self._parse_done(state['geometry'], sources[0]['path'])
+            (UnitSetupDialog if units_only else MepSetupDialog)(self.root, session, inventory, saved, source_id=source_id)
+        def run():
+            try:
+                inventory = session.source_units(source_id)['inventory']
+                self.root.after(0, lambda: scanned(inventory))
+            except Exception as exc:
+                self.root.after(0, lambda msg=str(exc): (self._log(msg), self._set_buttons('!disabled'),
+                                                         messagebox.showerror('설비 분석 실패', msg)))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _pick_source(self, sources):
+        """원본이 여럿이면(같은 층 공종 도면) 설정할 도면을 고른다. 취소하면 None."""
+        win = tk.Toplevel(self.root)
+        win.title('설정할 도면 선택')
+        win.transient(self.root)
+        box = tk.Listbox(win, width=90, height=min(8, len(sources)))
+        for source in sources:
+            kinds = ', '.join(source.get('categories') or ['전체'])
+            box.insert('end', f"{os.path.basename(source['path'])}  ({kinds})")
+        box.selection_set(0)
+        box.pack(padx=10, pady=8)
+        chosen = {}
+        def ok():
+            picked = box.curselection()
+            chosen['id'] = sources[picked[0]]['id'] if picked else None
+            win.destroy()
+        ttk.Button(win, text='선택', command=ok).pack(pady=6)
+        win.grab_set()
+        self.root.wait_window(win)
+        return chosen.get('id')
+
     def _do_mep_setup(self, units_only=False):
+        if self.project_session and len(self.project_session.store.read()['sources']) > 1:
+            return self._do_source_setup(self.project_session, units_only)
         dxf = self._ensure_dxf()
         if not dxf:
             return

@@ -1269,8 +1269,7 @@ def _main_impl():
             zb = float(el_r.get("z_base", el_r.get("elevation", 0.0)) or 0.0)
             _meta.setdefault(id(obj), (getattr(obj, "Label", "?"), zb))
             _hits.setdefault(id(obj), [])
-            floor_match = not el_r.get("level") or el_r["level"] in (
-                floors_info[fi].get("id"), floors_info[fi].get("label"), floors_info[fi].get("storey"))
+            floor_match = not el_r.get("level") or GC.floor_has_level(floors_info[fi], el_r["level"])
             if abs(zb - fz) < _FLOOR_TOL and floor_match:
                 _hits[id(obj)].append(fi)
                 out.append(obj)
@@ -1287,8 +1286,7 @@ def _main_impl():
             _hits.setdefault(id(obj), [])
             below = [k for k, z in enumerate(_fz_list) if z <= elev + _FLOOR_TOL]
             if el_r.get("level"):
-                named = [k for k, floor in enumerate(floors_info) if el_r["level"] in
-                         (floor.get("id"), floor.get("label"), floor.get("storey"))]
+                named = [k for k, floor in enumerate(floors_info) if GC.floor_has_level(floor, el_r["level"])]
                 owner = named[0] if len(named) == 1 else None
             else:
                 owner = max(below, key=lambda k: _fz_list[k]) if below else \

@@ -63,6 +63,25 @@
 - `equipment/outline`은 source symbol envelope이며 `role: equipment|terminal`과 높이를 가진다. 장비 계약은 하단 기준이므로 경로 중심 높이 계산에서 반높이를 뺀다. 닫힌 원본 하나는 본체 하나로 보존하고, 열린 경계는 INSERT 인스턴스를 넘어서 연결하지 않는다. 중첩 기호·겹친 본체는 수량 검토가 필요하다. 포트나 장비 제품 상세는 생성하지 않는다.
 - 선택 영역은 이번 프로필에서 재생성하지 않은 기존 설비에도 적용한다. coverage는 선택한 MEP 원본만 집계하며 건축 전체의 완전성을 평가한 값이 아니다. 고객 도면의 레이어명·핸들·영역·현장 규격은 공개 코드가 아니라 로컬 프로필에 보관한다.
 
+### ★ 한 층에 공종 도면 여러 장 — 건축은 한 원본에서만
+설비 도면(난방·환기)은 같은 세대의 건축 배경(XREF)을 물고 있다. 도면마다 프로젝트를 만들면 벽이 도면 수만큼
+생기고(실측: 실무 단위세대 난방·환기 도면이 각각 벽 98개), 원본마다 층을 만들면 같은 z 에 층이 둘 서서 벽과
+설비가 서로 다른 층으로 갈린다 — 간섭 검사를 할 모델이 없다. 종전엔 결과 JSON 을 사람이 병합해야 했다.
+
+- 원본(프로젝트 source = stack level)의 `floor` 가 같으면 **한 층**이다. z 가 다르면 `StackError`.
+- `categories` 로 그 원본에서 담을 종류를 정한다. 담지 않은 것은 `stack.levels[].excluded` 로 센다.
+  개구부는 같은 원본의 벽과 함께만 담는다(`wall_indices` 가 그 원본 벽을 가리킨다). 첫 원본과 좌표 범위가
+  안 겹치면 경고한다(기준점 확인).
+- 층 항목은 `{"z","label","id","sources":[…]}` 이고 레코드의 `level` 은 **원본 id 그대로**다(EID 접두·수정이
+  원본별). 층 소속은 `geom_contract.floor_has_level` 하나로 빌더·V001/V002·IFC 재검사가 판정한다 — 이름만
+  비교하면 같은 층의 원본이 전부 고아가 된다.
+- 추가: GUI '같은 층 도면 추가(설비)' · MCP `add_project_source` → `ProjectSession.add_source`. 기준(첫) 원본의
+  층·z·offset·매핑을 물려받고 기본 `categories` 는 설비 4종이다. 후보를 먼저 파싱해 실패하면 프로젝트는 그대로다.
+  단일 도면 프로젝트는 층 이름 `Level_1` 을 유지하고, 기존 수정은 `main:` 접두로 그대로 붙는다. 원본이 여럿이면
+  '설비 도면 설정'·'도면 단위 확인'이 도면을 먼저 고른다.
+- 회귀: `tests/test_same_floor_sources.py`, 합성 도면 벽 + 다른 도면 덕트가 한 층에서 FreeCAD/IFC verified·간섭 1
+  (`test_same_floor_drawings_share_one_storey_and_clash_natively`).
+
 ```json
 {
   "source": "plan.dxf",

@@ -196,7 +196,7 @@ def inspect_ifc(data, stats, path):
                 levels = data["floors"]
                 z = GC.base_z(cat, rec)
                 if rec.get("level"):
-                    matches = [f for f in levels if rec["level"] in (f.get("id"), f.get("label"), f.get("storey"))]
+                    matches = [f for f in levels if GC.floor_has_level(f, rec["level"])]
                     wanted = matches[0] if len(matches) == 1 else None
                 elif cat in ("pipe", "duct", "tray", "equipment"):
                     below = [f for f in levels if float(f.get("z", 0)) <= z + 100]

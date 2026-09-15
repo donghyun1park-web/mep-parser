@@ -183,6 +183,37 @@ class ProjectSession:
                                       project_id, decisions=[decision], edits_by_floor=proposed['edits_by_floor'])
             return self.state()
 
+    MEP_CATEGORIES = ('pipe', 'duct', 'tray', 'equipment')
+
+    def add_source(self, path, expected_revision, project_id, categories=MEP_CATEGORIES, source_id=None):
+        """같은 층에 공종 도면을 겹친다 — 기준(첫) 원본의 층·z·offset·매핑을 물려받고, 담을 종류는 `categories`.
+
+        설비 도면도 건축 배경을 물고 있어 전부 담으면 벽이 도면 수만큼 겹친다 — 기본은 설비 종류만.
+        후보를 먼저 파싱해 보고(설정 저장과 같은 규칙) 실패하면 프로젝트를 바꾸지 않는다."""
+        with self._mutex:
+            manifest = self.store.refresh_inputs()
+            self.store.check_revision(manifest, expected_revision, project_id)
+            base = manifest['sources'][0]
+            ids = {s['id'] for s in manifest['sources']}
+            sid = source_id or next('src%d' % n for n in range(2, len(ids) + 3) if 'src%d' % n not in ids)
+            base_label = 'Level_1' if self.store.is_plain_source(manifest) else None
+            source = dict(id=sid, path=str(path), floor=base.get('floor') or base['id'], z=base.get('z', 0),
+                          offset=list(base.get('offset') or [0, 0]), categories=list(categories),
+                          layer_map=base.get('layer_map'), block_map=base.get('block_map'), options={})
+            proposed = copy.deepcopy(manifest)
+            if base_label:
+                proposed['sources'][0].setdefault('label', base_label)
+            proposed['edits_by_floor'][sid] = {}
+            try:
+                proposed['sources'].append(self.store._normalize_source(source, ids))
+                self._parse(proposed)
+            except Exception as exc:
+                raise ValueError('도면을 추가할 수 없습니다(프로젝트는 바뀌지 않았습니다): ' + str(exc)) from exc
+            self.store.add_source(source, expected_revision, project_id, base_label=base_label,
+                                  decisions=[{'action': 'add_source', 'source_id': sid, 'revision': expected_revision,
+                                              'categories': list(categories)}])
+            return self.state()
+
     def configure_units(self, scale, expected_revision, project_id, source_id='main', *, source_sha256):
         """Save reviewed source units without requiring a MEP mapping or losing edits."""
         import ezdxf

@@ -34,10 +34,10 @@ def blender_review_status(receipt):
 
 
 class MepSetupDialog:
-    def __init__(self, parent, session, inventory, on_saved):
+    def __init__(self, parent, session, inventory, on_saved, source_id=None):
         self.session, self.inventory, self.on_saved = session, inventory, on_saved
         self.manifest = session.store.refresh_inputs()
-        self.source_id = self.manifest['sources'][0]['id']
+        self.source_id = source_id or self.manifest['sources'][0]['id']
         self.proposal = None
         self.mappings = []
         self.win = tk.Toplevel(parent)
@@ -65,7 +65,8 @@ class MepSetupDialog:
         self.save_button = ttk.Button(controls, text='설정 저장 · 다시 모델링', command=self._save)
         self.save_button.pack(side='right', padx=5)
         ttk.Button(controls, text='닫기', command=self.win.destroy).pack(side='right')
-        current = self.manifest['sources'][0].get('options', {}).get('mep_profile') or {}
+        source = next(s for s in self.manifest['sources'] if s['id'] == self.source_id)
+        current = source.get('options', {}).get('mep_profile') or {}
         self._load_profile(current)
         self._draw_regions()
 

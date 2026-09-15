@@ -110,34 +110,56 @@ class ProjectStore:
                 else:
                     fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
+    @staticmethod
+    def _normalize_source(source, ids):
+        source = copy.deepcopy(source)
+        if source.get('align'):
+            raise ValueError('Unresolved align is not allowed in a durable project; resolve alignment and save explicit offsets first')
+        sid = source.setdefault('id', 'main')
+        if not isinstance(sid, str) or not sid or ':' in sid or sid in ids:
+            raise ValueError('Source IDs must be unique nonempty strings')
+        source.setdefault('options', {})
+        source.setdefault('unit_policy', 'header')
+        source.setdefault('z', 0)
+        source.setdefault('offset', [0, 0])
+        source['fingerprints'] = {}
+        for key in ('path', 'layer_map', 'block_map', 'schedule'):
+            if source.get(key):
+                source[key] = str(Path(source[key]).resolve())
+                source['fingerprints'][key] = fingerprint(source[key])
+        return source
+
     def create(self, sources, options=None):
         with self.locked():
             if self.path.exists():
                 raise FileExistsError(self.path)
-            normalized = copy.deepcopy(sources)
-            if not normalized:
+            if not sources:
                 raise ValueError('At least one source is required')
-            ids = set()
-            for source in normalized:
-                if source.get('align'):
-                    raise ValueError('Unresolved align is not allowed in a durable project; resolve alignment and save explicit offsets first')
-                sid = source.setdefault('id', 'main')
-                if not isinstance(sid, str) or not sid or ':' in sid or sid in ids:
-                    raise ValueError('Source IDs must be unique nonempty strings')
-                ids.add(sid)
-                source.setdefault('options', {})
-                source.setdefault('unit_policy', 'header')
-                source.setdefault('z', 0)
-                source.setdefault('offset', [0, 0])
-                source['fingerprints'] = {}
-                for key in ('path', 'layer_map', 'block_map', 'schedule'):
-                    if source.get(key):
-                        source[key] = str(Path(source[key]).resolve())
-                        source['fingerprints'][key] = fingerprint(source[key])
+            normalized, ids = [], set()
+            for source in sources:
+                normalized.append(self._normalize_source(source, ids))
+                ids.add(normalized[-1]['id'])
             state = dict(schema_version=1, project_id=str(uuid.uuid4()), revision=0,
                          sources=normalized, options=options or {}, edits_by_floor={sid:{} for sid in ids}, decisions=[])
             atomic_json(self.path, state)
         return self
+
+    def add_source(self, source, expected_revision, project_id, decisions=None, base_label=None):
+        """원본 하나를 더한다(같은 층에 겹칠 공종 도면). 기존 원본의 id·수정은 건드리지 않는다.
+
+        `base_label`: 이름 없던 기준 원본에 붙일 층 이름 — 단일 도면 프로젝트가 층 이름 'Level_1' 을
+        잃지 않게(원본이 둘이 되면 층 이름이 원본 선언에서 나온다)."""
+        with self.locked():
+            before = self.read()
+            self.check_revision(before, expected_revision, project_id)
+            after = copy.deepcopy(before)
+            if base_label and 'label' not in after['sources'][0]:
+                after['sources'][0]['label'] = base_label
+            new = self._normalize_source(source, {s['id'] for s in before['sources']})
+            after['sources'].append(new)
+            after['edits_by_floor'][new['id']] = {}
+            after['decisions'].extend(copy.deepcopy(decisions or []))
+            return self._commit(before, after)
 
     @staticmethod
     def _validate_manifest(data):

@@ -148,7 +148,7 @@ def verify_geometry(data, policy=None):
                 z = GC.base_z(cat, rec)
                 hits = [k for k, v in enumerate(fz) if abs(z - v) < _FLOOR_TOL]
                 if rec.get("level"):
-                    hits = [k for k in hits if rec["level"] in (floors[k].get("id"), floors[k].get("label"), floors[k].get("storey"))]
+                    hits = [k for k in hits if GC.floor_has_level(floors[k], rec["level"])]
                 if not hits:
                     orphan.append({"cat": cat, "index": i, "z_base": z,
                                    "layer": rec.get("layer")})

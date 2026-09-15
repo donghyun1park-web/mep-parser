@@ -89,6 +89,14 @@ def datum_of(category):
     return Z_DATUM[category]
 
 
+def floor_has_level(floor, level):
+    """`floors[]` 한 항목이 레코드의 `level`(원본 id)을 담는가 — 빌더·빌드 전 검사·IFC 재검사가 같이 쓴다.
+
+    같은 층에 겹친 공종 도면(건축 + 난방 + 환기)은 한 층이 원본 여러 개를 `sources` 로 묶는다
+    (stack_build). 층 이름만 보면 원본 id 가 달라 그 층의 벽·설비가 전부 고아가 된다."""
+    return level in (floor.get("id"), floor.get("label"), floor.get("storey")) or level in (floor.get("sources") or ())
+
+
 def base_z(category, rec):
     """해당 카테고리가 쓰는 기준 z 값. MEP 는 elevation, 나머지는 z_base."""
     key = "elevation" if category in _ELEV_CATS else "z_base"

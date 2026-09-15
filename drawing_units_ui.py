@@ -20,10 +20,10 @@ def unit_summary(inventory):
 
 
 class UnitSetupDialog:
-    def __init__(self, parent, session, inventory, on_saved):
+    def __init__(self, parent, session, inventory, on_saved, source_id=None):
         self.session, self.inventory, self.on_saved = session, inventory, on_saved
         self.manifest = session.store.refresh_inputs()
-        self.source_id = self.manifest['sources'][0]['id']
+        self.source_id = source_id or self.manifest['sources'][0]['id']
         self.win = tk.Toplevel(parent)
         self.win.title('도면 단위 확인 · 프로젝트에 저장')
         self.win.geometry('850x650')

@@ -523,3 +523,29 @@ def test_bent_round_duct_preserves_line_path_through_native_ifc(tmp_path):
     # 평면 면만인 관은 면 그대로 나간다 — 직렬화 BREP 는 같은 형상에 파일이 13배였다(실무 난방 IFC 120MB).
     ifc = (tmp_path / "out.ifc").read_text(encoding="utf-8", errors="ignore")
     assert "IFCFACETEDBREP(" in ifc and "IFCADVANCEDBREP(" not in ifc
+
+
+def test_same_floor_drawings_share_one_storey_and_clash_natively(tmp_path):
+    """건축 도면의 벽과 설비 도면의 덕트를 한 층에 겹친다 — 층 하나, IFC verified, 간섭 1.
+
+    설비 도면도 같은 벽을 물고 있지만 덕트만 담는다(`categories`). 층을 원본마다 만들면 같은 높이에
+    층이 둘 서서 벽과 덕트가 다른 층으로 갈린다."""
+    _skip_if_no_freecad()
+    import ezdxf
+    import stack_build as SB
+    arch, mep = tmp_path / "arch.dxf", tmp_path / "mep.dxf"
+    for path, duct in ((arch, False), (mep, True)):
+        doc = ezdxf.new(units=4)
+        for y in (0, 200):
+            doc.modelspace().add_line((0, y), (5000, y), dxfattribs={"layer": "WALL"})
+        if duct:
+            doc.modelspace().add_line((2500, -1500), (2500, 1700), dxfattribs={"layer": "DUCT"})
+        doc.saveas(path)
+    g = SB.build_stack({"levels": [{"id": "A", "source": str(arch), "z": 0, "floor": "L1"},
+                                   {"id": "B", "source": str(mep), "z": 0, "floor": "L1", "categories": ["duct"]}]})
+    geometry = tmp_path / "geometry.json"
+    geometry.write_text(json.dumps(g), encoding="utf-8")
+    _, stats = _build(str(geometry), str(tmp_path / "out"))
+    assert stats["built"]["floors"] == 1 and stats["built"]["mep"] == 1, stats["built"]
+    assert stats["status"] == "verified", stats
+    assert len(stats["clashes"]) == 1, stats["clashes"]

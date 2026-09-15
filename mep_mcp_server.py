@@ -261,9 +261,35 @@ def get_mep_profile(json_path: str = DEFAULT_JSON) -> str:
         session = session_from_geometry(json_path)
         manifest = session.store.refresh_inputs()
         return json.dumps({'project_id': manifest['project_id'], 'revision': manifest['revision'],
-            'sources': [{'id': source['id'], 'path': source['path'],
+            'sources': [{'id': source['id'], 'path': source['path'], 'floor': source.get('floor'),
+                         'categories': source.get('categories'),
                          'mep_profile': source.get('options', {}).get('mep_profile')}
                         for source in manifest['sources']], 'proposals': session.mep_proposals()}, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({'error': str(exc)}, ensure_ascii=False)
+
+
+@mcp.tool()
+def add_project_source(dxf_path: str, expected_revision: int, json_path: str = DEFAULT_JSON,
+                       categories: str = "pipe,duct,tray,equipment") -> str:
+    """Overlay another discipline drawing (heating, ventilation...) on the same floor of this project.
+
+    The new source inherits the first source's floor, z and offset and contributes only `categories`
+    (comma separated) — MEP drawings carry the architectural background, so walls would otherwise be
+    built once per drawing. The candidate is parsed before saving; on failure the project is unchanged.
+    Configure the added drawing's MEP layers with propose_mep_profile(source_id=<returned id>).
+    """
+    try:
+        session = session_from_geometry(json_path)
+        state = session.add_source(dxf_path, expected_revision, session.store.read()['project_id'],
+                                   [c.strip() for c in categories.split(',') if c.strip()])
+        atomic_json(json_path, state['geometry'])
+        return json.dumps({'project_id': state['project_id'], 'revision': state['revision'],
+                           'source_id': session.store.read()['sources'][-1]['id'],
+                           'floors': state['geometry'].get('floors'),
+                           'levels': state['geometry'].get('stack', {}).get('levels')}, ensure_ascii=False)
+    except RevisionConflict as exc:
+        return json.dumps({'error': 'revision_conflict', 'current_revision': exc.current_revision})
     except Exception as exc:
         return json.dumps({'error': str(exc)}, ensure_ascii=False)
 

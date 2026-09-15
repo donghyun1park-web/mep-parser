@@ -207,6 +207,23 @@ def build_stack(spec, base_dir=".", dry_run=False):
            "scale_applied": 1.0, "params": {}, "elements": {}, "warnings": [],
            "contract": GC.contract_block(), "stack": {"levels": []}}
 
+    # ★ 한 층에 공종 도면 여러 장(건축 + 난방 + 환기)을 겹친다 — `floor` 가 같은 원본은 한 층이다.
+    #   설비 도면도 건축 배경(XREF)을 물고 있어 그대로 합치면 벽이 도면 수만큼 겹친다. 그래서 원본마다
+    #   `categories` 로 담을 종류를 정한다(건축은 한 원본에서만). EID·수정은 계속 원본별이다.
+    floors, floor_boxes = {}, {}
+    for lv in spec["levels"]:
+        key = str(lv.get("floor") or lv["id"])
+        f = floors.setdefault(key, {"z": float(lv["z"]), "label": lv.get("label", key), "id": key, "sources": []})
+        if float(lv["z"]) != f["z"]:
+            raise StackError(f"[{lv['id']}] 같은 층({key}) 원본은 z 가 같아야 한다: {lv['z']} ≠ {f['z']}")
+        f["sources"].append(lv["id"])
+        keep = lv.get("categories")
+        if keep is not None:
+            if not keep or set(keep) - set(GC.Z_DATUM):
+                raise StackError(f"[{lv['id']}] 알 수 없는 categories: {keep}")
+            if "opening" in keep and "wall" not in keep:
+                raise StackError(f"[{lv['id']}] 개구부는 같은 원본의 벽과 함께만 담는다(wall_indices 가 그 원본 벽을 가리킨다)")
+
     for lv in spec["levels"]:
         lid = lv["id"]
         src = os.path.join(base_dir, lv["source"])
@@ -227,6 +244,11 @@ def build_stack(spec, base_dir=".", dry_run=False):
             options['level_height'] = lv['height']
         data = dp.parse(src, rules, blocks, edits=_ed, **options)
         parsed[lid] = (src, data)
+        key = str(lv.get("floor") or lid)
+        keep = lv.get("categories")
+        excluded = {c: len(v) for c, v in data["elements"].items() if v and keep is not None and c not in keep}
+        if keep is not None:
+            data["elements"] = {c: v for c, v in data["elements"].items() if c in keep}
 
         dx, dy = lv.get("offset", [0.0, 0.0])
         ev = {"mode": "manual" if lv.get("offset") else "none"}
@@ -241,6 +263,10 @@ def build_stack(spec, base_dir=".", dry_run=False):
 
         rep = {"id": lid, "z": lv["z"], "offset": [dx, dy], "evidence": ev,
                "counts": {k: len(v) for k, v in data["elements"].items() if v}}
+        if key != lid or len(floors[key]["sources"]) > 1:
+            rep["floor"] = key
+        if excluded:
+            rep["excluded"] = excluded      # 이 원본에서 담지 않은 종류 — 조용히 사라지지 않게 센다
         report.append(rep)
         out["stack"]["levels"].append(rep)
         if dry_run:
@@ -272,6 +298,12 @@ def build_stack(spec, base_dir=".", dry_run=False):
         if n_ov:
             print(f"  층고 {lv['height']}mm 가 레이어 높이를 덮음: {n_ov}개")
             rep["height_overrode"] = n_ov
+        box = _bbox(data)
+        first = floor_boxes.setdefault(key, box)
+        if first is not box and first and box and (box[2] < first[0] or box[0] > first[2]
+                                                   or box[3] < first[1] or box[1] > first[3]):
+            out["warnings"].append(f"[{lid}] 같은 층 원본 '{floors[key]['sources'][0]}' 과 좌표 범위가 겹치지 않는다 — "
+                                   "두 도면의 기준점(offset)을 확인할 것")
         out["warnings"] += [f"[{lid}] {w}" for w in data.get("warnings", [])]
         if data.get('edits_report'):
             aggregate = out.setdefault('edits_report', {})
@@ -280,8 +312,9 @@ def build_stack(spec, base_dir=".", dry_run=False):
                     for eid in data['edits_report'].get(key, []))
 
     # floors[] 를 선언에서 직접 만든다 → z 클러스터링이 없으니 층 고아가 불가능하다.
-    out["floors"] = [{"z": float(lv["z"]), "label": lv.get("label", lv["id"])}
-                      for lv in spec["levels"]]
+    # 층 이름과 원본 id 가 다르면(같은 층 여러 원본) 레코드의 `level` 을 `sources` 로 찾는다(GC.floor_has_level).
+    out["floors"] = [f if (len(f["sources"]) > 1 or f["id"] != f["sources"][0]) else {"z": f["z"], "label": f["label"]}
+                     for f in floors.values()]
     if not dry_run and out.get('edits_report'):
         from element_id import suggest_relink
         world_edits = edits_to_world(local_edits, report)
