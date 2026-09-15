@@ -226,6 +226,22 @@ def inspect_mep_source(dxf_path: str) -> str:
 
 
 @mcp.tool()
+def measure_mep_outline_widths(rule: dict, json_path: str = DEFAULT_JSON, source_id: str = 'main',
+                               region_bounds_mm: list | None = None) -> str:
+    """Measure the plan width of every centerline one MEP layer rule selects, from its two parallel outline lines.
+
+    Read-only. Returns width groups (with source handles/refs) and unmeasured sources with a reason
+    (one_side, asymmetric, no_outline, not_straight). Width only: a plan has no section shape or height —
+    take those from product data, then put one rule per group into propose_mep_profile for the user to review.
+    """
+    try:
+        return json.dumps(session_from_geometry(json_path).measure_outline_widths(rule, source_id, region_bounds_mm),
+                          ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({'error': str(exc)}, ensure_ascii=False)
+
+
+@mcp.tool()
 def get_source_units(json_path: str = DEFAULT_JSON, source_id: str = 'main') -> str:
     """Read header/saved units, source-bound length samples and project revision. No changes.
 

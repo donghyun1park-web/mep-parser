@@ -280,6 +280,19 @@ class ProjectSession:
             return {'project_id': manifest['project_id'], 'revision': manifest['revision'],
                     'source_id': source_id, 'inventory': inventory}
 
+    def measure_outline_widths(self, rule, source_id='main', region_bounds_mm=None):
+        """설비 규칙의 중심선마다 외곽선 폭을 잰다(읽기 전용). 영역을 안 주면 저장된 프로필의 영역."""
+        from drawing_units import option_scale, uses_legacy_units
+        from mep_profile import measure_outline_widths
+        with self._mutex:
+            manifest = self.store.refresh_inputs()
+            source = self._profile_source(manifest, source_id)
+            options = source.get('options') or {}
+            region = region_bounds_mm or ((options.get('mep_profile') or {}).get('region') or {}).get('bounds_mm')
+            result = measure_outline_widths(source['path'], rule, option_scale(options),
+                                            legacy_units=uses_legacy_units(source), region=region)
+            return dict(result, project_id=manifest['project_id'], revision=manifest['revision'], source_id=source_id)
+
     def propose_mep_profile(self, profile, expected_revision, project_id, source_id='main', reason=''):
         """Save a reviewable proposal. Never changes a profile, geometry or review acknowledgement."""
         from mep_profile import validate_profile

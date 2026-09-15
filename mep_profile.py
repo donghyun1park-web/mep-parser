@@ -357,6 +357,121 @@ def inspect_mep_source(dxf_path, unit_scale_to_mm=None, *, legacy_units=False):
             'warnings': warnings, 'issues': issues, 'scope': 'Read-only inventory; regions and layer roles require selection'}
 
 
+OUTLINE_PARALLEL_DEG = 2.0     # 외곽선으로 인정하는 중심선과의 각도 차
+OUTLINE_MIN_OVERLAP = 0.5      # 중심선 길이의 이 비율 이상 나란히 겹쳐야 그 덕트의 외곽선
+OUTLINE_MAX_OFFSET_MM = 1000.0  # 중심선에서 한쪽 외곽선까지 최대
+OUTLINE_GROUP_MM = 3.0         # 폭이 이 안에서 이어지면 같은 규격 묶음
+
+
+def measure_outline_widths(dxf_path, row, unit_scale_to_mm=None, *, legacy_units=False, region=None):
+    """규칙에 걸리는 중심선 LINE 마다 같은 레이어의 나란한 외곽선 두 줄 사이 폭을 재 폭별로 묶는다. 읽기 전용.
+
+    설비 도면은 덕트를 외곽선 2줄 + 중심선 1줄로 긋는다 — 폭은 도면에 이미 있다. 종전엔 사람이 규격마다 규칙을
+    만들고 핸들 번호를 일일이 적었다(실측: 환기 한 장에 규칙 7개 · 핸들 41개). 평면에는 **높이와 원형/사각
+    구분이 없으므로** 폭만 증거로 내고 나머지는 제품 자료로 사람이 채운다. 한쪽에만 선이 있거나 양쪽 간격이
+    다르면(비대칭) 묶지 않고 `unmeasured` 로 사유와 함께 남긴다."""
+    from shapely.geometry import LineString
+    from shapely.strtree import STRtree
+    row = copy.deepcopy(row)
+    _validate_filters(row)
+    path = Path(dxf_path)
+    source_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    doc = ezdxf.readfile(path)
+    scale = unit_review(doc, unit_scale_to_mm, legacy_header=legacy_units)['effective_scale_to_mm']
+    if scale is None:
+        raise ValueError('Drawing unit is unresolved; confirm units before measuring outlines')
+    pattern = re.compile(row['pattern'], re.I)
+    centers, lines, issues = [], [], []
+    for entity, ref, appearance in _expanded(doc, issues):
+        if entity is None or not pattern.search(appearance['layer']):
+            continue
+        if _matches(row, pattern, ref, appearance):
+            centers.append((entity, ref, appearance['layer']))
+        elif entity.dxftype() == 'LINE':
+            s, e = entity.dxf.start, entity.dxf.end
+            lines.append((((s.x * scale, s.y * scale), (e.x * scale, e.y * scale)), appearance['layer']))
+    tree = STRtree([LineString(seg) for seg, _ in lines]) if lines else None
+    measured, unmeasured = [], []
+    for entity, ref, layer in centers:
+        item = {'source_ref': ref, 'layer': layer}
+        if entity.dxftype() != 'LINE':
+            unmeasured.append(dict(item, status='not_straight'))
+            continue
+        s, e = entity.dxf.start, entity.dxf.end
+        a, b = (s.x * scale, s.y * scale), (e.x * scale, e.y * scale)
+        mid, length = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2), math.dist(a, b)
+        if region and not (region[0] <= mid[0] <= region[2] and region[1] <= mid[1] <= region[3]):
+            continue
+        item['length_mm'] = round(length, 1)
+        if length < 1e-6:
+            unmeasured.append(dict(item, status='degenerate'))
+            continue
+        u = ((b[0] - a[0]) / length, (b[1] - a[1]) / length)
+        n = (-u[1], u[0])
+        left = right = None
+        for k in (tree.query(LineString([a, b]).buffer(OUTLINE_MAX_OFFSET_MM)) if tree is not None else ()):
+            (p, q), other_layer = lines[int(k)]
+            span = math.dist(p, q)
+            if other_layer != layer or span < 1e-6:
+                continue
+            if abs(u[0] * (q[1] - p[1]) - u[1] * (q[0] - p[0])) / span > math.sin(math.radians(OUTLINE_PARALLEL_DEG)):
+                continue
+            t0, t1 = sorted(((p[0] - a[0]) * u[0] + (p[1] - a[1]) * u[1], (q[0] - a[0]) * u[0] + (q[1] - a[1]) * u[1]))
+            if min(t1, length) - max(t0, 0.0) < OUTLINE_MIN_OVERLAP * length:
+                continue
+            offset = ((p[0] - a[0]) * n[0] + (p[1] - a[1]) * n[1] + (q[0] - a[0]) * n[0] + (q[1] - a[1]) * n[1]) / 2
+            if 0.5 < offset <= OUTLINE_MAX_OFFSET_MM and (left is None or offset < left):
+                left = offset
+            if -OUTLINE_MAX_OFFSET_MM <= offset < -0.5 and (right is None or -offset < right):
+                right = -offset
+        if left is None or right is None:
+            unmeasured.append(dict(item, status='one_side' if (left or right) else 'no_outline'))
+            continue
+        item['offsets_mm'] = [round(left, 1), round(right, 1)]
+        if abs(left - right) > max(3.0, 0.05 * (left + right)):
+            unmeasured.append(dict(item, status='asymmetric'))
+            continue
+        measured.append(dict(item, width_mm=left + right))
+    groups = []
+    for m in sorted(measured, key=lambda m: m['width_mm']):
+        if groups and m['width_mm'] - groups[-1][-1]['width_mm'] <= OUTLINE_GROUP_MM:
+            groups[-1].append(m)
+        else:
+            groups.append([m])
+    out = []
+    for group in groups:
+        widths = [m['width_mm'] for m in group]
+        out.append({'width_mm': round(widths[len(widths) // 2]), 'range_mm': [round(widths[0], 1), round(widths[-1], 1)],
+                    'count': len(group), 'length_mm': round(sum(m['length_mm'] for m in group), 1),
+                    'source_refs': [m['source_ref'] for m in group]})
+    return {'source_sha256': source_hash, 'scale_to_mm': scale, 'groups': out, 'unmeasured': unmeasured,
+            'issues': issues,
+            'scope': 'Plan outline spacing gives width only; section shape and height need product data and user review'}
+
+
+def split_rule_by_outline_widths(row, measurement):
+    """규칙 하나 → 폭 묶음마다 규칙(원 필터 + 폭) + 못 잰 원본을 담는 규칙. 계통·높이·설치 기준은 원 규칙 그대로."""
+    round_section = row.get('category') == 'pipe' or row.get('section_shape') == 'round'
+
+    def narrowed(refs):
+        rule = {k: copy.deepcopy(v) for k, v in row.items() if k not in ('source_handles', 'source_refs')}
+        if all(not r['insert_path'] for r in refs):
+            rule['source_handles'] = sorted({r['handle'].upper() for r in refs})
+        else:
+            rule['source_refs'] = copy.deepcopy(refs)
+        return rule
+
+    rules = []
+    for group in measurement['groups']:
+        rule = narrowed(group['source_refs'])
+        rule['diameter_mm' if round_section else 'width_mm'] = float(group['width_mm'])
+        rules.append(rule)
+    rest = [u['source_ref'] for u in measurement['unmeasured']]
+    if rest:
+        rules.append(narrowed(rest))
+    return rules
+
+
 def _region_status(bounds, region):
     if region is None or bounds is None:
         return 'inside'

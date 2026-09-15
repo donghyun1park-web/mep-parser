@@ -1,4 +1,5 @@
 """GUI form for source-bound MEP profiles. Codex proposals use the same form and save gate."""
+from collections import Counter
 import copy
 import json
 import math
@@ -128,6 +129,7 @@ class MepSetupDialog:
             self.rule_vars[key].set(value)
         ttk.Button(form, text='선택 레이어에 설정 추가', command=self._add_mapping).grid(row=13, column=0, columnspan=2, pady=5)
         ttk.Button(form, text='선택 규칙 수정', command=self._update_mapping).grid(row=14, column=0, columnspan=2, pady=3)
+        ttk.Button(form, text='선택 규칙을 외곽선 폭별로 나누기', command=self._split_by_outline).grid(row=15, column=0, columnspan=2, pady=3)
         self.map_tree = ttk.Treeview(left, columns=('pattern', 'category', 'system', 'dimension', 'placement'), show='headings', height=5)
         for key, label, width in [('pattern', '저장할 규칙', 250), ('category', '형상', 55), ('system', '계통', 65), ('dimension', '치수 mm', 85), ('placement', '설치', 105)]:
             self.map_tree.heading(key, text=label)
@@ -406,6 +408,60 @@ class MepSetupDialog:
                 self._draw_regions()
                 break
 
+    def _form_region(self):
+        index = self.region_select.current()
+        if index < 0:
+            raise ValueError('모델링 영역을 선택하세요.')
+        if index == len(self.regions) + 1:
+            return {'id': self.region_vars['id'].get().strip(),
+                    'bounds_mm': [float(self.region_vars[key].get()) for key in ('xmin', 'ymin', 'xmax', 'ymax')]}
+        return {key: self.regions[index - 1][key] for key in ('id', 'bounds_mm')} if index > 0 else None
+
+    def _split_by_outline(self):
+        """선택 규칙의 중심선을 외곽선 폭으로 재 폭별 규칙으로 나눈다. 단면 형태·높이는 사람이 제품 자료로 채운다."""
+        try:
+            selected = self.map_tree.selection()
+            if len(selected) != 1:
+                raise ValueError('나눌 규칙 한 개를 선택하세요.')
+            index = int(selected[0])
+            row = copy.deepcopy(self.mappings[index])
+            from drawing_units import positive_scale
+            scale = positive_scale(self.level_vars['unit_scale_to_mm'].get())
+            region = self._form_region()
+        except ValueError as exc:
+            messagebox.showerror('외곽선 폭', str(exc), parent=self.win)
+            return
+        source = next(s for s in self.manifest['sources'] if s['id'] == self.source_id)
+        self.status.set('원본 외곽선 간격을 재고 있습니다…')
+
+        def run():
+            try:
+                from mep_profile import measure_outline_widths
+                result = measure_outline_widths(source['path'], row, scale, region=region and region['bounds_mm'])
+                self.win.after(0, lambda: self._split_done(index, row, result))
+            except Exception as exc:
+                self.win.after(0, lambda message=str(exc): messagebox.showerror('외곽선 폭', message, parent=self.win))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _split_done(self, index, row, result):
+        from mep_profile import split_rule_by_outline_widths
+        if result['source_sha256'] != self.inventory['source_sha256']:
+            messagebox.showerror('외곽선 폭', '원본 도면이 바뀌었습니다. 설정 창을 다시 여세요.', parent=self.win)
+            return
+        reasons = Counter(u['status'] for u in result['unmeasured'])
+        lines = [f"폭 {g['width_mm']}mm · {g['count']}개 · {g['length_mm'] / 1000:.1f}m" for g in result['groups']]
+        if reasons:
+            lines.append('못 잰 원본 ' + ' · '.join(f'{k} {v}' for k, v in reasons.items()) + ' → 별도 규칙')
+        self.status.set('외곽선 폭: ' + ' / '.join(lines))
+        if not result['groups']:
+            messagebox.showinfo('외곽선 폭', '잴 수 있는 외곽선이 없습니다.\n' + '\n'.join(lines), parent=self.win)
+            return
+        if not messagebox.askyesno('외곽선 폭', '\n'.join(lines) + '\n\n이 규칙을 폭별로 나눌까요? 평면에는 높이와 원형/사각 구분이 없습니다 — '
+                                   '나눈 규칙마다 제품 자료로 단면 형태·높이를 확인해 입력하세요.', parent=self.win):
+            return
+        self.mappings[index:index + 1] = split_rule_by_outline_widths(row, result)
+        self._refresh_mappings()
+
     def _form_profile(self):
         if not self.mappings and not self.architecture_rules:
             raise ValueError('모델링할 레이어를 최소 한 개 설정하세요.')
@@ -420,14 +476,9 @@ class MepSetupDialog:
         for key in ('unit_scale_to_mm', 'curve_chord_error_mm', 'endpoint_tolerance_mm', 'gap_review_mm'):
             if key in values:
                 profile[key] = values[key]
-        index = self.region_select.current()
-        if index < 0:
-            raise ValueError('모델링 영역을 선택하세요.')
-        if index == len(self.regions) + 1:
-            profile['region'] = {'id': self.region_vars['id'].get().strip(),
-                'bounds_mm': [float(self.region_vars[key].get()) for key in ('xmin', 'ymin', 'xmax', 'ymax')]}
-        elif index > 0:
-            profile['region'] = {key: self.regions[index - 1][key] for key in ('id', 'bounds_mm')}
+        region = self._form_region()
+        if region:
+            profile['region'] = region
         return profile
 
     def _save(self):
