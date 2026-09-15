@@ -552,6 +552,11 @@ def test_same_floor_drawings_share_one_storey_and_clash_natively(tmp_path):
     (clash,) = stats["clashes"]
     # 벽과 경계상자가 안 겹치는 덕트는 불리언까지 가지 않는다(종전 `intersected()` 는 늘 참이라 전부 갔다)
     assert stats["clash_pairs_checked"] == 1, stats["clash_pairs_checked"]
+    # 어디가 느렸는지는 빌드가 스스로 남긴다 — 화면 로그는 빌드가 끝나면 없다.
+    stages = stats["stage_seconds"]
+    assert {"walls", "columns_slabs_beams_spaces_mep", "recompute", "openings", "clash",
+            "fcstd_save_and_reopen", "ifc_export", "ifc_verify"} <= set(stages), stages
+    assert all(isinstance(v, float) and v >= 0 for v in stages.values()), stages
     # 객체 이름만으로는 현장에서 못 찾는다 — 원본 EID 와 겹친 자리의 중심(mm)이 같이 나온다.
     assert clash["struct_eids"] and all(e.startswith("A:") for e in clash["struct_eids"]), clash
     assert clash["mep_eids"] and all(e.startswith("B:") for e in clash["mep_eids"]), clash

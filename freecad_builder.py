@@ -55,6 +55,9 @@ UNBUILT = {}
 PROVENANCE = {}
 BUILT_RECORDS = {}
 CLASH_STATS = {"pairs_checked": 0}   # 경계상자를 통과해 불리언까지 간 쌍 — 1차 거르기가 도는지 영수증이 말한다
+# 단계별 초. 화면 로그로만 나오면 빌드가 끝난 뒤 어디가 느렸는지 알 수 없다(실무 통합 빌드 1,138초의 내역을
+# 알아내려 저장된 FCStd 를 다시 열어 재야 했다). 영수증에 남겨 다음 최적화를 측정으로 고른다.
+STAGE_SECONDS = {}
 OPENING_RESULTS = []
 OPENING_LEAVES = []
 
@@ -1209,6 +1212,7 @@ def _main_impl():
     UNBUILT.clear()
     BUILT_RECORDS.clear()
     CLASH_STATS["pairs_checked"] = 0
+    STAGE_SECONDS.clear()
     OPENING_RESULTS.clear()
     OPENING_LEAVES.clear()
     import verify as V
@@ -1228,6 +1232,9 @@ def _main_impl():
 
     import time as _time
 
+    def _mark(name, started):
+        STAGE_SECONDS[name] = round(_time.time() - started, 1)
+
     print("[2/8] 문서 생성")
     doc = App.newDocument("BIM")
     # Part::Feature.Shape = wire_shape 는 shape 직접 할당 → 개별 recompute 가 빠름.
@@ -1237,6 +1244,7 @@ def _main_impl():
     print("[3/8] 벽체 빌드")
     walls, wall_idx_map, wall_src = build_walls(doc, el.get("wall", []), params)
     print(f"  → {len(walls)}개 벽체 ({_time.time()-_t0:.1f}s)")
+    _mark("walls", _t0)
 
     print("[4/8] 기둥/슬래브/보/공간/MEP 빌드")
     _t1 = _time.time()
@@ -1247,6 +1255,7 @@ def _main_impl():
     mep_objs          = build_mep(doc, el, params)
     print(f"  → cols={len(cols)} slabs={len(slabs)} beams={len(beams)}"
           f" spaces={len(spaces)} mep={len(mep_objs)} ({_time.time()-_t1:.1f}s)")
+    _mark("columns_slabs_beams_spaces_mep", _t1)
     for _c, _v in sorted(UNBUILT.items()):
         _n = {}
         for _e in _v:
@@ -1259,6 +1268,7 @@ def _main_impl():
     try:
         doc.recompute()
         print(f"  → {len(doc.Objects)}개 객체 ({_time.time()-_t2:.1f}s)")
+        _mark("recompute", _t2)
     except Exception as _re:
         print(f"  [warn] recompute 오류: {_re}")
 
@@ -1351,6 +1361,7 @@ def _main_impl():
     _n_fixed = repair_null_walls(walls)
 
     print("[7/8] 문/창 3D (사각형 void + 문짝/창틀) + clash 검사")
+    _t3 = _time.time()
     n_voids, n_leaf = build_openings(doc, el.get("opening", []), wall_idx_map, params)
     if OPENING_LEAVES:
         leaf_objs = [obj for obj, rec in OPENING_LEAVES]
@@ -1361,8 +1372,11 @@ def _main_impl():
         _orphans = [_meta[k] for k, v in _hits.items() if not v]
         _dups = [_meta[k] for k, v in _hits.items() if len(v) > 1]
     print(f"  개구부 void={n_voids}개, 문짝/창틀={n_leaf}개")
+    _mark("openings", _t3)
+    _t4 = _time.time()
     struct_objs = walls + cols + slabs + beams
     clashes = check_clashes(struct_objs, mep_objs)
+    _mark("clash", _t4)
     if clashes:
         print(f"  [CLASH] 간섭 {len(clashes)}건")
         for c in clashes[:30]:
@@ -1477,6 +1491,7 @@ def _main_impl():
                      "struct_eids": c.get("struct_eids", []), "mep_eids": c.get("mep_eids", []),
                      "center_mm": c.get("center_mm")} for c in (clashes or [])],
         "clash_pairs_checked": CLASH_STATS["pairs_checked"],
+        "stage_seconds": STAGE_SECONDS,       # 살아 있는 dict — 저장·IFC 단계가 뒤에 채운다
     }
 
     _stats_path = os.path.abspath(out_base + ".build.json")
@@ -1494,6 +1509,7 @@ def _main_impl():
     with tempfile.TemporaryDirectory(prefix="mep_build_", dir=temp_parent if temp_parent.isascii() else None) as tmpdir:
         tmp_fc = os.path.join(tmpdir, "model.FCStd")
         tmp_ifc = os.path.join(tmpdir, "model.ifc")
+        _t5 = _time.time()
         try:
             doc.saveAs(tmp_fc)
             if not os.path.isfile(tmp_fc) or os.path.getsize(tmp_fc) == 0:
@@ -1510,6 +1526,7 @@ def _main_impl():
             os.replace(tmp_fc, dst)
             status = "diagnostic_nonverified" if diagnostic else "verified"
             build_stats["artifacts"]["fcstd"] = AV.artifact_receipt(dst, PROVENANCE, status)
+            _mark("fcstd_save_and_reopen", _t5)
             if not diagnostic:
                 print(f"FCSTD_DST:{dst}", flush=True)
         except Exception as exc:
@@ -1563,7 +1580,10 @@ def _main_impl():
                 if original_attributes:
                     exporter.exportIfcAttributes = original_attributes
             print(f"  IFC export complete ({_time.perf_counter() - export_started:.1f}s); verifying", flush=True)
+            STAGE_SECONDS["ifc_export"] = round(_time.perf_counter() - export_started, 1)
+            _t6 = _time.time()
             report = V.verify_build(original_data, build_stats, tmp_ifc, stage="post_export")
+            _mark("ifc_verify", _t6)
             build_stats["verify_ifc"] = report.to_dict()
             if report.failed and not allow_errors:
                 raise ValueError("IFC verification failed: " + report.text())
