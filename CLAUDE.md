@@ -101,6 +101,10 @@
   미리보기 '검토 대기' 맨 앞(분류 '간섭', 누르면 설비 부재 선택) · Pascal 검토 탭(`pascal_review` 의 clash) · MCP
   `get_review_items.clash_review` · GUI 파싱 로그 요약. FreeCAD `check_clashes` 항목에도 `struct_eids`·`mep_eids`·
   `center_mm` 이 붙고 로그에 30건까지 찍힌다.
+- ★ FreeCAD `check_clashes` 의 경계상자 1차 거르기는 **한 번도 거르지 않았다** — `BoundBox.intersected()` 는 교차
+  상자를 돌려주고 늘 참이다(불리언은 `intersect()`). 실측(같은 통합 모델 FCStd 재열기): 70 × 42 = 2,940쌍 전부
+  `common()` 161.6초 → 168쌍 68.7초, 간섭 14건 동일. `build.json.clash_pairs_checked` 가 불리언까지 간 쌍을 센다.
+  남은 68.7초는 거의 난방 코일(1쌍 ~1초)이다 — 2.5D 목록을 1차 거르기로 쓰면 더 줄지만 놓침 위험과 맞바꾼다(미적용).
 - 실측(실무 단위세대 난방·환기 통합 모델): **24건을 0.1초에** — RA Ø100 벽 관통 6 · 난방 코일 벽 하부 통과 4 ·
   두께 10mm '벽' 오결합 의심 14(난방 12 · SA 2). 같은 모델의 FreeCAD 불리언 간섭 14쌍과 위치가 전부 대응한다
   (FreeCAD 는 체인으로 합친 벽 단위라 쌍이 적다). 그 FreeCAD 통합 빌드는 1,138.6초였다.

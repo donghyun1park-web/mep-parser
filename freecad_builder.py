@@ -54,6 +54,7 @@ MATERIALS_APPLIED = {}   # 재질명 → 부여된 객체 수(build.json 으로 
 UNBUILT = {}
 PROVENANCE = {}
 BUILT_RECORDS = {}
+CLASH_STATS = {"pairs_checked": 0}   # 경계상자를 통과해 불리언까지 간 쌍 — 1차 거르기가 도는지 영수증이 말한다
 OPENING_RESULTS = []
 OPENING_LEAVES = []
 
@@ -1116,12 +1117,15 @@ def check_clashes(struct_objs, mep_objs, vol_tol=1.0):
             mbb = _bb(mo)
             if mbb is None:
                 continue
-            # AABB 겹침 확인 (Intersect)
+            # AABB 겹침 확인. ★ `intersected()` 는 교차 **상자**를 돌려주고 늘 참이라 거르지 못했다 — 불리언은
+            #   `intersect()` 다. 실측(단위세대 통합 모델): 벽 70 × 설비 42 = 2,940쌍 전부 common() 161.6초 →
+            #   168쌍 68.7초, 간섭 14건 그대로.
             try:
-                if not sbb.intersected(mbb):
+                if not sbb.intersect(mbb):
                     continue
             except Exception:
                 continue
+            CLASH_STATS["pairs_checked"] += 1
             try:
                 s_shape = so.Shape
                 m_shape = mo.Shape
@@ -1204,6 +1208,7 @@ def _main_impl():
     original_data = copy.deepcopy(data)
     UNBUILT.clear()
     BUILT_RECORDS.clear()
+    CLASH_STATS["pairs_checked"] = 0
     OPENING_RESULTS.clear()
     OPENING_LEAVES.clear()
     import verify as V
@@ -1471,6 +1476,7 @@ def _main_impl():
         "clashes": [{"struct": c.get("struct"), "mep": c.get("mep"), "volume_mm3": c.get("volume_mm3"),
                      "struct_eids": c.get("struct_eids", []), "mep_eids": c.get("mep_eids", []),
                      "center_mm": c.get("center_mm")} for c in (clashes or [])],
+        "clash_pairs_checked": CLASH_STATS["pairs_checked"],
     }
 
     _stats_path = os.path.abspath(out_base + ".build.json")

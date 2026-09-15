@@ -540,15 +540,18 @@ def test_same_floor_drawings_share_one_storey_and_clash_natively(tmp_path):
             doc.modelspace().add_line((0, y), (5000, y), dxfattribs={"layer": "WALL"})
         if duct:
             doc.modelspace().add_line((2500, -1500), (2500, 1700), dxfattribs={"layer": "DUCT"})
+            doc.modelspace().add_line((2500, 3000), (4500, 3000), dxfattribs={"layer": "DUCT"})   # 벽과 안 겹친다
         doc.saveas(path)
     g = SB.build_stack({"levels": [{"id": "A", "source": str(arch), "z": 0, "floor": "L1"},
                                    {"id": "B", "source": str(mep), "z": 0, "floor": "L1", "categories": ["duct"]}]})
     geometry = tmp_path / "geometry.json"
     geometry.write_text(json.dumps(g), encoding="utf-8")
     _, stats = _build(str(geometry), str(tmp_path / "out"))
-    assert stats["built"]["floors"] == 1 and stats["built"]["mep"] == 1, stats["built"]
+    assert stats["built"]["floors"] == 1 and stats["built"]["mep"] == 2, stats["built"]
     assert stats["status"] == "verified", stats
     (clash,) = stats["clashes"]
+    # 벽과 경계상자가 안 겹치는 덕트는 불리언까지 가지 않는다(종전 `intersected()` 는 늘 참이라 전부 갔다)
+    assert stats["clash_pairs_checked"] == 1, stats["clash_pairs_checked"]
     # 객체 이름만으로는 현장에서 못 찾는다 — 원본 EID 와 겹친 자리의 중심(mm)이 같이 나온다.
     assert clash["struct_eids"] and all(e.startswith("A:") for e in clash["struct_eids"]), clash
     assert clash["mep_eids"] and all(e.startswith("B:") for e in clash["mep_eids"]), clash
