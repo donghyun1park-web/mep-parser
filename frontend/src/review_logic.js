@@ -140,6 +140,30 @@ export function buildReviewEntries(elements={}, report={}, clashes=[], connectiv
     catRank(a)-catRank(b) || a.key.localeCompare(b.key)));
 }
 
+// ── 검토 목록의 화면 문구 ────────────────────────────────────────────────────
+// 여기 있는 것은 전부 **문자열 in / 문자열 out** 이다. DOM 은 `app.js` 가 붙이기만 한다 —
+// 그래야 브라우저 없이 node:test 로 잠글 수 있고, 화면을 믿을 근거가 테스트에 남는다.
+export function escHtml(value) {
+  return String(value==null?'':value).replace(/[&<>"']/g,
+    c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+export function reviewRowHtml(entry, canSave=false) {
+  const head=`<button class="review-item" data-eid="${escHtml(entry.eid||'')}" data-orphan="${escHtml(entry.orphan||'')}">`
+    +`<b>${escHtml(entry.eid||entry.orphan||entry.kind)}</b> · ${escHtml(entry.category)}`
+    +`${entry.floor?' · 층 '+escHtml(entry.floor):''}<small>${escHtml(entry.reason)}</small></button>`;
+  // 이음 확정은 서버(프로젝트)에 저장된다 — 독립 HTML 로 연 미리보기에는 저장할 곳이 없어 버튼을 두지 않는다.
+  if (!entry.confirm || !canSave) return head;
+  return `<div class="review-row">${head}<button class="confirm-gap" data-gap="${escHtml(entry.confirm.id)}"`
+    +` data-confirmed="${entry.confirm.confirmed?'1':''}">${entry.confirm.confirmed?'확정 취소':'이음 확정'}</button></div>`;
+}
+
+export function batchButtonHtml(ids, canSave=false) {
+  const count=(ids||[]).length;
+  if (!count || !canSave) return '';
+  return `<button class="confirm-gap" data-batch="1">일상 이음 후보 ${count}건 일괄 확정</button>`;
+}
+
 export function deriveSectionRange(elements={}, floors=[], zRange) {
   const values=[];
   for (const floor of floors || []) if (Number.isFinite(Number(floor.z))) values.push(Number(floor.z));

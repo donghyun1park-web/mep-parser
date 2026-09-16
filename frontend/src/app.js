@@ -2,7 +2,8 @@ import './style.css';
 import MepEdit from 'mep-edit';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { buildReviewEntries, reviewBannerText, bridgeRequest, routineCandidateIds, deriveSectionRange, floorKeyOf, isZVisible, reconcileSection, uniqueByEid, fitDistance, recordOnEditFloor, editBackdropState } from './review_logic.js';
+import { buildReviewEntries, reviewBannerText, bridgeRequest, routineCandidateIds,
+         escHtml, reviewRowHtml, batchButtonHtml, deriveSectionRange, floorKeyOf, isZVisible, reconcileSection, uniqueByEid, fitDistance, recordOnEditFloor, editBackdropState } from './review_logic.js';
 import { screenToDrawing, drawingUnitsPerPixel } from './svg_coordinates.js';
 import { linearMepGeometry, footprintMepGeometry, mepPropertyKeys } from './mep_preview_geometry.js';
 
@@ -688,18 +689,11 @@ function renderReview(){
   banner.textContent=reviewBannerText(CLASH_REVIEW.summary||{},CONNECTIVITY.summary||{});
   banner.hidden=!banner.textContent;
   // 일상 후보(직선·엘보 · 규격 그대로)는 한 번에 확정한다 — 확인은 사람이 하되 26번 누르게 하지 않는다.
-  const routine=RUNTIME?routineCandidateIds(CONNECTIVITY):[];
   const batch=document.getElementById('reviewBatch');
-  batch.innerHTML=routine.length?`<button class="confirm-gap" data-batch="1">일상 이음 후보 ${routine.length}건 일괄 확정</button>`:'';
-  batch.hidden=!routine.length;
-  document.getElementById('reviewList').innerHTML=shown.length?shown.map(reviewRowHtml).join(''):'없음';
-}
-function reviewRowHtml(x){
-  const head=`<button class="review-item" data-eid="${escHtml(x.eid||'')}" data-orphan="${escHtml(x.orphan||'')}"><b>${escHtml(x.eid||x.orphan||x.kind)}</b> · ${escHtml(x.category)}${x.floor?' · 층 '+escHtml(x.floor):''}<small>${escHtml(x.reason)}</small></button>`;
-  // 이음 확정은 서버(프로젝트)에 저장된다 — 독립 HTML 로 연 미리보기에는 저장할 곳이 없어 버튼을 두지 않는다.
-  if(!x.confirm||!RUNTIME) return head;
-  return `<div class="review-row">${head}<button class="confirm-gap" data-gap="${escHtml(x.confirm.id)}"`
-    +` data-confirmed="${x.confirm.confirmed?'1':''}">${x.confirm.confirmed?'확정 취소':'이음 확정'}</button></div>`;
+  batch.innerHTML=batchButtonHtml(routineCandidateIds(CONNECTIVITY),!!RUNTIME);
+  batch.hidden=!batch.innerHTML;
+  document.getElementById('reviewList').innerHTML=
+    shown.length?shown.map(x=>reviewRowHtml(x,!!RUNTIME)).join(''):'없음';
 }
 async function confirmGap(ids,confirmed){
   setSaveStatus('saving','저장 중…');
@@ -1115,7 +1109,6 @@ function setActionLock(locked){
   svg2.style.pointerEvents=locked?'none':'';
   renderer.domElement.style.pointerEvents=locked?'none':'';
 }
-function escHtml(value){ return String(value==null?'':value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function renderOrphans(){
   const list=orphanSuggestions.filter(s=>!deferredOrphans.has(s.orphan));
   document.getElementById('norphans').textContent=list.length;

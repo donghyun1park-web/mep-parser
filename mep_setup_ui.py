@@ -577,7 +577,10 @@ class MepSetupDialog:
         self.manifest = self.session.store.read()
         self.proposal = None
         self.save_button.state(['!disabled'])
-        self.status.set(f"프로젝트 revision {state['revision']} 저장 완료. 원본 비교·검토 진단을 확인하세요.")
+        # 실무 도면의 설비 해석을 방금 정했다 — 회귀로 잠그지 않으면 다음 변경이 조용히 바꾼다.
+        self.status.set(f"프로젝트 revision {state['revision']} 저장 완료. 원본 비교·검토 진단을 확인하세요. "
+                        "· 회귀 등록: tests/golden.local.json 에 이 프로젝트 폴더를 중립적인 이름으로 적고 "
+                        "python tests/test_golden.py --bless (docs/release_checklist.md)")
         self._refresh_proposals()
         self.on_saved(state)
 

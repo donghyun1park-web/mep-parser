@@ -42,12 +42,13 @@
 | `sample_mep.dxf` | **MEP 샘플** (배관/덕트/트레이 중심선 + 장비 블록, Phase 2.7 검증용) |
 | `geometry.json` | 파서 출력 예시 |
 | `tests/run_all.py` | 의존성 없는 테스트 러너(`python tests/run_all.py`). **빌드 게이트는 `pytest tests` 다** — `build_exe.bat` 이 빌드 전에 돌리고 실패 시 중단한다. `run_all.py` 는 pytest 픽스처(`tmp_path`·`monkeypatch`)를 못 주어 테스트 48개를 못 돌리므로 **미실행이 있으면 스스로 exit 1** 을 낸다 — 반쪽 러너가 게이트 행세를 하지 않게 |
-| `tests/golden.json` | **실무 도면 회귀 다이제스트.** 도면은 고객 자료라 커밋하지 않고 경로만 `tests/golden.local.json`(gitignore)에 둔다. 도면이 없으면 `[skip]`. 갱신은 `python tests/test_golden.py --bless`. 항목은 두 종류다 — `dxf`+`layer_map`(레이어맵 파싱) · **`project`(설비 `.mep` 폴더)**: 저장된 프로필·영역·단위 그대로 `ProjectSession` 으로 다시 해석해 설비 요약(이음·커버리지·연결성·간섭·진단 코드)까지 본다. 폴더는 **복사해서** 연다(원본 revision 을 건드리지 않게) |
+| `tests/golden.json` | **실무 도면 회귀 다이제스트.** 도면은 고객 자료라 커밋하지 않고 경로만 `tests/golden.local.json`(gitignore)에 둔다. 도면이 없으면 `[skip]`. 갱신은 `python tests/test_golden.py --bless`. 항목은 두 종류다 — `dxf`+`layer_map`(레이어맵 파싱) · **`project`(설비 `.mep` 폴더)**: 저장된 프로필·영역·단위 그대로 `ProjectSession` 으로 다시 해석해 설비 요약(이음·커버리지·연결성·간섭·진단 코드)까지 본다. 폴더는 **복사해서** 연다(원본 revision 을 건드리지 않게). 새 도면 등록 절차와 커밋 전 스캔은 `docs/release_checklist.md` |
 | `extractors.py` + `mep_macro/` | **FreeCAD 안에서만** 쓰는 라이브 자연어 모델링용 헬퍼(`freecad_live_addon`). 일반 파이프라인은 이걸 거치지 않는다 |
 | `FIX_SPEC.md` | 면선 페어링·곡선벽 개선의 이전 설계 기록. 현재 구현 여부는 코드와 회귀 테스트를 확인한다. |
 | `pascal_bridge.py` | **geometry.json ↔ Pascal(pascalorg/editor) 씬 그래프.** 벽·기둥·슬래브·zone·개구부와 설비(배관·덕트·트레이는 **전용 플러그인 노드**, 단면 mm). 단위(mm↔m)·축(Pascal 은 Y-up)·고저(레벨 스택) 환산은 전부 `geom_contract` 를 부른다. Pascal 이 표현 못 하거나 스키마 범위를 넘긴 것은 `unconvertible` 로 **세어서 보고**한다 |
 | `pascal_host/` | **Pascal 편집 화면 호스트(3단계 첫 조각).** `PASCAL_COMMIT`(고정 커밋) · `overlay/`(체크아웃에 얹는 우리 파일: `/mep` 페이지 · `/api/mep/*` 서버 측 프록시 · `lib/mep-plugin/` 설비 노드 플러그인) · `run_host.py`(저장소 서버와 Pascal 을 함께 띄우는 실행기) |
 | `docs/project_workflow.md` | 프로젝트 저장·복구·재연결·출력 검증 사용법과 현재 범위. |
+| `docs/release_checklist.md` | **릴리스 전 수동 점검 5가지**(브라우저·FreeCAD·Pascal 은 CI 에 없다) + 골든 등록 절차. 자동 검사가 덮는 것은 적지 않는다 — 순수 함수는 전부 `npm test` 가 잠갔다 |
 
 ## geometry.json 스키마
 

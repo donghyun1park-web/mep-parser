@@ -15,8 +15,17 @@
                  "layer_map": "layer_map.csv",
                  "block_map": "block_map.csv"}}
 
+항목은 두 종류다:
+    {"단위세대_난방": {"dxf": "C:/.../heating.dxf", "layer_map": "layer_map.csv"},
+     "단위세대_환기": {"project": "C:/.../unit.mep"}}
+`project` 는 저장된 프로필·영역·단위 그대로 `ProjectSession` 으로 다시 해석해 설비 요약까지 본다
+(폴더는 복사해서 연다 — 원본 revision 을 건드리지 않게).
+
 갱신(의도한 변화일 때만):
     python tests/test_golden.py --bless
+
+★ **키 이름은 중립적으로** — 현장명·고객명은 공개 저장소에 나가면 안 된다. 등록 절차와 커밋 전
+식별자 스캔은 `docs/release_checklist.md` 에 있다.
 """
 import contextlib
 import hashlib

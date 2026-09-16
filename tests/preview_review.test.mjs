@@ -5,6 +5,8 @@ import {
   reviewBannerText,
   bridgeRequest,
   routineCandidateIds,
+  reviewRowHtml,
+  batchButtonHtml,
   deriveSectionRange,
   floorKeyOf,
   isZVisible,
@@ -204,4 +206,27 @@ test('a clash row and the banner say when the wall under them is one the parser 
   // 검토 표시가 없는 벽은 아무 말도 붙이지 않는다.
   const clean=[{...clashes[0], struct:{eid:'w:ok',category:'wall',width_mm:200}}];
   assert.ok(!buildReviewEntries({}, {}, clean)[0].reason.includes('벽 위치'));
+});
+
+test('review rows carry the hooks the click handler needs, and no save buttons without a server', () => {
+  const gap={key:'gap:1', kind:'gap', eid:'d:1', category:'연결 후보', floor:'', reason:'직선 이음 후보',
+             confirm:{id:'gap:abc', confirmed:false}};
+  const saved=reviewRowHtml(gap, true);
+  assert.match(saved, /data-gap="gap:abc"/);
+  assert.match(saved, /data-confirmed=""/);
+  assert.match(saved, /이음 확정</);
+  assert.match(reviewRowHtml({...gap, confirm:{id:'gap:abc', confirmed:true}}, true), /data-confirmed="1".*확정 취소</s);
+  // 서버 없이 연 독립 HTML 에는 저장할 곳이 없다 — 버튼을 그리지 않는다.
+  const standalone=reviewRowHtml(gap, false);
+  assert.ok(!standalone.includes('confirm-gap') && standalone.includes('data-eid="d:1"'));
+  assert.equal(batchButtonHtml(['a','b'], false), '');
+  assert.match(batchButtonHtml(['a','b'], true), /data-batch="1".*2건/);
+  assert.equal(batchButtonHtml([], true), '');
+});
+
+test('review text is escaped so a layer name cannot inject markup', () => {
+  const row=reviewRowHtml({eid:'<img src=x>', category:'간섭', floor:'', reason:'a & b "c"'}, false);
+  assert.ok(!row.includes('<img'));
+  assert.match(row, /&lt;img src=x&gt;/);
+  assert.match(row, /a &amp; b &quot;c&quot;/);
 });
