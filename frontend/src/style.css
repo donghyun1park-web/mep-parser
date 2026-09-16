@@ -63,6 +63,7 @@ html,body{margin:0;height:100%;overflow:hidden;font-family:"Segoe UI",sans-serif
 .section-inputs{display:grid;grid-template-columns:1fr 82px auto;gap:5px;align-items:center;margin-top:6px}
 #sectionEnabled{width:auto}
 .review-filters{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-bottom:6px}
+.review-banner{margin:4px 0;padding:6px 8px;background:#2a2317;border-left:3px solid #e0a040;color:#d8c49a;font-size:12px;line-height:1.4}
 #reviewList{max-height:30vh;overflow:auto}
 .review-item{display:block;width:100%;text-align:left;margin:4px 0;padding:7px;background:#20242b;border-left:3px solid #e0a040}
 .review-item small{display:block;color:#9aa4b2;margin-top:2px;white-space:normal}

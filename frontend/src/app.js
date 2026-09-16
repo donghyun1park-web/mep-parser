@@ -2,7 +2,7 @@ import './style.css';
 import MepEdit from 'mep-edit';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { buildReviewEntries, deriveSectionRange, floorKeyOf, isZVisible, reconcileSection, uniqueByEid, fitDistance, recordOnEditFloor, editBackdropState } from './review_logic.js';
+import { buildReviewEntries, reviewBannerText, deriveSectionRange, floorKeyOf, isZVisible, reconcileSection, uniqueByEid, fitDistance, recordOnEditFloor, editBackdropState } from './review_logic.js';
 import { screenToDrawing, drawingUnitsPerPixel } from './svg_coordinates.js';
 import { linearMepGeometry, footprintMepGeometry, mepPropertyKeys } from './mep_preview_geometry.js';
 
@@ -683,6 +683,10 @@ function renderReview(){
   reviewFloor.value=floors.includes(keepFloor)?keepFloor:''; reviewCategory.value=categories.includes(keepCategory)?keepCategory:'';
   const shown=entries.filter(x=>(!reviewFloor.value||x.floor===reviewFloor.value)&&(!reviewCategory.value||x.category===reviewCategory.value));
   document.getElementById('reviewCount').textContent=shown.length;
+  // 목록 전체가 가정 높이 위에 서 있으면 줄마다의 표시로는 안 보인다 — 맨 위에 한 줄.
+  const banner=document.getElementById('reviewBanner');
+  banner.textContent=reviewBannerText(CLASH_REVIEW.summary||{},CONNECTIVITY.summary||{});
+  banner.hidden=!banner.textContent;
   document.getElementById('reviewList').innerHTML=shown.length?shown.map(reviewRowHtml).join(''):'없음';
 }
 function reviewRowHtml(x){

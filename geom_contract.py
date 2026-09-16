@@ -250,6 +250,15 @@ def _dim_source(category, key, rec, params):
 
 _HEIGHT_KEYS = {"wall": ("height",), "column": ("height",), "zone": ("height",), "equipment": ("height",),
                 "opening": ("height", "sill"), "slab": ("thickness",), "beam": ("thickness",)}
+# 평면도에서 온 z — 0 은 값이 아니라 값이 없다는 뜻이다(`height_basis` 의 `plan_z`).
+PLAN_Z_EPS_MM = 1e-6
+
+
+def is_plan_zero(value):
+    try:
+        return abs(float(value)) <= PLAN_Z_EPS_MM
+    except (TypeError, ValueError):
+        return False
 
 
 def height_basis(category, rec, params=None):
@@ -262,7 +271,12 @@ def height_basis(category, rec, params=None):
 
     판정: 기준 z 는 `overrides`·`elevation_source`(declared/profile) → declared · 도면 z → source · 없음 →
     assumed. 치수는 `dims_assumed`·`dimension_basis` 가 가정이라 말했거나 `params`/기본값으로 떨어지면 가정이다.
-    하나라도 가정이면 그 부재의 `z` 는 assumed 다."""
+    하나라도 가정이면 그 부재의 `z` 는 assumed 다.
+
+    ★ **평면도의 z 0 은 근거가 아니다.** 평면도는 설비를 전부 z 0 에 그린다 — 0 은 "도면이 높이를 말해
+      줬다" 가 아니라 **정보가 없다**는 뜻이다. 그걸 `source` 로 세면 바닥에 깔린 덕트가 선언한 줄과
+      똑같아 보인다(실측: 환기 덕트 45개가 전부 z 0 이던 때 간섭 2건이 나왔고, 제 높이로 올리자 0건이
+      됐다 — 형상은 양쪽 다 멀쩡했다). 그래서 기준 z 가 0 이면 `assumed` 에 `plan_z` 를 넣는다."""
     assumed = []
     overrides = rec.get("overrides") or {}
     if category in _ELEV_CATS:
@@ -270,7 +284,13 @@ def height_basis(category, rec, params=None):
         if overrides.get("elevation") is not None or source in ("declared", "profile"):
             datum = "declared"
         elif source == "source" or rec.get("elevation") is not None:
-            datum = "source"
+            raw = rec.get("source_elevation_mm")
+            raw = rec.get("elevation") if raw is None else raw
+            if is_plan_zero(raw):
+                datum = "assumed"
+                assumed.append("plan_z")
+            else:
+                datum = "source"
         else:
             datum = "assumed"
             assumed.append("elevation")

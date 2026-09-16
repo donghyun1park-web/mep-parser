@@ -127,6 +127,21 @@
   **고치지 않고 말하기만 한다** — 높이를 추정해 채우는 것이 애초에 이 문제를 만들었다.
   실측(통합 모델 24건, 규격 실측 이전 파일): **24건 전부 `assumed`** — 난방 배관 22건이 지름 가정(PB Ø15.9),
   덕트 2건이 단면 가정이고 z 쌍은 전부 (벽=도면 z, 설비=가정)이다. 규격을 외곽선으로 재 선언하면 그만큼 준다.
+- ★ **평면도의 z 0 은 근거가 아니다**(`geom_contract.is_plan_zero` → `height_basis` 의 `plan_z`). 평면도는
+  설비를 전부 z 0 에 그리므로 0 은 "도면이 높이를 말해 줬다" 가 아니라 **정보가 없다**는 뜻이다. 종전 규약은
+  그걸 `source` 로 세서, 바닥에 깔린 덕트가 **선언한 줄과 똑같아 보였다** — 이 표가 막으려던 바로 그 상황이다.
+  기준 z 가 0 이면 `assumed` 에 `plan_z` 가 들어간다.
+  그 반대쪽 함정도 같다: **z 가 0 이 아니라고 설치 높이인 것은 아니다.** 실측(단위세대 환기) 슬리브 2개의
+  원본 z 는 **12,357mm · 24,715mm** 였다 — 한 층짜리 세대에서 12m·24m 는 높이가 아니라 도면 작성 흔적이다.
+  둘 다 프로필 진단으로만 말한다(`mep_profile`, 고치지 않는다) — `placement: source` 규칙의 원본이 전부 z 0
+  이면 **`PLAN_Z_AS_ELEVATION`**, 선언한 층 높이(`levels.floor_to_floor_mm`) 밖이면 **`SOURCE_Z_OUTSIDE_STOREY`**
+  (층 높이 선언이 없으면 잴 기준이 없어 아무 말도 하지 않는다). 설정 화면의 '설치 기준' 이 `source` 면 폼이
+  그 자리에서 `slab_soffit`·`center` 를 권한다. 실측: 환기 프로젝트에 둘 다 1건씩 — 디퓨저 11개가 z 0(바닥),
+  슬리브 2개가 층 밖이다.
+- ★ **목록 전체가 가정 위에 서 있다는 사실은 줄마다의 표시로 안 보인다** — 검토 목록 맨 위 한 줄로 말한다
+  (`review_logic.reviewBannerText`, 미리보기 `#reviewBanner` · Pascal 검토 탭 · `pascal_review.summary`).
+  가정이 하나도 없으면 아무 말도 하지 않는다(빈 문자열). 연결 요약도 같은 수를 든다
+  (`mep_connectivity.summary.assumed_basis` = `{candidates, open_ends}`).
 - 붙는 곳: `ProjectSession._parse` → `geometry.clash_review`(실패하면 `summary.error` — 모델·수정은 막지 않는다) ·
   미리보기 '검토 대기' 맨 앞(분류 '간섭', 누르면 설비 부재 선택) · Pascal 검토 탭(`pascal_review` 의 clash) · MCP
   `get_review_items.clash_review` · GUI 파싱 로그 요약. FreeCAD `check_clashes` 항목에도 `struct_eids`·`mep_eids`·

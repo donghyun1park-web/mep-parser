@@ -180,7 +180,9 @@
     },
     "mep_issues": {
       "OUTLINE_OPEN": 4,
-      "REGION_CROSSING": 1
+      "PLAN_Z_AS_ELEVATION": 1,
+      "REGION_CROSSING": 1,
+      "SOURCE_Z_OUTSIDE_STOREY": 1
     },
     "mep_joints": {
       "joints": 0,

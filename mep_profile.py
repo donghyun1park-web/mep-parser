@@ -676,6 +676,37 @@ def apply_mep_profile(doc, result, profile):
         missing_refs = {_ref_key(r) for r in row.get('source_refs', [])} - seen[index]
         if missing_handles or missing_refs:
             raise ValueError(f'Explicit source filter did not match: rule {index}, handles {sorted(missing_handles)}, refs {len(missing_refs)}')
+    # 평면도의 z 는 0 이다 — `placement: source` 로 두면 그 0 이 설치 높이가 되어 덕트가 바닥에 깔린다.
+    # 형상은 멀쩡해 보이고 간섭만 조용히 달라진다(실측: 덕트 45개 z 0 에서 간섭 2건 → 제 높이에서 0건).
+    # 반대쪽 함정도 같은 자리에 있다: 도면 z 가 0 이 아니라고 설치 높이인 것은 아니다. 실측(단위세대 환기)
+    # 슬리브 2개의 원본 z 는 12,357mm·24,715mm 였다 — 한 층짜리 세대에서 12m·24m 는 높이가 아니라 도면
+    # 작성 흔적이다. 선언한 층 높이 밖이면 그 사실만 말한다(고르지도, 고치지도 않는다).
+    storey = profile.get('levels') or {}
+    span = None
+    if storey.get('floor_to_floor_mm'):
+        top = float(storey.get('structural_slab_top_mm', 0.))
+        span = (top - float(storey.get('slab_thickness_mm', 0.)), top + float(storey['floor_to_floor_mm']))
+    for index, records in sorted(grouped.items()):
+        row = profile['layers'][index]
+        if row['placement'] != 'source' or not records:
+            continue
+        if all(GC.is_plan_zero(rec.get('source_elevation_mm', 0.)) for rec in records):
+            issues.append({'code': 'PLAN_Z_AS_ELEVATION', 'severity': 'warning',
+                           'reason': 'Every selected source sits at z 0; a plan states no installation height. '
+                                     'Declare slab_soffit or center instead of source.',
+                           'rule': index, 'pattern': row['pattern'], 'category': row['category'],
+                           'count': len(records)})
+            continue
+        outside_storey = [rec for rec in records if span is not None
+                          and not span[0] - 1e-6 <= float(rec.get('source_elevation_mm') or 0.) <= span[1] + 1e-6]
+        if outside_storey:
+            elevations = sorted({round(float(r.get('source_elevation_mm') or 0.), 1) for r in outside_storey})
+            issues.append({'code': 'SOURCE_Z_OUTSIDE_STOREY', 'severity': 'warning',
+                           'reason': 'Source z lies outside the declared storey; a drawing z is not an '
+                                     'installation height. Declare a placement instead of source.',
+                           'rule': index, 'pattern': row['pattern'], 'category': row['category'],
+                           'count': len(outside_storey), 'storey_mm': list(span),
+                           'source_elevations_mm': elevations[:10]})
     elements = result['elements']
     rebuilt_categories = set()
     if any(row['category'] in ('pipe', 'duct', 'tray') for _, row in rules):

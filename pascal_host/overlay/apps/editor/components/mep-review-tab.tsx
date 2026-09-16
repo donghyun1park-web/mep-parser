@@ -8,7 +8,8 @@ import { useViewer } from '@pascal-app/viewer'
 import { useCallback, useEffect, useState } from 'react'
 
 type Item = { category: string; eid: string | null; layer?: string | null; reason: string }
-type Review = { revision: number; items: Item[]; unconvertible: Item[] }
+type Summary = { clash_total: number; clash_assumed: number; gap_total: number; gap_assumed: number }
+type Review = { revision: number; items: Item[]; unconvertible: Item[]; summary?: Summary }
 type MepMeta = Record<string, unknown>
 type AnyNode = { id: string; type: string; name?: string; metadata?: { mep?: MepMeta } } & Record<string, unknown>
 
@@ -24,6 +25,14 @@ const SIZE_KEYS: [string, string, number][] = [
 function eidOf(node: AnyNode | undefined): string | undefined {
   const eid = node?.metadata?.mep?.eid
   return typeof eid === 'string' ? eid : undefined
+}
+
+function bannerText(summary: Summary | undefined): string {
+  if (!summary || (!summary.clash_assumed && !summary.gap_assumed)) return ''
+  const parts: string[] = []
+  if (summary.clash_total) parts.push(`간섭 ${summary.clash_total}건 중 가정 높이 ${summary.clash_assumed}건`)
+  if (summary.gap_total) parts.push(`연결 후보 ${summary.gap_total}건 중 가정 ${summary.gap_assumed}건`)
+  return `${parts.join(' · ')} — 평면도에는 높이가 없습니다. 설비 설정에서 계통별 설치 높이·규격을 선언하면 줄어듭니다.`
 }
 
 export function MepReviewTab() {
@@ -90,6 +99,12 @@ export function MepReviewTab() {
           </button>
         </div>
         {error && <p className="text-red-600">{error}</p>}
+        {/* 평면도에는 높이가 없다 — 목록 전체가 가정 위에 서 있다는 사실을 줄마다의 표시로는 볼 수 없다. */}
+        {bannerText(review?.summary) && (
+          <p className="mb-1 border-amber-500/60 border-l-2 bg-amber-500/10 px-1.5 py-1 text-amber-200">
+            {bannerText(review?.summary)}
+          </p>
+        )}
         {review && review.items.length === 0 && <p className="text-muted-foreground">검토할 부재가 없습니다.</p>}
         <ul className="flex flex-col gap-0.5">
           {review?.items.map((item, i) => (

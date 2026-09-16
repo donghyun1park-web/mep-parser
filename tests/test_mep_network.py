@@ -157,3 +157,18 @@ def test_a_confirmation_is_stored_by_candidate_id_and_survives_reopening(tmp_pat
     undone = session.confirm_bridge(cand["id"], reopened["revision"], reopened["project_id"], confirmed=False)
     assert undone["geometry"]["mep_connectivity"]["bridges"]["applied"] == []
     assert undone["geometry"]["mep_connectivity"]["summary"]["groups"] == 2
+
+
+def test_the_summary_counts_how_many_judgements_leaned_on_assumed_heights():
+    """평면도에는 높이가 없다 — 몇 건이 가정 위에 서 있는지 요약이 말한다(줄마다의 표시로는 안 보인다)."""
+    flat = dict(elevation=0.0, source_elevation_mm=0.0, elevation_source="source")
+    g = _geom(duct=[_duct("d:c", [[0, 3000], [1000, 3000]], **flat),
+                    _duct("d:d", [[1200, 3000], [2000, 3000]], **flat)])
+    net = analyze(g)
+    (gap,) = net["candidates"]
+    assert gap["z_basis"] == "assumed" and "plan_z" in gap["assumed"]
+    assert net["summary"]["assumed_basis"] == {"candidates": 1, "open_ends": 4}   # 조각 2개 × 끝 2개
+    # 같은 경로에 설치 높이를 선언하면 가정이 사라진다.
+    declared = _geom(duct=[_duct("d:c", [[0, 3000], [1000, 3000]], elevation_source="profile"),
+                           _duct("d:d", [[1200, 3000], [2000, 3000]], elevation_source="profile")])
+    assert analyze(declared)["summary"]["assumed_basis"] == {"candidates": 0, "open_ends": 0}

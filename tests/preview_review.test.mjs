@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildReviewEntries,
+  reviewBannerText,
   deriveSectionRange,
   floorKeyOf,
   isZVisible,
@@ -161,4 +162,15 @@ test('missing and partial DXF remain disclosed in the edit view', () => {
   assert.ok(state.notices.some(x=>x.includes('TEXT 3')));
   assert.ok(state.notices.some(x=>x.includes('제한')));
   assert.ok(state.notices.includes('Source extraction stopped'));
+});
+
+test('the banner says how much of the list stands on assumed heights, and nothing when none does', () => {
+  assert.equal(reviewBannerText({total:24, assumed_basis:0}, {candidates:26, assumed_basis:{candidates:0}}), '');
+  assert.equal(reviewBannerText({}, {}), '');
+  const text=reviewBannerText({total:24, assumed_basis:24}, {candidates:26, assumed_basis:{candidates:3}});
+  assert.match(text, /간섭 24건 중 가정 높이 24건 · 연결 후보 26건 중 가정 3건/);
+  assert.match(text, /평면도에는 높이가 없습니다/);
+  // 간섭이 없는 도면은 간섭 쪽을 말하지 않는다.
+  assert.match(reviewBannerText({total:0, assumed_basis:0}, {candidates:4, assumed_basis:{candidates:4}}),
+    /^연결 후보 4건 중 가정 4건 —/);
 });

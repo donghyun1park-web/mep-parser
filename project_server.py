@@ -565,7 +565,14 @@ class ProjectSession:
                           'reason': (f"다른 계통 끝이 {kind}형으로 맞닿음({' ↔ '.join(map(str, gap['systems']))}) — 도면 확인"
                                      if gap.get('conflict') else f"{kind} 이음 후보 · 틈 {gap['gap_mm']:.0f}mm (확정 아님)")})
         _scene, report = to_pascal_scene(state['geometry'])
+        # 평면도에는 높이가 없다 — 목록 전체가 가정 위에 서 있다는 사실은 줄마다의 표시로는 안 보인다.
+        clash_summary = (state['geometry'].get('clash_review') or {}).get('summary') or {}
+        net_summary = net.get('summary') or {}
         return {'project_id': state['project_id'], 'revision': state['revision'], 'items': items,
+                'summary': {'clash_total': clash_summary.get('total', 0),
+                            'clash_assumed': clash_summary.get('assumed_basis', 0),
+                            'gap_total': net_summary.get('candidates', 0),
+                            'gap_assumed': (net_summary.get('assumed_basis') or {}).get('candidates', 0)},
                 'unconvertible': report['unconvertible']}
 
     def pascal_apply(self, scene, expected_revision, project_id, snapshot_sha256, op_id,

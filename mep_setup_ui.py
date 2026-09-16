@@ -130,6 +130,16 @@ class MepSetupDialog:
         ttk.Button(form, text='선택 레이어에 설정 추가', command=self._add_mapping).grid(row=13, column=0, columnspan=2, pady=5)
         ttk.Button(form, text='선택 규칙 수정', command=self._update_mapping).grid(row=14, column=0, columnspan=2, pady=3)
         ttk.Button(form, text='선택 규칙을 외곽선 폭별로 나누기', command=self._split_by_outline).grid(row=15, column=0, columnspan=2, pady=3)
+        # 평면도의 z 는 0 이다 — 'source' 로 두면 그 0 이 설치 높이가 되어 설비가 바닥에 깔린다.
+        self.placement_hint = tk.StringVar(value='')
+        ttk.Label(form, textvariable=self.placement_hint, wraplength=210,
+                  foreground='#a06000').grid(row=16, column=0, columnspan=2, sticky='w', padx=4)
+        def _placement_hint(*_args):
+            self.placement_hint.set('평면 z 를 그대로 씁니다. 평면도의 z 는 0 이라 설치 높이가 아닙니다 — '
+                                    'slab_soffit(슬래브 밑면 밀착) 또는 center 를 고르세요.'
+                                    if self.rule_vars['placement'].get() == 'source' else '')
+        self.rule_vars['placement'].trace_add('write', _placement_hint)
+        _placement_hint()
         self.map_tree = ttk.Treeview(left, columns=('pattern', 'category', 'system', 'dimension', 'placement'), show='headings', height=5)
         for key, label, width in [('pattern', '저장할 규칙', 250), ('category', '형상', 55), ('system', '계통', 65), ('dimension', '치수 mm', 85), ('placement', '설치', 105)]:
             self.map_tree.heading(key, text=label)

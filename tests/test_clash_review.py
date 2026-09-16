@@ -137,3 +137,19 @@ def test_project_state_carries_the_clash_list_for_overlaid_drawings(tmp_path):
     (item,) = review["items"]
     assert item["struct"]["eid"].startswith("main:") and item["mep"]["eid"].startswith("src2:")
     assert any(i["category"] == "clash" and i["eid"] == item["mep"]["eid"] for i in session.pascal_review()["items"])
+
+
+def test_a_plan_z_of_zero_is_not_evidence_of_an_installation_height():
+    """평면도는 설비를 전부 z 0 에 그린다 — 0 은 '도면이 말해 줬다' 가 아니라 정보가 없다는 뜻이다."""
+    flat = {"eid": "d:flat", "kind": "polyline", "points": [[2500, -1500], [2500, 1700]], "elevation": 0.0,
+            "source_elevation_mm": 0.0, "elevation_source": "source",
+            "width_mm": 400, "height_mm": 300, "system": "SA"}
+    g = _geom(wall=[_wall("w:1", [[0, 100], [5000, 100]])], duct=[flat])
+    (row,) = find_clashes(g)["items"]
+    assert (row["basis"], row["mep"]["z_basis"]) == ("assumed", "assumed") and "plan_z" in row["assumed"]
+    assert find_clashes(g)["summary"]["assumed_basis"] == 1
+    # 같은 덕트를 프로필이 선언하면(설치 높이 규칙) 그 줄은 다시 선언 근거가 된다.
+    declared = dict(flat, elevation=2400.0, elevation_source="profile")
+    g2 = _geom(wall=[_wall("w:1", [[0, 100], [5000, 100]])], duct=[declared])
+    (row2,) = find_clashes(g2)["items"]
+    assert (row2["basis"], row2["assumed"], row2["mep"]["z_basis"]) == ("declared", [], "declared")

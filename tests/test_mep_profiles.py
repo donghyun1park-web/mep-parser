@@ -232,3 +232,38 @@ def test_legacy_gap_option_does_not_leak_to_other_layers(tmp_path):
              ('^P2$', 'pipe', {'width': 15.9})]
     r = dp.parse(str(path), rules, block_rules=[])
     assert len(r['elements']['pipe']) == 3
+
+
+def _codes(result):
+    return {i['code'] for i in result['mep_diagnostics']['issues']}
+
+
+def test_a_plan_z_used_as_an_installation_height_is_reported(tmp_path):
+    """평면도는 설비를 z 0 에 그린다 — 그 0 을 설치 높이로 쓰면 설비가 바닥에 깔린 채 조용히 나간다."""
+    _, path = source(tmp_path)
+    rule = {'pattern': '^COIL$', 'category': 'pipe', 'system': 'heating', 'representation': 'centerline',
+            'diameter_mm': 15.9, 'dimension_basis': 'user', 'placement': 'source'}
+    flat = dp.parse(str(path), [], block_rules=[], mep_profile=profile(path, layers=[rule]))
+    assert 'PLAN_Z_AS_ELEVATION' in _codes(flat)
+    assert flat['elements']['pipe'][0]['elevation'] == 0
+    # 설치 높이를 선언하면 사라진다 — 이 진단이 요구하는 조치가 그것이다.
+    declared = dp.parse(str(path), [], block_rules=[], mep_profile=profile(
+        path, layers=[dict(rule, placement='slab_soffit')]))
+    assert 'PLAN_Z_AS_ELEVATION' not in _codes(declared)
+
+
+def test_a_drawing_z_outside_the_declared_storey_is_not_an_installation_height(tmp_path):
+    """실측(단위세대 환기): 슬리브 2개의 원본 z 가 12,357mm·24,715mm 였다 — 한 층 세대의 높이가 아니다."""
+    d = ezdxf.new(); d.units = 4
+    d.layers.new('COIL', dxfattribs={'color': 3})
+    d.modelspace().add_line((0, 0, 12357.8), (100, 0, 12357.8), dxfattribs={'layer': 'COIL'})
+    path = tmp_path / 'high.dxf'; d.saveas(path)
+    rule = {'pattern': '^COIL$', 'category': 'pipe', 'system': 'heating', 'representation': 'centerline',
+            'diameter_mm': 15.9, 'dimension_basis': 'user', 'placement': 'source'}
+    result = dp.parse(str(path), [], block_rules=[], mep_profile=profile(path, layers=[rule]))
+    (issue,) = [i for i in result['mep_diagnostics']['issues'] if i['code'] == 'SOURCE_Z_OUTSIDE_STOREY']
+    assert issue['storey_mm'] == [-200.0, 2800.0] and issue['source_elevations_mm'] == [12357.8]
+    assert 'PLAN_Z_AS_ELEVATION' not in _codes(result)     # z 0 과는 다른 문제다
+    # 선언한 층 높이가 없으면 잴 기준이 없다 — 아무 말도 하지 않는다(추정하지 않는다).
+    quiet = profile(path, layers=[rule]); quiet['levels'] = {'structural_slab_top_mm': 0}
+    assert 'SOURCE_Z_OUTSIDE_STOREY' not in _codes(dp.parse(str(path), [], block_rules=[], mep_profile=quiet))

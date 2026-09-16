@@ -294,6 +294,9 @@ def analyze(geometry):
                "open_ends": len(ends), "candidates": len(candidates),
                "by_kind": dict(Counter(c["kind"] for c in candidates)), "conflicts": len(conflicts),
                "by_status": dict(Counter(e["status"] for e in ends)), "skipped_routes": skipped,
+               # 평면도에는 높이가 없다 — 가정 높이로 나온 판정이 몇 건인지 요약이 말한다(고치지 않고 말한다).
+               "assumed_basis": {"candidates": sum(1 for c in candidates if c["z_basis"] == "assumed"),
+                                 "open_ends": sum(1 for e in ends if runs[e["run"]]["basis"]["z"] == "assumed")},
                "by_system": [dict(row, groups=len(row["groups"]), groups_with_candidates=len(row["groups_with_candidates"]))
                              for _key, row in sorted(by_system.items())]}
     open_ends = [{"eid": runs[e["run"]]["rec"].get("eid"), "category": runs[e["run"]]["cat"],

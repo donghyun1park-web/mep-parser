@@ -35,6 +35,19 @@ function assumedHeightText(row) {
   return ` · 높이 근거: 가정${keys.length?`(${keys.join(', ')})`:''}`;
 }
 
+// 줄마다 붙는 '높이 근거: 가정' 만으로는 목록 **전체**가 가정 위에 서 있다는 사실이 안 보인다 —
+// 그 한 줄을 목록 맨 위에 둔다. 가정이 하나도 없으면 아무 말도 하지 않는다(빈 문자열).
+export function reviewBannerText(clashSummary={}, connectivitySummary={}) {
+  const clashTotal=clashSummary.total||0, clashAssumed=clashSummary.assumed_basis||0;
+  const gapTotal=connectivitySummary.candidates||0;
+  const gapAssumed=(connectivitySummary.assumed_basis||{}).candidates||0;
+  if (!clashAssumed && !gapAssumed) return '';
+  const parts=[];
+  if (clashTotal) parts.push(`간섭 ${clashTotal}건 중 가정 높이 ${clashAssumed}건`);
+  if (gapTotal) parts.push(`연결 후보 ${gapTotal}건 중 가정 ${gapAssumed}건`);
+  return parts.join(' · ')+' — 평면도에는 높이가 없습니다. 설비 설정에서 계통별 설치 높이·규격을 선언하면 줄어듭니다.';
+}
+
 export function buildReviewEntries(elements={}, report={}, clashes=[], connectivity={}) {
   const entries=[];
   // 간섭은 목록 맨 앞에, 받은 순서(조치 종류 → 위치) 그대로 — 건축 분류 확인 수십 건에 묻히지 않게.
