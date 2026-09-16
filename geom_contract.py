@@ -237,6 +237,63 @@ def width_of(rec, params=None, category="wall"):
     return _dim(category, "width", rec, params)
 
 
+def _dim_source(category, key, rec, params):
+    """그 치수가 어디서 왔는가 — `_dim` 의 우선순위와 **같은 순서**로 본다."""
+    if (rec.get("overrides") or {}).get(key) is not None:
+        return "overrides"
+    if rec.get(key) is not None:
+        return "record"
+    if ((params or {}).get(category) or {}).get(key) is not None:
+        return "params"
+    return "default"
+
+
+_HEIGHT_KEYS = {"wall": ("height",), "column": ("height",), "zone": ("height",), "equipment": ("height",),
+                "opening": ("height", "sill"), "slab": ("thickness",), "beam": ("thickness",)}
+
+
+def height_basis(category, rec, params=None):
+    """이 부재의 높이가 어디서 왔는가 — `{"z": "declared"|"source"|"assumed", "assumed": [키…]}`.
+
+    ★ **평면도에는 높이가 없다.** 간섭·연결 판정은 대부분 선언값이나 레이어 기본값에 기대는데, 종전에는
+      그 사실이 판정 결과 어디에도 안 실려 **가정으로 나온 줄과 도면이 말해 준 줄이 똑같아 보였다**
+      (실측: 지하3층 개구부 26개의 높이·문턱이 26개 전부 가정값, 난방관 지름은 프로필의 `assumed`).
+      고치지 않고 **말하기만** 한다 — 높이를 추정해 바꾸는 것은 같은 실패를 한 겹 더 쌓는 일이다.
+
+    판정: 기준 z 는 `overrides`·`elevation_source`(declared/profile) → declared · 도면 z → source · 없음 →
+    assumed. 치수는 `dims_assumed`·`dimension_basis` 가 가정이라 말했거나 `params`/기본값으로 떨어지면 가정이다.
+    하나라도 가정이면 그 부재의 `z` 는 assumed 다."""
+    assumed = []
+    overrides = rec.get("overrides") or {}
+    if category in _ELEV_CATS:
+        source = rec.get("elevation_source")
+        if overrides.get("elevation") is not None or source in ("declared", "profile"):
+            datum = "declared"
+        elif source == "source" or rec.get("elevation") is not None:
+            datum = "source"
+        else:
+            datum = "assumed"
+            assumed.append("elevation")
+    elif overrides.get("z_base") is not None:
+        datum = "declared"
+    elif rec.get("z_base") is not None:
+        datum = "source"
+    else:
+        datum, _ = "assumed", assumed.append("z_base")
+    keys = _HEIGHT_KEYS.get(category)
+    if keys is None:
+        try:
+            keys = tuple(mep_dimensions(category, rec, params))
+        except ContractError:
+            keys = ()
+            assumed.append("section")
+    declared_assumed = set(rec.get("dims_assumed") or ())
+    for key in keys:
+        if key in declared_assumed or _dim_source(category, key, rec, params) in ("params", "default"):
+            assumed.append(key)
+    return {"z": "assumed" if assumed else datum, "assumed": sorted(set(assumed))}
+
+
 # ── 단위 ────────────────────────────────────────────────────────────────────
 # geometry.json 은 **mm**(스키마 `"units": "mm"`), Pascal 씬 그래프는 **m** 이다.
 # 나누기 1000 을 여기저기 쓰기 시작하면 어느 한 곳이 빠졌을 때 1000배 틀린 모델이

@@ -28,6 +28,12 @@ function diagnosticText(value) {
 }
 
 const GAP_KIND={straight:'직선',elbow:'엘보',tee:'티'};
+// 평면도에는 높이가 없다 — 가정 높이로 나온 판정은 그렇다고 말한다(도면이 말해 준 줄과 같아 보이면 안 된다).
+function assumedHeightText(row) {
+  if ((row.basis||row.z_basis)!=='assumed') return '';
+  const keys=row.assumed||[];
+  return ` · 높이 근거: 가정${keys.length?`(${keys.join(', ')})`:''}`;
+}
 
 export function buildReviewEntries(elements={}, report={}, clashes=[], connectivity={}) {
   const entries=[];
@@ -38,7 +44,8 @@ export function buildReviewEntries(elements={}, report={}, clashes=[], connectiv
       key:`clash:${clash.id}`, kind:'clash', eid:m.eid||null, category:'간섭', order,
       floor:clash.level!=null?String(clash.level):'', action:'select', struct:s.eid||null,
       reason:`${clash.action} · (${Math.round(at[0])}, ${Math.round(at[1])}) z ${Math.round(z[0])}~${Math.round(z[1])} · `
-        +`${s.category||''} ${s.eid||''}${s.width_mm!=null?` 두께 ${s.width_mm}mm`:''} ↔ ${[m.system,m.size].filter(Boolean).join(' ')}`,
+        +`${s.category||''} ${s.eid||''}${s.width_mm!=null?` 두께 ${s.width_mm}mm`:''} ↔ ${[m.system,m.size].filter(Boolean).join(' ')}`
+        +assumedHeightText(clash),
     });
   });
   // 설비 이음 후보·계통 충돌은 간섭 다음, 받은 순서 그대로. 후보는 모델에 쓰지 않았다 — 확정은 사람이 한다.
@@ -57,7 +64,8 @@ export function buildReviewEntries(elements={}, report={}, clashes=[], connectiv
       confirm:gap.conflict?null:{id:gap.id, confirmed:!!gap.confirmed},
       reason:gap.conflict?`다른 계통 끝이 ${kind}형으로 맞닿음 · ${systems.join(' ↔ ')} · ${where} — 도면 확인`
         :`${gap.confirmed?`${kind} 이음으로 확정함`:`${kind} 이음 후보`} · ${where} · `
-         +`${[gap.systems?.[0],size].filter(Boolean).join(' ')}${gap.size_change?' · 규격 바뀜':''}`,
+         +`${[gap.systems?.[0],size].filter(Boolean).join(' ')}${gap.size_change?' · 규격 바뀜':''}`
+         +assumedHeightText(gap),
     });
   });
   for (const category of Object.keys(elements).sort()) {

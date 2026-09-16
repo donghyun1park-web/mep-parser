@@ -28,7 +28,9 @@ def test_duct_through_a_wall_is_one_located_penetration():
     assert item["mep"]["size"] == "400×300" and item["mep"]["system"] == "SA"
     assert find_clashes(g)["items"][0]["id"] == item["id"]                 # 다시 돌려도 같은 id
     assert result["summary"] == {"total": 1, "by_kind": {"wall_penetration": 1}, "through_openings": 0,
+                                 "through_openings_assumed": 0, "assumed_basis": 0,
                                  "skipped_structures": 0, "skipped_routes": 0}
+    assert item["basis"] == "declared" and item["assumed"] == []      # 선언 두께·높이 + 도면 z
 
 
 def test_floor_pipe_under_a_wall_and_a_thin_wall_are_told_apart():
@@ -63,6 +65,23 @@ def test_a_riser_through_a_slab_and_no_clash_above_the_wall():
     g = _geom(wall=[_wall("w:1", [[0, 100], [5000, 100]])], slab=[slab], pipe=[riser], duct=[high])
     items = find_clashes(g)["items"]
     assert [(c["kind"], c["mep"]["eid"]) for c in items] == [("slab_penetration", "p:r")]
+
+
+def test_each_row_says_whether_the_heights_it_used_were_declared_or_assumed():
+    """평면도에는 높이가 없다 — 가정으로 나온 줄이 도면이 말해 준 줄과 같아 보이면 안 된다."""
+    door = {"eid": "o:1", "kind": "circle", "center": [1000, 100], "radius": 450, "width": 900, "height": 2100,
+            "sill": 0, "host_dir": [1, 0], "host_width": 200, "z_base": 0, "dims_assumed": ["height", "sill"]}
+    plain = {"eid": "w:p", "kind": "polyline", "closed": False, "points": [[0, 3000], [5000, 3000]],
+             "centerline": [[0, 3000], [5000, 3000]], "z_base": 0, "layer": "A-WALL"}   # 높이가 params 기본값이다
+    g = _geom(wall=[_wall("w:1", [[0, 100], [5000, 100]]), plain], opening=[door],
+              pipe=[_pipe("p:1", [[1000, -500], [1000, 700]]), _pipe("p:2", [[2000, 2500], [2000, 3500]])])
+    result = find_clashes(g)
+    (row,) = result["items"]
+    assert (row["struct"]["eid"], row["basis"], row["assumed"]) == ("w:p", "assumed", ["height"])
+    assert (row["struct"]["z_basis"], row["mep"]["z_basis"]) == ("assumed", "source")
+    # 문 안을 지나 뺀 한 건은 그 문의 높이·문턱이 가정이라는 사실과 함께 센다.
+    summary = result["summary"]
+    assert (summary["through_openings"], summary["through_openings_assumed"], summary["assumed_basis"]) == (1, 1, 1)
 
 
 def test_project_state_carries_the_clash_list_for_overlaid_drawings(tmp_path):

@@ -668,6 +668,9 @@ class App:
             from clash_review import LABELS
             kinds = " · ".join(f"{LABELS.get(k, k)} {n}" for k, n in (clash.get("by_kind") or {}).items())
             self._log(f"  [간섭 후보] {clash.get('total', 0)}건 ({kinds}) — 위치는 3D 미리보기 '검토 대기' 맨 앞"
+                      + (f" · 가정 높이에 기댄 것 {clash['assumed_basis']}건" if clash.get("assumed_basis") else "")
+                      + (f" · 개구부 통과 {clash['through_openings']}건(가정 문턱·높이 {clash.get('through_openings_assumed', 0)})"
+                         if clash.get("through_openings") else "")
                       + (f" · 계산 실패: {clash['error']}" if clash.get("error") else ""))
         net = (self.data.get("mep_connectivity") or {}).get("summary") or {}
         if net.get("runs") or net.get("error"):

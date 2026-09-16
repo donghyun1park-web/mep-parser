@@ -97,6 +97,17 @@
 - 조치 구분은 **형상으로만** 가른다(레이어 이름을 추측하지 않는다): 슬래브 → 슬리브·방수 · 기둥/보 → 경로 변경 ·
   벽 두께 < 50mm → 면선 오결합 의심 · 벽 바닥 위 300mm 안에서 끝나는 설비 → 벽 하부 통과(문 하부 경로·벽 선시공
   확인) · 그 밖의 벽 → 관통(슬리브·개구). 문·창 개구부 안을 지나는 것은 빼고 `through_openings` 로 센다.
+- ★ **높이 근거를 판정과 같이 싣는다**(`geom_contract.height_basis` — 이 표를 다시 구현하지 말 것). 평면도에는
+  높이가 없어서 간섭·연결 판정은 대부분 선언값이나 레이어 기본값에 기댄다. 그 사실이 결과에 안 실리면
+  **가정으로 나온 줄과 도면이 말해 준 줄이 똑같아 보인다**(덕트가 높이 0 으로 깔렸을 때 간섭 2건이 나왔다가
+  제 높이로 올리자 0 건이 된 적이 있다 — 형상은 양쪽 다 멀쩡했다). 기준 z 는 `overrides`·`elevation_source`
+  (declared/profile) → `declared` · 도면 z → `source` · 없음 → `assumed`, 치수는 `dims_assumed`·
+  `dimension_basis` 가 가정이라 했거나 `params`/기본값으로 떨어지면 가정이다. 하나라도 가정이면 그 줄은 가정이다.
+  항목에 `basis`·`assumed`(가정한 키)·`struct.z_basis`·`mep.z_basis`, 요약에 `assumed_basis` 와
+  `through_openings_assumed`(문턱·높이가 가정인 개구부로 뺀 수). 연결 후보·끊긴 끝도 같은 값을 든다.
+  **고치지 않고 말하기만 한다** — 높이를 추정해 채우는 것이 애초에 이 문제를 만들었다.
+  실측(통합 모델 24건, 규격 실측 이전 파일): **24건 전부 `assumed`** — 난방 배관 22건이 지름 가정(PB Ø15.9),
+  덕트 2건이 단면 가정이고 z 쌍은 전부 (벽=도면 z, 설비=가정)이다. 규격을 외곽선으로 재 선언하면 그만큼 준다.
 - 붙는 곳: `ProjectSession._parse` → `geometry.clash_review`(실패하면 `summary.error` — 모델·수정은 막지 않는다) ·
   미리보기 '검토 대기' 맨 앞(분류 '간섭', 누르면 설비 부재 선택) · Pascal 검토 탭(`pascal_review` 의 clash) · MCP
   `get_review_items.clash_review` · GUI 파싱 로그 요약. FreeCAD `check_clashes` 항목에도 `struct_eids`·`mep_eids`·

@@ -553,12 +553,13 @@ class ProjectSession:
         for clash in (state['geometry'].get('clash_review') or {}).get('items', []):
             items.append({'category': 'clash', 'eid': clash['mep']['eid'], 'layer': clash['struct'].get('layer'),
                           'eids': [clash['struct']['eid'], clash['mep']['eid']], 'reason': clash['action'],
-                          'at': clash['at'], 'z': clash['z']})
+                          'at': clash['at'], 'z': clash['z'], 'z_basis': clash.get('basis')})
         from mep_network import KIND_LABELS
         net = state['geometry'].get('mep_connectivity') or {}
         for gap in net.get('candidates', []) + [dict(c, conflict=True) for c in net.get('conflicts', [])]:
             kind = KIND_LABELS.get(gap['kind'], gap['kind'])
             items.append({'category': 'mep_gap', 'eid': gap['eids'][0], 'eids': gap['eids'], 'at': gap['points'][0],
+                          'z_basis': gap.get('z_basis'),
                           'reason': (f"다른 계통 끝이 {kind}형으로 맞닿음({' ↔ '.join(map(str, gap['systems']))}) — 도면 확인"
                                      if gap.get('conflict') else f"{kind} 이음 후보 · 틈 {gap['gap_mm']:.0f}mm (확정 아님)")})
         _scene, report = to_pascal_scene(state['geometry'])

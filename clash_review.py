@@ -60,7 +60,8 @@ def _prisms(geometry):
             if poly is None or poly.is_empty or not z1 > z0:
                 skipped += 1
                 continue
-            out.append({"rec": rec, "category": cat, "poly": poly, "z": (z0, z1), "width": width})
+            out.append({"rec": rec, "category": cat, "poly": poly, "z": (z0, z1), "width": width,
+                        "basis": GC.height_basis(cat, rec, params)})
     return out, skipped
 
 
@@ -79,7 +80,9 @@ def _voids(geometry):
         hw, hd = float(o["width"]) / 2, float(o.get("host_width") or 200) / 2 + 20
         ring = [(cx + dx * a - dy * b, cy + dy * a + dx * b) for a, b in ((-hw, -hd), (hw, -hd), (hw, hd), (-hw, hd))]
         lo = GC.base_z("opening", o) + float(o.get("sill") or 0)
-        out.append((Polygon(ring), lo, lo + float(o["height"])))
+        # 이 개구부의 높이·문턱이 가정이면, '개구부 안을 지나니 간섭 아님' 이라는 판정도 그 가정에 기댄다.
+        out.append((Polygon(ring), lo, lo + float(o["height"]),
+                    bool(set(o.get("dims_assumed") or ()) & {"height", "sill"})))
     return out
 
 
@@ -123,7 +126,7 @@ def find_clashes(geometry):
     prisms, skipped_structures = _prisms(geometry)
     voids = _voids(geometry)
     tree = STRtree([p["poly"] for p in prisms]) if prisms else None
-    items, through, skipped_routes = [], 0, 0
+    items, through, through_assumed, skipped_routes = [], 0, 0, 0
     for cat in ROUTE_CATS:
         for rec in (geometry.get("elements") or {}).get(cat) or []:
             try:
@@ -131,6 +134,7 @@ def find_clashes(geometry):
             except Exception:
                 skipped_routes += 1
                 continue
+            mep_basis = GC.height_basis(cat, rec, params)
             hits = {}
             for band, axis, lo, hi in bands:
                 for k in (tree.query(band) if tree is not None else ()):
@@ -149,11 +153,15 @@ def find_clashes(geometry):
                     members = [p for p in pieces if p[0].intersects(part)]
                     z0, z1 = min(p[2] for p in members), max(p[3] for p in members)
                     at = part.representative_point() if not part.centroid.within(part.buffer(1)) else part.centroid
-                    if any(v.contains(at) and v_lo <= z0 and z1 <= v_hi for v, v_lo, v_hi in voids):
+                    inside = [v_assumed for v, v_lo, v_hi, v_assumed in voids
+                              if v.contains(at) and v_lo <= z0 and z1 <= v_hi]
+                    if inside:
                         through += 1
+                        through_assumed += any(inside)
                         continue
                     kind = _kind(prism, max(p[4] for p in members))
                     struct = prism["rec"]
+                    assumed = sorted(set(prism["basis"]["assumed"] + mep_basis["assumed"]))
                     key = "|".join([str(struct.get("eid")), str(rec.get("eid")), "%.0f" % at.x, "%.0f" % at.y])
                     items.append({
                         "id": "clash:" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:12],
@@ -161,10 +169,14 @@ def find_clashes(geometry):
                         "at": [round(at.x, 1), round(at.y, 1)], "z": [round(z0, 1), round(z1, 1)],
                         "crossing_mm": round(sum(p[1] for p in members), 1), "area_mm2": round(part.area, 1),
                         "level": rec.get("level") or struct.get("level"),
+                        # 이 줄의 높이가 도면에서 온 것인지 가정인지 — 판정과 **같이** 보여야 한다.
+                        "basis": "assumed" if assumed else "declared", "assumed": assumed,
                         "struct": {"eid": struct.get("eid"), "category": prism["category"], "layer": struct.get("layer"),
-                                   "width_mm": None if prism["width"] is None else round(prism["width"], 1)},
+                                   "width_mm": None if prism["width"] is None else round(prism["width"], 1),
+                                   "z_basis": prism["basis"]["z"]},
                         "mep": {"eid": rec.get("eid"), "category": cat, "size": size, "layer": rec.get("layer"),
-                                "system": rec.get("system") or (rec.get("overrides") or {}).get("system")},
+                                "system": rec.get("system") or (rec.get("overrides") or {}).get("system"),
+                                "z_basis": mep_basis["z"]},
                     })
     order = list(ACTIONS)
     items.sort(key=lambda c: (order.index(c["kind"]), c["at"][1], c["at"][0], c["id"]))
@@ -173,5 +185,7 @@ def find_clashes(geometry):
         by_kind[c["kind"]] = by_kind.get(c["kind"], 0) + 1
     return {"items": items,
             "summary": {"total": len(items), "by_kind": by_kind, "through_openings": through,
+                        "through_openings_assumed": through_assumed,
+                        "assumed_basis": sum(1 for c in items if c["basis"] == "assumed"),
                         "skipped_structures": skipped_structures, "skipped_routes": skipped_routes},
             "method": "2.5D plan intersection with z ranges (geom_contract widths, elevations, routes)"}

@@ -81,6 +81,11 @@ def _entry(kind, gap, a, ra, b_xy, rb, b_port, corner, at_mm=None):
              "level": ra["rec"].get("level")}
     if at_mm is not None:
         entry["at_mm"] = round(float(at_mm), 3)     # 가지(tee)가 줄기의 어디에 붙는가 — 이음 기록에 그대로 쓴다
+    # 후보 판정은 높이 범위가 겹치는지도 본다 — 그 높이가 가정이면 후보도 가정 위에 서 있다.
+    assumed = sorted(set(ra["basis"]["assumed"] + rb["basis"]["assumed"]))
+    entry["z_basis"] = "assumed" if assumed else "declared"
+    if assumed:
+        entry["assumed"] = assumed
     return entry
 
 
@@ -142,6 +147,7 @@ def analyze(geometry):
                 skipped += 1
                 continue
             runs.append({"cat": cat, "rec": rec, "pts": pts, "w": float(w), "h": float(h), "size": size,
+                         "basis": GC.height_basis(cat, rec, params),
                          "system": (rec.get("overrides") or {}).get("system", rec.get("system"))})
 
     parent, members = list(range(len(runs))), {}
@@ -271,6 +277,7 @@ def analyze(geometry):
     open_ends = [{"eid": runs[e["run"]]["rec"].get("eid"), "category": runs[e["run"]]["cat"],
                   "system": runs[e["run"]]["system"], "port": e["port"],
                   "at": [round(e["xy"][0], 1), round(e["xy"][1], 1)], "z": round(e["z"], 1),
+                  "z_basis": runs[e["run"]]["basis"]["z"],
                   "status": e["status"], "level": runs[e["run"]]["rec"].get("level")} for e in ends]
     return {"summary": summary, "candidates": candidates, "conflicts": conflicts, "open_ends": open_ends,
             "review_widths": REVIEW_WIDTHS,

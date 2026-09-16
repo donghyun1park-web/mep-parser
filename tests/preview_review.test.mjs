@@ -48,6 +48,7 @@ test('review queue is deterministic, deduplicated, and keeps actionable state', 
 test('clash rows lead the review queue in the given order and select the MEP element', () => {
   const clashes=[
     {id:'b',kind:'wall_penetration',action:'벽 관통 — 슬리브·개구 확인',at:[2500,100],z:[2250,2550],level:'B',
+     basis:'assumed',assumed:['height','sill'],
      struct:{eid:'A:w:1',category:'wall',width_mm:200},mep:{eid:'B:d:1',system:'SA',size:'400×300'}},
     {id:'a',kind:'under_wall',action:'바닥 매립 설비가 벽 아래를 지남',at:[1000,100],z:[70,86],
      struct:{eid:'A:w:1',category:'wall',width_mm:200},mep:{eid:'A:p:1',size:'Ø15.9'}}];

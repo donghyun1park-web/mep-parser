@@ -25,6 +25,9 @@ def test_elbow_and_straight_gaps_are_candidates_but_ends_that_are_only_close_are
         ("elbow", ("d:a", "d:b"), 212.1), ("straight", ("d:c", "d:d"), 200.0)]
     elbow = next(c for c in net["candidates"] if c["kind"] == "elbow")
     assert elbow["points"] == [[1000.0, 0.0], [1150.0, 0.0], [1150.0, 150.0]]   # 모서리를 지나는 점선
+    # 높이 범위가 겹치는지도 보는 판정이라 그 높이의 근거를 함께 싣는다(도면 z + 선언 단면 → 가정 없음).
+    assert elbow["z_basis"] == "declared" and "assumed" not in elbow
+    assert {e["z_basis"] for e in net["open_ends"]} == {"source"}
     s = net["summary"]
     assert (s["runs"], s["groups"], s["groups_with_candidates"], s["open_ends"], s["conflicts"]) == (6, 6, 4, 12, 0)
     assert analyze(g)["candidates"][0]["id"] == net["candidates"][0]["id"]      # 다시 돌려도 같은 id
