@@ -3,7 +3,7 @@ import MepEdit from 'mep-edit';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { buildReviewEntries, reviewBannerText, bridgeRequest, routineCandidateIds,
-         escHtml, reviewRowHtml, batchButtonHtml, deriveSectionRange, floorKeyOf, isZVisible, reconcileSection, uniqueByEid, fitDistance, recordOnEditFloor, editBackdropState } from './review_logic.js';
+         escHtml, reviewRowHtml, batchButtonHtml, modelBounds, deriveSectionRange, floorKeyOf, isZVisible, reconcileSection, uniqueByEid, fitDistance, recordOnEditFloor, editBackdropState } from './review_logic.js';
 import { screenToDrawing, drawingUnitsPerPixel } from './svg_coordinates.js';
 import { linearMepGeometry, footprintMepGeometry, mepPropertyKeys } from './mep_preview_geometry.js';
 
@@ -244,6 +244,12 @@ const REASON = {
                  + '위치·두께 둘 다 추정치다.',
   'closed': '닫힌 폴리선을 그대로 압출했다(면선 페어링을 거치지 않음).',
   'axis': '치수선(DIMENSION)에서 뽑은 축선이다 — 단면은 부재일람표에서 온다.',
+  // 기둥 세 사유는 종전에 원문 키가 그대로 찍혔다 — 사용자가 고칠 대상을 보는 유일한 화면인데.
+  'column_layer_looks_like_wall': '이 레이어의 선은 기둥이 아니라 **벽처럼** 그려졌다(평행 짝). '
+             + 'layer_map 한 줄이면 해결된다 — 경고 맨 위에 붙여 넣을 줄이 있다.',
+  'column_boundary_unresolved': '기둥 경계를 닫지 못했다 — 원본 선이 실제로 면을 이루지 않는다. '
+             + '레이어 분류가 맞는지 먼저 보고, 맞다면 도면의 경계를 확인한다.',
+  'column_outline_inferred': '원본 선이 닫은 면으로 기둥을 복원했다 — 분류가 맞는지 확인이 필요하다.',
 };
 
 const edits = MepEdit.clone(DATA.project_edits || {}); // canonical server snapshot + local changes
@@ -570,7 +576,15 @@ function applySourceVB(){
   sourceSvg.setAttribute('viewBox',`${sourceVB.x} ${-(sourceVB.y+sourceVB.h)} ${sourceVB.w} ${sourceVB.h}`);
   sourceGeometry.setAttribute('transform','scale(1,-1)'); sourceOverlay.setAttribute('transform','scale(1,-1)');
 }
-function fitSource(){ sourceVB=sourceViewBox(); applySourceVB(); }
+// 기본은 **부재에** 맞춘다 — 설계변경 표·안내선이 도면 밖으로 크게 뻗어 평면이 손톱만 해지는 것을 막는다.
+// '맞춤' 버튼을 다시 누르면 층 전체(원본 선 포함)로 오간다.
+let sourceFitWide=false;
+function fitSource(wide){
+  const floor=selectedSourceFloor();
+  const model=wide?null:modelBounds(EFFECTIVE_ELEMENTS,floor&&floor.id);
+  sourceVB=model||sourceViewBox(); applySourceVB();
+}
+function toggleSourceFit(){ sourceFitWide=!sourceFitWide; fitSource(sourceFitWide); }
 function sourceElement(kind,record,klass){
   if(kind==='circle' && record.center){ return mk2('circle',{cx:record.center[0],cy:record.center[1],r:record.radius||1,class:klass}); }
   const points=record.centerline||record.points;
@@ -635,7 +649,7 @@ sourceFloor.addEventListener('change',()=>{
   }
   renderedSourceFloor=null;fitSource();renderSourceBackdrop();renderSourceOverlay();
 });
-document.getElementById('sourceFit').addEventListener('click',fitSource);
+document.getElementById('sourceFit').addEventListener('click',toggleSourceFit);
 sourceSvg.addEventListener('wheel',ev=>{
   if(!sourceVB||ACTION_LOCK) return; ev.preventDefault(); const k=ev.deltaY>0?1.15:.87;
   const point=sourceWorldPoint(ev); if(!point) return; const [x,y]=point;
@@ -1201,14 +1215,27 @@ if(_restored!==null){
 // 파서가 낸 경고·통계를 화면에 옮긴다. 종전엔 CLI 로그에만 있었고, 3D 를 보는
 // 사람은 무엇이 의심스러운지 알 수 없었다.
 function renderWarnings(){
-  const w=[...(DATA.warnings||[]),...mepRenderWarnings];
+  // 분류 의심이 맨 위다 — 검토 대기 수십 건의 **원인**이 한 줄로 해결되는 경우가 있다.
+  const suspect=(DATA.column_layers_like_wall||[]).map(c=>
+    `[분류 의심] '${c.layer}' 은 기둥으로 분류됐지만 ${c.lines}선 중 ${c.paired}개가 `
+    +`${Math.round(c.spacing_mm)}mm 짝 — 벽 레이어일 수 있다. layer_map 에 붙여 넣을 줄: ${c.suggested_row}`);
+  const evidence=(DATA.suggestions||[]).filter(s=>s.source==='layer'&&s.evidence&&s.evidence.wall_like).map(s=>
+    `미매핑 '${s.layer}' 은 벽처럼 그려졌다 — ${s.geom_reason}`);
+  const quiet=(DATA.suggestions||[]).filter(s=>s.source==='layer'&&s.evidence&&!s.evidence.wall_like);
+  const w=[...suspect,...evidence,...(DATA.warnings||[]).filter(x=>!String(x).startsWith('[분류 의심]')),
+           ...mepRenderWarnings];
+  if(quiet.length)
+    w.push(`벽이 아닌 미매핑 레이어 ${quiet.length}개(평행 짝 없음 — 마감선·해치·안내선): `
+           +quiet.slice(0,10).map(s=>s.layer).join(' · ')+(quiet.length>10?' · …':''));
   for(const c of (DATA.width_conflicts||[]).slice(0,6))
     w.push('두께 불일치: '+c.layer+' 선언 '+Math.round(c.declared)
            +' != 실측 '+Math.round(c.detected)+'mm x '+c.count+'개');
   const q=DATA.qa||{};
   if(q.face_coverage_pct!=null)
     w.push('면선 회수율 '+Math.round(q.face_coverage_pct)+'% '
-           +(q.face_coverage_pct<90?'— 낮으면 페어링 실패(opts pair_max 확인)':''));
+           +(q.face_coverage_pct<90?'— 낮으면 페어링 실패(opts pair_max 확인)':'')
+           // 회수율은 **벽으로 매핑된** 레이어만 센 값이다 — 그 옆에 모델 밖의 벽 같은 선을 같이 말한다.
+           +(q.wall_like_unmapped_m?` (벽으로 매핑된 레이어 기준 — 모델 밖에 벽처럼 보이는 선 ${q.wall_like_unmapped_m}m)`:''));
   const er=DATA.edits_report||{};
   if((er.orphaned||[]).length)
     w.push('이전 수정 중 붙일 곳을 못 찾은 것 '+er.orphaned.length+'건');
@@ -1226,7 +1253,7 @@ document.getElementById('legend').innerHTML =
   + `<div style="margin-top:6px;border-top:1px solid #3a3f4a;padding-top:6px">신뢰도 색(벽): `
   + Object.entries(PAIR_COLOR).map(([k,c])=>`<span class="sw" style="background:#${c.toString(16).padStart(6,'0')}"></span>${k} `).join('')+`</div></details>`;
 
-fitSource(); renderSourceBackdrop(); rebuild(); refreshEditsOnly(); fit();
+renderSourceBackdrop(); rebuild(); refreshEditsOnly(); fit(); fitSource();   // 부재가 선 뒤에 맞춘다
 addEventListener('resize', ()=>{
   cam.aspect=W()/H(); cam.updateProjectionMatrix(); renderer.setSize(W(),H());
   if(svg2.classList.contains('on') && !dragging) render2();

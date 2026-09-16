@@ -90,6 +90,10 @@ def build_html(data):
         "thin_pairs": data.get("thin_pairs", {}),
         "width_conflicts": data.get("width_conflicts", []),
         "qa": data.get("qa", {}),
+        # 레이어 분류의 근거·의심을 화면이 볼 수 있어야 한다 — 종전엔 GUI 로그에만 있었다.
+        "suggestions": data.get("suggestions", []),
+        "column_layers_like_wall": data.get("column_layers_like_wall", []),
+        "unhandled": data.get("unhandled", {}),
         "edits_report": data.get("edits_report", {}),
         "clash_review": data.get("clash_review", {}),
         "mep_connectivity": data.get("mep_connectivity", {}),

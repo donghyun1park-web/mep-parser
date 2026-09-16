@@ -164,6 +164,25 @@ export function batchButtonHtml(ids, canSave=false) {
   return `<button class="confirm-gap" data-batch="1">일상 이음 후보 ${count}건 일괄 확정</button>`;
 }
 
+// 원본 창은 층 bbox 전체에 맞춘다 — 그런데 실무 도면은 평면 옆에 설계변경 표·안내선을 크게 둔다
+// (실측: 평면은 14.6m × 11.2m 인데 설계변경 블록이 69m × 79m, 안내선이 105m × 65m → 평면이 손톱만 했다).
+// 파서가 만든 부재만의 bbox 로 맞추면 건물이 창을 채운다. 부재가 없으면 null 을 내고 종전대로 층 bbox.
+export function modelBounds(elements={}, floorId=null, pad=0.2) {
+  const xs=[], ys=[];
+  for (const records of Object.values(elements)) for (const rec of records||[]) {
+    if (floorId!=null && floorKeyOf(rec) && floorKeyOf(rec)!==String(floorId)) continue;
+    if (rec.center) {
+      const r=rec.radius||200;
+      xs.push(rec.center[0]-r, rec.center[0]+r); ys.push(rec.center[1]-r, rec.center[1]+r);
+    }
+    for (const p of rec.centerline||rec.points||[]) { xs.push(p[0]); ys.push(p[1]); }
+  }
+  if (!xs.length) return null;
+  const x0=Math.min(...xs), x1=Math.max(...xs), y0=Math.min(...ys), y1=Math.max(...ys);
+  const margin=Math.max(500,((x1-x0)+(y1-y0))*pad/2);
+  return {x:x0-margin, y:y0-margin, w:Math.max(1,x1-x0+margin*2), h:Math.max(1,y1-y0+margin*2)};
+}
+
 export function deriveSectionRange(elements={}, floors=[], zRange) {
   const values=[];
   for (const floor of floors || []) if (Number.isFinite(Number(floor.z))) values.push(Number(floor.z));

@@ -7,6 +7,7 @@ import {
   routineCandidateIds,
   reviewRowHtml,
   batchButtonHtml,
+  modelBounds,
   deriveSectionRange,
   floorKeyOf,
   isZVisible,
@@ -229,4 +230,21 @@ test('review text is escaped so a layer name cannot inject markup', () => {
   assert.ok(!row.includes('<img'));
   assert.match(row, /&lt;img src=x&gt;/);
   assert.match(row, /a &amp; b &quot;c&quot;/);
+});
+
+test('the source pane frames the parsed building, not the change-note blocks around it', () => {
+  // 실측: 평면은 14.6m × 11.2m 인데 설계변경 표가 69m × 79m 라 층 bbox 에 맞추면 평면이 손톱만 했다.
+  const elements={wall:[{eid:'w:1', points:[[0,0],[14600,0]]}, {eid:'w:2', points:[[0,0],[0,11200]]}]};
+  const box=modelBounds(elements);
+  assert.ok(box.w < 20000 && box.h < 20000, JSON.stringify(box));
+  assert.ok(box.x < 0 && box.y < 0);                       // 여백이 붙는다
+  assert.equal(modelBounds({}), null);                     // 부재가 없으면 종전대로 층 bbox
+  assert.equal(modelBounds({wall:[]}), null);
+  // 층 필터: 다른 층 부재는 안 센다.
+  const twoFloors={wall:[{eid:'a', level:'1F', points:[[0,0],[1000,0]]},
+                         {eid:'b', level:'2F', points:[[90000,90000],[91000,90000]]}]};
+  assert.ok(modelBounds(twoFloors,'1F').x < 1000);
+  assert.ok(modelBounds(twoFloors,'2F').x > 80000);
+  // 원(기둥)도 반지름만큼 담는다.
+  assert.ok(modelBounds({column:[{eid:'c', center:[0,0], radius:300}]}).w >= 600);
 });
