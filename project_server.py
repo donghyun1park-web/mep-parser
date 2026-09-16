@@ -415,20 +415,31 @@ class ProjectSession:
             return self.state()
 
     def confirm_bridge(self, candidate_id, expected_revision, project_id, confirmed=True, reason=''):
-        """이음 후보를 사람이 확정(또는 취소)한다. 형상은 바뀌지 않고 `joints` 에만 기록된다."""
+        """이음 후보 하나를 사람이 확정(또는 취소)한다. 형상은 바뀌지 않고 `joints` 에만 기록된다."""
+        return self.confirm_bridges([candidate_id], expected_revision, project_id, confirmed, reason)
+
+    def confirm_bridges(self, candidate_ids, expected_revision, project_id, confirmed=True, reason=''):
+        """확정(취소)을 **한 번에** 처리한다 — revision 하나, 결정 기록 하나.
+
+        후보 26건을 버튼 26번·revision 26번으로 밟게 하지 않는다. 대신 **전부 아니면 아무것도** 다 —
+        모르는 후보가 하나라도 섞이면 통째로 거부한다(부분 적용은 무엇이 들어갔는지 아무도 모르게 만든다)."""
+        ids = [str(c) for c in candidate_ids]
+        if not ids or len(set(ids)) != len(ids):
+            raise ValueError('candidate_ids must be a nonempty list of distinct ids')
         with self._mutex:
             manifest = self.store.refresh_inputs()
             self.store.check_revision(manifest, expected_revision, project_id)
             if confirmed:
                 live = {c['id'] for c in ((self.state()['geometry'].get('mep_connectivity') or {}).get('candidates') or [])}
-                if candidate_id not in live:
-                    raise ValueError('Unknown connection candidate: ' + str(candidate_id))
-            kept = [b for b in (manifest.get('bridges') or []) if b.get('id') != candidate_id]
+                unknown = [i for i in ids if i not in live]
+                if unknown:
+                    raise ValueError('Unknown connection candidate: ' + ', '.join(unknown))
+            kept = [b for b in (manifest.get('bridges') or []) if b.get('id') not in set(ids)]
             if confirmed:
-                kept.append({'id': str(candidate_id), 'reason': str(reason)[:500]})
+                kept.extend({'id': i, 'reason': str(reason)[:500]} for i in ids)
             self.store.set_bridges(kept, expected_revision, project_id,
-                                   decisions=[{'action': 'confirm_bridge' if confirmed else 'unconfirm_bridge',
-                                               'candidate_id': str(candidate_id), 'revision': expected_revision}])
+                                   decisions=[{'action': 'confirm_bridges' if confirmed else 'unconfirm_bridges',
+                                               'candidate_ids': ids, 'revision': expected_revision}])
             return self.state()
 
     def import_legacy(self, path, expected_revision, project_id):
@@ -730,8 +741,13 @@ class ProjectServer:
                             body.get('source_id', 'main'), source_sha256=body['source_sha256'])
                     elif path == '/bridges':
                         # 설비 이음 후보 확정·취소 — 형상은 안 바뀌고 `joints` 에만 기록된다.
-                        result = session.confirm_bridge(body['candidate_id'], *common,
-                                                        bool(body.get('confirmed', True)))
+                        # 여럿은 `candidate_ids` 로 한 번에(revision 하나). 둘 다 오면 무엇을 저장할지 모른다.
+                        if ('candidate_id' in body) == ('candidate_ids' in body):
+                            raise ValueError('Send exactly one of candidate_id or candidate_ids')
+                        ids = body.get('candidate_ids') or [body.get('candidate_id')]
+                        if not isinstance(ids, list):
+                            raise ValueError('candidate_ids must be a list')
+                        result = session.confirm_bridges(ids, *common, bool(body.get('confirmed', True)))
                     elif path == '/pascal/apply':
                         result = session.pascal_apply(body['scene'], *common, body['snapshot_sha256'],
                                                       body['op_id'], bool(body.get('dry_run', False)))

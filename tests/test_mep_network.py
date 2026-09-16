@@ -172,3 +172,56 @@ def test_the_summary_counts_how_many_judgements_leaned_on_assumed_heights():
     declared = _geom(duct=[_duct("d:c", [[0, 3000], [1000, 3000]], elevation_source="profile"),
                            _duct("d:d", [[1200, 3000], [2000, 3000]], elevation_source="profile")])
     assert analyze(declared)["summary"]["assumed_basis"] == {"candidates": 0, "open_ends": 0}
+
+
+def test_only_straight_and_elbow_candidates_of_the_same_size_are_offered_as_routine():
+    """묶어서 **보여 주는** 기준이지 적용 기준이 아니다 — 티와 규격 바뀜은 도면을 봐야 한다."""
+    g = _geom(duct=[_duct("d:a", [[0, 0], [1000, 0]]), _duct("d:b", [[1200, 0], [2000, 0]]),
+                    _duct("d:c", [[0, 3000], [1000, 3000]]), _duct("d:d", [[1200, 3000], [2000, 3000]], w=204),
+                    _duct("d:e", [[0, 6000], [2000, 6000]]), _duct("d:f", [[1000, 6250], [1000, 7000]])])
+    net = analyze(g)
+    by_eid = {tuple(c["eids"]): (c["kind"], c["routine"]) for c in net["candidates"]}
+    assert by_eid[("d:a", "d:b")] == ("straight", True)
+    assert by_eid[("d:c", "d:d")] == ("straight", False)       # 규격이 바뀐다 — 레듀서 자리
+    assert by_eid[("d:f", "d:e")] == ("tee", False)            # 가지는 계통 위상과 물량을 바꾼다(가지가 먼저)
+    assert net["summary"]["routine"] == 1
+
+
+def test_confirming_many_candidates_takes_one_revision_and_is_all_or_nothing(tmp_path):
+    session = _duct_project(tmp_path)
+    state = session.state()
+    ids = [c["id"] for c in state["geometry"]["mep_connectivity"]["candidates"]]
+    import pytest
+    with pytest.raises(ValueError, match="Unknown connection candidate"):
+        session.confirm_bridges(ids + ["gap:doesnotexist"], state["revision"], state["project_id"])
+    assert session.state()["revision"] == state["revision"]        # 하나라도 모르면 아무것도 저장하지 않는다
+    after = session.confirm_bridges(ids, state["revision"], state["project_id"])
+    assert after["revision"] == state["revision"] + 1              # 후보가 몇이든 revision 하나
+    assert sorted(b["id"] for b in after["geometry"]["mep_connectivity"]["bridges"]["applied"]) == sorted(ids)
+    (decision,) = [d for d in session.store.read()["decisions"] if d["action"] == "confirm_bridges"]
+    assert sorted(decision["candidate_ids"]) == sorted(ids)
+
+
+def test_the_bridges_route_takes_a_list_and_refuses_an_ambiguous_body(tmp_path):
+    import json as _json
+    import urllib.error
+    import urllib.request
+    session = _duct_project(tmp_path)
+    with session.serve() as server:
+        def post(payload):
+            req = urllib.request.Request(server.base_url + "/bridges", data=_json.dumps(payload).encode(),
+                                         headers={"Authorization": "Bearer " + server.token,
+                                                  "Content-Type": "application/json"})
+            with urllib.request.urlopen(req) as response:
+                return _json.load(response)
+        state = session.state()
+        ids = [c["id"] for c in state["geometry"]["mep_connectivity"]["candidates"]]
+        common = {"project_id": state["project_id"], "expected_revision": state["revision"]}
+        try:
+            post(dict(common, candidate_id=ids[0], candidate_ids=ids))
+            raise AssertionError("둘 다 보내면 무엇을 저장할지 모른다 — 거부해야 한다")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 400 and b"exactly one" in exc.read()
+        saved = post(dict(common, candidate_ids=ids, confirmed=True))
+    assert saved["revision"] == state["revision"] + 1
+    assert sorted(b["id"] for b in saved["geometry"]["mep_connectivity"]["bridges"]["applied"]) == sorted(ids)

@@ -678,7 +678,7 @@ class App:
             cov = self.data.get("source_coverage") or {}
             self._log(f"  [설비 연결] 조각 {net.get('runs', 0)} · 이어진 무리 {net.get('groups', 0)} · "
                       f"끊긴 끝 {net.get('open_ends', 0)} · 이음 후보 {net.get('candidates', 0)}"
-                      f"(모두 확정하면 {net.get('groups_with_candidates', 0)}무리)"
+                      f"(일상 {net.get('routine', 0)} · 모두 확정하면 {net.get('groups_with_candidates', 0)}무리)"
                       + (f" · 가정 높이에 기댄 후보 {(net.get('assumed_basis') or {})['candidates']}건"
                          if (net.get("assumed_basis") or {}).get("candidates") else "")
                       + (f" · 계통 충돌 {net['conflicts']}" if net.get("conflicts") else "")

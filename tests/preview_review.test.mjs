@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import {
   buildReviewEntries,
   reviewBannerText,
+  bridgeRequest,
+  routineCandidateIds,
   deriveSectionRange,
   floorKeyOf,
   isZVisible,
@@ -173,4 +175,19 @@ test('the banner says how much of the list stands on assumed heights, and nothin
   // 간섭이 없는 도면은 간섭 쪽을 말하지 않는다.
   assert.match(reviewBannerText({total:0, assumed_basis:0}, {candidates:4, assumed_basis:{candidates:4}}),
     /^연결 후보 4건 중 가정 4건 —/);
+});
+
+test('a batch confirmation carries the ids the list actually offered, and one id stays a single request', () => {
+  const connectivity={candidates:[
+    {id:'gap:1', routine:true}, {id:'gap:2', routine:false}, {id:'gap:3', routine:true}]};
+  assert.deepEqual(routineCandidateIds(connectivity), ['gap:1','gap:3']);
+  assert.deepEqual(routineCandidateIds({}), []);
+  const runtime={project_id:'p', revision:7};
+  assert.deepEqual(bridgeRequest(['gap:1','gap:3'], true, runtime),
+    {project_id:'p', expected_revision:7, candidate_ids:['gap:1','gap:3'], confirmed:true});
+  // 한 건은 종전 본문 그대로다 — 저장소의 단건 경로를 바꾸지 않는다.
+  assert.deepEqual(bridgeRequest(['gap:1'], false, runtime),
+    {project_id:'p', expected_revision:7, candidate_id:'gap:1', confirmed:false});
+  assert.deepEqual(bridgeRequest(['gap:1','gap:1'], true, runtime).candidate_id, 'gap:1');
+  assert.throws(()=>bridgeRequest([], true, runtime), /후보/);
 });

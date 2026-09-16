@@ -252,6 +252,34 @@ def confirm_mep_connection(candidate_id: str, expected_revision: int, json_path:
 
 
 @mcp.tool()
+def confirm_mep_connections(candidate_ids: list, expected_revision: int, json_path: str = DEFAULT_JSON,
+                            confirmed: bool = True, reviewed_by_user: bool = False, reason: str = '') -> str:
+    """Record that a person confirmed several connection candidates at once, or undo that. One revision.
+
+    Same contract as confirm_mep_connection: geometry never changes, only joints with basis "bridged".
+    All or nothing — if any id is not a live candidate the whole request is refused and nothing is stored.
+    Routine candidates (summary "routine": straight or elbow, size unchanged) are the ones meant to be
+    grouped; tees and size changes stay one at a time because they alter topology and fittings.
+    reviewed_by_user must reflect an actual review of those locations, never an agent inference.
+    """
+    if reviewed_by_user is not True:
+        return json.dumps({'error': 'user_review_required',
+                           'message': 'Review the candidate locations in the 3D preview before confirming.'})
+    try:
+        session = session_from_geometry(json_path)
+        state = session.confirm_bridges(candidate_ids, expected_revision, session.store.read()['project_id'],
+                                        confirmed, reason)
+        atomic_json(json_path, state['geometry'])
+        net = state['geometry'].get('mep_connectivity') or {}
+        return json.dumps({'project_id': state['project_id'], 'revision': state['revision'],
+                           'bridges': net.get('bridges', {}), 'summary': net.get('summary', {})}, ensure_ascii=False)
+    except RevisionConflict as exc:
+        return json.dumps({'error': 'revision_conflict', 'current_revision': exc.current_revision})
+    except Exception as exc:
+        return json.dumps({'error': str(exc)}, ensure_ascii=False)
+
+
+@mcp.tool()
 def measure_mep_outline_widths(rule: dict, json_path: str = DEFAULT_JSON, source_id: str = 'main',
                                region_bounds_mm: list | None = None) -> str:
     """Measure the plan width of every centerline one MEP layer rule selects, from its two parallel outline lines.

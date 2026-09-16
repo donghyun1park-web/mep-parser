@@ -27,6 +27,7 @@ SLACK_MM = 20.0          # 직선 끝의 옆 어긋남 · 엘보 모서리가 �
 TERMINAL_MM = 300.0      # 장비·단말 외곽에서 이 안에서 **그쪽을 향해** 끝나면 단말 끝
 TERMINAL_FACING = 0.5    # 끝의 진행 방향과 단말 방향의 cos — 옆을 지나가는 경로를 단말로 삼키지 않는다
 KIND_LABELS = {"straight": "직선", "elbow": "엘보", "tee": "티"}
+ROUTINE_KINDS = ("straight", "elbow")   # 일괄 확정으로 **보여 줄** 종류 — 규칙은 여기 한 줄뿐이다(`_entry`)
 
 
 def _find(parent, i):
@@ -95,6 +96,10 @@ def _entry(kind, gap, a, ra, b_xy, rb, b_port, corner, at_mm=None):
              "points": [[round(float(p[0]), 1), round(float(p[1]), 1)] for p in pts], "gap_mm": round(gap, 1),
              "sizes": [ra["size"], rb["size"]], "size_change": ra["size"] != rb["size"],
              "level": ra["rec"].get("level")}
+    # 한 건씩 보지 않아도 되는 후보 — **묶어서 보여 주는 기준이지 자동으로 적용하는 기준이 아니다.**
+    # 티는 뺀다: 가지는 계통 위상과 물량(티 피팅 · 줄기의 `at_mm`)을 바꾼다. 규격이 바뀌는 자리도 뺀다 —
+    # 레듀서가 서는 곳이라 도면을 봐야 한다.
+    entry["routine"] = kind in ROUTINE_KINDS and not entry["size_change"]
     if at_mm is not None:
         entry["at_mm"] = round(float(at_mm), 3)     # 가지(tee)가 줄기의 어디에 붙는가 — 이음 기록에 그대로 쓴다
     # 후보 판정은 높이 범위가 겹치는지도 본다 — 그 높이가 가정이면 후보도 가정 위에 서 있다.
@@ -293,6 +298,7 @@ def analyze(geometry):
                "groups_with_candidates": len({_find(joined, i) for i in range(len(runs))}),
                "open_ends": len(ends), "candidates": len(candidates),
                "by_kind": dict(Counter(c["kind"] for c in candidates)), "conflicts": len(conflicts),
+               "routine": sum(1 for c in candidates if c["routine"]),
                "by_status": dict(Counter(e["status"] for e in ends)), "skipped_routes": skipped,
                # 평면도에는 높이가 없다 — 가정 높이로 나온 판정이 몇 건인지 요약이 말한다(고치지 않고 말한다).
                "assumed_basis": {"candidates": sum(1 for c in candidates if c["z_basis"] == "assumed"),

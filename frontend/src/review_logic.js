@@ -48,6 +48,19 @@ export function reviewBannerText(clashSummary={}, connectivitySummary={}) {
   return parts.join(' · ')+' — 평면도에는 높이가 없습니다. 설비 설정에서 계통별 설치 높이·규격을 선언하면 줄어듭니다.';
 }
 
+// 확정 요청 본문은 한 곳에서만 만든다 — 한 건이든 여럿이든 저장소가 보는 열쇠는 같다(revision·project_id).
+export function bridgeRequest(ids, confirmed, runtime={}) {
+  const list=[...new Set((ids||[]).map(String).filter(Boolean))];
+  if (!list.length) throw new Error('확정할 후보가 없습니다');
+  return {project_id:runtime.project_id, expected_revision:runtime.revision,
+    ...(list.length===1?{candidate_id:list[0]}:{candidate_ids:list}), confirmed:!!confirmed};
+}
+
+// 한 건씩 26번 누르게 하지 않는다. 티와 규격이 바뀌는 자리는 빼고(도면을 봐야 한다) 남은 것만 묶어 보여 준다.
+export function routineCandidateIds(connectivity={}) {
+  return (connectivity.candidates||[]).filter(c=>c.routine).map(c=>c.id);
+}
+
 export function buildReviewEntries(elements={}, report={}, clashes=[], connectivity={}) {
   const entries=[];
   // 간섭은 목록 맨 앞에, 받은 순서(조치 종류 → 위치) 그대로 — 건축 분류 확인 수십 건에 묻히지 않게.

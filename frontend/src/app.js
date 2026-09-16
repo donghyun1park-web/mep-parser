@@ -2,7 +2,7 @@ import './style.css';
 import MepEdit from 'mep-edit';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { buildReviewEntries, reviewBannerText, deriveSectionRange, floorKeyOf, isZVisible, reconcileSection, uniqueByEid, fitDistance, recordOnEditFloor, editBackdropState } from './review_logic.js';
+import { buildReviewEntries, reviewBannerText, bridgeRequest, routineCandidateIds, deriveSectionRange, floorKeyOf, isZVisible, reconcileSection, uniqueByEid, fitDistance, recordOnEditFloor, editBackdropState } from './review_logic.js';
 import { screenToDrawing, drawingUnitsPerPixel } from './svg_coordinates.js';
 import { linearMepGeometry, footprintMepGeometry, mepPropertyKeys } from './mep_preview_geometry.js';
 
@@ -687,6 +687,11 @@ function renderReview(){
   const banner=document.getElementById('reviewBanner');
   banner.textContent=reviewBannerText(CLASH_REVIEW.summary||{},CONNECTIVITY.summary||{});
   banner.hidden=!banner.textContent;
+  // 일상 후보(직선·엘보 · 규격 그대로)는 한 번에 확정한다 — 확인은 사람이 하되 26번 누르게 하지 않는다.
+  const routine=RUNTIME?routineCandidateIds(CONNECTIVITY):[];
+  const batch=document.getElementById('reviewBatch');
+  batch.innerHTML=routine.length?`<button class="confirm-gap" data-batch="1">일상 이음 후보 ${routine.length}건 일괄 확정</button>`:'';
+  batch.hidden=!routine.length;
   document.getElementById('reviewList').innerHTML=shown.length?shown.map(reviewRowHtml).join(''):'없음';
 }
 function reviewRowHtml(x){
@@ -696,11 +701,10 @@ function reviewRowHtml(x){
   return `<div class="review-row">${head}<button class="confirm-gap" data-gap="${escHtml(x.confirm.id)}"`
     +` data-confirmed="${x.confirm.confirmed?'1':''}">${x.confirm.confirmed?'확정 취소':'이음 확정'}</button></div>`;
 }
-async function confirmGap(id,confirmed){
+async function confirmGap(ids,confirmed){
   setSaveStatus('saving','저장 중…');
   try{
-    const response=await apiPost('/bridges',{project_id:RUNTIME.project_id,expected_revision:RUNTIME.revision,
-      candidate_id:id,confirmed});
+    const response=await apiPost('/bridges',bridgeRequest([].concat(ids),confirmed,RUNTIME));
     RUNTIME.revision=response.revision;
     if(response.geometry&&response.geometry.elements)
       BASE_ELEMENTS=MepEdit.deriveBaseElements(response.geometry.elements,response.edits||{},excludedEditIds(response.geometry.edits_report));
@@ -712,6 +716,10 @@ async function confirmGap(id,confirmed){
   }
   renderReview();
 }
+document.getElementById('reviewBatch').addEventListener('click',ev=>{
+  if(ACTION_LOCK||!ev.target.closest('.confirm-gap')) return;
+  confirmGap(routineCandidateIds(CONNECTIVITY),true);
+});
 reviewFloor.addEventListener('change',renderReview); reviewCategory.addEventListener('change',renderReview);
 document.getElementById('reviewList').addEventListener('click',ev=>{
   if(ACTION_LOCK) return;
