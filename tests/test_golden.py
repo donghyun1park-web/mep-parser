@@ -81,10 +81,44 @@ def digest(data):
         # grouping 이 바뀌면 EID 가 바뀐다. 의도한 변화면 --bless, 아니면 회귀다.
         "eid_hash": hashlib.sha1("\n".join(eids).encode()).hexdigest()[:12],
         "eid_count": len(eids),
+        **_mep_digest(data),
     }
 
 
+def _mep_digest(data):
+    """설비 프로젝트에서만 나오는 요약. 건축 도면 골든은 이 키들이 없어 그대로다.
+
+    id·좌표는 담지 않는다 — 반올림 한 자리에 흔들리면 두 주면 아무도 안 본다. 세는 것만 담는다."""
+    out = {}
+    # `mep` 카테고리 수는 넣지 않는다 — `counts` 에 이미 있고, 건축 도면 골든까지 빈 키가 붙어 정보 없이
+    # 다시 승인하게 된다(회귀 파일은 '한눈에 틀렸다고 알 수 있는 요약' 이어야 한다).
+    joints = data.get("mep_joints") or (data.get("mep_diagnostics") or {}).get("paths", {}).get("joints")
+    if joints:
+        out["mep_joints"] = {k: joints[k] for k in ("joints", "taps") if k in joints}
+    coverage = data.get("source_coverage") or {}
+    if coverage:
+        out["source_coverage"] = {k: coverage.get(k) for k in ("selected", "represented", "omitted", "complete")}
+    net = (data.get("mep_connectivity") or {}).get("summary") or {}
+    if net and not net.get("error"):
+        out["mep_connectivity"] = {k: net.get(k) for k in
+                                   ("runs", "groups", "groups_with_candidates", "open_ends", "candidates",
+                                    "by_kind", "conflicts", "by_status")}
+    clash = (data.get("clash_review") or {}).get("summary") or {}
+    if clash and not clash.get("error"):
+        out["clash_review"] = {k: clash.get(k) for k in
+                               ("total", "by_kind", "through_openings", "through_openings_assumed", "assumed_basis")}
+    issues = (data.get("mep_diagnostics") or {}).get("issues")
+    if issues:
+        codes = {}
+        for issue in issues:
+            codes[issue.get("code", "?")] = codes.get(issue.get("code", "?"), 0) + 1
+        out["mep_issues"] = dict(sorted(codes.items()))
+    return out
+
+
 def _parse(spec):
+    if spec.get("project"):
+        return _parse_project(spec)
     import dxf_parser as dp
     dxf = _path(spec["dxf"])
     if not os.path.exists(dxf):
@@ -95,6 +129,29 @@ def _parse(spec):
     with contextlib.redirect_stdout(io.StringIO()):
         return dp.parse(dxf, rules, blocks,
                         member_schedule=spec.get("member_schedule"))
+
+
+def _parse_project(spec):
+    """설비 프로젝트(`.mep` 폴더) 회귀 — 저장된 프로필·영역·단위 그대로 다시 해석한다.
+
+    레이어맵 파싱만으로는 설비 해석(프로필 선택·단면·고저·이음·연결·간섭)이 하나도 안 돌아, 오늘 바꾼
+    것들이 회귀로 안 잡혔다. ★ 폴더를 **복사해서** 연다 — `refresh_inputs` 가 원본 지문을 갱신하며
+    project.json 을 건드리면, 회귀를 돌릴 때마다 사람이 쓰는 프로젝트의 revision 이 흔들린다."""
+    import shutil
+    import tempfile
+    folder = _path(spec["project"])
+    if not os.path.isdir(folder):
+        return None
+    from project_server import ProjectSession
+    from project_store import ProjectStore
+    with tempfile.TemporaryDirectory(prefix="golden_mep_") as tmp:
+        copy = os.path.join(tmp, os.path.basename(folder.rstrip("/\\")) or "project.mep")
+        shutil.copytree(folder, copy)
+        manifest = json.loads(open(os.path.join(copy, "project.json"), encoding="utf-8").read())
+        if any(not os.path.exists(source["path"]) for source in manifest["sources"]):
+            return None                       # 원본 도면이 이 PC 에 없다
+        with contextlib.redirect_stdout(io.StringIO()):
+            return ProjectSession(ProjectStore(copy)).state()["geometry"]
 
 
 def _load(p, default):

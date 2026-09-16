@@ -36,6 +36,191 @@
     "wall_thickness_10mm": {},
     "width_conflicts": 0
   },
+  "단위세대_난방": {
+    "bbox": [
+      55515,
+      67630,
+      69915,
+      77710
+    ],
+    "clash_review": {
+      "assumed_basis": 8,
+      "by_kind": {
+        "under_wall": 8
+      },
+      "through_openings": 0,
+      "through_openings_assumed": 0,
+      "total": 8
+    },
+    "closed_wall_dups": 0,
+    "counts": {
+      "opening": 13,
+      "pipe": 5,
+      "wall": 68
+    },
+    "duplicate_geometry_dropped": {},
+    "eid_collisions": {},
+    "eid_count": 86,
+    "eid_hash": "55567eed11d2",
+    "face_coverage_pct": 100,
+    "floors": [
+      0
+    ],
+    "member_schedule": {},
+    "mep_connectivity": {
+      "by_kind": {},
+      "by_status": {
+        "open": 10
+      },
+      "candidates": 0,
+      "conflicts": 0,
+      "groups": 5,
+      "groups_with_candidates": 5,
+      "open_ends": 10,
+      "runs": 5
+    },
+    "mep_issues": {
+      "REGION_CROSSING": 1,
+      "SOURCE_GAP": 1
+    },
+    "mep_joints": {
+      "joints": 0,
+      "taps": 0
+    },
+    "needs_review": 73,
+    "openings_dims_assumed": {
+      "height": 13,
+      "sill": 13
+    },
+    "small_openings_dropped": 0,
+    "source_coverage": {
+      "complete": true,
+      "omitted": 0,
+      "represented": 271,
+      "selected": 271
+    },
+    "thin_pairs": {
+      "XREF_UNIT_74 expand$0$Parti": 2
+    },
+    "wall_pairing": {
+      "paired": 66,
+      "single": 0,
+      "single_offset": 0
+    },
+    "wall_thickness_10mm": {
+      "10": 2,
+      "100": 8,
+      "110": 2,
+      "120": 1,
+      "160": 3,
+      "170": 1,
+      "180": 5,
+      "200": 17,
+      "390": 1,
+      "410": 1,
+      "440": 2,
+      "450": 1,
+      "500": 1,
+      "80": 3,
+      "90": 18
+    },
+    "width_conflicts": 0
+  },
+  "단위세대_환기": {
+    "bbox": [
+      55515,
+      67630,
+      69915,
+      77775
+    ],
+    "clash_review": {
+      "assumed_basis": 8,
+      "by_kind": {
+        "wall_penetration": 8
+      },
+      "through_openings": 0,
+      "through_openings_assumed": 0,
+      "total": 8
+    },
+    "closed_wall_dups": 0,
+    "counts": {
+      "duct": 37,
+      "opening": 13,
+      "wall": 68
+    },
+    "duplicate_geometry_dropped": {},
+    "eid_collisions": {},
+    "eid_count": 118,
+    "eid_hash": "e67028b0cc81",
+    "face_coverage_pct": 100,
+    "floors": [
+      0
+    ],
+    "member_schedule": {},
+    "mep_connectivity": {
+      "by_kind": {
+        "elbow": 16,
+        "straight": 6,
+        "tee": 4
+      },
+      "by_status": {
+        "candidate": 44,
+        "open": 26,
+        "tee": 4
+      },
+      "candidates": 26,
+      "conflicts": 0,
+      "groups": 37,
+      "groups_with_candidates": 11,
+      "open_ends": 74,
+      "runs": 37
+    },
+    "mep_issues": {
+      "REGION_CROSSING": 1
+    },
+    "mep_joints": {
+      "joints": 0,
+      "taps": 0
+    },
+    "needs_review": 105,
+    "openings_dims_assumed": {
+      "height": 13,
+      "sill": 13
+    },
+    "small_openings_dropped": 0,
+    "source_coverage": {
+      "complete": true,
+      "omitted": 0,
+      "represented": 41,
+      "selected": 41
+    },
+    "thin_pairs": {
+      "XREF_UNIT_74 expand$0$Parti": 2
+    },
+    "wall_pairing": {
+      "paired": 66,
+      "single": 0,
+      "single_offset": 0
+    },
+    "wall_thickness_10mm": {
+      "10": 2,
+      "100": 8,
+      "110": 2,
+      "120": 1,
+      "160": 3,
+      "170": 1,
+      "180": 5,
+      "200": 17,
+      "390": 1,
+      "410": 1,
+      "440": 2,
+      "450": 1,
+      "500": 1,
+      "80": 3,
+      "90": 18
+    },
+    "width_conflicts": 0
+  },
   "지하3층_건축평면": {
     "bbox": [
       -3844,
