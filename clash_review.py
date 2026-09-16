@@ -24,6 +24,11 @@ MIN_AREA_MM2 = 1.0
 MIN_Z_MM = 0.5
 
 SLEEVE_MARGIN_MM = 20.0   # 슬리브 외곽에서 이 안이면 그 슬리브 자리로 본다(중심선·외곽선 제도 오차)
+# 파서가 **위치나 두께를 확신하지 못하는** 벽 — 그 위에서 센 간섭은 그만큼만 믿을 수 있다.
+# `needs_review` 전체를 쓰지 않는다: 실무 프로젝트는 건축 레이어 분류 확인으로 벽이 통째로 검토 대상이라
+# (실측: 통합 모델 24건 전부 `project_architecture_classification`) 그걸로 세면 매번 24/24 가 되어 아무
+# 말도 안 하는 것과 같다. 여기서 보는 것은 **기하의 불확실성**이다.
+UNCERTAIN_PAIRINGS = ("single_offset", "manual")   # 축선 자체가 추정이거나 사람이 그린 것
 
 ACTIONS = {
     "slab_penetration": "슬래브 관통 — 슬리브·방수 확인",
@@ -36,6 +41,14 @@ ACTIONS = {
 LABELS = {"slab_penetration": "슬래브 관통", "structure_penetration": "기둥·보 관통", "wall_penetration": "벽 관통",
           "sleeve_provided": "슬리브 관통",
           "under_wall": "벽 하부 통과", "suspect_thin_wall": "두께 의심 벽"}
+
+
+def _uncertain_wall(category, rec):
+    """이 벽의 위치·두께를 파서가 확신하는가. 확신하지 못하면 그 위에서 센 간섭도 그만큼만 믿는다."""
+    if category != "wall":
+        return False
+    return (rec.get("pairing") in UNCERTAIN_PAIRINGS
+            or rec.get("review_reason") in GC.UNTRUSTED_WIDTH_REASONS)
 
 
 def _prisms(geometry):
@@ -244,9 +257,17 @@ def find_clashes(geometry):
                         "level": rec.get("level") or struct.get("level"),
                         # 이 줄의 높이가 도면에서 온 것인지 가정인지 — 판정과 **같이** 보여야 한다.
                         "basis": "assumed" if assumed else "declared", "assumed": assumed,
-                        "struct": {"eid": struct.get("eid"), "category": prism["category"], "layer": struct.get("layer"),
-                                   "width_mm": None if prism["width"] is None else round(prism["width"], 1),
-                                   "z_basis": prism["basis"]["z"], "synthetic": prism.get("synthetic")},
+                        # 벽이 간섭 품질의 바닥이다 — 그 줄이 선 벽을 파서가 어떻게 잡았는지 같이 싣는다
+                        # (`single_offset` 은 축선 자체가 추정이라 위치도 두께도 추정이다).
+                        "struct": dict({"eid": struct.get("eid"), "category": prism["category"],
+                                        "layer": struct.get("layer"),
+                                        "width_mm": None if prism["width"] is None else round(prism["width"], 1),
+                                        "z_basis": prism["basis"]["z"], "synthetic": prism.get("synthetic")},
+                                       **{k: v for k, v in (
+                                           ("pairing", struct.get("pairing")),
+                                           ("review_reason", struct.get("review_reason")),
+                                           ("uncertain", _uncertain_wall(prism["category"], struct) or None))
+                                          if v}),
                         "mep": {"eid": rec.get("eid"), "category": cat, "size": size, "layer": rec.get("layer"),
                                 "system": rec.get("system") or (rec.get("overrides") or {}).get("system"),
                                 "z_basis": mep_basis["z"]},
@@ -260,12 +281,14 @@ def find_clashes(geometry):
             "summary": {"total": len(items), "by_kind": by_kind, "through_openings": through,
                         "through_openings_assumed": through_assumed,
                         "assumed_basis": sum(1 for c in items if c["basis"] == "assumed"),
+                        "on_uncertain_walls": sum(1 for c in items if c["struct"].get("uncertain")),
                         "skipped_structures": skipped_structures, "skipped_routes": skipped_routes},
             "method": "2.5D plan intersection with z ranges (geom_contract widths, elevations, routes)"}
 
 
 CSV_COLUMNS = ("id", "kind", "label", "action", "level", "x_mm", "y_mm", "z0_mm", "z1_mm", "crossing_mm",
                "struct_eid", "struct_category", "struct_layer", "struct_width_mm",
+               "struct_pairing", "struct_review_reason",
                "mep_eid", "mep_category", "mep_system", "mep_size", "basis", "assumed")
 
 
@@ -283,6 +306,7 @@ def to_rows(review):
             # 합성 슬래브는 도면에 없는 부재라 EID 가 없다 — 빈칸 대신 출처를 적는다.
             "struct_layer": struct.get("layer") or struct.get("synthetic"),
             "struct_width_mm": struct.get("width_mm"),
+            "struct_pairing": struct.get("pairing"), "struct_review_reason": struct.get("review_reason"),
             "mep_eid": mep.get("eid"), "mep_category": mep.get("category"), "mep_system": mep.get("system"),
             "mep_size": mep.get("size"), "basis": item.get("basis"),
             "assumed": " ".join(item.get("assumed") or ()),

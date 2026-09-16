@@ -191,3 +191,17 @@ test('a batch confirmation carries the ids the list actually offered, and one id
   assert.deepEqual(bridgeRequest(['gap:1','gap:1'], true, runtime).candidate_id, 'gap:1');
   assert.throws(()=>bridgeRequest([], true, runtime), /후보/);
 });
+
+test('a clash row and the banner say when the wall under them is one the parser flagged', () => {
+  const clashes=[{id:'a',kind:'under_wall',action:'바닥 매립 설비가 벽 아래를 지남',at:[1000,100],z:[70,86],
+    struct:{eid:'w:g',category:'wall',width_mm:50,pairing:'single_offset',review_reason:'single_offset',
+            uncertain:true},
+    mep:{eid:'p:1',size:'Ø15.9'}}];
+  const [row]=buildReviewEntries({}, {}, clashes);
+  assert.match(row.reason, /벽 위치·두께 불확실\(single_offset\)/);
+  assert.match(reviewBannerText({total:24, assumed_basis:24, on_uncertain_walls:14}, {}),
+    /간섭 24건 중 가정 높이 24건 · 불확실한 벽 위 14건/);
+  // 검토 표시가 없는 벽은 아무 말도 붙이지 않는다.
+  const clean=[{...clashes[0], struct:{eid:'w:ok',category:'wall',width_mm:200}}];
+  assert.ok(!buildReviewEntries({}, {}, clean)[0].reason.includes('벽 위치'));
+});

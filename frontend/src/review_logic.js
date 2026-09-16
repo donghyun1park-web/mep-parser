@@ -28,6 +28,11 @@ function diagnosticText(value) {
 }
 
 const GAP_KIND={straight:'직선',elbow:'엘보',tee:'티'};
+// 간섭은 그 벽 위에서 센 것이다 — 파서가 검토하라고 표시한 벽이면 그 사실을 줄에 싣는다.
+function wallEvidenceText(struct={}) {
+  if (!struct.uncertain) return '';
+  return ` · 벽 위치·두께 불확실(${struct.review_reason||struct.pairing})`;
+}
 // 평면도에는 높이가 없다 — 가정 높이로 나온 판정은 그렇다고 말한다(도면이 말해 준 줄과 같아 보이면 안 된다).
 function assumedHeightText(row) {
   if ((row.basis||row.z_basis)!=='assumed') return '';
@@ -43,7 +48,8 @@ export function reviewBannerText(clashSummary={}, connectivitySummary={}) {
   const gapAssumed=(connectivitySummary.assumed_basis||{}).candidates||0;
   if (!clashAssumed && !gapAssumed) return '';
   const parts=[];
-  if (clashTotal) parts.push(`간섭 ${clashTotal}건 중 가정 높이 ${clashAssumed}건`);
+  if (clashTotal) parts.push(`간섭 ${clashTotal}건 중 가정 높이 ${clashAssumed}건`
+    +(clashSummary.on_uncertain_walls?` · 불확실한 벽 위 ${clashSummary.on_uncertain_walls}건`:''));
   if (gapTotal) parts.push(`연결 후보 ${gapTotal}건 중 가정 ${gapAssumed}건`);
   return parts.join(' · ')+' — 평면도에는 높이가 없습니다. 설비 설정에서 계통별 설치 높이·규격을 선언하면 줄어듭니다.';
 }
@@ -72,7 +78,7 @@ export function buildReviewEntries(elements={}, report={}, clashes=[], connectiv
       reason:`${clash.action} · (${Math.round(at[0])}, ${Math.round(at[1])}) z ${Math.round(z[0])}~${Math.round(z[1])} · `
         // 합성 슬래브(층 높이 선언)는 부재가 아니라 EID 가 없다 — 빈칸 대신 출처를 적는다.
         +`${s.category||''} ${s.eid||s.layer||''}${s.width_mm!=null?` 두께 ${s.width_mm}mm`:''} ↔ ${[m.system,m.size].filter(Boolean).join(' ')}`
-        +assumedHeightText(clash),
+        +assumedHeightText(clash)+wallEvidenceText(s),
     });
   });
   // 설비 이음 후보·계통 충돌은 간섭 다음, 받은 순서 그대로. 후보는 모델에 쓰지 않았다 — 확정은 사람이 한다.

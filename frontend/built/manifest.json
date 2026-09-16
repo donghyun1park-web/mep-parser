@@ -4,7 +4,7 @@
   "three": "0.160.0",
   "source_hash": "sha256-lf",
   "assets": {
-    "preview.js": "9cb240b1a0db86c53f7418e3ed00661e8690c021d2a4629499594cacc9855777",
+    "preview.js": "2079955fc11c524fd4af4812664034df38fb371da25bff97688a9225058be79e",
     "preview.css": "1956a3f8de7c221ba93601b93c3335229e50032a35db8277e3b33840aeeb73f2",
     "shell.html": "24d40c2177d89fb710f0d5d5f8d6ce754cf7e013553fb45c65b4d2c0572e1a54"
   },
@@ -13,7 +13,7 @@
     "frontend/package.json": "6ad22f1d058e43fb9861aa8af59693d40dedbee8fef9ab8bb366b8c259ea1d68",
     "frontend/src/app.js": "b2b0844eb9fb931a7b0d6d93c39ba887ef270538cc405c726eb8a2a64f687f61",
     "frontend/src/mep_preview_geometry.js": "2bcc5fdf265906b6ab759dee82aad530332db057b73434c1d3907f5c024a8111",
-    "frontend/src/review_logic.js": "7f8a6b60f67888e4e4f4d2d2d377cbee65a76187c4e9ee3de3d46d8e49af3621",
+    "frontend/src/review_logic.js": "51751b01b83c965f58c47638dcc2b1ce4176739944c236806d3e9288d22c1887",
     "frontend/src/shell.html": "8319884416e9aa5435ab3efe7db6ecb8785b3a72ddd30a3b6d7bed643907b5a3",
     "frontend/src/style.css": "648ea7729a95d439f3d6b67aeea2ca6a7bc09e09858b049d62729581543f8129",
     "frontend/src/svg_coordinates.js": "37d499435b9c067d9891abefec37e2e277caffcdd18cfbfbabc7bfd06274d68e",

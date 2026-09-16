@@ -29,7 +29,7 @@ def test_duct_through_a_wall_is_one_located_penetration():
     assert item["mep"]["size"] == "400×300" and item["mep"]["system"] == "SA"
     assert find_clashes(g)["items"][0]["id"] == item["id"]                 # 다시 돌려도 같은 id
     assert result["summary"] == {"total": 1, "by_kind": {"wall_penetration": 1}, "through_openings": 0,
-                                 "through_openings_assumed": 0, "assumed_basis": 0,
+                                 "through_openings_assumed": 0, "assumed_basis": 0, "on_uncertain_walls": 0,
                                  "skipped_structures": 0, "skipped_routes": 0}
     assert item["basis"] == "declared" and item["assumed"] == []      # 선언 두께·높이 + 도면 z
 
@@ -201,3 +201,21 @@ def test_the_command_line_writes_both_tables(tmp_path):
                           capture_output=True, text=True, cwd=str(Path(__file__).resolve().parents[1]))
     assert done.returncode == 0, done.stderr
     assert (tmp_path / "geometry_clash.csv").exists() and (tmp_path / "geometry_connectivity.csv").exists()
+
+
+def test_a_clash_row_says_how_the_parser_found_the_wall_it_stands_on():
+    """벽이 간섭 품질의 바닥이다 — `single_offset` 은 축선 자체가 추정이라 위치도 두께도 추정이다."""
+    guessed = dict(_wall("w:g", [[0, 100], [5000, 100]]), pairing="single_offset",
+                   review_reason="single_offset", needs_review=True)
+    g = _geom(wall=[guessed, _wall("w:ok", [[0, 3000], [5000, 3000]])],
+              pipe=[_pipe("p:1", [[1000, -500], [1000, 700]]), _pipe("p:2", [[2000, 2500], [2000, 3500]])])
+    result = find_clashes(g)
+    by_eid = {c["struct"]["eid"]: c["struct"] for c in result["items"]}
+    assert by_eid["w:g"]["pairing"] == "single_offset" and by_eid["w:g"]["uncertain"] is True
+    assert "pairing" not in by_eid["w:ok"] and "uncertain" not in by_eid["w:ok"]   # 없는 키는 안 만든다
+    assert result["summary"]["on_uncertain_walls"] == 1
+    # 건축 레이어 분류 확인만 걸린 벽은 기하가 불확실한 것이 아니다 — 그걸로 세면 매번 전건이 된다.
+    classified = dict(_wall("w:c", [[0, 6000], [5000, 6000]]), pairing="paired",
+                      review_reason="project_architecture_classification", needs_review=True)
+    g2 = _geom(wall=[classified], pipe=[_pipe("p:3", [[1000, 5500], [1000, 6500]])])
+    assert find_clashes(g2)["summary"]["on_uncertain_walls"] == 0

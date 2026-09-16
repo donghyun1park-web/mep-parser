@@ -142,6 +142,15 @@
   (`review_logic.reviewBannerText`, 미리보기 `#reviewBanner` · Pascal 검토 탭 · `pascal_review.summary`).
   가정이 하나도 없으면 아무 말도 하지 않는다(빈 문자열). 연결 요약도 같은 수를 든다
   (`mep_connectivity.summary.assumed_basis` = `{candidates, open_ends}`).
+- ★ **간섭은 그 벽 위에서 센 것이다 — 벽을 어떻게 잡았는지 같이 싣는다.** 줄의 `struct` 에 `pairing`·
+  `review_reason` 이 붙고, 파서가 **위치나 두께를 확신하지 못하는** 벽이면 `uncertain: true` 와 요약
+  `on_uncertain_walls` 가 선다(`UNCERTAIN_PAIRINGS` = `single_offset`·`manual`, 그리고
+  `GC.UNTRUSTED_WIDTH_REASONS`). `single_offset` 은 중심선이 선언 폭 오프셋이라 위치도 두께도 추정이다.
+  ★ `needs_review` **전체를 쓰지 않는다** — 실무 프로젝트는 건축 레이어 분류 확인으로 벽이 통째로 검토
+  대상이라(실측: 통합 모델 24건 전부 `project_architecture_classification`) 그걸로 세면 매번 24/24 가 되어
+  아무 말도 안 하는 것과 같다. 좁힌 뒤 실측은 **0건**이다 — 24건 전부 `paired` 벽 위다. 그 도면의 10mm
+  칸막이는 `thin_pair` 로 안 걸리고(그리디 페어링이 보드선을 짝지었다) 간섭 목록의 `suspect_thin_wall` 이
+  잡는다 — 두 신호가 서로를 덮는다.
 - ★ **일상 검토는 2.5D 목록에서 끝난다 — FreeCAD 불리언은 납품 검증용이다.** 같은 자리를 2.5D 는 0.1초에,
   FreeCAD 통합 빌드는 421초에 찾는다(위 실측). 그런데 GUI 흐름은 `(3) 미리보기 → (4) 3D Build` 라 현장이
   매번 빌드를 눌렀고, 현장에 보낸 표는 **그때그때 짠 스크립트**로 만들었다. 이제 정식 출력이다:
