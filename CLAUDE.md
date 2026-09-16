@@ -142,6 +142,18 @@
   (`review_logic.reviewBannerText`, 미리보기 `#reviewBanner` · Pascal 검토 탭 · `pascal_review.summary`).
   가정이 하나도 없으면 아무 말도 하지 않는다(빈 문자열). 연결 요약도 같은 수를 든다
   (`mep_connectivity.summary.assumed_basis` = `{candidates, open_ends}`).
+- ★ **일상 검토는 2.5D 목록에서 끝난다 — FreeCAD 불리언은 납품 검증용이다.** 같은 자리를 2.5D 는 0.1초에,
+  FreeCAD 통합 빌드는 421초에 찾는다(위 실측). 그런데 GUI 흐름은 `(3) 미리보기 → (4) 3D Build` 라 현장이
+  매번 빌드를 눌렀고, 현장에 보낸 표는 **그때그때 짠 스크립트**로 만들었다. 이제 정식 출력이다:
+  `clash_review.to_rows`·`write_csv`(열 20개) · `mep_network.to_rows`(확정한 이음·후보·계통 충돌·끊긴 끝을
+  `row_type` 으로 한 표에) · GUI **'(3b) 검토 목록 CSV'** → `<프로젝트>/review/clash_r<rev>.csv` ·
+  `connectivity_r<rev>.csv`(**파일 이름에 revision** — 어느 상태의 목록인지 알아야 그 표를 믿는다) ·
+  CLI `python clash_review.py geometry.json [-o x.csv] [--connectivity]`. 인코딩은 물량 CSV 와 같은
+  `utf-8-sig` 라 Excel 이 바로 연다. 빌드 버튼은 **'(4) 납품 검증 빌드 (FreeCAD · 느림)'** 이고, 누르면
+  지난 `build.json` 의 `stage_seconds` 합과 가장 긴 단계를 먼저 찍는다 — 7분짜리를 모르고 누르지 않게.
+  실측(통합 모델): 간섭 CSV **24행**(손으로 짠 표와 같은 건수, 열은 13 → 20) · 연결 CSV 110행(끊긴 끝 84 ·
+  후보 26). FreeCAD 빌드 속도 자체는 손대지 않았다 — 남은 큰 구간(IFC 122.8초 · 설비 형상 189초)이 FreeCAD
+  내부라 여기서 줄일 수단이 없다.
 - 붙는 곳: `ProjectSession._parse` → `geometry.clash_review`(실패하면 `summary.error` — 모델·수정은 막지 않는다) ·
   미리보기 '검토 대기' 맨 앞(분류 '간섭', 누르면 설비 부재 선택) · Pascal 검토 탭(`pascal_review` 의 clash) · MCP
   `get_review_items.clash_review` · GUI 파싱 로그 요약. FreeCAD `check_clashes` 항목에도 `struct_eids`·`mep_eids`·
@@ -815,6 +827,15 @@ python preview.py sample_plan.dxf -m layer_map.csv -b block_map.csv  # DXF 즉�
 ```
 python dxf_parser.py plan.dxf -m layer_map.csv -o geometry.json --edits edits.json
 ```
+
+### 6.4 검토 목록 CSV (일상 검토 — FreeCAD 불필요)
+간섭·연결 목록을 표로 낸다. 같은 자리를 FreeCAD 불리언보다 수천 배 빠르게 찾으므로 **일상 검토는 여기까지**이고,
+`(4) 납품 검증 빌드` 는 납품 전에 한 번 돌린다.
+```
+python clash_review.py geometry.json --connectivity
+# → geometry_clash.csv (위치·부재·조치·높이 근거) · geometry_connectivity.csv (이음 후보·끊긴 끝)
+```
+GUI 는 '(3b) 검토 목록 CSV' 가 `<프로젝트>/review/clash_r<rev>.csv` 로 쓴다.
 
 ### 6.5 Blender 로 보기 (렌더·4D 공정·간섭 검토)
 **새로 만들지 않는다.** [Bonsai](https://bonsaibim.org/)(구 BlenderBIM)가 IFC 네이티브로

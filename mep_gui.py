@@ -348,12 +348,16 @@ class App:
                    command=self._do_diag).pack(side="left", padx=4)
         ttk.Button(f, text="(3) 3D 미리보기(브라우저)",
                    command=self._do_preview).pack(side="left", padx=4)
+        ttk.Button(f, text="(3b) 검토 목록 CSV",
+                   command=self._do_review_csv).pack(side="left", padx=4)
         ttk.Button(f, text="edits.json 불러오기",
                    command=self._pick_edits).pack(side="left", padx=4)
         self.btn_ifc = ttk.Button(f, text="선택: IFC 직접 내보내기",
                                   command=self._do_ifc_build)
         # FreeCAD is the primary build action; direct IFC remains optional.
-        self.btn_build = ttk.Button(f, text="(4) 3D Build (FreeCAD 기본)", command=self._do_build)
+        # 일상 검토는 (2)→(3b) 에서 끝난다. FreeCAD 불리언은 같은 자리를 훨씬 느리게 다시 찾으므로
+        # 납품 검증용이라고 이름으로 말한다(실측 통합 빌드 421초 대 2.5D 목록 0.1초).
+        self.btn_build = ttk.Button(f, text="(4) 납품 검증 빌드 (FreeCAD · 느림)", command=self._do_build)
         self.btn_build.pack(side="left", padx=4)
         ttk.Button(f, text="Blender / GLB 내보내기", command=self._do_blender_build).pack(side="left", padx=4)
         self.btn_ifc.pack(side="left", padx=4)
@@ -969,6 +973,36 @@ class App:
         except Exception as e:
             messagebox.showerror("진단 실패", str(e))
 
+    def _do_review_csv(self):
+        """간섭·연결 검토 목록을 CSV 로. 일상 검토는 여기서 끝난다 — FreeCAD 빌드는 납품 검증용이다.
+
+        파일 이름에 revision 을 넣는다: 어느 상태의 목록인지 나중에 알 수 있어야 현장에 보낸 표를 믿는다."""
+        if not self.data:
+            messagebox.showwarning("Check", "먼저 (2) Parse 를 실행하세요.")
+            return
+        try:
+            import clash_review as CR
+            import mep_network as NET
+            folder = os.path.join(str(self.project_session.store.folder), "review")
+            os.makedirs(folder, exist_ok=True)
+            revision = (self.data.get("project") or {}).get("revision", 0)
+            clash_path, clash_rows = CR.write_csv(
+                os.path.join(folder, f"clash_r{revision}.csv"),
+                CR.to_rows(self.data.get("clash_review")), CR.CSV_COLUMNS)
+            net_path, net_rows = CR.write_csv(
+                os.path.join(folder, f"connectivity_r{revision}.csv"),
+                NET.to_rows(self.data.get("mep_connectivity")), NET.CSV_COLUMNS)
+            self._log(f"검토 목록 CSV -> {clash_path} ({clash_rows}행) · {net_path} ({net_rows}행)")
+            summary = (self.data.get("clash_review") or {}).get("summary") or {}
+            if summary.get("assumed_basis"):
+                self._log(f"  간섭 {summary.get('total', 0)}건 중 가정 높이 {summary['assumed_basis']}건 — "
+                          "설비 설정에서 설치 높이·규격을 선언하면 줄어듭니다")
+            os.startfile(folder)
+        except PermissionError:
+            messagebox.showerror("검토 목록 CSV", "출력 파일이 Excel 에서 열려 있습니다. 닫고 다시 시도하세요.")
+        except Exception as e:
+            messagebox.showerror("검토 목록 CSV 실패", str(e))
+
     def _do_boq(self):
         """물량집계(BOQ) Excel 내보내기 — boq_export.py 재사용.
         벽(두께별 길이·면적·체적)/기둥(단면별)/슬래브/창호/MEP 규격별 집계."""
@@ -1047,6 +1081,16 @@ class App:
         out = os.path.splitext(self.geom_path)[0].replace(".geometry", "") + "_model"
         self.btn_build.state(["disabled"])
         self._log(f"Build started... (freecadcmd) -> {out}.FCStd / .ifc")
+        # 얼마나 걸릴지는 지난 빌드가 이미 말해 뒀다(`stage_seconds`) — 7분짜리를 모르고 누르지 않게.
+        try:
+            with open(out + ".build.json", encoding="utf-8") as handle:
+                stages = (json.load(handle).get("stage_seconds") or {})
+            if stages:
+                top = max(stages.items(), key=lambda kv: kv[1])
+                self._log(f"  이전 빌드 {sum(stages.values()):.0f}초 (가장 긴 단계 {top[0]} {top[1]:.0f}초) — "
+                          "일상 검토는 (3b) 검토 목록 CSV 로 충분합니다")
+        except Exception:
+            pass
 
         builder_py = resource_path("freecad_builder.py")
 

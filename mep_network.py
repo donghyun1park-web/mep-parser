@@ -315,3 +315,39 @@ def analyze(geometry):
             "method": ("connected = shared joint ids only; candidates between open ends of the same category, system "
                        "and height band: straight (facing within 10 deg), elbow (turn >= 60 deg) or tee (end ray meets "
                        "another route), nearest first, one per end, within 2.5 x the larger section width; model unchanged")}
+
+
+CSV_COLUMNS = ("row_type", "id", "kind", "status", "routine", "gap_mm", "x_mm", "y_mm",
+               "eid_a", "eid_b", "port_a", "port_b", "category", "system_a", "system_b",
+               "size_a", "size_b", "size_change", "z_basis", "level")
+
+
+def to_rows(connectivity):
+    """연결성 → 표 한 장. 확정한 이음·후보·계통 충돌·끊긴 끝을 `row_type` 으로 갈라 한 표에 담는다."""
+    net = connectivity or {}
+    rows = []
+
+    def gap_row(row_type, gap):
+        eids, ports = gap.get("eids") or [None, None], gap.get("ports") or [None, None]
+        systems, sizes = gap.get("systems") or [None, None], gap.get("sizes") or [None, None]
+        at = (gap.get("points") or [[None, None]])[0]
+        rows.append({"row_type": row_type, "id": gap.get("id"), "kind": gap.get("kind"),
+                     "routine": gap.get("routine"), "gap_mm": gap.get("gap_mm"),
+                     "x_mm": at[0], "y_mm": at[1], "eid_a": eids[0], "eid_b": eids[1],
+                     "port_a": ports[0], "port_b": ports[1], "category": gap.get("category"),
+                     "system_a": systems[0], "system_b": systems[1], "size_a": sizes[0], "size_b": sizes[1],
+                     "size_change": gap.get("size_change"), "z_basis": gap.get("z_basis"), "level": gap.get("level")})
+
+    for gap in (net.get("bridges") or {}).get("applied") or []:
+        gap_row("bridged", gap)
+    for gap in net.get("candidates") or []:
+        gap_row("candidate", gap)
+    for gap in net.get("conflicts") or []:
+        gap_row("conflict", gap)
+    for end in net.get("open_ends") or []:
+        at = end.get("at") or [None, None]
+        rows.append({"row_type": "open_end", "id": None, "kind": None, "status": end.get("status"),
+                     "x_mm": at[0], "y_mm": at[1], "eid_a": end.get("eid"), "port_a": end.get("port"),
+                     "category": end.get("category"), "system_a": end.get("system"),
+                     "z_basis": end.get("z_basis"), "level": end.get("level")})
+    return rows

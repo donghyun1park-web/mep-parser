@@ -225,3 +225,22 @@ def test_the_bridges_route_takes_a_list_and_refuses_an_ambiguous_body(tmp_path):
         saved = post(dict(common, candidate_ids=ids, confirmed=True))
     assert saved["revision"] == state["revision"] + 1
     assert sorted(b["id"] for b in saved["geometry"]["mep_connectivity"]["bridges"]["applied"]) == sorted(ids)
+
+
+def test_the_connectivity_table_carries_every_kind_of_row():
+    """확정한 이음·후보·계통 충돌·끊긴 끝이 한 표에 `row_type` 으로 갈려 들어간다."""
+    from mep_network import CSV_COLUMNS, to_rows
+    g = _geom(duct=[_duct("d:a", [[0, 0], [1000, 0]]), _duct("d:b", [[1200, 0], [2000, 0]]),
+                    _duct("d:c", [[0, 3000], [1000, 3000]]),
+                    _duct("d:d", [[1200, 3000], [2000, 3000]], system="RA")])
+    net = analyze(g)
+    net["bridges"] = {"applied": [dict(net["candidates"][0], id="gap:done")], "orphaned": []}
+    rows = to_rows(net)
+    kinds = {r["row_type"] for r in rows}
+    assert kinds == {"bridged", "candidate", "conflict", "open_end"}
+    assert set(rows[0]) <= set(CSV_COLUMNS)
+    (conflict,) = [r for r in rows if r["row_type"] == "conflict"]
+    assert conflict["system_a"] != conflict["system_b"]
+    end = next(r for r in rows if r["row_type"] == "open_end")
+    assert end["status"] in ("open", "terminal", "sleeve", "tee") and end["eid_a"]
+    assert to_rows({}) == [] and to_rows(None) == []

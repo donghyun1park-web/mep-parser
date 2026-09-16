@@ -1,4 +1,5 @@
 """간섭 검토 목록 — 한 교차가 한 줄, 위치·부재·조치가 붙는다."""
+from pathlib import Path
 import geom_contract as GC
 from clash_review import find_clashes
 
@@ -153,3 +154,50 @@ def test_a_plan_z_of_zero_is_not_evidence_of_an_installation_height():
     g2 = _geom(wall=[_wall("w:1", [[0, 100], [5000, 100]])], duct=[declared])
     (row2,) = find_clashes(g2)["items"]
     assert (row2["basis"], row2["assumed"], row2["mep"]["z_basis"]) == ("declared", [], "declared")
+
+
+def test_the_list_becomes_one_table_excel_can_open(tmp_path):
+    """현장에 보낼 표를 일회성 스크립트로 만들지 않는다 — 열은 고정이고 없는 값은 빈칸이다."""
+    import csv as _csv
+    from clash_review import CSV_COLUMNS, to_rows, write_csv
+    duct = {"eid": "d:1", "kind": "polyline", "points": [[2500, -1500], [2500, 1700]], "elevation": 2400,
+            "width_mm": 400, "height_mm": 300, "system": "SA", "layer": "M-SA"}
+    g = _geom(wall=[_wall("w:1", [[0, 100], [5000, 100]])], duct=[duct])
+    review = find_clashes(g)
+    (row,) = to_rows(review)
+    assert row["kind"] == "wall_penetration" and row["label"] == "벽 관통"
+    assert (row["x_mm"], row["y_mm"], row["struct_eid"], row["mep_eid"]) == (2500.0, 100.0, "w:1", "d:1")
+    assert row["mep_size"] == "400×300" and row["basis"] == "declared" and row["assumed"] == ""
+    path, count = write_csv(tmp_path / "clash.csv", to_rows(review), CSV_COLUMNS)
+    with open(path, encoding="utf-8-sig", newline="") as handle:
+        table = list(_csv.reader(handle))
+    assert count == 1 and table[0] == list(CSV_COLUMNS) and len(table) == 2
+    assert open(path, "rb").read(3) == b"\xef\xbb\xbf"          # Excel 이 바로 연다
+
+
+def test_a_synthetic_slab_row_says_where_it_came_from_instead_of_an_empty_cell(tmp_path):
+    from clash_review import to_rows
+    riser = {"eid": "p:r", "kind": "polyline", "points": [[2000, 2000], [2000, 2000]], "elevation": 1500,
+             "diameter": 100, "path3d": {"segments": [{"type": "line", "start": [2000, 2000, -1000],
+                                                       "end": [2000, 2000, 1400]}]}}
+    g = _geom(pipe=[riser])
+    g["mep_profile"] = {"levels": {"structural_slab_top_mm": 0.0, "floor_to_floor_mm": 2800.0,
+                                   "slab_thickness_mm": 200.0},
+                        "region": {"id": "unit", "bounds_mm": [0, 0, 5000, 5000]}}
+    (row,) = to_rows(find_clashes(g))
+    assert row["struct_eid"] is None and "층 높이 선언" in row["struct_layer"]
+
+
+def test_the_command_line_writes_both_tables(tmp_path):
+    import json as _json
+    import subprocess
+    import sys
+    duct = {"eid": "d:1", "kind": "polyline", "points": [[2500, -1500], [2500, 1700]], "elevation": 2400,
+            "width_mm": 400, "height_mm": 300, "system": "SA"}
+    g = _geom(wall=[_wall("w:1", [[0, 100], [5000, 100]])], duct=[duct])
+    source = tmp_path / "geometry.json"
+    source.write_text(_json.dumps(g), encoding="utf-8")
+    done = subprocess.run([sys.executable, "clash_review.py", str(source), "--connectivity"],
+                          capture_output=True, text=True, cwd=str(Path(__file__).resolve().parents[1]))
+    assert done.returncode == 0, done.stderr
+    assert (tmp_path / "geometry_clash.csv").exists() and (tmp_path / "geometry_connectivity.csv").exists()

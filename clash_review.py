@@ -262,3 +262,75 @@ def find_clashes(geometry):
                         "assumed_basis": sum(1 for c in items if c["basis"] == "assumed"),
                         "skipped_structures": skipped_structures, "skipped_routes": skipped_routes},
             "method": "2.5D plan intersection with z ranges (geom_contract widths, elevations, routes)"}
+
+
+CSV_COLUMNS = ("id", "kind", "label", "action", "level", "x_mm", "y_mm", "z0_mm", "z1_mm", "crossing_mm",
+               "struct_eid", "struct_category", "struct_layer", "struct_width_mm",
+               "mep_eid", "mep_category", "mep_system", "mep_size", "basis", "assumed")
+
+
+def to_rows(review):
+    """간섭 목록 → 표 한 장. 열은 고정이고 없는 값은 빈칸이다(합성 슬래브는 EID 가 없다)."""
+    rows = []
+    for item in (review or {}).get("items") or []:
+        struct, mep = item.get("struct") or {}, item.get("mep") or {}
+        at, z = item.get("at") or [None, None], item.get("z") or [None, None]
+        rows.append({
+            "id": item.get("id"), "kind": item.get("kind"), "label": LABELS.get(item.get("kind"), item.get("kind")),
+            "action": item.get("action"), "level": item.get("level"),
+            "x_mm": at[0], "y_mm": at[1], "z0_mm": z[0], "z1_mm": z[1], "crossing_mm": item.get("crossing_mm"),
+            "struct_eid": struct.get("eid"), "struct_category": struct.get("category"),
+            # 합성 슬래브는 도면에 없는 부재라 EID 가 없다 — 빈칸 대신 출처를 적는다.
+            "struct_layer": struct.get("layer") or struct.get("synthetic"),
+            "struct_width_mm": struct.get("width_mm"),
+            "mep_eid": mep.get("eid"), "mep_category": mep.get("category"), "mep_system": mep.get("system"),
+            "mep_size": mep.get("size"), "basis": item.get("basis"),
+            "assumed": " ".join(item.get("assumed") or ()),
+        })
+    return rows
+
+
+def write_csv(path, rows, columns):
+    """표 한 장을 CSV 로. `utf-8-sig` 라 Excel 이 바로 연다(물량 CSV 와 같은 규약)."""
+    import csv
+    with open(path, "w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(columns)
+        for row in rows:
+            writer.writerow(["" if row.get(key) is None else row.get(key) for key in columns])
+    return str(path), len(rows)
+
+
+def main(argv=None):
+    """간섭·연결 목록을 CSV 로 낸다 — 일상 검토는 여기서 끝난다(FreeCAD 빌드는 납품 검증용).
+
+    `python clash_review.py geometry.json -o clash.csv [--connectivity conn.csv]`"""
+    import argparse
+    import json
+    parser = argparse.ArgumentParser(description="간섭 검토 목록 → CSV")
+    parser.add_argument("geometry", help="geometry.json")
+    parser.add_argument("-o", "--out", help="간섭 목록 CSV (기본: <geometry>_clash.csv)")
+    parser.add_argument("--connectivity", nargs="?", const=True,
+                        help="설비 연결 목록도 CSV 로 (기본: <geometry>_connectivity.csv)")
+    args = parser.parse_args(argv)
+    with open(args.geometry, encoding="utf-8") as handle:
+        data = json.load(handle)
+    stem = args.geometry.rsplit(".", 1)[0]
+    review = data.get("clash_review") or find_clashes(data)
+    path, count = write_csv(args.out or stem + "_clash.csv", to_rows(review), CSV_COLUMNS)
+    print("간섭 %d건 -> %s" % (count, path))
+    summary = review.get("summary") or {}
+    if summary.get("assumed_basis"):
+        print("  가정 높이에 기댄 줄 %d건 — 설비 설정에서 설치 높이·규격을 선언하면 줄어듭니다"
+              % summary["assumed_basis"])
+    if args.connectivity:
+        import mep_network
+        net = data.get("mep_connectivity") or mep_network.analyze(data)
+        out = args.connectivity if isinstance(args.connectivity, str) else stem + "_connectivity.csv"
+        path, count = write_csv(out, mep_network.to_rows(net), mep_network.CSV_COLUMNS)
+        print("연결 목록 %d행 -> %s" % (count, path))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
