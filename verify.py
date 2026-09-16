@@ -193,6 +193,12 @@ def verify_geometry(data, policy=None):
                     why = "잘못된 원형 기둥 중심/반지름"
             elif cat == "column" and not rec.get("closed"):
                 why = "기둥 경계가 닫히지 않음 — 레이어 분류 또는 원본 경계 검토 필요"
+                # 파서가 그 레이어를 '벽처럼 그려졌다' 고 이미 짚었으면 원인을 여기서도 말한다 — 게이트 문구가
+                # '기둥 경계' 만 가리키면 사람이 기둥을 들여다본다(실측: 미해결 43개가 전부 A-COL 내력벽).
+                like = {c["layer"]: c for c in data.get("column_layers_like_wall") or []}
+                if rec.get("layer") in like:
+                    why += (f" — 이 레이어는 벽처럼 보인다({like[rec['layer']]['spacing_mm']:.0f}mm 짝): "
+                            f"layer_map 한 줄로 해결 → {like[rec['layer']]['suggested_row']}")
             elif len(pts) < 2:
                 why = "정점 2개 미만"
             elif rec.get("closed") and len(pts) < 3:
@@ -214,8 +220,11 @@ def verify_geometry(data, policy=None):
             elif cat == "wall" and len(pts) >= 3 and _has_fold(pts):
                 folds.append({"index": i, "layer": rec.get("layer")})
     if degen:
+        by_layer = {}
+        for d in degen:
+            by_layer[d.get("layer") or ""] = by_layer.get(d.get("layer") or "", 0) + 1
         F.append(Finding("V005", _sev("V005", policy),
-                         f"퇴화 형상 {len(degen)}개", {"count": len(degen), "sample": degen[:5]}))
+                         f"퇴화 형상 {len(degen)}개", {"count": len(degen), "by_layer": by_layer, "sample": degen[:5]}))
     if folds:
         F.append(Finding("V006", _sev("V006", policy),
                          f"되꺾인 벽 {len(folds)}개 — 빌더가 분할하지만 원본 데이터 중복 의심",

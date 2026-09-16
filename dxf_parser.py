@@ -2409,9 +2409,81 @@ def fuzzy_layer_suggestion(layer, rules):
     return best
 
 
+WALL_LIKE_MIN_RATIO = 0.5              # 레이어 선의 이 비율 이상이 평행 짝이면 벽처럼 보인다
+WALL_LIKE_SPACING_MM = (60.0, 400.0)   # 짝 간격이 이 안이어야 벽 두께다
+WALL_LIKE_MIN_LINES = 4
+# ★ 보드·마감선 가드. 칸막이는 벽면 두 줄 **안쪽 10~20mm** 에 보드선을 한 줄씩 더 긋는다. 전역
+#   `WALL_PAIR_MIN_MM`(1mm, 밀착 철골용)으로 재면 그 10mm 짝이 가까워서 먼저 구간을 먹고 **진짜 두께가
+#   안 잡힌다** — 실측(단위세대 `Parti`): 10mm 42쌍 · 100mm 1쌍이 나와 칸막이가 '벽 아님' 이 됐다.
+#   50 은 `architecture_layers` 벽 행의 기본 `pair_min_mm` 과 같은 값이다(결정 기록의 칸막이 절).
+WALL_LIKE_PAIR_MIN_MM = 50.0
+# 짝 찾기는 세그먼트 수의 제곱이다. 증거는 **제안 보조**라 전수를 볼 이유가 없다 — 실측(지하3층): 레이어 `0`
+# 에 선 8,437개가 있어 파싱이 4.5초 → 101.8초가 됐다. 긴 선 400개만 본다(벽은 길고 주기는 짧다). 결정론.
+WALL_LIKE_MAX_LINES = 400
+
+
+def layer_evidence(recs, pair_min=WALL_LIKE_PAIR_MIN_MM):
+    """레이어 하나가 **벽처럼 그려졌는가** — 파서가 벽을 정의하는 그 함수들로 잰다. 새 휴리스틱이 아니다.
+
+    ★ 이름은 부재를 안 알려 준다(결정 기록 drawings-in-practice.md). 아파트 단위세대 실측: `A-COL` 은 기둥이
+      아니라 200mm 내력벽(78선 중 51개가 200mm 짝, 닫힌 면 0), `Parti` 는 100·110mm 칸막이(84%가 짝),
+      `A-FIN` 은 마감선(30%), 단열선은 0~6%. 종전 `classify_geometry` 는 열린 선이면 전부 `wall 0.45` 라
+      선 레이어 20개에 같은 말을 했다 — 증거가 아니다.
+    ★ **판정이 아니라 증거다.** 타일 해치(300mm 격자)도 90% 가 짝이라 걸린다. 그래서 자동 적용은 없고
+      사람이 layer_map 한 줄을 쓴다(`map-layers` 규약).
+    반환: lines·paired·ratio·spacings(mm, 쌍)·closed·circles·wall_like·spacing_mm·length_mm."""
+    closed = sum(1 for r in recs if r.get("kind") == "polyline" and r.get("closed"))
+    circles = sum(1 for r in recs if r.get("kind") == "circle")
+    open_recs = [r for r in recs if r.get("kind") == "polyline" and not r.get("closed")]
+    segs = _wall_segments(open_recs)
+    for s in segs:
+        s["opts"] = dict(s.get("opts") or {}, pair_min=pair_min)
+    lines = len(segs)
+    # ★ 표본은 **병합 전에** 뽑는다. 비싼 것은 짝 찾기가 아니라 그 앞의 세그먼트 병합이다 — 실측(지하3층,
+    #   레이어 123개·선 수만 개): 병합 뒤에 자르면 상한을 400 → 120 으로 낮춰도 30초 그대로였다.
+    sampled = lines > WALL_LIKE_MAX_LINES
+    if sampled:
+        segs = sorted(segs, key=lambda s: (-s["len"], s["p1"], s["p2"]))[:WALL_LIKE_MAX_LINES]
+    segs = _merge_collinear_segments(segs)
+    pairs, matched = _find_wall_pairs(segs) if len(segs) > 1 else ([], set())
+    spacing = {}
+    for p in pairs:
+        mm = int(round(p[2] / 10.0)) * 10
+        spacing[mm] = spacing.get(mm, 0) + 1
+    top = sorted(spacing.items(), key=lambda kv: (-kv[1], kv[0]))[:3]
+    ratio = len(matched) / len(segs) if segs else 0.0
+    dominant = top[0][0] if top else None
+    # 닫힌 도형이 **주를 이루면** 기둥·영역 레이어다. 몇 개 섞인 것으로 실격시키지 않는다 —
+    # 실측: `Parti`(칸막이 74선)에 닫힌 폴리라인 2개가 있어 벽이 아닌 것으로 빠졌다.
+    wall_like = (closed + circles <= 0.1 * lines and lines >= WALL_LIKE_MIN_LINES
+                 and ratio >= WALL_LIKE_MIN_RATIO and dominant is not None
+                 and WALL_LIKE_SPACING_MM[0] <= dominant <= WALL_LIKE_SPACING_MM[1])
+    out = {"lines": lines, "paired": len(matched), "ratio": round(ratio, 2), "spacings": top,
+           "closed": closed, "circles": circles, "wall_like": wall_like, "spacing_mm": dominant,
+           "length_mm": round(sum(s["len"] for s in segs), 1)}
+    if sampled:
+        out["sampled_longest"] = WALL_LIKE_MAX_LINES      # 전수가 아니라 긴 선 표본이다 — 값과 같이 말한다
+    return out
+
+
+def _evidence_sentence(ev):
+    return f"{ev['lines']}선 중 {ev['paired']}개가 짝 · " + " · ".join(f"{mm:.0f}mm {n}쌍" for mm, n in ev["spacings"])
+
+
+def layer_rule_pattern(layer_name):
+    """레이어 **하나만** 잡는 정규식 — 설정 폼(`mep_setup_ui._add_mapping`)과 같은 규약.
+    바인드된 외부참조 이름(`XREF…$0$A-COL`)은 `$` 뒤 마지막 조각을 잡는다(`block_map.csv` 창호 규칙과 같은 꼴)."""
+    tail = layer_name.rsplit("$", 1)[-1]
+    if tail != layer_name:
+        return r"(^|\$)" + re.escape(tail) + "$"
+    return "^" + re.escape(layer_name) + "$"
+
+
 def build_suggestions(unmapped_recs, rules, kind="layer"):
     """미매핑 레이어/블록별: 기하 투표 + 이름 fuzzy → 비강제 제안(사람/AI 검토용).
-    kind: 'layer'|'block' — 제안에 source 표기. classify_geometry 4-튜플 사용."""
+    kind: 'layer'|'block' — 제안에 source 표기. classify_geometry 4-튜플 사용.
+    레이어의 열린 선은 `layer_evidence` 로 평행 짝을 재서 **벽처럼 그려졌을 때만** wall 이라 한다 —
+    종전엔 열린 선이면 전부 wall 0.45 였다(마감선·해치·안내선까지)."""
     out = []
     for name, recs in sorted(unmapped_recs.items()):
         votes = {}            # category → [conf,...]
@@ -2432,12 +2504,25 @@ def build_suggestions(unmapped_recs, rules, kind="layer"):
         geom_subtype = (max(subtype_votes, key=subtype_votes.get)
                         if subtype_votes else None)
         score, tok, name_cat = fuzzy_layer_suggestion(name, rules)
-        out.append({"layer": name, "count": len(recs), "source": kind,
-                    "geom_guess": geom_cat, "geom_confidence": geom_conf,
-                    "geom_reason": geom_reason, "geom_subtype": geom_subtype,
-                    "name_guess": name_cat if score >= 0.5 else None,
-                    "name_match": tok if score >= 0.5 else None,
-                    "name_score": round(score, 2)})
+        entry = {"layer": name, "count": len(recs), "source": kind,
+                 "geom_guess": geom_cat, "geom_confidence": geom_conf,
+                 "geom_reason": geom_reason, "geom_subtype": geom_subtype,
+                 "name_guess": name_cat if score >= 0.5 else None,
+                 "name_match": tok if score >= 0.5 else None,
+                 "name_score": round(score, 2)}
+        if kind == "layer" and any(r.get("kind") == "polyline" and not r.get("closed") for r in recs):
+            ev = layer_evidence(recs)
+            entry["evidence"] = ev
+            if ev["wall_like"]:
+                # 신뢰도 상한 0.8 — `apply_ai_classifications` 는 0.8 **초과**만 자동 적용하므로 증거 제안은
+                # 절대 자동으로 들어가지 않는다. 사람이 layer_map 한 줄을 쓴다.
+                entry.update(geom_guess="wall", geom_confidence=round(min(0.8, 0.5 + 0.3 * ev["ratio"]), 2),
+                             geom_reason=_evidence_sentence(ev))
+            elif geom_cat == "wall":
+                # 열린 선이라는 것만으로 벽이라 하지 않는다 — 짝이 안 지어지면 마감선·해치·안내선이다.
+                entry.update(geom_guess=None, geom_confidence=0.0,
+                             geom_reason=f"평행선 쌍 {ev['ratio'] * 100:.0f}% — 벽 아님(마감선·해치·안내선일 수 있음)")
+        out.append(entry)
     return out
 
 
@@ -2616,6 +2701,7 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
     _dim_skipped = {}       # from=dim 레이어에서 '진짜 치수선' 이라 건너뛴 수
     _nondim_skipped = {}    # from=dim 레이어의 비-DIMENSION(보조선·화살표) 건너뛴 수
     _outline_skipped = {}   # centerline= 레이어에서 중심선이 아니라 건너뛴 외곽선 수
+    _unhandled = {}         # 형상이 안 되는 엔티티(TEXT 등) — (타입, 레이어) 별로 세서 한 줄로 말한다
     _rule_hits = set()      # 실제 매칭된 규칙 인덱스 — 그림자 규칙 탐지용
     _layers_seen = set()
     _rule_layer = {}        # 블록 안쪽 레이어 → 규칙을 정한 INSERT 레이어(집합)
@@ -2712,7 +2798,9 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
             elif _is_not_centerline(e, _opts):     # centerline= 레이어의 외곽선·끝막이
                 _outline_skipped[e.dxf.layer] = _outline_skipped.get(e.dxf.layer, 0) + 1
             else:
-                result["warnings"].append(f"unhandled {e.dxftype()} @ {e.dxf.layer}")
+                # 엔티티마다 한 줄이면 소음이다(실측: `unhandled TEXT @ Roomtxt` 14줄). 세서 한 줄로.
+                _key = (e.dxftype(), e.dxf.layer)
+                _unhandled[_key] = _unhandled.get(_key, 0) + 1
             continue
         if mep_profile and classify(e.dxf.layer, architecture_rules)[0] is not None:
             project_classification_sigs.update(rec.get('_sigs', []))
@@ -2810,7 +2898,34 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
     if _n_raw != _n_joined:
         print(f"  [join] LINE 연결: {_n_raw}개 → {_n_joined}개 레코드")
         
+    # ★ 기둥으로 매핑된 레이어가 **벽처럼 그려졌으면** 먼저 잰다. 아파트 단위세대의 `A-COL` 은 200mm 내력벽이다 —
+    #   그대로 두면 아래 `recover_column_outlines` 가 닫힌 면을 만들려다 미해결 기둥 43개를 내고 V005 가 막는데,
+    #   문구는 '기둥 경계' 를 가리켜 원인(레이어 매핑)을 안 말했다. 재분류는 하지 않는다 — 다른 도면에선 진짜
+    #   기둥이다. 붙여 넣을 layer_map 한 줄과 증거를 준다.
+    _col_by_layer = {}
+    for _r in result["elements"]["column"]:
+        _col_by_layer.setdefault(_r.get("layer", ""), []).append(_r)
+    _col_like_wall = []
+    for _layer, _recs in sorted(_col_by_layer.items()):
+        _ev = layer_evidence(_recs)
+        if _ev["wall_like"]:
+            _col_like_wall.append({"layer": _layer, "lines": _ev["lines"], "paired": _ev["paired"],
+                                   "ratio": _ev["ratio"], "spacing_mm": _ev["spacing_mm"], "spacings": _ev["spacings"],
+                                   "suggested_row": f"{layer_rule_pattern(_layer)},wall,,2800,"})
     result["elements"]["column"] = recover_column_outlines(result["elements"]["column"])
+    if _col_like_wall:
+        result["column_layers_like_wall"] = _col_like_wall
+        _like = {c["layer"] for c in _col_like_wall}
+        for _r in result["elements"]["column"]:
+            if _r.get("layer", "") in _like:
+                _r["needs_review"] = True
+                _r["review_reason"] = "column_layer_looks_like_wall"      # 원인이 사유다
+        for _c in reversed(_col_like_wall):
+            result["warnings"].insert(0, (
+                f"[분류 의심] '{_c['layer']}' 은 column 인데 닫힌 면 0 · {_c['lines']}선 중 {_c['paired']}개가 "
+                f"{_c['spacing_mm']:.0f}mm 짝 → 벽 레이어일 수 있다. layer_map 에 '{_c['suggested_row']}' 를 "
+                f"COL 행 위에 넣고 다시 해석"))
+            print(f"  {result['warnings'][0]}")
 
     # 좌표까지 같은 중복 부재 제거. 기둥·슬래브는 벽과 달리 페어링·병합을 안 거쳐
     # 중복을 흡수할 기회가 없다 — 실측: 같은 기둥 블록이 같은 자리에 두 번 들어가
@@ -3121,13 +3236,24 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
 
     # [자기검증 QA] 원본 면선 대비 최종 벽 회수율 + 누락 의심 리스트
     _qa = build_qa(_qa_face_segs, result["elements"]["wall"], params)
-    if _qa:
+    # ★ '면선커버 100%' 는 **벽으로 매핑된 레이어만** 센 값이다. 실측(단위세대): A-WALL 44.9m 가 100% 인데
+    #   벽처럼 그려진 Parti·A-COL 은 벽이 아닌 채라 세지지 않았다. 그 길이를 옆에 같이 말한다.
+    #   ★ 벽이 **하나도** 안 잡힌 도면(`build_qa` 가 빈 값)에서도 말해야 한다 — 그때가 정작 중요한 경우다.
+    _wall_like = [s for s in result.get("suggestions", [])
+                  if s.get("source") == "layer" and (s.get("evidence") or {}).get("wall_like")]
+    if _qa or _wall_like:
+        _qa = _qa or {}
         _qa["needs_review"] = sum(1 for items in result["elements"].values()
                                   for it in items if it.get("needs_review"))
+        _qa["wall_like_unmapped_m"] = round(sum(s["evidence"]["length_mm"] for s in _wall_like) / 1000.0, 1)
+        _qa["wall_like_unmapped_layers"] = [s["layer"] for s in _wall_like]
         result["qa"] = _qa
-        print(f"  [QA] 면선커버 {_qa['face_coverage_pct']:.0f}% "
-              f"({_qa['face_total_m']}m) | paired {paired} | "
-              f"미커버 면선 {_qa['uncovered_count']}개 | 검토필요 {_qa['needs_review']}")
+        print("  [QA] "
+              + (f"면선커버 {_qa['face_coverage_pct']:.0f}% ({_qa['face_total_m']}m) | paired {paired} | "
+                 f"미커버 면선 {_qa['uncovered_count']}개 | " if "face_coverage_pct" in _qa else "")
+              + f"검토필요 {_qa['needs_review']}"
+              + (f" | 벽으로 보이는 미매핑 선 {_qa['wall_like_unmapped_m']}m ({', '.join(_qa['wall_like_unmapped_layers'])})"
+                 if _wall_like else ""))
     result["blocks"] = {"inserts": n_inserts, "unmapped": sum(unmapped_blocks.values())}
     result["mep"] = {c: len(result["elements"].get(c, [])) for c in MEP_CATEGORIES}
     result["contract"] = _GC.contract_block()   # 파일이 자기 규약을 스스로 기술한다
@@ -3135,6 +3261,12 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         result["ignored"] = ignored
         print(f"  [ignore] {sum(ignored.values())}개 드롭: "
               + ", ".join(f"{k}({v})" for k, v in sorted(ignored.items())[:5]))
+    if _unhandled:
+        _ranked = sorted(_unhandled.items(), key=lambda kv: (-kv[1], kv[0]))
+        result["unhandled"] = {f"{t} @ {l}": n for (t, l), n in _ranked}
+        result["warnings"].append(
+            "unhandled(형상 아님) 건너뜀: " + " · ".join(f"{t} {n}개 @ {l}" for (t, l), n in _ranked[:8])
+            + (f" · 그 밖 {len(_ranked) - 8}종" if len(_ranked) > 8 else ""))
     if _outline_skipped:
         # 세고 버린다 — 조용히 사라지면 "덕트가 왜 이렇게 적지" 를 추적할 근거가 없다.
         result["outline_skipped"] = _outline_skipped

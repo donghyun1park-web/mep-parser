@@ -23,7 +23,7 @@
 ## 파일 구성
 | 파일 | 역할 |
 |------|------|
-| `dxf_parser.py` | DXF → geometry.json 파서 v2 |
+| `dxf_parser.py` | DXF → geometry.json 파서 v2. ★ **레이어 이름이 부재를 안 알려 줄 때 증거를 낸다**(`layer_evidence` — 평행 짝 비율·간격을 파서가 벽을 정의하는 그 함수(`_find_wall_pairs`)로 잰다). 기둥으로 매핑된 레이어가 벽처럼 그려졌으면 `[분류 의심]` 경고 + 붙여 넣을 layer_map 한 줄 + `column_layers_like_wall`, 레코드 사유는 `column_layer_looks_like_wall`. **재분류는 하지 않는다** |
 | `geom_contract.py` | **기하 계약의 단일 출처.** z 기준면 `z_range()`, 감김 정규화 `ccw()`, 보 축선→footprint `beam_rings()`, MEP 경로 계약 v3(`path3d_segments`·`route_points`·`mep_section`·`rect_parts`). JS 소비자(preview)는 `js_constants()` 로 같은 식을 주입받는다. FreeCAD 의존 없음(단위테스트 가능) |
 | `verify.py` | **빌드 게이트.** `verify_geometry`(빌드 전) / `verify_build`(빌드 후). 검사 ID V001~V104. 실패 시 빌더가 마커를 출력하지 않아 산출물이 나가지 않는다 |
 | `stack_build.py` | **선언적 다층 조립.** `stack.json`(층별 dxf·z·offset) → 한 geometry.json. 통심선 offset 해결기 + 가드 3개. 파싱은 `dxf_parser.parse` 호출만 한다 |

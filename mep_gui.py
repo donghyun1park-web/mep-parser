@@ -824,9 +824,12 @@ class App:
                           + (f"/{s.get('final_subtype')}" if s.get('final_subtype') else "")
                           + f" ({s.get('final_confidence')}, {s.get('decided_by')})")
         remain = [s for s in sugg if not s.get("applied")]
+        # 증거가 있는 제안만 한 줄씩 — 열린 선이라는 것만으로 wall(0.45) 를 20줄 찍던 것은 소음이었다.
+        loud = [s for s in remain if s.get("geom_guess") or s.get("name_guess") or s.get("llm_guess") or s.get("vision_guess")]
+        quiet = [s for s in remain if s not in loud]
         if remain:
             self._log(f"  [{len(remain)} unmapped — [Edit] layer_map]:")
-        for s in remain:
+        for s in loud:
             g = f"geom={s['geom_guess']}({s['geom_confidence']})" if s.get("geom_guess") else "geom=?"
             nm = (f"name~{s['name_match']}->{s['name_guess']}({s['name_score']})"
                   if s.get("name_guess") else "name=?")
@@ -834,7 +837,16 @@ class App:
                    if s.get("llm_guess") else "")
             vis = (f" [Vision->{s['vision_guess']}({s['vision_confidence']})]"
                    if s.get("vision_guess") else "")
-            self._log(f"  [suggest] '{s['layer']}'x{s['count']}: {g} {nm}{llm}{vis}")
+            why = f" — {s['geom_reason']}" if s.get("evidence") and s.get("geom_reason") else ""
+            self._log(f"  [suggest] '{s['layer']}'x{s['count']}: {g} {nm}{llm}{vis}{why}")
+        if quiet:
+            self._log(f"  [벽 아님·형상 없음 {len(quiet)}개] " + " · ".join(s['layer'].split('$')[-1] for s in quiet[:12])
+                      + (" · …" if len(quiet) > 12 else ""))
+        qa = self.data.get("qa") or {}
+        if qa.get("wall_like_unmapped_m"):
+            self._log(f"  [QA] 벽으로 보이는 미매핑 선 {qa['wall_like_unmapped_m']}m "
+                      f"({', '.join(l.split('$')[-1] for l in qa.get('wall_like_unmapped_layers', []))}) — "
+                      f"면선커버 {qa.get('face_coverage_pct', '?')}% 는 벽으로 매핑된 레이어만 센 값이다")
         self._populate_review()
         # '열기…' 로 시작했으면 여기서 브라우저까지 간다 — 버튼을 세 번 누르게 하지 않는다.
         if self._open_after_parse:
