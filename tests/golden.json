@@ -131,7 +131,7 @@
       55515,
       67630,
       69915,
-      77775
+      77810
     ],
     "clash_review": {
       "assumed_basis": 8,
@@ -145,13 +145,14 @@
     "closed_wall_dups": 0,
     "counts": {
       "duct": 37,
+      "equipment": 13,
       "opening": 13,
       "wall": 68
     },
     "duplicate_geometry_dropped": {},
     "eid_collisions": {},
-    "eid_count": 118,
-    "eid_hash": "e67028b0cc81",
+    "eid_count": 131,
+    "eid_hash": "cc1f635ddb0c",
     "face_coverage_pct": 100,
     "floors": [
       0
@@ -165,8 +166,10 @@
       },
       "by_status": {
         "candidate": 44,
-        "open": 26,
-        "tee": 4
+        "open": 17,
+        "sleeve": 2,
+        "tee": 4,
+        "terminal": 7
       },
       "candidates": 26,
       "conflicts": 0,
@@ -176,23 +179,24 @@
       "runs": 37
     },
     "mep_issues": {
+      "OUTLINE_OPEN": 4,
       "REGION_CROSSING": 1
     },
     "mep_joints": {
       "joints": 0,
       "taps": 0
     },
-    "needs_review": 105,
+    "needs_review": 118,
     "openings_dims_assumed": {
       "height": 13,
       "sill": 13
     },
     "small_openings_dropped": 0,
     "source_coverage": {
-      "complete": true,
-      "omitted": 0,
-      "represented": 41,
-      "selected": 41
+      "complete": false,
+      "omitted": 4,
+      "represented": 60,
+      "selected": 64
     },
     "thin_pairs": {
       "XREF_UNIT_74 expand$0$Parti": 2
