@@ -165,8 +165,10 @@ def validate_profile(profile, source_sha256=None):
             raise ValueError('Invalid section_shape for this representation')
         if cat == 'equipment':
             row.setdefault('role', 'equipment')
-            if row['role'] not in ('equipment', 'terminal'):
-                raise ValueError('Equipment role must be equipment or terminal')
+            # sleeve = 벽을 지나라고 뚫어 둔 자리(외벽 배기 슬리브 등). 부재가 아니라 **판정 근거**다 —
+            # 몸체를 만들면 물량이 늘고, 개구부로 바꾸면 문턱·높이 가정이 또 필요해진다.
+            if row['role'] not in ('equipment', 'terminal', 'sleeve'):
+                raise ValueError('Equipment role must be equipment, terminal or sleeve')
         row.setdefault('dimension_basis', 'assumed')
         if row['dimension_basis'] not in ('user', 'assumed', 'annotation'):
             raise ValueError('Unsupported dimension_basis')
@@ -510,7 +512,8 @@ def _assign(record, row, index, profile):
         if row['placement'] != 'source':
             rec['elevation'] -= height / 2
         rec['overrides'] = {'height': height}
-        rec['needs_review'] = True; rec['review_reason'] = 'equipment_symbol_envelope'
+        rec['needs_review'] = True
+        rec['review_reason'] = 'sleeve_symbol' if row['role'] == 'sleeve' else 'equipment_symbol_envelope'
     if row.get('material'):
         rec.setdefault('overrides', {})['material'] = row['material']
     if row['dimension_basis'] == 'assumed':

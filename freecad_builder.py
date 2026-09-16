@@ -1024,6 +1024,8 @@ def build_mep(doc, mep_elements, params=None):
                 obj = shape = None
                 counted = False          # 기대 부피를 넣은 것만 실제 부피를 더한다(한쪽만 담으면 셈이 어긋난다)
                 if cat == "equipment":
+                    # 슬리브(`role: sleeve`)도 여기서 선다 — 실제 시공 자재다. 간섭 판정은 그 `role` 을
+                    # 따로 읽어 '슬리브 자리 관통' 으로 가른다(`clash_review._sleeves`).
                     if not el.get("closed") or len(pts) < 3:
                         continue
                     shape = _equip_solid(pts, elev, GC.z_range(cat, el, params)[1] - elev)

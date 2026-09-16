@@ -24,7 +24,8 @@ REVIEW_WIDTHS = 2.5      # 이음 후보를 찾는 틈 = 두 단면 중 큰 폭 
 STRAIGHT_DEG = 10.0      # 마주 보는 두 끝의 방향 차 허용
 ELBOW_MIN_DEG = 60.0     # 이보다 크게 꺾여 만나야 엘보
 SLACK_MM = 20.0          # 직선 끝의 옆 어긋남 · 엘보 모서리가 끝 뒤로 들어간 거리(중심선을 조금 넘겨 그린 경우) 허용
-TERMINAL_MM = 150.0      # 장비·단말 외곽에서 이 안에서 끝나면 단말 끝
+TERMINAL_MM = 300.0      # 장비·단말 외곽에서 이 안에서 **그쪽을 향해** 끝나면 단말 끝
+TERMINAL_FACING = 0.5    # 끝의 진행 방향과 단말 방향의 cos — 옆을 지나가는 경로를 단말로 삼키지 않는다
 KIND_LABELS = {"straight": "직선", "elbow": "엘보", "tee": "티"}
 
 
@@ -50,6 +51,21 @@ def _outward(pts, port):
         if n > 1e-6:
             return dx / n, dy / n
     return None
+
+
+def _faces(end, shell):
+    """끝이 그 장비·단말 **쪽을 향해** 끝나는가 — 옆을 스쳐 지나가는 경로는 단말이 아니다.
+
+    실측(단위세대 환기, 디퓨저 33개): 덕트 끝에서 단말 외곽까지 150mm 안은 0개, 300mm 안이 9개이고
+    그중 8개는 끝이 그 단말을 향한다. 나머지 하나(203mm)는 **반대 방향**이라 거리만 보면 삼킨다."""
+    if end["dir"] is None:
+        return True                                  # 수직으로만 끝난 경로는 방향을 물을 수 없다
+    centre = shell.centroid
+    vx, vy = centre.x - end["xy"][0], centre.y - end["xy"][1]
+    distance = math.hypot(vx, vy)
+    if distance < 1e-6:
+        return True
+    return (end["dir"][0] * vx + end["dir"][1] * vy) / distance >= TERMINAL_FACING
 
 
 def _shape(a, b, width, reach):
@@ -236,21 +252,27 @@ def analyze(geometry):
             candidates.append(_entry("tee", gap, a, ra, xy, runs[j], "tap", None, at_mm=along))
             links.append((a["run"], j))
 
-    shells = []
+    # 장비·단말에서 끝나는 것과 **슬리브를 지나 모델 밖으로 나가는 것**은 다르다 — 둘 다 '열림' 이 아니다.
+    from clash_review import SLEEVE_MARGIN_MM
+    shells, sleeves = [], []
     for rec in elements.get("equipment") or []:
         try:
             poly = (Point(rec["center"][:2]).buffer(float(rec["radius"])) if rec.get("kind") == "circle"
                     else Polygon([p[:2] for p in rec.get("points") or []]).buffer(0))
         except Exception:
             continue
-        if not poly.is_empty:
-            shells.append(poly)
-    shell_tree = STRtree(shells) if shells else None
+        if poly.is_empty:
+            continue
+        role = rec.get("role") or (rec.get("overrides") or {}).get("role")
+        (sleeves if role == "sleeve" else shells).append(poly)
     for e in ends:
-        if e["status"] == "open" and shell_tree is not None:
-            pt = Point(e["xy"])
-            if any(shells[int(n)].distance(pt) <= TERMINAL_MM for n in shell_tree.query(pt.buffer(TERMINAL_MM))):
-                e["status"] = "terminal"
+        if e["status"] != "open":
+            continue
+        pt = Point(e["xy"])
+        if any(s.distance(pt) <= SLEEVE_MARGIN_MM for s in sleeves):
+            e["status"] = "sleeve"
+        elif any(s.distance(pt) <= TERMINAL_MM and _faces(e, s) for s in shells):
+            e["status"] = "terminal"
 
     joined = list(parent)
     for i, j in links:

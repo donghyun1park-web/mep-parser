@@ -143,7 +143,7 @@ class MepSetupDialog:
         ttk.Label(self.source_tab, text='영역·레이어 탭에서 규칙을 선택하고 이 필터를 지정하세요. 원본이 두 규칙에 동시에 해당하면 저장을 차단합니다.\n원형 덕트: duct + centerline + round + 실외경. 말단/장비: equipment + outline + 높이. 기호 외곽은 검토용 형상입니다.', wraplength=920).pack(anchor='w', padx=16, pady=15)
         form = ttk.Frame(self.source_tab); form.pack(anchor='nw', padx=12)
         for i, (key, label, values) in enumerate([
-            ('section_shape', '단면 형태', ['rect', 'round']), ('role', '기구 역할', ['equipment', 'terminal']),
+            ('section_shape', '단면 형태', ['rect', 'round']), ('role', '기구 역할', ['equipment', 'terminal', 'sleeve']),
             ('block_pattern', '블록명 정규식 (선택)', None), ('entity_types', '원본 유형 (쉼표 구분)', None),
             ('source_handles', '원본 핸들 (쉼표 구분)', None)]):
             self.rule_vars[key] = self._entry(form, label, i, values, width=48)

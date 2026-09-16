@@ -444,13 +444,18 @@ def test_bent_duct_survives_the_ifc_export():
             "elements": {"duct": [
                 {"eid": f"d:{i}", "kind": "polyline", "points": p, "level": "L1",
                  "elevation": 2490.0, "width_mm": 200.0, "height_mm": 200.0}
-                for i, p in enumerate(runs)]},
+                for i, p in enumerate(runs)],
+                # 슬리브도 실제 시공 자재다 — 부재로 서고 IFC 로 나간다(간섭 판정만 `role` 로 따로 가른다).
+                "equipment": [{"eid": "e:sleeve", "kind": "polyline", "closed": True, "role": "sleeve",
+                               "level": "L1", "z_base": 0.0, "overrides": {"height": 200.0},
+                               "points": [[0, 0], [200, 0], [200, 125], [0, 125]]}]},
             "warnings": []}
     with open(geom, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
     log, st = _build(geom, os.path.join(directory, "out"))
 
-    assert st["built"]["mep"] == 2, st["built"]
+    assert st["built"]["mep"] == 3, st["built"]           # 덕트 2 + 슬리브 1(자재로 선다)
+    assert st["ifctype_counts"].get("distributionelement") == 1, st["ifctype_counts"]
     assert st["artifacts"]["ifc"]["status"] == "verified", st["artifacts"]
     # 축선 길이 × 단면적과 자릿수가 같아야 한다 — 종잇장/토막이면 여기서 걸린다.
     mv = st["mep_volume"]

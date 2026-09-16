@@ -23,14 +23,18 @@ FLOOR_EMBED_MM = 300.0    # 벽 바닥에서 이 높이 안에서 끝나는 설�
 MIN_AREA_MM2 = 1.0
 MIN_Z_MM = 0.5
 
+SLEEVE_MARGIN_MM = 20.0   # 슬리브 외곽에서 이 안이면 그 슬리브 자리로 본다(중심선·외곽선 제도 오차)
+
 ACTIONS = {
     "slab_penetration": "슬래브 관통 — 슬리브·방수 확인",
     "structure_penetration": "기둥·보 관통 — 경로 변경 검토",
     "wall_penetration": "벽 관통 — 슬리브·개구 확인",
+    "sleeve_provided": "슬리브 자리 관통 — 도면의 슬리브 규격·위치와 대조",
     "under_wall": "바닥 매립 설비가 벽 아래를 지남 — 문 하부 경로·벽 선시공 여부 확인",
     "suspect_thin_wall": "벽 두께가 비정상(면선 오결합 의심) — 도면 확인",
 }
 LABELS = {"slab_penetration": "슬래브 관통", "structure_penetration": "기둥·보 관통", "wall_penetration": "벽 관통",
+          "sleeve_provided": "슬리브 관통",
           "under_wall": "벽 하부 통과", "suspect_thin_wall": "두께 의심 벽"}
 
 
@@ -86,6 +90,21 @@ def _voids(geometry):
     return out
 
 
+def _sleeves(geometry):
+    """슬리브 자리(프로필 `role: sleeve`)의 평면. **부재가 아니라 판정 근거**다 — 도면이 "여기는 뚫어 뒀다"
+    고 말한 자리라 같은 관통이라도 조치가 다르다(슬리브 없는 관통은 새로 뚫어야 한다)."""
+    out = []
+    for rec in (geometry.get("elements") or {}).get("equipment") or []:
+        if (rec.get("role") or (rec.get("overrides") or {}).get("role")) != "sleeve":
+            continue
+        pts = [p[:2] for p in rec.get("points") or []]
+        if len(pts) >= 3:
+            poly = Polygon(pts).buffer(0)
+            if not poly.is_empty:
+                out.append(poly.buffer(SLEEVE_MARGIN_MM))
+    return out
+
+
 def _bands(cat, rec, params):
     """설비 경로 → 구간별 (평면 띠, 축선, 아래 z, 위 z). 원형은 폭 = 지름."""
     sec = GC.mep_section(cat, rec, params)
@@ -125,6 +144,7 @@ def find_clashes(geometry):
     params = geometry.get("params")
     prisms, skipped_structures = _prisms(geometry)
     voids = _voids(geometry)
+    sleeves = _sleeves(geometry)
     tree = STRtree([p["poly"] for p in prisms]) if prisms else None
     items, through, through_assumed, skipped_routes = [], 0, 0, 0
     for cat in ROUTE_CATS:
@@ -160,6 +180,8 @@ def find_clashes(geometry):
                         through_assumed += any(inside)
                         continue
                     kind = _kind(prism, max(p[4] for p in members))
+                    if kind == "wall_penetration" and any(s.contains(at) for s in sleeves):
+                        kind = "sleeve_provided"
                     struct = prism["rec"]
                     assumed = sorted(set(prism["basis"]["assumed"] + mep_basis["assumed"]))
                     key = "|".join([str(struct.get("eid")), str(rec.get("eid")), "%.0f" % at.x, "%.0f" % at.y])

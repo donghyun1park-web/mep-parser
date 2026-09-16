@@ -67,6 +67,19 @@ def test_a_riser_through_a_slab_and_no_clash_above_the_wall():
     assert [(c["kind"], c["mep"]["eid"]) for c in items] == [("slab_penetration", "p:r")]
 
 
+def test_a_penetration_at_a_drawn_sleeve_is_told_apart_from_one_without():
+    """도면이 '여기는 뚫어 뒀다' 고 말한 자리와 아닌 자리는 조치가 다르다."""
+    sleeve = {"eid": "e:s", "kind": "polyline", "closed": True, "role": "sleeve", "z_base": 0,
+              "points": [[2400, 40], [2600, 40], [2600, 160], [2400, 160]], "overrides": {"height": 200}}
+    duct = {"eid": "d:in", "kind": "polyline", "points": [[2500, -1500], [2500, 1700]], "elevation": 2400,
+            "width_mm": 400, "height_mm": 300, "system": "RA"}
+    away = {"eid": "d:out", "kind": "polyline", "points": [[4000, -1500], [4000, 1700]], "elevation": 2400,
+            "width_mm": 400, "height_mm": 300, "system": "RA"}
+    g = _geom(wall=[_wall("w:1", [[0, 100], [5000, 100]])], equipment=[sleeve], duct=[duct, away])
+    kinds = {c["mep"]["eid"]: c["kind"] for c in find_clashes(g)["items"]}
+    assert kinds == {"d:in": "sleeve_provided", "d:out": "wall_penetration"}
+
+
 def test_each_row_says_whether_the_heights_it_used_were_declared_or_assumed():
     """평면도에는 높이가 없다 — 가정으로 나온 줄이 도면이 말해 준 줄과 같아 보이면 안 된다."""
     door = {"eid": "o:1", "kind": "circle", "center": [1000, 100], "radius": 450, "width": 900, "height": 2100,

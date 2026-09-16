@@ -86,7 +86,7 @@ html,body{margin:0;height:100%;overflow:hidden;font-family:"Segoe UI",sans-serif
 #view2d .gap-conflict{stroke:#ff4d4d;stroke-dasharray:3 4}
 #view2d .mep-end{stroke:#000;stroke-width:1;vector-effect:non-scaling-stroke;pointer-events:none;fill:#ff4d4d}
 #view2d .mep-end.candidate,#view2d .mep-end.tee{fill:#ffa94d}
-#view2d .mep-end.terminal{fill:#9aa4b2}
+#view2d .mep-end.terminal,#view2d .mep-end.sleeve{fill:#9aa4b2}
 .why{margin:3px 0;padding:4px 6px;background:#20242b;border-left:2px solid #556;
      border-radius:2px;font-size:12px;line-height:1.45}
 #warnbox{max-height:150px;overflow:auto;font-size:12px;line-height:1.5}

@@ -48,6 +48,23 @@ def test_drawn_joints_close_ends_a_branch_is_a_tee_and_ends_at_equipment_are_ter
     assert (net["summary"]["groups"], net["summary"]["groups_with_candidates"]) == (2, 1)
 
 
+def test_an_end_at_a_sleeve_is_not_open_and_is_told_apart_from_a_terminal():
+    """슬리브를 지나 모델 밖으로 나가는 끝과 단말에서 끝나는 끝은 둘 다 '열림' 이 아니다 — 조치가 다르다."""
+    g = _geom(duct=[_duct("d:out", [[0, 0], [1000, 0]]), _duct("d:term", [[0, 2000], [1000, 2000]]),
+                    _duct("d:past", [[1000, 4000], [2400, 4000]])],
+              equipment=[{"eid": "e:s", "kind": "polyline", "closed": True, "role": "sleeve", "z_base": 0,
+                          "points": [[1010, -60], [1120, -60], [1120, 60], [1010, 60]]},
+                         {"eid": "e:t", "kind": "polyline", "closed": True, "role": "terminal", "z_base": 0,
+                          "points": [[1150, 1900], [1450, 1900], [1450, 2100], [1150, 2100]]},
+                         {"eid": "e:past", "kind": "polyline", "closed": True, "role": "terminal", "z_base": 0,
+                          "points": [[1500, 4120], [1800, 4120], [1800, 4300], [1500, 4300]]}])
+    status = {(e["eid"], e["port"]): e["status"] for e in analyze(g)["open_ends"]}
+    assert status[("d:out", "end")] == "sleeve" and status[("d:term", "end")] == "terminal"
+    assert status[("d:out", "start")] == "open" and status[("d:term", "start")] == "open"
+    # 경로 **옆** 120mm 에 단말이 있어도 그쪽을 향해 끝난 것이 아니면 단말이 아니다(거리만 보면 삼킨다).
+    assert status[("d:past", "start")] == "open" and status[("d:past", "end")] == "open"
+
+
 def test_other_system_meeting_is_a_conflict_and_each_end_takes_only_its_nearest_partner():
     g = _geom(duct=[_duct("d:sa", [[0, 0], [1000, 0]]), _duct("d:ra", [[1200, 0], [2000, 0]], system="RA"),
                     _duct("d:a", [[0, 5000], [1000, 5000]]),
