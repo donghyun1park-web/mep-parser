@@ -130,10 +130,11 @@ class MepSetupDialog:
         ttk.Button(form, text='선택 레이어에 설정 추가', command=self._add_mapping).grid(row=13, column=0, columnspan=2, pady=5)
         ttk.Button(form, text='선택 규칙 수정', command=self._update_mapping).grid(row=14, column=0, columnspan=2, pady=3)
         ttk.Button(form, text='선택 규칙을 외곽선 폭별로 나누기', command=self._split_by_outline).grid(row=15, column=0, columnspan=2, pady=3)
+        ttk.Button(form, text='선택 장비 규칙의 본체 고르기', command=self._pick_equipment_body).grid(row=16, column=0, columnspan=2, pady=3)
         # 평면도의 z 는 0 이다 — 'source' 로 두면 그 0 이 설치 높이가 되어 설비가 바닥에 깔린다.
         self.placement_hint = tk.StringVar(value='')
         ttk.Label(form, textvariable=self.placement_hint, wraplength=210,
-                  foreground='#a06000').grid(row=16, column=0, columnspan=2, sticky='w', padx=4)
+                  foreground='#a06000').grid(row=17, column=0, columnspan=2, sticky='w', padx=4)
         def _placement_hint(*_args):
             self.placement_hint.set('평면 z 를 그대로 씁니다. 평면도의 z 는 0 이라 설치 높이가 아닙니다 — '
                                     'slab_soffit(슬래브 밑면 밀착) 또는 center 를 고르세요.'
@@ -470,6 +471,65 @@ class MepSetupDialog:
                                    '나눈 규칙마다 제품 자료로 단면 형태·높이를 확인해 입력하세요.', parent=self.win):
             return
         self.mappings[index:index + 1] = split_rule_by_outline_widths(row, result)
+        self._refresh_mappings()
+
+    def _pick_equipment_body(self):
+        """겹친 기호에서 본체 한 겹만 남기는 원본 필터를 **제안**받는다. 고르는 것은 사람이다."""
+        try:
+            selected = self.map_tree.selection()
+            if len(selected) != 1:
+                raise ValueError('장비 규칙 한 개를 선택하세요.')
+            index = int(selected[0])
+            row = copy.deepcopy(self.mappings[index])
+            if row.get('representation') != 'outline' or row.get('category') != 'equipment':
+                raise ValueError('장비 외곽선(equipment + outline) 규칙에만 쓸 수 있습니다.')
+            from drawing_units import positive_scale
+            scale = positive_scale(self.level_vars['unit_scale_to_mm'].get())
+            region = self._form_region()
+        except ValueError as exc:
+            messagebox.showerror('장비 본체', str(exc), parent=self.win)
+            return
+        source = next(s for s in self.manifest['sources'] if s['id'] == self.source_id)
+        self.status.set('기호의 닫힌 면을 세고 있습니다…')
+
+        def run():
+            try:
+                from mep_profile import measure_equipment_bodies
+                result = measure_equipment_bodies(source['path'], row, scale, region=region and region['bounds_mm'])
+                self.win.after(0, lambda: self._equipment_body_done(index, row, result))
+            except Exception as exc:
+                self.win.after(0, lambda message=str(exc): messagebox.showerror('장비 본체', message, parent=self.win))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _equipment_body_done(self, index, row, result):
+        from mep_profile import split_rule_by_equipment_bodies
+        if result['source_sha256'] != self.inventory['source_sha256']:
+            messagebox.showerror('장비 본체', '원본 도면이 바뀌었습니다. 설정 창을 다시 여세요.', parent=self.win)
+            return
+        faces = Counter(len(i['faces']) for i in result['instances'])
+        lines = [f"기호 {len(result['instances'])}곳 · 겹 수 " + ' · '.join(f'{k}겹 {v}곳' for k, v in sorted(faces.items()))]
+        rule, _status = split_rule_by_equipment_bodies(row, result)
+        if rule is None:
+            reasons = Counter(i['reason'] for i in result['ambiguous_instances'])
+            lines.append('제안할 수 없음: ' + ' · '.join(f'{k} {v}곳' for k, v in reasons.items()))
+            for entry in result['ambiguous_instances'][:3]:
+                lines.append('  면 ' + ' / '.join(f"{f['area_mm2']:.0f}mm² 핸들 {','.join(f['handles'][:3])}"
+                                                  for f in entry['faces'][:4]))
+            self.status.set('장비 본체: ' + lines[1])
+            messagebox.showinfo('장비 본체', '\n'.join(lines)
+                                + '\n\n도면에서 본체 한 겹을 골라 원본 필터에 직접 적으세요.',
+                                parent=self.win)
+            return
+        picked = result['suggestion']
+        lines.append('제안: ' + ('핸들 ' + ', '.join(picked['source_handles']) if 'source_handles' in picked
+                                 else f"원본 {len(picked['source_refs'])}개") + f" · 기호 {picked['instances']}곳")
+        self.status.set('장비 본체: ' + lines[-1])
+        if not messagebox.askyesno('장비 본체', '\n'.join(lines)
+                                   + '\n\n이 규칙에 그 필터를 적용할까요? '
+                                   '기호 바깥에 점검 여유선을 둔 도면이면 가장 바깥 면이 본체가 아닐 수 있습니다 — '
+                                   '도면에서 확인하세요.', parent=self.win):
+            return
+        self.mappings[index] = rule
         self._refresh_mappings()
 
     def _form_profile(self):

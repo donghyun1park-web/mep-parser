@@ -296,6 +296,25 @@ def measure_mep_outline_widths(rule: dict, json_path: str = DEFAULT_JSON, source
 
 
 @mcp.tool()
+def measure_mep_equipment_bodies(rule: dict, json_path: str = DEFAULT_JSON, source_id: str = 'main',
+                                 region_bounds_mm: list | None = None) -> str:
+    """List every closed face of each equipment symbol one rule selects, and suggest which one is the body.
+
+    Read-only. A drawing symbol is often several layered shapes (measured: a diffuser block holds three
+    concentric circles, so eleven terminals became thirty-three bodies). The suggestion is the single face
+    that covers all others in that symbol instance; when there is none, or the outline has a hole, or two
+    faces share a source, nothing is suggested and the faces are returned under ambiguous_instances with
+    their area and bounding box. The user picks — never assume the largest face is the body, because some
+    symbols carry an outer service-clearance rectangle. Put the chosen rule into propose_mep_profile.
+    """
+    try:
+        return json.dumps(session_from_geometry(json_path).measure_equipment_bodies(rule, source_id, region_bounds_mm),
+                          ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({'error': str(exc)}, ensure_ascii=False)
+
+
+@mcp.tool()
 def get_source_units(json_path: str = DEFAULT_JSON, source_id: str = 'main') -> str:
     """Read header/saved units, source-bound length samples and project revision. No changes.
 

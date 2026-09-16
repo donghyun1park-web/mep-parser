@@ -474,6 +474,133 @@ def split_rule_by_outline_widths(row, measurement):
     return rules
 
 
+def measure_equipment_bodies(dxf_path, row, unit_scale_to_mm=None, *, legacy_units=False, region=None):
+    """장비 규칙이 고르는 원본을 INSERT 인스턴스마다 닫힌 면으로 만들어 **본체 후보를 제안한다.** 읽기 전용.
+
+    `_equipment_outlines` 는 한 인스턴스 안에서 닫힌 면이 여러 개 겹치면 `Ambiguous equipment outline` 으로
+    저장을 막는다 — 맞는 판단이지만 **어느 핸들을 고르라는지 말하지 않는다.** 실측(단위세대 환기): 디퓨저
+    블록 안에 동심원이 셋이라 단말 본체가 11곳 × 3 = 33개로 섰고, 사람이 DXF 를 열어 바깥 원 핸들을 찾아
+    `source_handles` 에 적어야 했다. 환기유니트·난방 분배기는 아직 그 핸들을 못 골라 적용하지 못했다.
+
+    제안 규칙은 하나뿐이다: 한 인스턴스 안에서 **다른 모든 면을 덮는 면이 정확히 하나**면 그것이 본체
+    후보다. 없거나 둘 이상이면 제안하지 않고 `ambiguous_instances` 로 면 목록을 돌려준다 — **고르는 것은
+    사람이다.** 가장 큰 면을 조용히 고르지 않는 이유는 기호 바깥에 점검 여유(점선 사각형)를 두는 도면이
+    있기 때문이다. 면적·bbox 를 같이 실어 사람이 판단한다."""
+    from shapely.geometry import Polygon
+    row = copy.deepcopy(row)
+    _validate_filters(row)
+    path = Path(dxf_path)
+    source_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    doc = ezdxf.readfile(path)
+    scale = unit_review(doc, unit_scale_to_mm, legacy_header=legacy_units)['effective_scale_to_mm']
+    if scale is None:
+        raise ValueError('Drawing unit is unresolved; confirm units before measuring bodies')
+    pattern = re.compile(row['pattern'], re.I)
+    issues, grouped = [], defaultdict(list)
+    for entity, ref, appearance in _expanded(doc, issues):
+        if entity is None or not _matches(row, pattern, ref, appearance):
+            continue
+        try:
+            rec = extract_curve(entity, scale, float(row.get('curve_chord_error_mm', 0.25)), ref)
+        except (ValueError, ezdxf.DXFError) as exc:
+            issues.append({'code': 'UNSUPPORTED_SOURCE', 'severity': 'warning', 'reason': str(exc),
+                           'source_refs': [ref]})
+            continue
+        # 영역 판정은 `apply_mep_profile` 과 **같은 함수**로 한다 — 걸친 원본을 여기서만 담으면 이 도구가
+        # 파이프라인과 다른 면을 세고, 제안한 필터가 실제로는 다른 결과를 낸다(실측으로 겪음).
+        if region and _region_status(_bounds(rec['points']), {'bounds_mm': list(region)}) != 'inside':
+            continue
+        rec['layer'] = appearance['layer']
+        rec['_profile_rule'] = 0            # `_outlines` 가 규칙 출처를 싣는다 — 여기는 규칙 하나짜리 조사다
+        # ★ 묶는 방식은 파이프라인과 **똑같아야 한다** — 다르면 이 도구가 다른 세상을 설명하고, 제안한
+        #   필터가 실제로는 다른 결과를 낸다. 두 단계 모두 옮긴다:
+        #   ① `apply_mep_profile` 의 `outline_groups` — 규칙 값은 다 같으므로 레코드마다 다른 것은
+        #      해소한 높이뿐이고, 그건 `placement: source` 일 때만 원본 z 를 따른다(실측: 슬리브 2개의
+        #      사각형과 X 표시가 z 가 달라 네 묶음으로 갈렸다 — 그래서 사각형이 X 에 안 잘린다).
+        #   ② `_equipment_outlines` — 닫힌 원본은 저마다 한 몸, 열린 경계만 이어 붙인다(실측: 동심원
+        #      셋은 저마다 닫혀 있어 세 몸으로 선다).
+        #   ★ 높이는 **반올림하지 않는다** — `outline_groups` 가 float 를 그대로 키로 쓰기 때문이다. 실측:
+        #     슬리브 사각형과 그 안의 X 표시가 z 로 9.45e-6mm 어긋나 다른 묶음이 됐고, 그 덕분에 사각형이
+        #     X 에 사분되지 않았다. 여기서 반올림하면 도구만 사분면 4개를 보고 없는 문제를 보고한다.
+        instance = (_signature(ref['insert_path']),
+                    float(rec.get('source_elevation_mm') or 0.0) if row.get('placement') == 'source' else 0.0)
+        key = instance + (('closed', _ref_key(ref)) if rec.get('closed') else ('open',))
+        grouped[key].append((instance, rec))
+
+    tolerance = float(row.get('endpoint_tolerance_mm', 0.001))
+    by_instance, used = defaultdict(list), defaultdict(list)
+    for key in sorted(grouped, key=repr):
+        instance = grouped[key][0][0]
+        built, _lost = _outlines([rec for _inst, rec in grouped[key]], issues, tolerance)
+        for rec in built:
+            polygon = Polygon(rec['points'])
+            refs = copy.deepcopy(rec['source_refs'])
+            by_instance[instance].append(
+                {'polygon': polygon, 'area_mm2': round(polygon.area, 1),
+                 'bbox_mm': [round(v, 1) for v in _bounds(rec['points'])],
+                 'handles': sorted({r['handle'].upper() for r in refs}), 'refs': refs,
+                 'holes': len(rec.get('holes') or [])})
+            for r in refs:
+                used[instance].append(_ref_key(r))
+
+    instances, ambiguous, per_instance_handles = [], [], []
+    for instance in sorted(by_instance, key=repr):
+        faces = by_instance[instance]
+        for i, face in enumerate(faces):
+            face['contains'] = [j for j, other in enumerate(faces)
+                                if j != i and face['polygon'].covers(other['polygon'])]
+        covering = [i for i, f in enumerate(faces) if len(f['contains']) == len(faces) - 1]
+        body = covering[0] if len(covering) == 1 else None
+        entry = {'faces': [{k: v for k, v in f.items() if k != 'polygon'} for f in faces],
+                 'body_face': body,
+                 'in_block': any(r['insert_path'] for f in faces for r in f['refs'])}
+        # 저장을 막는 것과 같은 조건(면에 구멍 · 같은 원본을 두 면이 나눠 씀)은 제안하지 않는다.
+        blocked = (any(f['holes'] for f in faces)
+                   or len(used[instance]) != len(set(used[instance])))
+        if body is None or blocked:
+            entry['reason'] = ('outline_has_hole' if any(f['holes'] for f in faces) else
+                               'shared_source' if blocked else
+                               'no_single_covering_face' if faces else 'no_closed_face')
+            entry['body_face'] = None
+            ambiguous.append(entry)
+        else:
+            per_instance_handles.append((tuple(faces[body]['handles']), faces[body]['refs']))
+        instances.append(entry)
+
+    suggestion = None
+    if per_instance_handles and not ambiguous and all(len(i['faces']) <= 1 for i in instances):
+        # 기호마다 이미 면이 하나다 — 좁힐 것이 없다. 없는 제안을 만들어 규칙을 흔들지 않는다.
+        return {'source_sha256': source_hash, 'scale_to_mm': scale, 'instances': instances,
+                'suggestion': None, 'already_single_body': True, 'ambiguous_instances': [], 'issues': issues,
+                'scope': 'Every symbol already resolves to one body; no source filter is needed.'}
+    if per_instance_handles and not ambiguous:
+        handle_sets = {h for h, _refs in per_instance_handles}
+        refs = [r for _h, group in per_instance_handles for r in group]
+        if len(handle_sets) == 1 and any(r['insert_path'] for r in refs):
+            # 블록 **안쪽** 핸들은 인스턴스가 달라도 같다 — 핸들 하나가 위치마다 한 겹만 남긴다.
+            suggestion = {'source_handles': sorted(next(iter(handle_sets))), 'instances': len(per_instance_handles)}
+        else:
+            suggestion = {'source_refs': copy.deepcopy(refs), 'instances': len(per_instance_handles)}
+    return {'source_sha256': source_hash, 'scale_to_mm': scale, 'instances': instances,
+            'suggestion': suggestion, 'ambiguous_instances': ambiguous, 'issues': issues,
+            'scope': 'Suggests one body face per symbol instance; the user picks. No geometry is invented '
+                     'and overlapping symbols are never merged.'}
+
+
+def split_rule_by_equipment_bodies(row, measurement):
+    """규칙 하나 → 제안한 본체만 고르는 규칙 하나. 제안이 없으면 `None` 과 사유(사람이 고른다)."""
+    suggestion = measurement.get('suggestion')
+    if not suggestion:
+        return None, ('already_single_body' if measurement.get('already_single_body') else
+                      'ambiguous_instances' if measurement.get('ambiguous_instances') else 'no_closed_face')
+    rule = {k: copy.deepcopy(v) for k, v in row.items() if k not in ('source_handles', 'source_refs')}
+    if 'source_handles' in suggestion:
+        rule['source_handles'] = list(suggestion['source_handles'])
+    else:
+        rule['source_refs'] = copy.deepcopy(suggestion['source_refs'])
+    return rule, 'suggested'
+
+
 def _region_status(bounds, region):
     if region is None or bounds is None:
         return 'inside'
@@ -608,7 +735,14 @@ def _equipment_outlines(records, issues, tolerance):
         for rec in built:
             refs = {_ref_key(r) for r in rec['source_refs']}
             if rec.get('holes') or used.intersection(refs):
-                raise ValueError('Ambiguous equipment outline; select an explicit closed body')
+                # 어디를 보라는지 말한다 — 도구 없이도 고칠 자리를 알 수 있게(`measure_equipment_bodies`).
+                handles = sorted({r['handle'].upper() for r in rec['source_refs']})
+                blocks = sorted({p['block'] for r in rec['source_refs'] for p in r['insert_path']})
+                raise ValueError(
+                    'Ambiguous equipment outline; select an explicit closed body. '
+                    f"handles {handles[:12]}" + (f" in block {blocks}" if blocks else '')
+                    + (f"; the face has {len(rec['holes'])} hole(s)" if rec.get('holes') else '; sources are shared')
+                    + '. Use measure_equipment_bodies to see every face of this symbol.')
             used.update(refs)
         output.extend(built)
     return output, lost

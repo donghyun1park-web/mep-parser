@@ -301,6 +301,19 @@ class ProjectSession:
                                             legacy_units=uses_legacy_units(source), region=region)
             return dict(result, project_id=manifest['project_id'], revision=manifest['revision'], source_id=source_id)
 
+    def measure_equipment_bodies(self, rule, source_id='main', region_bounds_mm=None):
+        """장비 규칙이 고르는 기호마다 닫힌 면을 세어 본체 후보를 제안한다(읽기 전용). 고르는 것은 사람이다."""
+        from drawing_units import option_scale, uses_legacy_units
+        from mep_profile import measure_equipment_bodies
+        with self._mutex:
+            manifest = self.store.refresh_inputs()
+            source = self._profile_source(manifest, source_id)
+            options = source.get('options') or {}
+            region = region_bounds_mm or ((options.get('mep_profile') or {}).get('region') or {}).get('bounds_mm')
+            result = measure_equipment_bodies(source['path'], rule, option_scale(options),
+                                              legacy_units=uses_legacy_units(source), region=region)
+            return dict(result, project_id=manifest['project_id'], revision=manifest['revision'], source_id=source_id)
+
     def propose_mep_profile(self, profile, expected_revision, project_id, source_id='main', reason=''):
         """Save a reviewable proposal. Never changes a profile, geometry or review acknowledgement."""
         from mep_profile import validate_profile
