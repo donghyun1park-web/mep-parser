@@ -106,15 +106,15 @@ def test_a_real_column_layer_is_left_alone(tmp_path):
 
 
 def test_an_unmapped_wall_layer_is_suggested_with_evidence_but_never_applied(tmp_path):
-    path = _drawing(tmp_path, "parti.dxf", _wall_pairs(6, 100.0), "Parti9")
+    path = _drawing(tmp_path, "unmapped.dxf", _wall_pairs(6, 100.0), "ZZ9")
     data = _parse(path)
-    (sug,) = [s for s in data["suggestions"] if s["layer"] == "Parti9"]
+    (sug,) = [s for s in data["suggestions"] if s["layer"] == "ZZ9"]
     assert sug["geom_guess"] == "wall" and sug["evidence"]["spacing_mm"] == 100
     assert "100mm" in sug["geom_reason"] and "짝" in sug["geom_reason"]
     # 자동 적용 문턱은 0.8 **초과** 다 — 증거 제안은 상한이 0.8 이라 절대 자동으로 들어가지 않는다.
     assert sug["geom_confidence"] <= 0.8
     assert data["elements"].get("wall") in (None, [])
-    assert data["qa"]["wall_like_unmapped_layers"] == ["Parti9"]
+    assert data["qa"]["wall_like_unmapped_layers"] == ["ZZ9"]
     assert data["qa"]["wall_like_unmapped_m"] > 0
 
 

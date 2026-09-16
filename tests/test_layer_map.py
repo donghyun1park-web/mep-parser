@@ -439,3 +439,20 @@ def test_bad_elevation_spec_fails_at_load():
             continue
         raise AssertionError(f"elevation={bad!r} 가 통과했다")
     assert dp._parse_opts("elevation=top:2500") == {"elevation": "top:2500"}
+
+
+def test_apartment_convention_rows_do_not_shadow_the_wall_rules_below_them():
+    """아파트 단위세대 관행 이름 넉 줄. 선매칭 우선이라 **아래 행을 가로채면 벽이 사라진다.**
+
+    실측으로 겪었다: 경계 없는 `Insul$` 가 아래의 'A-INSUL,wall,100' 을 삼켜 지하3층 골든이
+    벽 662 → 648 이 됐다(A-INSUL 5개 소멸 + 상부골조 페어링 10개 흔들림)."""
+    import dxf_parser as P
+    rules = P.load_layer_map("layer_map.csv")
+    cat = lambda name: P.classify(name, rules)[0]
+    assert cat("XREF_UNIT_74 expand$0$Parti") == "wall"
+    assert P.classify("Parti", rules)[1].get("_opts", {}).get("pair_min") == 50.0
+    for name in ("XREF_UNIT_74 expand$0$A-FIN", "Hat-tile", "HAT", "$0$Insul", "A-INS", "단열재"):
+        assert cat(name) == "ignore", name
+    # 아래 행이 살아 있어야 한다 — 이 넷은 그 위에 있다.
+    assert cat("A-INSUL") == "wall" and cat("A-ELE") == "wall"
+    assert cat("A-WALL") == "wall" and cat("A-COL") == "column"
