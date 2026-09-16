@@ -44,7 +44,8 @@ export function buildReviewEntries(elements={}, report={}, clashes=[], connectiv
       key:`clash:${clash.id}`, kind:'clash', eid:m.eid||null, category:'간섭', order,
       floor:clash.level!=null?String(clash.level):'', action:'select', struct:s.eid||null,
       reason:`${clash.action} · (${Math.round(at[0])}, ${Math.round(at[1])}) z ${Math.round(z[0])}~${Math.round(z[1])} · `
-        +`${s.category||''} ${s.eid||''}${s.width_mm!=null?` 두께 ${s.width_mm}mm`:''} ↔ ${[m.system,m.size].filter(Boolean).join(' ')}`
+        // 합성 슬래브(층 높이 선언)는 부재가 아니라 EID 가 없다 — 빈칸 대신 출처를 적는다.
+        +`${s.category||''} ${s.eid||s.layer||''}${s.width_mm!=null?` 두께 ${s.width_mm}mm`:''} ↔ ${[m.system,m.size].filter(Boolean).join(' ')}`
         +assumedHeightText(clash),
     });
   });

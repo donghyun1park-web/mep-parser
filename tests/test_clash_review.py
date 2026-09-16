@@ -67,6 +67,26 @@ def test_a_riser_through_a_slab_and_no_clash_above_the_wall():
     assert [(c["kind"], c["mep"]["eid"]) for c in items] == [("slab_penetration", "p:r")]
 
 
+def test_ceiling_and_floor_slabs_come_from_the_level_declaration_only_when_it_exists():
+    """평면도에 슬래브 몸체가 없어 천장 쪽 간섭은 판정 대상 밖이었다 — 선언이 있으면 그 두 장만 세운다."""
+    riser = {"eid": "p:r", "kind": "polyline", "points": [[2000, 2000], [2000, 2000]], "elevation": 1500,
+             "diameter": 100, "path3d": {"segments": [{"type": "line", "start": [2000, 2000, -1000],
+                                                       "end": [2000, 2000, 1400]}]}}
+    tight = {"eid": "d:tight", "kind": "polyline", "points": [[0, 500], [4000, 500]], "elevation": 2500,
+             "width_mm": 200, "height_mm": 200, "system": "SA"}          # 상단 2600 = 천장 슬래브 밑면
+    g = _geom(pipe=[riser], duct=[tight])
+    assert find_clashes(g)["items"] == []                                 # 선언이 없으면 아무것도 세우지 않는다
+    g["mep_profile"] = {"levels": {"structural_slab_top_mm": 0.0, "floor_to_floor_mm": 2800.0,
+                                   "slab_thickness_mm": 200.0},
+                        "region": {"id": "unit", "bounds_mm": [0, 0, 5000, 5000]}}
+    items = find_clashes(g)["items"]
+    # 밑면에 딱 붙은 덕트는 항목이 아니다(접촉은 간섭이 아니다). 슬래브를 뚫은 입상관만 뜬다.
+    assert [(c["mep"]["eid"], c["kind"], c["struct"]["eid"]) for c in items] == [("p:r", "slab_penetration", None)]
+    # 입상관은 z 500~2900 이라 천장 슬래브(2600~2800)를 지난다. 바닥(−200~0)에는 닿지 않는다.
+    assert "층 높이 선언" in items[0]["struct"]["layer"] and items[0]["struct"]["synthetic"] == "천장"
+    assert "천장 슬래브" in items[0]["action"] and "합성" in items[0]["action"]
+
+
 def test_a_penetration_at_a_drawn_sleeve_is_told_apart_from_one_without():
     """도면이 '여기는 뚫어 뒀다' 고 말한 자리와 아닌 자리는 조치가 다르다."""
     sleeve = {"eid": "e:s", "kind": "polyline", "closed": True, "role": "sleeve", "z_base": 0,

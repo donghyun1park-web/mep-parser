@@ -552,7 +552,9 @@ class ProjectSession:
                           'eids': problem['eids'], 'reason': 'joint_' + problem['problem']})
         for clash in (state['geometry'].get('clash_review') or {}).get('items', []):
             items.append({'category': 'clash', 'eid': clash['mep']['eid'], 'layer': clash['struct'].get('layer'),
-                          'eids': [clash['struct']['eid'], clash['mep']['eid']], 'reason': clash['action'],
+                          # 합성 슬래브는 부재가 아니라 EID 가 없다 — 목록에서 고를 수 있는 것만 싣는다.
+                          'eids': [e for e in (clash['struct']['eid'], clash['mep']['eid']) if e],
+                          'reason': clash['action'],
                           'at': clash['at'], 'z': clash['z'], 'z_basis': clash.get('basis')})
         from mep_network import KIND_LABELS
         net = state['geometry'].get('mep_connectivity') or {}

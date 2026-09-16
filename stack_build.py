@@ -263,6 +263,13 @@ def build_stack(spec, base_dir=".", dry_run=False):
 
         rep = {"id": lid, "z": lv["z"], "offset": [dx, dy], "evidence": ev,
                "counts": {k: len(v) for k, v in data["elements"].items() if v}}
+        # 층 높이·슬래브 두께 선언은 **원본 프로필에만** 있다. 병합하면서 버리면 통합 모델에서
+        # 천장·바닥 위치를 아무도 모른다 — 간섭 검토가 상부를 볼 수 있게 층 항목에 남긴다.
+        _profile = data.get("mep_profile") or {}
+        if _profile.get("levels"):
+            rep["levels"] = copy.deepcopy(_profile["levels"])
+        if _profile.get("region"):
+            rep["region"] = copy.deepcopy(_profile["region"])
         if key != lid or len(floors[key]["sources"]) > 1:
             rep["floor"] = key
         if excluded:

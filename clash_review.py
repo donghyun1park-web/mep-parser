@@ -90,6 +90,53 @@ def _voids(geometry):
     return out
 
 
+def _level_slabs(geometry):
+    """층 높이 선언에서 **바닥·천장 슬래브**를 합성한다 → `_prisms` 와 같은 모양의 항목들.
+
+    ★ 평면도에는 슬래브·보 몸체가 없다. 그래서 '덕트 상단 = 슬래브 밑면' 같은 설치 조건은 선언일 뿐
+      아무도 검사하지 않았고, 천장 쪽 간섭은 **판정 대상 밖**이었다. 프로필의 층 높이·슬래브 두께가
+      있으면 그 두 장만 간섭 계산에 세운다 — **모델·IFC·물량에는 넣지 않는다**(도면에 없는 부재다).
+      선언이 없으면 아무것도 만들지 않는다(추정하지 않는다).
+    """
+    sources = []
+    profile = geometry.get("mep_profile") or {}
+    if profile.get("levels"):
+        sources.append((profile["levels"], profile.get("region"), None))
+    for level in (geometry.get("stack") or {}).get("levels") or []:
+        if level.get("levels"):
+            sources.append((level["levels"], level.get("region"), level.get("id")))
+    out, seen = [], set()
+    for levels, region, level_id in sources:
+        thickness = levels.get("slab_thickness_mm")
+        floor_to_floor = levels.get("floor_to_floor_mm")
+        if not thickness or not floor_to_floor:
+            continue
+        top = float(levels.get("structural_slab_top_mm") or 0.0)
+        bounds = (region or {}).get("bounds_mm") or _plan_bounds(geometry)
+        if not bounds:
+            continue
+        key = (round(top, 1), round(float(thickness), 1), round(float(floor_to_floor), 1), tuple(round(v, 1) for v in bounds))
+        if key in seen:
+            continue                      # 같은 층을 원본마다 다시 세우지 않는다
+        seen.add(key)
+        poly = box(*bounds)
+        for role, slab_top in (("바닥", top), ("천장", top + float(floor_to_floor))):
+            out.append({"rec": {"eid": None, "layer": "(층 높이 선언)", "level": level_id},
+                        "category": "slab", "poly": poly, "z": (slab_top - float(thickness), slab_top),
+                        "width": None, "synthetic": role,
+                        "basis": {"z": "declared", "assumed": []}})
+    return out
+
+
+def _plan_bounds(geometry):
+    xs, ys = [], []
+    for recs in (geometry.get("elements") or {}).values():
+        for rec in recs:
+            for p in (rec.get("points") or []):
+                xs.append(float(p[0])); ys.append(float(p[1]))
+    return [min(xs), min(ys), max(xs), max(ys)] if xs else None
+
+
 def _sleeves(geometry):
     """슬리브 자리(프로필 `role: sleeve`)의 평면. **부재가 아니라 판정 근거**다 — 도면이 "여기는 뚫어 뒀다"
     고 말한 자리라 같은 관통이라도 조치가 다르다(슬리브 없는 관통은 새로 뚫어야 한다)."""
@@ -143,6 +190,7 @@ def find_clashes(geometry):
     """geometry.json dict → {"items": [...], "summary": {...}}. 입력을 바꾸지 않는다."""
     params = geometry.get("params")
     prisms, skipped_structures = _prisms(geometry)
+    prisms += _level_slabs(geometry)       # 도면에 몸체가 없는 바닥·천장 — 간섭 계산에만 선다
     voids = _voids(geometry)
     sleeves = _sleeves(geometry)
     tree = STRtree([p["poly"] for p in prisms]) if prisms else None
@@ -184,10 +232,13 @@ def find_clashes(geometry):
                         kind = "sleeve_provided"
                     struct = prism["rec"]
                     assumed = sorted(set(prism["basis"]["assumed"] + mep_basis["assumed"]))
+                    action = ACTIONS[kind]
+                    if prism.get("synthetic"):
+                        action = f"{prism['synthetic']} 슬래브(층 높이 선언에서 합성) 관통 — 설치 높이 확인"
                     key = "|".join([str(struct.get("eid")), str(rec.get("eid")), "%.0f" % at.x, "%.0f" % at.y])
                     items.append({
                         "id": "clash:" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:12],
-                        "kind": kind, "action": ACTIONS[kind],
+                        "kind": kind, "action": action,
                         "at": [round(at.x, 1), round(at.y, 1)], "z": [round(z0, 1), round(z1, 1)],
                         "crossing_mm": round(sum(p[1] for p in members), 1), "area_mm2": round(part.area, 1),
                         "level": rec.get("level") or struct.get("level"),
@@ -195,7 +246,7 @@ def find_clashes(geometry):
                         "basis": "assumed" if assumed else "declared", "assumed": assumed,
                         "struct": {"eid": struct.get("eid"), "category": prism["category"], "layer": struct.get("layer"),
                                    "width_mm": None if prism["width"] is None else round(prism["width"], 1),
-                                   "z_basis": prism["basis"]["z"]},
+                                   "z_basis": prism["basis"]["z"], "synthetic": prism.get("synthetic")},
                         "mep": {"eid": rec.get("eid"), "category": cat, "size": size, "layer": rec.get("layer"),
                                 "system": rec.get("system") or (rec.get("overrides") or {}).get("system"),
                                 "z_basis": mep_basis["z"]},
