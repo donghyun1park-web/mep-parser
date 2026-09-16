@@ -5,6 +5,7 @@ import sys
 import types
 
 import pytest
+from tkinter import ttk
 from project_store import ProjectStore, RevisionConflict, fingerprint
 from project_server import ProjectSession
 
@@ -167,3 +168,76 @@ def test_hidden_tk_proposals_only_show_active_source(workflow):
         if dialog:
             dialog.win.destroy()
         root.destroy()
+
+
+def test_hidden_tk_main_window_shows_four_controls_and_keeps_every_tool(workflow):
+    """첫 화면은 넷뿐이다 — 나머지는 접혀 있을 뿐 하나도 지우지 않았다."""
+    import tkinter as tk
+    from mep_gui import App
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        app = App(root)
+        bar = root.winfo_children()[0]
+        assert [child.cget('text') for child in bar.winfo_children()] == [
+            '열기…', '설비 도면 설정', '내보내기 ▾', '그 밖의 도구 ▾']
+        assert not app.tools.winfo_manager()                 # 기본 접힘
+        app.v_tools.set(True); app._toggle_tools(); root.update_idletasks()
+        assert app.tools.winfo_manager()
+        # 접힌 도구는 전부 살아 있다(기능 손실 0).
+        for name in ('_do_scan', '_do_diag', '_do_review_csv', '_do_build', '_do_blender_build',
+                     '_do_boq', '_apply_review', '_pick_edits', '_do_add_source', '_show_checklist'):
+            assert callable(getattr(app, name)), name
+        assert app._open_after_parse is False
+        # 진행 중 비활성화는 접힌 프레임 안까지 닿아야 한다(한 겹 더 깊다).
+        app._set_buttons('disabled')
+        buried = [w for w in app.tools.winfo_children() for w in w.winfo_children()
+                  if isinstance(w, ttk.Button)]
+        assert buried and all('disabled' in w.state() for w in buried)
+    finally:
+        root.destroy()
+
+
+def test_hidden_tk_setup_dialog_hides_handle_and_proposal_tabs_until_expert(workflow):
+    """현장에서 쓸 일이 없는 핸들·정규식과 제안 검토는 숨긴다. 위젯은 그대로 살아 있다."""
+    import tkinter as tk
+    from mep_setup_ui import MepSetupDialog
+    session, profile = workflow
+    root = tk.Tk()
+    root.withdraw()
+    dialog = None
+    try:
+        dialog = MepSetupDialog(root, session, {'source_sha256': profile['source_sha256'],
+            'scale_to_mm': 1, 'bounds_mm': None, 'layers': [], 'regions': []}, lambda _: None)
+        dialog.win.withdraw()
+        root.update_idletasks()
+        shown = lambda: [dialog.tabs.tab(t, 'text') for t in dialog.tabs.tabs()
+                         if dialog.tabs.tab(t, 'state') == 'normal']
+        assert shown() == ['영역·레이어', '건축 분류', '높이·바닥 구성']
+        assert 'source_handles' in dialog.rule_vars and 'role' in dialog.rule_vars  # 숨겨도 변수는 산다
+        dialog.v_expert.set(True); dialog._toggle_expert(); root.update_idletasks()
+        assert shown() == ['영역·레이어', '설비 원본 필터', '건축 분류', '높이·바닥 구성', 'Codex 제안 검토']
+    finally:
+        if dialog:
+            dialog.win.destroy()
+        root.destroy()
+
+
+def test_drawing_kind_is_guessed_from_layer_names_only(tmp_path):
+    """추측은 대화의 기본 선택을 채울 뿐이다. 설비 도면을 그냥 해석하면 배경이 기둥이 된다."""
+    import ezdxf
+    from mep_gui import guess_drawing_kind
+
+    def drawing(name, layers):
+        doc = ezdxf.new()
+        for layer in layers:
+            doc.layers.new(layer)
+        path = tmp_path / name
+        doc.saveas(path)
+        return str(path)
+
+    assert guess_drawing_kind(drawing('arch.dxf', ['A-WALL', 'A-COL', 'A-SLAB'])) == '건축'
+    assert guess_drawing_kind(drawing('mep.dxf', ['M-DUCT', 'A-WALL'])) == '설비'   # 설비 이름이 이긴다
+    # 벽·기둥 이름이 하나도 없으면 해석할 건축이 없다 — 실무 환기 도면이 그렇다(배경은 XREF).
+    assert guess_drawing_kind(drawing('vent.dxf', ['SA', 'RA', 'BACK'])) == '설비'
+    assert guess_drawing_kind(str(tmp_path / 'missing.dxf')) == '건축'              # 못 읽으면 종전 경로

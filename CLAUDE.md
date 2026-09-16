@@ -40,7 +40,7 @@
 | `mep_network.py` | **설비 연결성.** 조각·이어진 무리(`joints` 만)·끊긴 끝과, 끊긴 끝끼리의 이음 **후보**(직선·엘보·티, 같은 계통·높이, 1:1 최근접). 모델은 바꾸지 않는다. `geometry.mep_connectivity` 로 미리보기 검토 목록·평면 탭·Pascal 검토 탭·MCP·GUI 로그가 같이 쓴다 |
 | `clash_review.py` | **간섭 검토 목록.** 구조체(벽·기둥·슬래브·보) × 설비 경로의 교차를 2.5D 로 한 곳씩 — 위치·부재 EID·조치 구분. 프로젝트 상태(`geometry.clash_review`)·미리보기 검토 목록·Pascal 검토 탭·MCP 가 같이 쓴다 |
 | `artifact_validation.py` + `freecad_runner.py` | 실행별 산출물 영수증과 실제 IFC 재검사. 입력 해시·EID/GlobalId·형상·체적·층·QA 속성을 대조한다. |
-| `mep_gui.py` | **현장용 GUI** (Phase 2.5): 파일선택→스캔→파싱→**3D 미리보기(브라우저)**→needs_review 수정→3D빌드 (tkinter, 무의존) |
+| `mep_gui.py` | **현장용 GUI** (tkinter, 무의존). 첫 화면은 넷이다 — `열기…` · `설비 도면 설정` · `내보내기 ▾` · `그 밖의 도구 ▾`. ★ **열기 한 번이 길을 정한다**: 도면 종류를 먼저 묻고(추측은 `guess_drawing_kind` 가 레이어 **이름만** 보고 채우는 기본 선택일 뿐) **건축이면 파싱, 설비면 설정 창**으로 갈라 브라우저까지 연다. 설비 평면을 그냥 파싱하면 **배경 건축 XREF 가 기둥·벽이 되어 오답이 첫 화면이 된다**(실측: 단위세대 환기 도면 검토 대기 43건이 전부 그것). 일회성·상황별 도구(스캔·단위·누락 진단·같은 층 추가·edits 가져오기·layer_map 편집·AI 체크박스·needs_review 표)는 **접혀 있을 뿐 그대로 있다** |
 | `run_gui.bat` | GUI 더블클릭 런처 (CLI 불필요) |
 | `run_editor.bat` + `pascal_host/stage_runtime.py` | **편집 화면 런처(npm·bun 없이).** `stage_runtime.py` 가 Pascal standalone 빌드 + node 실행 파일 + `mep-runtime.json`(고정 커밋·오버레이 지문)을 `pascal_runtime/`(gitignore)에 모으고, `run_editor.bat <도면|프로젝트>` 가 `run_host.py --runtime pascal_runtime --open` 을 부른다 |
 | `make_sample_dxf.py` | 테스트용 샘플 DXF 생성 (A-WALL/A-COLS/A-SLAB/A-ZONE) |

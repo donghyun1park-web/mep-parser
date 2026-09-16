@@ -59,6 +59,11 @@ class MepSetupDialog:
         self.tabs.insert(2, self.architecture_tab, text='건축 분류')
         self._build_source_filters()
         self._build_architecture()
+        # 핸들·정규식(설비 원본 필터)과 MCP 제안 검토는 현장에서 쓸 일이 없다 — 만들어 두고 숨긴다.
+        # 위젯은 그대로 살아 있어 폼 값 왕복과 저장 경로는 바뀌지 않는다.
+        self.expert_tabs = (self.source_tab, self.proposal_tab)
+        self.v_expert = tk.BooleanVar(value=False)
+        self._toggle_expert()
         self.status = tk.StringVar(value='원본 SHA-256: ' + inventory['source_sha256'][:20])
         ttk.Label(self.win, textvariable=self.status, wraplength=1050).pack(anchor='w', padx=12, pady=6)
         controls = ttk.Frame(self.win)
@@ -66,10 +71,16 @@ class MepSetupDialog:
         self.save_button = ttk.Button(controls, text='설정 저장 · 다시 모델링', command=self._save)
         self.save_button.pack(side='right', padx=5)
         ttk.Button(controls, text='닫기', command=self.win.destroy).pack(side='right')
+        ttk.Checkbutton(controls, text='전문가 설정 보기 (원본 핸들 · 제안 검토)',
+                        variable=self.v_expert, command=self._toggle_expert).pack(side='left')
         source = next(s for s in self.manifest['sources'] if s['id'] == self.source_id)
         current = source.get('options', {}).get('mep_profile') or {}
         self._load_profile(current)
         self._draw_regions()
+
+    def _toggle_expert(self):
+        for tab in self.expert_tabs:
+            self.tabs.add(tab) if self.v_expert.get() else self.tabs.hide(tab)
 
     def _entry(self, parent, label, row, values=None, width=17):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky='w', padx=4, pady=3)

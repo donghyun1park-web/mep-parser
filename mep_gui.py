@@ -57,6 +57,27 @@ CATEGORIES = ["wall", "column", "slab", "beam", "zone", "opening",
               "pipe", "duct", "tray", "equipment", "ignore"]
 
 
+def guess_drawing_kind(dxf_path):
+    """레이어 **이름만** 보고 건축/설비를 짚는다 — 물어보는 대화의 기본 선택을 채울 뿐이다.
+
+    ★ 판정이 아니라 추측이다. 엔티티를 순회하지 않고 레이어 테이블만 읽는다(즉시).
+      규칙은 둘뿐이고 둘 다 `DEFAULT_LAYER_RULES` 를 그대로 쓴다(이름 규칙을 새로 만들지 않는다):
+      ① 설비 이름(PIPE·DUCT·TRAY…)이 하나라도 있으면 설비다.
+      ② 벽·기둥 이름이 **하나도 없으면** 해석할 건축이 없다 — 설비로 짚는다. 실측(단위세대 환기):
+         배경 건축이 XREF 라 벽 레이어 이름이 없고, 그냥 해석하면 배경이 기둥 43개로 잡힌다.
+      읽지 못하면 종전 기본 경로인 건축으로 둔다.
+    """
+    try:
+        import ezdxf
+        names = [layer.dxf.name for layer in ezdxf.readfile(dxf_path).layers]
+    except Exception:
+        return "건축"
+    kinds = {P.classify(name, P.DEFAULT_LAYER_RULES)[0] for name in names}
+    if kinds & {"pipe", "duct", "tray", "equipment"}:
+        return "설비"
+    return "건축" if kinds & {"wall", "column"} else "설비"
+
+
 def find_freecadcmd():
     """Auto-detect freecadcmd.exe. Returns None if not found."""
     cands = [r"C:\Program Files\FreeCAD 1.1\bin\freecadcmd.exe"]
@@ -298,11 +319,13 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title("MEP Parser -- DXF to 3D BIM")
-        root.geometry("960x780")
+        root.geometry("820x520")
         self.data = None          # parsed result dict
         self.geom_path = None     # path to saved geometry.json
         self.project_session = None
         self.project_server = None
+        # 열기 한 번으로 브라우저까지 간다 — 파싱이 끝나면 이 표시를 보고 미리보기를 연다.
+        self._open_after_parse = False
         root.protocol("WM_DELETE_WINDOW", self._close)
 
         self.v_dxf = tk.StringVar()
@@ -314,15 +337,50 @@ class App:
         self.v_schedule = tk.StringVar()  # 외부 창호일람 Excel 경로(선택)
         self.v_edits = tk.StringVar()     # preview 에서 받은 edits.json 경로(선택)
 
-        self._build_file_row()
-        self._build_buttons()
-        self._build_review()
+        # 첫 화면은 넷뿐이다. 나머지는 '그 밖의 도구' 안에 접혀 있다(지우지 않았다).
+        self._build_main_bar()
+        self._build_tools()
         self._build_log()
         self._log(f"FreeCAD: {find_freecadcmd() or 'not found (build disabled)'}")
 
     # ── UI builders ───────────────────────────────────────────
-    def _build_file_row(self):
-        f = ttk.LabelFrame(self.root, text="1) File selection")
+    def _build_main_bar(self):
+        f = ttk.Frame(self.root)
+        f.pack(fill="x", padx=8, pady=8)
+        ttk.Button(f, text="열기…", command=self._do_open).pack(side="left", padx=4)
+        ttk.Button(f, text="설비 도면 설정", command=self._do_mep_setup).pack(side="left", padx=4)
+        self.btn_export = ttk.Menubutton(f, text="내보내기 ▾")
+        menu = tk.Menu(self.btn_export, tearoff=0)
+        for label, command in [("검토 목록 CSV", self._do_review_csv),
+                               ("물량 Excel", self._do_boq),
+                               ("창호일람 Excel 내보내기", self._do_schedule_export),
+                               ("IFC 직접 내보내기", self._do_ifc_build),
+                               ("납품 검증 빌드 (FreeCAD · 느림)", self._do_build),
+                               ("Blender / GLB", self._do_blender_build)]:
+            menu.add_command(label=label, command=command)
+        if find_freecadcmd() is None:
+            menu.entryconfigure("납품 검증 빌드 (FreeCAD · 느림)", state="disabled")
+        self.btn_export["menu"] = menu
+        self.btn_export.pack(side="left", padx=4)
+        self.v_tools = tk.BooleanVar(value=False)
+        ttk.Checkbutton(f, text="그 밖의 도구 ▾", variable=self.v_tools,
+                        command=self._toggle_tools).pack(side="left", padx=4)
+
+    def _build_tools(self):
+        """일회성·상황별 도구. 만들어 두고 접어 둔다 — 기능은 하나도 줄이지 않았다."""
+        self.tools = ttk.LabelFrame(self.root, text="그 밖의 도구")
+        self._build_file_row(self.tools)
+        self._build_buttons(self.tools)
+        self._build_review(self.tools)
+
+    def _toggle_tools(self):
+        if self.v_tools.get():
+            self.tools.pack(fill="both", expand=True, padx=8, pady=6, before=self.log_frame)
+        else:
+            self.tools.pack_forget()
+
+    def _build_file_row(self, parent=None):
+        f = ttk.LabelFrame(parent or self.root, text="1) File selection")
         f.pack(fill="x", padx=8, pady=6)
         rows = [("DXF drawing", self.v_dxf, self._pick_dxf),
                 ("Layer map", self.v_map, lambda: self._pick_csv(self.v_map)),
@@ -335,15 +393,15 @@ class App:
                 ttk.Button(f, text="Edit",
                            command=self._open_layer_editor).grid(row=i, column=3, padx=2)
 
-    def _build_buttons(self):
-        f = ttk.Frame(self.root)
+    def _build_buttons(self, parent=None):
+        f = ttk.Frame(parent or self.root)
         f.pack(fill="x", padx=8)
         ttk.Button(f, text="프로젝트 열기", command=self._open_project).pack(side="left", padx=4)
         ttk.Button(f, text="(1) Scan drawing", command=self._do_scan).pack(side="left", padx=4)
         ttk.Button(f, text="도면 단위 확인", command=lambda: self._do_mep_setup(units_only=True)).pack(side="left", padx=4)
         ttk.Button(f, text="설비 도면 설정 · Codex 제안", command=self._do_mep_setup).pack(side="left", padx=4)
         ttk.Button(f, text="같은 층 도면 추가(설비)", command=self._do_add_source).pack(side="left", padx=4)
-        ttk.Button(f, text="(2) Parse -> geometry.json", command=self._do_parse).pack(side="left", padx=4)
+        ttk.Button(f, text="(2) 다시 해석", command=self._do_parse).pack(side="left", padx=4)
         ttk.Button(f, text="(2b) 누락 진단",
                    command=self._do_diag).pack(side="left", padx=4)
         ttk.Button(f, text="(3) 3D 미리보기(브라우저)",
@@ -384,8 +442,8 @@ class App:
         for i, control in enumerate(controls):
             control.grid(row=i // 5, column=i % 5, sticky="w", padx=4, pady=3)
 
-    def _build_review(self):
-        f = ttk.LabelFrame(self.root,
+    def _build_review(self, parent=None):
+        f = ttk.LabelFrame(parent or self.root,
                            text="(3) Items needing review (needs_review) -- edit and click [Apply]")
         f.pack(fill="both", expand=True, padx=8, pady=6)
         cols = ("idx", "cat", "pairing", "width", "conf")
@@ -408,8 +466,8 @@ class App:
         ttk.Button(e, text="Apply & Save", command=self._apply_review).pack(anchor="w", pady=6)
 
     def _build_log(self):
-        f = ttk.LabelFrame(self.root, text="Log")
-        f.pack(fill="both", padx=8, pady=6)
+        f = self.log_frame = ttk.LabelFrame(self.root, text="Log")
+        f.pack(fill="both", expand=True, padx=8, pady=6)
         self.txt = tk.Text(f, height=9, wrap="none")
         self.txt.pack(fill="both", expand=True, padx=4, pady=4)
 
@@ -417,6 +475,67 @@ class App:
     def _log(self, msg):
         self.txt.insert("end", str(msg) + "\n")
         self.txt.see("end")
+
+    def _do_open(self):
+        """열기 한 번이 길을 정한다 — 건축이면 해석, 설비면 설정, 저장된 프로젝트면 그대로.
+
+        ★ 설비 도면을 그냥 해석하면 **오답이 첫 화면이 된다**: 설비 평면은 배경 건축을 XREF 로
+          물고 있어 기본 규칙으로 파싱하면 그 배경이 기둥·벽이 된다(실측: 단위세대 환기 도면에서
+          검토 대기 43건이 전부 배경 기둥). 그래서 종류를 **먼저 한 번 묻는다.**
+        """
+        path = filedialog.askopenfilename(
+            title="도면 또는 저장된 프로젝트 열기",
+            filetypes=[("도면 · 저장된 프로젝트", "*.dxf *.dwg project.json"),
+                       ("도면 (DXF/DWG)", "*.dxf *.dwg"),
+                       ("저장된 프로젝트", "project.json"), ("All", "*.*")])
+        if not path:
+            return
+        if os.path.basename(path).lower() == "project.json":
+            self._open_after_parse = True
+            self._open_project(os.path.dirname(path))
+            return
+        self.v_dxf.set(path)
+        dxf = self._ensure_dxf()          # DWG 면 여기서 DXF 로 바뀐다
+        if not dxf:
+            return
+        kind = self._ask_drawing_kind(guess_drawing_kind(dxf))
+        if kind is None:
+            return
+        self._open_after_parse = True
+        # 설비는 파싱하지 않고 설정부터 — 저장하면 그 콜백이 `_parse_done` 을 부른다.
+        self._do_mep_setup() if kind == "설비" else self._do_parse()
+
+    def _ask_drawing_kind(self, guess):
+        """도면 종류를 묻는다. 추측은 기본 선택만 채우고 **고르는 것은 사람이다.**"""
+        win = tk.Toplevel(self.root)
+        win.title("도면 종류")
+        win.transient(self.root)
+        win.resizable(False, False)
+        ttk.Label(win, text="이 도면은 무엇입니까?", font=("", 10, "bold")).pack(anchor="w", padx=14, pady=(12, 2))
+        ttk.Label(win, justify="left", wraplength=430,
+                  text="설비 평면은 배경 건축 도면을 함께 물고 있습니다. 그냥 해석하면 그 배경이 "
+                       "기둥·벽으로 잡혀 검토 대기만 수십 건 쌓입니다. 그래서 설비를 고르면 "
+                       "어느 레이어가 덕트·배관인지 먼저 정합니다.").pack(anchor="w", padx=14)
+        choice = tk.StringVar(value=guess)
+        for value, text in (("건축", "건축 평면 — 벽·기둥·슬래브를 바로 해석합니다"),
+                            ("설비", "설비 평면 — 난방·환기. 설비 도면 설정을 먼저 엽니다")):
+            ttk.Radiobutton(win, text=text, value=value, variable=choice).pack(anchor="w", padx=20, pady=3)
+        ttk.Label(win, text=f"레이어 이름으로 '{guess}' 을 짚었습니다. 추측이니 맞는 쪽을 고르세요.",
+                  foreground="#555555").pack(anchor="w", padx=14, pady=(2, 4))
+        picked = {}
+        row = ttk.Frame(win)
+        row.pack(fill="x", padx=12, pady=(0, 12))
+
+        def confirm():
+            picked["kind"] = choice.get()
+            win.destroy()
+        ttk.Button(row, text="확인", command=confirm).pack(side="right", padx=4)
+        ttk.Button(row, text="취소", command=win.destroy).pack(side="right")
+        win.bind("<Return>", lambda _event: confirm())
+        win.bind("<Escape>", lambda _event: win.destroy())
+        win.grab_set()
+        self.root.wait_window(win)
+        return picked.get("kind")
 
     def _pick_dxf(self):
         p = filedialog.askopenfilename(
@@ -495,8 +614,8 @@ class App:
                     self._set_buttons("!disabled")))
         threading.Thread(target=run, daemon=True).start()
 
-    def _open_project(self):
-        folder = filedialog.askdirectory(title="저장된 .mep 프로젝트 폴더 선택")
+    def _open_project(self, folder=None):
+        folder = folder or filedialog.askdirectory(title="저장된 .mep 프로젝트 폴더 선택")
         if not folder:
             return
         try:
@@ -642,12 +761,19 @@ class App:
             messagebox.showerror("Excel", f"저장 실패: {e}")
 
     def _set_buttons(self, state):
-        """스캔·파싱 진행 중 버튼 비활성화(GUI 반응 보장)."""
+        """스캔·파싱 진행 중 버튼 비활성화(GUI 반응 보장).
+
+        ★ 접힌 '그 밖의 도구' 안의 버튼은 한 겹 더 깊다 — 재귀로 내려가지 않으면 진행 중에도
+          눌린다(프레임 구조를 바꿀 때 조용히 깨지는 자리다)."""
+        def walk(widget):
+            for child in widget.winfo_children():
+                if isinstance(child, (ttk.Button, ttk.Menubutton)):
+                    child.state([state])
+                else:
+                    walk(child)
         for w in self.root.winfo_children():
             try:
-                for btn in w.winfo_children():
-                    if isinstance(btn, ttk.Button):
-                        btn.state([state])
+                walk(w)
             except Exception:
                 pass
 
@@ -710,6 +836,11 @@ class App:
                    if s.get("vision_guess") else "")
             self._log(f"  [suggest] '{s['layer']}'x{s['count']}: {g} {nm}{llm}{vis}")
         self._populate_review()
+        # '열기…' 로 시작했으면 여기서 브라우저까지 간다 — 버튼을 세 번 누르게 하지 않는다.
+        if self._open_after_parse:
+            self._open_after_parse = False
+            self._do_preview()
+
     def _populate_review(self):
         self.tree.delete(*self.tree.get_children())
         if not self.data:
