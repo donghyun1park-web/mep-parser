@@ -56,7 +56,8 @@
 | 개구부 판정은 세 갈래 · `no_host_reason` 네 사유 | `tests/test_openings.py`(9) · `tests/test_verify.py` 의 V106 |
 | 이미 뚫린 자리는 실패가 아니다 | `tests/test_openings.py` 의 `already_void` |
 | **drawings-in-practice.md** | |
-| 레이어 이름이 부재를 안 알려 준다 · 벽 증거 | `tests/test_layer_evidence.py`(9) — 짝 비율·간격 · 보드선 가드 · 기둥 레이어가 벽일 때 · 진짜 기둥 · 표본 |
+| 레이어 이름이 부재를 안 알려 준다 · 벽 증거 | `tests/test_layer_evidence.py`(10) — 짝 비율·간격 · 보드선 가드 · 기둥 레이어가 벽일 때 · 진짜 기둥 · 표본 |
+| 기하 투표만으로는 자동 적용하지 않는다 | `test_a_geometry_only_guess_is_never_auto_applied` |
 | 한 층에 공종 도면 여러 장 | `tests/test_same_floor_sources.py`(5) |
 | `ignore` 는 두 분기 모두에서 | `test_ignore_layer_never_becomes_an_elements_bucket` |
 | 블록 이름이 폭을 담는다 · 문짝 조각 | `tests/test_wall_opening_quality.py`(5) · `tests/test_layer_map.py` |

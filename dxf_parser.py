@@ -3569,7 +3569,14 @@ def apply_ai_classifications(result, suggestions, unmapped_recs,
     """confidence>threshold 제안 → 해당 미매핑 레코드를 elements[cat]로 자동 이동.
     레이어: unmapped_recs[name] 의 보관 레코드 사용.
     블록: unmapped_block_entities[name] 엔티티를 결정 카테고리로 재추출.
-    threshold 이하: needs_review=True 태깅(GUI 검토)."""
+    threshold 이하: needs_review=True 태깅(GUI 검토).
+
+    ★ **기하 투표만으로는 자동 적용하지 않는다.** `classify_geometry` 의 '소형 정사각 닫힘폴리 → column
+      0.85' 는 문턱 0.8 을 넘어서, 이름·LLM·Vision 신호가 하나도 없어도 자동 적용으로 들어갔다. 실측
+      (단위세대 평면도, 'AI auto-classify' 켬 — 이 체크는 `ANTHROPIC_API_KEY` 가 있으면 기본 ON 이다):
+      **기둥 43 → 139.** 설계변경 표 블록 두 개(63 + 46 레코드)와 기호 블록 하나가 기둥이 됐고
+      `decided_by` 는 `geom` 이었다 — LLM 은 부르지도 않았다(`llm_tiebreak_suggestions` 가 geom ≥ 0.7 을
+      건너뛴다). 이 기능의 이름과 약속은 'AI 분류 보조' 다. 기하만인 판정은 검토로 남긴다."""
     n_applied = 0
     for s in suggestions:
         best = best_classification(s)
@@ -3579,7 +3586,7 @@ def apply_ai_classifications(result, suggestions, unmapped_recs,
         s["final_subtype"] = best.get("subtype")
         s["final_confidence"] = best["confidence"]
         s["decided_by"] = best["decided_by"]
-        if best["confidence"] <= threshold:
+        if best["confidence"] <= threshold or best["decided_by"] == "geom":
             s["needs_review"] = True
             continue
         cat = best["category"]

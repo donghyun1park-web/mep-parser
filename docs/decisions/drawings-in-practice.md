@@ -67,6 +67,13 @@ JSON 에 실렸고 V003 이 빌드를 막았다. 같은 규약을 두 분기가 
   가로채 지하3층 골든이 벽 662 → 648 이 된 적이 있다 — `(^|\$)…$` 로 경계를 붙인다.
 - 결과(이 도면): 넉 줄로 벽 20 → 37, 파서가 준 `A-COL` 한 줄까지 붙이면 **벽 68(82.6m) · 기둥 0 ·
   검토 대기 2 · V005 통과.**
+- ★ **기하 투표만으로는 자동 적용하지 않는다.** `classify_geometry` 의 '소형 정사각 닫힘폴리 → column
+  0.85' 가 자동 적용 문턱 0.8 을 넘어, 이름·LLM·Vision 신호가 하나도 없어도 들어갔다. 실측(이 도면,
+  'AI auto-classify' 켬 — `ANTHROPIC_API_KEY` 가 있으면 **기본 ON** 인 체크다): **기둥 43 → 139.**
+  설계변경 표 블록 둘(63 + 46 레코드)과 기호 블록 하나가 기둥이 됐고 `decided_by` 가 `geom` 이었다 —
+  LLM 은 부르지도 않았다(`llm_tiebreak_suggestions` 가 geom ≥ 0.7 을 건너뛴다). 그 기능의 약속은
+  'AI 분류 보조' 다. `apply_ai_classifications` 가 `decided_by == "geom"` 이면 검토로 남긴다.
+  (`test_a_geometry_only_guess_is_never_auto_applied`)
 - 화면: 원본 창이 **부재 bbox** 에 맞는다(`review_logic.modelBounds`). 종전엔 층 bbox 라 설계변경 표
   (69m × 79m)와 안내선(105m × 65m) 때문에 평면(14.6m × 11.2m)이 손톱만 했다 — 평면 6장처럼 보였다.
 

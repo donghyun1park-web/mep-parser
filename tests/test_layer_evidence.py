@@ -144,3 +144,32 @@ def test_evidence_on_a_huge_layer_is_sampled_and_says_so():
     ev = P.layer_evidence(recs)
     assert ev["lines"] == 2 * P.WALL_LIKE_MAX_LINES
     assert ev["sampled_longest"] == P.WALL_LIKE_MAX_LINES      # 전수가 아니라 표본이라고 말한다
+
+
+def test_a_geometry_only_guess_is_never_auto_applied(tmp_path):
+    """'AI auto-classify' 는 AI 분류 보조다 — 기하 투표만인 판정은 검토로 남긴다.
+
+    실측(단위세대 평면도, 체크 ON): 설계변경 표 블록이 '소형 정사각 닫힘폴리 → column 0.85' 로
+    문턱 0.8 을 넘어 자동 적용돼 **기둥 43 → 139** 가 됐다. LLM 은 부르지도 않았다
+    (`llm_tiebreak_suggestions` 가 geom >= 0.7 을 건너뛴다)."""
+    doc = ezdxf.new(units=4)
+    doc.layers.new("ZZTABLE9")
+    block = doc.blocks.new(name="ZZNOTE9")
+    for i in range(6):                       # 표 칸 — 작은 정사각 닫힌 폴리선
+        x = i * 500
+        block.add_lwpolyline([(x, 0), (x + 400, 0), (x + 400, 350), (x, 350)],
+                             close=True, dxfattribs={"layer": "ZZTABLE9"})
+    doc.modelspace().add_blockref("ZZNOTE9", (0, 0), dxfattribs={"layer": "ZZTABLE9"})
+    path = tmp_path / "note.dxf"
+    doc.saveas(path)
+
+    import contextlib
+    import io
+    rules, brules = P.load_layer_map("layer_map.csv"), P.load_layer_map("block_map.csv")
+    with contextlib.redirect_stdout(io.StringIO()):
+        data = P.parse(str(path), rules, block_rules=brules, use_ai=True)
+    (sug,) = [s for s in data["suggestions"] if s["layer"] == "ZZNOTE9"]
+    assert sug["geom_guess"] == "column" and sug["geom_confidence"] > 0.8    # 기하는 확신한다
+    assert sug["decided_by"] == "geom" and sug.get("applied") is not True    # 그래도 적용하지 않는다
+    assert sug["needs_review"] is True
+    assert data["elements"].get("column") in (None, [])
