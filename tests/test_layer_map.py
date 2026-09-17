@@ -455,4 +455,8 @@ def test_apartment_convention_rows_do_not_shadow_the_wall_rules_below_them():
         assert cat(name) == "ignore", name
     # 아래 행이 살아 있어야 한다 — 이 넷은 그 위에 있다.
     assert cat("A-INSUL") == "wall" and cat("A-ELE") == "wall"
-    assert cat("A-WALL") == "wall" and cat("A-COL") == "column"
+    assert cat("A-WALL") == "wall"
+    # 아파트 벽식 구조의 A-COL 은 200mm 외벽·내력벽이다(동봉 규칙 맨 위 한 줄). 이름이 **정확히** A-COL 인 것만 —
+    # A-COLS·S-COL·COLUMN 은 여전히 기둥이다. 진짜 기둥을 A-COL 로 그린 도면은 닫힌 벽이 되고 경고가 없다(대가).
+    assert cat("A-COL") == "wall" and cat("XREF_UNIT_74 expand$0$A-COL") == "wall"
+    assert cat("A-COLS") == "column" and cat("S-COL") == "column" and cat("COLUMN") == "column"

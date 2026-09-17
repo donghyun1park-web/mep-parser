@@ -65,6 +65,7 @@
 | GUI 가 묻는다 — 벽 같은 기둥 레이어 · 추정 창호 치수 | `test_the_gui_asks_about_a_wall_like_column_layer_once_and_reparses_on_yes` · `test_the_gui_asks_for_window_dims_when_they_are_assumed_and_reparses_after_a_schedule_is_picked` · `test_layer_rule_inserted_first_wins_over_the_broad_column_rule` · `test_cancelling_the_schedule_file_dialog_keeps_the_question_for_next_time` |
 | **drawings-in-practice.md** | |
 | 레이어 이름이 부재를 안 알려 준다 · 벽 증거 | `tests/test_layer_evidence.py`(10) — 짝 비율·간격 · 보드선 가드 · 기둥 레이어가 벽일 때 · 진짜 기둥 · 표본 |
+| 동봉 규칙의 A-COL 은 벽(정확히 그 이름만) · 증거 경로는 S-COL 로 | `test_apartment_convention_rows_do_not_shadow_the_wall_rules_below_them` · `test_a_column_layer_drawn_as_walls_says_so_and_offers_the_layer_map_row` · `test_a_real_column_layer_is_left_alone` |
 | 기하 투표만으로는 자동 적용하지 않는다 | `test_a_geometry_only_guess_is_never_auto_applied` |
 | 한 층에 공종 도면 여러 장 | `tests/test_same_floor_sources.py`(5) |
 | `ignore` 는 두 분기 모두에서 | `test_ignore_layer_never_becomes_an_elements_bucket` |

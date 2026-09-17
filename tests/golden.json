@@ -38,27 +38,26 @@
   },
   "단위세대_건축평면": {
     "bbox": [
-      55415,
+      55515,
       67630,
-      70015,
-      77810
+      69915,
+      77710
     ],
     "closed_wall_dups": 0,
     "counts": {
-      "column": 43,
       "opening": 16,
-      "wall": 40
+      "wall": 91
     },
     "duplicate_geometry_dropped": {},
     "eid_collisions": {},
-    "eid_count": 99,
-    "eid_hash": "42138a35b2d3",
-    "face_coverage_pct": 99,
+    "eid_count": 107,
+    "eid_hash": "13cf84ca71d5",
+    "face_coverage_pct": 100,
     "floors": [
       0
     ],
     "member_schedule": {},
-    "needs_review": 45,
+    "needs_review": 2,
     "openings_dims_assumed": {
       "height": 16,
       "sill": 16
@@ -68,19 +67,25 @@
       "XREF_UNIT_74 expand$0$Parti": 2
     },
     "wall_pairing": {
-      "paired": 35,
+      "paired": 66,
       "single": 0,
       "single_offset": 0
     },
     "wall_thickness_10mm": {
       "10": 2,
-      "100": 6,
+      "100": 8,
       "110": 2,
       "120": 1,
-      "160": 2,
+      "160": 3,
+      "170": 1,
+      "180": 8,
+      "200": 34,
+      "390": 1,
+      "410": 1,
       "440": 2,
+      "450": 1,
       "500": 1,
-      "80": 1,
+      "80": 3,
       "90": 21
     },
     "width_conflicts": 0

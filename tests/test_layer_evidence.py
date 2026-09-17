@@ -82,23 +82,24 @@ def test_a_few_closed_shapes_do_not_disqualify_a_wall_layer():
 
 
 def test_a_column_layer_drawn_as_walls_says_so_and_offers_the_layer_map_row(tmp_path):
-    path = _drawing(tmp_path, "col.dxf", _wall_pairs(6, 200.0), "A-COL")
+    # A-COL 은 동봉 규칙이 이제 벽으로 보낸다 — 증거 경로는 여전히 기둥으로 매핑되는 이름(S-COL)으로 잰다
+    path = _drawing(tmp_path, "col.dxf", _wall_pairs(6, 200.0), "S-COL")
     data = _parse(path)
     assert data["elements"]["wall"] == []                      # 재분류하지 않는다
     (like,) = data["column_layers_like_wall"]
-    assert like["layer"] == "A-COL" and like["spacing_mm"] == 200
-    assert like["suggested_row"] == "^A\\-COL$,wall,,2800,"
-    assert data["warnings"][0].startswith("[분류 의심]") and "A-COL" in data["warnings"][0]
+    assert like["layer"] == "S-COL" and like["spacing_mm"] == 200
+    assert like["suggested_row"] == "^S\\-COL$,wall,,2800,"
+    assert data["warnings"][0].startswith("[분류 의심]") and "S-COL" in data["warnings"][0]
     assert {r["review_reason"] for r in data["elements"]["column"]} == {"column_layer_looks_like_wall"}
     # 게이트 문구가 원인을 가리킨다 — 종전엔 '기둥 경계' 만 말해 사람이 기둥을 들여다봤다.
     v005 = [f for f in verify.verify_geometry(data).findings if f.id == "V005"]
     assert v005 and "벽처럼 보인다" in v005[0].payload["sample"][0]["why"]
-    assert v005[0].payload["by_layer"] == {"A-COL": len(data["elements"]["column"])}
+    assert v005[0].payload["by_layer"] == {"S-COL": len(data["elements"]["column"])}
 
 
 def test_a_real_column_layer_is_left_alone(tmp_path):
     squares = [[(x, 0), (x + 400, 0), (x + 400, 400), (x, 400)] for x in range(0, 4000, 1000)]
-    path = _drawing(tmp_path, "real.dxf", [], "A-COL", closed=squares)
+    path = _drawing(tmp_path, "real.dxf", [], "S-COL", closed=squares)
     data = _parse(path)
     assert "column_layers_like_wall" not in data
     assert not [w for w in data["warnings"] if "분류 의심" in w]
