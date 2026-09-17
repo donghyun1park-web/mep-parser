@@ -429,7 +429,7 @@ def _build_verified(original, ifc_path, storey="Level", z_base=0.0, connect=Fals
         sto = _add_storey(model, bld, name, z)
         subset = dict(data)
         if original.get("floors"):
-            subset["elements"] = {c: [r for r in rows if abs(GC.base_z(c, r)-z) < 100 and
+            subset["elements"] = {c: [r for r in rows if abs(GC.floor_z(c, r)-z) < 100 and
                                      (not r.get("level") or r["level"] in (floor.get("id"), name))]
                                   for c, rows in data["elements"].items() if c in ("wall", "column", "slab")}
         partial = _build_elements(model, body, sb, sto, subset,
@@ -490,6 +490,8 @@ def build_multi(floors, ifc_path, connect=False, qto=True):
             rec["eid"] = name + ":" + rec["eid"]
             rec["level"] = name
             rec["z_base"] = GC.base_z(cat, rec) + z
+            if rec.get("floor_z") is not None:          # 층 판정 높이도 같이(창 위 벽) — stack_build._shift 와 같다
+                rec["floor_z"] = float(rec["floor_z"]) + z
             rec["overrides"] = dict(rec.get("overrides") or {})
             for dim in GC.DEFAULT_DIMS.get(cat, {}):
                 rec["overrides"].setdefault(dim, GC._dim(cat, dim, rec, data.get("params")))

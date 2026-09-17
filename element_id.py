@@ -177,6 +177,10 @@ def suggest_relink(orphan_eids, edits, elements, max_suggest=5):
             eid = rec.get('eid')
             if not eid or counts[eid] != 1 or current_cat != cat or _floor(eid, rec) != floor:
                 continue
+            if (rec.get('pairing') == 'infill') != (source.get('pairing') == 'infill'):
+                # 창 위아래 벽은 벽 선 위에 딱 붙어 있어 1순위가 된다 — 벽 수정을 인방에, 인방 수정을 층 높이 벽에 옮겨 붙이지 않는다.
+                # 스냅숏(source_snapshot)에 있는 키는 `pairing` 이다(`source` 는 없다 — 넣으면 검토 서명이 바뀐다).
+                continue
             if not floor and any(k in source for k in ('z_base', 'elevation')):
                 if abs(GC.base_z(cat, source) - GC.base_z(cat, rec)) > 100:
                     continue

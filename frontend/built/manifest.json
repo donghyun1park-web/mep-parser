@@ -4,14 +4,14 @@
   "three": "0.160.0",
   "source_hash": "sha256-lf",
   "assets": {
-    "preview.js": "efd69a5abae02f21be2b95a336de31129d87a17e64cc501b9a3ad25cebb5253a",
+    "preview.js": "1bb4f5900b9ca3e3f95f322017ea46b752ac2454f2ad0a5192ea745c37ecc17e",
     "preview.css": "1956a3f8de7c221ba93601b93c3335229e50032a35db8277e3b33840aeeb73f2",
     "shell.html": "24d40c2177d89fb710f0d5d5f8d6ce754cf7e013553fb45c65b4d2c0572e1a54"
   },
   "sources": {
     "frontend/package-lock.json": "03627119091818598186cefeed205a528879ba404f441e62fecce228612e04b4",
     "frontend/package.json": "6ad22f1d058e43fb9861aa8af59693d40dedbee8fef9ab8bb366b8c259ea1d68",
-    "frontend/src/app.js": "2bfcbb5a8acb4ff5873c0ba3674073df9df6facebec47c3eb259e62b358c5d5b",
+    "frontend/src/app.js": "6197f733468be6b5c3bd668b7049fee214b1a0ec4145e274d114d389f11ca88e",
     "frontend/src/mep_preview_geometry.js": "2bcc5fdf265906b6ab759dee82aad530332db057b73434c1d3907f5c024a8111",
     "frontend/src/review_logic.js": "4e18458a2c2e2365b8a38a38bd443bc2bd8390401d18582e05609f8fba897a1b",
     "frontend/src/shell.html": "8319884416e9aa5435ab3efe7db6ecb8785b3a72ddd30a3b6d7bed643907b5a3",

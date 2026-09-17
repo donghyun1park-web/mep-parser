@@ -29,8 +29,8 @@ class ProjectSession:
         if source.get('height') is not None:
             options['level_height'] = source['height']
         if source.get('schedule'):
-            from schedule_io import load_schedule_xlsx
-            options['ext_schedule'] = load_schedule_xlsx(source['schedule'])
+            from schedule_io import load_schedule
+            options['ext_schedule'] = load_schedule(source['schedule'])
         with contextlib.redirect_stdout(io.StringIO()):
             return parser.parse(source['path'], rules, block, edits=edits, **options)
 
@@ -47,8 +47,8 @@ class ProjectSession:
                 level['options'] = dict(source.get('options') or {})
                 level['options']['legacy_units'] = uses_legacy_units(source)
                 if source.get('schedule'):
-                    from schedule_io import load_schedule_xlsx
-                    level['options']['ext_schedule'] = load_schedule_xlsx(source['schedule'])
+                    from schedule_io import load_schedule
+                    level['options']['ext_schedule'] = load_schedule(source['schedule'])
                 levels.append(level)
             with contextlib.redirect_stdout(io.StringIO()):
                 data = build_stack({'project':manifest['project_id'], 'levels':levels})

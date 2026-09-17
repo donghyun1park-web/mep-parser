@@ -145,7 +145,7 @@ def verify_geometry(data, policy=None):
         orphan, dup = [], []
         for cat in _STRUCT_CATS:
             for i, rec in enumerate(el.get(cat) or []):
-                z = GC.base_z(cat, rec)
+                z = GC.floor_z(cat, rec)      # 창 위 벽처럼 떠서 시작하는 벽은 옆 벽의 층으로 판정한다
                 hits = [k for k, v in enumerate(fz) if abs(z - v) < _FLOOR_TOL]
                 if rec.get("level"):
                     hits = [k for k in hits if GC.floor_has_level(floors[k], rec["level"])]

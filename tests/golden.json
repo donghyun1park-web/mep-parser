@@ -47,12 +47,12 @@
     "counts": {
       "column": 43,
       "opening": 16,
-      "wall": 37
+      "wall": 40
     },
     "duplicate_geometry_dropped": {},
     "eid_collisions": {},
-    "eid_count": 96,
-    "eid_hash": "23d9bbf0f5f0",
+    "eid_count": 99,
+    "eid_hash": "42138a35b2d3",
     "face_coverage_pct": 99,
     "floors": [
       0
@@ -81,7 +81,7 @@
       "440": 2,
       "500": 1,
       "80": 1,
-      "90": 18
+      "90": 21
     },
     "width_conflicts": 0
   },
@@ -105,12 +105,12 @@
     "counts": {
       "opening": 13,
       "pipe": 5,
-      "wall": 68
+      "wall": 85
     },
     "duplicate_geometry_dropped": {},
     "eid_collisions": {},
-    "eid_count": 86,
-    "eid_hash": "55567eed11d2",
+    "eid_count": 103,
+    "eid_hash": "09d68f2b0ea6",
     "face_coverage_pct": 100,
     "floors": [
       0
@@ -163,15 +163,15 @@
       "120": 1,
       "160": 3,
       "170": 1,
-      "180": 5,
-      "200": 17,
+      "180": 8,
+      "200": 28,
       "390": 1,
       "410": 1,
       "440": 2,
       "450": 1,
       "500": 1,
       "80": 3,
-      "90": 18
+      "90": 21
     },
     "width_conflicts": 0
   },
@@ -183,25 +183,25 @@
       77810
     ],
     "clash_review": {
-      "assumed_basis": 8,
+      "assumed_basis": 14,
       "by_kind": {
-        "wall_penetration": 8
+        "wall_penetration": 14
       },
       "through_openings": 0,
       "through_openings_assumed": 0,
-      "total": 8
+      "total": 14
     },
     "closed_wall_dups": 0,
     "counts": {
       "duct": 37,
       "equipment": 13,
       "opening": 13,
-      "wall": 68
+      "wall": 85
     },
     "duplicate_geometry_dropped": {},
     "eid_collisions": {},
-    "eid_count": 131,
-    "eid_hash": "cc1f635ddb0c",
+    "eid_count": 148,
+    "eid_hash": "ef8483368b71",
     "face_coverage_pct": 100,
     "floors": [
       0
@@ -264,15 +264,15 @@
       "120": 1,
       "160": 3,
       "170": 1,
-      "180": 5,
-      "200": 17,
+      "180": 8,
+      "200": 28,
       "390": 1,
       "410": 1,
       "440": 2,
       "450": 1,
       "500": 1,
       "80": 3,
-      "90": 18
+      "90": 21
     },
     "width_conflicts": 0
   },
@@ -287,17 +287,17 @@
     "counts": {
       "column": 80,
       "equipment": 6,
-      "opening": 26,
+      "opening": 22,
       "slab": 8,
-      "wall": 662
+      "wall": 664
     },
     "duplicate_geometry_dropped": {
       "column": 13,
       "wall": 10
     },
     "eid_collisions": {},
-    "eid_count": 782,
-    "eid_hash": "7b3710b54384",
+    "eid_count": 780,
+    "eid_hash": "d1cf7130f5d9",
     "face_coverage_pct": 98,
     "floors": [
       0
@@ -305,8 +305,8 @@
     "member_schedule": {},
     "needs_review": 161,
     "openings_dims_assumed": {
-      "height": 26,
-      "sill": 26
+      "height": 22,
+      "sill": 22
     },
     "small_openings_dropped": 244,
     "thin_pairs": {
@@ -323,7 +323,7 @@
       "100": 16,
       "150": 1,
       "20": 3,
-      "200": 308,
+      "200": 310,
       "220": 1,
       "250": 121,
       "30": 24,

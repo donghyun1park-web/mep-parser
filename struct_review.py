@@ -114,7 +114,7 @@ def supports_at(d, zb):
             xs = [p[0] for p in c["points"]]; ys = [p[1] for p in c["points"]]
             cols.append(((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2))
     for w in d["elements"]["wall"]:
-        if abs(w.get("z_base", 0) - zb) >= 1:
+        if abs(w.get("z_base", 0) - zb) >= 1 or w.get("source") == "opening_infill":   # 창 아래 벽은 지지선이 아니다
             continue
         cl = w.get("centerline") or w.get("points") or []
         for a, b in zip(cl, cl[1:]):
@@ -217,7 +217,7 @@ def compute(d):
     for w in d["elements"]["wall"]:
         cl = w.get("centerline") or w.get("points") or []
         ww = float(w.get("overrides", {}).get("width") or w.get("width_detected") or 200) / 1000.0
-        h = float(w.get("overrides", {}).get("height", 2800)) / 1000.0
+        h = GC.height_of(w, None, "wall") / 1000.0
         L = sum(((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5 for a, b in zip(cl, cl[1:])) / 1000.0
         conc += L * ww * h
     W_self = conc * RC_D + steel * ST_D
@@ -230,7 +230,7 @@ def compute(d):
     out["plates"] = {k: v for k, v in plates.items()}
     out["walls"] = [dict(p=(w.get("centerline") or w["points"]),
                          z=w.get("z_base", 0),
-                         h=w.get("overrides", {}).get("height", 2800))
+                         h=GC.height_of(w, None, "wall"))
                     for w in d["elements"]["wall"]]
     del out["_dist"]
     return out

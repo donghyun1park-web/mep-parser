@@ -40,7 +40,10 @@ def _kind_label_to_subtype(label, mark=""):
         if s:
             return s
     m = (mark or "").upper()
-    if m.endswith("W") and "D" not in m:
+    pre = m.split("-", 1)[0]          # 블록식 부호 'W-1200' · 'FSD-1100' · 'ADW-2950' 는 접두가 종류다
+    if "DW" in pre:
+        return "door"                 # 문+창
+    if pre == "AG" or (pre.endswith("W") and "D" not in pre):
         return "window"
     return "door"
 
@@ -184,11 +187,27 @@ def load_schedule_xlsx(path):
             "subtype": sub,
             "width": round(w, 1),
             "height": round(h, 1),
-            "sill": float(sill) if sill is not None else _default_sill(sub),
+            "sill": float(sill) if sill is not None else None,   # 빈칸은 빈칸 — 파서가 추정치로 채우고 그렇게 보고한다
             "count": int(cnt) if cnt is not None else 1,
             **({"remarks": rem} if rem else {}),
         })
     return out
+
+
+def schedule_with_marks(schedule, marks):
+    """양식 내보내기용: 일람 행 + 일람에 없는 평면 부호(높이·창대 빈칸). 사용자는 빈칸만 채운다."""
+    have = {str(s.get("mark", "")).upper() for s in schedule or []}
+    return list(schedule or []) + [m for m in marks or [] if str(m["mark"]).upper() not in have]
+
+
+def load_schedule(path):
+    """창호일람 파일 → schedule 레코드. `.dxf` 는 일람표 도면(창호부호 TEXT)에서 추출, 그 밖은 Excel."""
+    if str(path).lower().endswith(".dxf"):
+        import ezdxf
+        from dxf_parser import extract_window_schedule
+        _, rows = extract_window_schedule(ezdxf.readfile(path).modelspace(), 1.0)
+        return rows
+    return load_schedule_xlsx(path)
 
 
 def merge_schedules(base, extra):

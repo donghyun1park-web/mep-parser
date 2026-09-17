@@ -194,7 +194,7 @@ def inspect_ifc(data, stats, path):
                     continue
                 cat, rec = expected[eid]
                 levels = data["floors"]
-                z = GC.base_z(cat, rec)
+                z = GC.floor_z(cat, rec)
                 if rec.get("level"):
                     matches = [f for f in levels if GC.floor_has_level(f, rec["level"])]
                     wanted = matches[0] if len(matches) == 1 else None

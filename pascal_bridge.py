@@ -161,6 +161,10 @@ _IDENTITY_INPUTS = ("eid_v1", "_sigs", "_span_sigs", "source_signatures")
 def _derived(rec, new_eid, from_eid):
     out = {k: v for k, v in rec.items() if k not in _IDENTITY_INPUTS}
     out.update(eid=new_eid, pairing="manual", derived_from=from_eid)
+    if out.get("source") == "opening_infill":
+        # 옮긴 창 아래 벽은 이제 사람이 그린 벽이다 — 채움 표시를 남기면 평면 탭·물량·재연결이 계속 파생물로 다룬다
+        for key in ("source", "infill_of", "infill_part", "floor_z"):
+            out.pop(key, None)
     return out
 
 
@@ -347,14 +351,18 @@ def to_pascal_scene(geometry, name=None):
         item.update(extra)
         report["unconvertible"].append(item)
 
-    # 레벨은 **구조** 카테고리의 z 로만 만든다
-    zs = sorted({round(GC.base_z(c, r), 6)
+    def raised(c, r):
+        """층 바닥보다 떠서 시작하는 부재(창 위아래 벽). Pascal 벽은 레벨 바닥에서만 선다."""
+        return GC.base_z(c, r) - GC.floor_z(c, r) > 1.0
+
+    # 레벨은 **구조** 카테고리의 z 로만 만든다 — 떠 있는 벽의 z_base(2100 등)로 레벨을 만들면 가짜 층이 된다
+    zs = sorted({round(GC.floor_z(c, r), 6)
                  for c in LEVEL_CATS for r in (el.get(c) or [])}) or [0.0]
     heights = []
     for z in zs:
         hs = [GC.z_range(c, r, params)[1] - GC.z_range(c, r, params)[0]
               for c in ("wall", "column") for r in (el.get(c) or [])
-              if abs(GC.base_z(c, r) - z) < 1e-6]
+              if abs(GC.base_z(c, r) - z) < 1e-6 and not raised(c, r)]
         heights.append(max(hs) if hs else GC.m_to_mm(PASCAL_DEFAULT_WALL_HEIGHT_M))
 
     nodes = {}
@@ -408,6 +416,10 @@ def to_pascal_scene(geometry, name=None):
     for i, w in enumerate(el.get("wall") or []):
         eid = w.get("eid") or "wall:%d" % i
         wall_eid_at[i] = eid
+        if raised("wall", w):
+            # 세어서 보고하고 넘긴다. 되돌리기는 내보낸 부재만 대조하므로 삭제로 읽히지 않는다(scene_to_edits).
+            bad("wall", w, "wall_base_above_level", z_base_mm=GC.base_z("wall", w), floor_z_mm=GC.floor_z("wall", w))
+            continue
         lz, lid = _level_for(GC.base_z("wall", w), levels)
         axis = w.get("centerline") or w.get("points") or []
         thickness = GC.width_of(w, params, "wall")

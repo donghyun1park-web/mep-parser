@@ -128,6 +128,8 @@ def _shift(rec, cat, dx, dy, z, height=None):
         rec["center"][1] += dy
     key = "elevation" if cat in GC._ELEV_CATS else "z_base"
     rec[key] = float(rec.get(key, 0.0) or 0.0) + z
+    if rec.get("floor_z") is not None:          # 층 판정 높이도 같이 옮긴다(창 위 벽)
+        rec["floor_z"] = float(rec["floor_z"]) + z
     # 층에 height 를 적었으면 그게 이긴다. 층고를 적어줬는데 레이어 기본값이
     # 조용히 이기면 "층마다 같은 설명을 반복" 하던 문제로 되돌아간다.
     # 레이어별 높이를 쓰고 싶으면 층에서 height 를 빼면 된다.
@@ -294,6 +296,8 @@ def build_stack(spec, base_dir=".", dry_run=False):
                 _shift(r, cat, dx, dy, float(lv['z']))
                 r["level"] = lid
                 r["eid"] = f"{lid}:{r['eid']}"      # 같은 DXF 를 두 층에 쓰면 충돌한다
+                if r.get("infill_of") and not str(r["infill_of"]).startswith(f"{lid}:"):
+                    r["infill_of"] = f"{lid}:{r['infill_of']}"   # 채운 벽이 가리키는 개구부 EID 도 같은 접두
                 for _j in r.get("joints") or []:
                     # 이음 id 도 층마다 따로다(이음 점 좌표에서 나와 같은 DXF 면 같다). 편집으로
                     # 저장된 수동 레코드는 이미 붙어 온다 — 한 번만 붙인다.

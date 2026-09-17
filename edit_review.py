@@ -12,15 +12,15 @@ def annotate_edit_diagnostics(elements, params=None):
         pts = r.get('centerline') or r.get('points') or []
         shapes.append(LineString(pts) if len(pts) >= 2 else None)
     for i, rec in enumerate(walls):
-        if not rec.get('_edited'):
+        if not rec.get('_edited') or rec.get('source') == 'opening_infill':
             continue
         findings = []
         line = shapes[i]
         if line is not None and not rec.get('closed'):
             z0, z1 = GC.z_range('wall', rec, params)
             for j, other in enumerate(walls):
-                if i == j or shapes[j] is None:
-                    continue
+                if i == j or shapes[j] is None or other.get('source') == 'opening_infill':
+                    continue          # 창 위아래 벽은 옆 벽에서 파생된다 — 거기까지의 틈·겹침은 편집이 만든 것이 아니다
                 a, b = GC.z_range('wall', other, params)
                 if min(z1, b) <= max(z0, a):
                     continue

@@ -1285,7 +1285,8 @@ def _main_impl():
     def _at_floor(obj_list, src_list, fz, fi):
         out = []
         for obj, el_r in zip(obj_list, src_list):
-            zb = float(el_r.get("z_base", el_r.get("elevation", 0.0)) or 0.0)
+            # 층 판정 높이 — 창 위 벽(z_base 2100)은 floor_z 에 옆 벽의 층을 든다(geom_contract.floor_z)
+            zb = float(el_r.get("floor_z", el_r.get("z_base", el_r.get("elevation", 0.0))) or 0.0)
             _meta.setdefault(id(obj), (getattr(obj, "Label", "?"), zb))
             _hits.setdefault(id(obj), [])
             floor_match = not el_r.get("level") or GC.floor_has_level(floors_info[fi], el_r["level"])

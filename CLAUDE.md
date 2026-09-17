@@ -151,6 +151,13 @@
 폴리곤 감김도 같은 계약이다: `Arch.makeStructure` 는 **면 법선 방향으로** 압출하므로 CW 폴리곤은
 −Z 로 밀린다. 닫힌 폴리곤은 반드시 `geom_contract.ccw()` 를 통과시킬 것.
 
+**층 판정은 `geom_contract.floor_z(cat, rec)` 로 한다 — `z_base` 가 아니다.** 창 아래 벽·인방(`source="opening_infill"`)은
+층 바닥보다 떠서 시작하고(`z_base` 2100) `floor_z` 에 옆 벽의 층을 든다. 층 매칭(V001·빌더 `_at_floor`·IFC 층 재검사·
+Pascal 레벨·층 조립 이동)에 `z_base` 를 쓰면 가짜 층이 생기거나 빌드가 막힌다. 형상은 여전히 `z_range` 로만 읽는다.
+고정: `tests/test_opening_infill.py` 의 `test_raised_walls_do_not_make_floors_and_pass_the_floor_gate` ·
+`test_stacked_levels_move_the_floor_anchor_and_prefix_the_opening_link` ·
+`test_pascal_keeps_one_level_reports_raised_walls_and_an_untouched_scene_saves_nothing`
+
 ## layer_map.csv 컬럼
 `pattern,category,width,height,thickness,opts`
 - `pattern`: 정규식 (re.search, 대소문자 무시). **선매칭 우선** — 좁은/제외 패턴을 넓은 패턴 위에 둘 것.

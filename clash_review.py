@@ -194,7 +194,9 @@ def _kind(prism, z1):
         return "structure_penetration"
     if prism["width"] is not None and prism["width"] < THIN_WALL_MM:
         return "suspect_thin_wall"
-    if z1 - prism["z"][0] <= FLOOR_EMBED_MM:
+    rec = prism.get("rec") or {}
+    # '벽 밑을 지나는 바닥 매립 배관' 은 **바닥에 선 벽**에서만 말이 된다 — 창 위 벽(인방)의 아랫면은 바닥이 아니다
+    if z1 - prism["z"][0] <= FLOOR_EMBED_MM and GC.base_z("wall", rec) - GC.floor_z("wall", rec) < 1.0:
         return "under_wall"
     return "wall_penetration"
 

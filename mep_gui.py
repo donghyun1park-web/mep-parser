@@ -37,6 +37,21 @@ def resource_path(rel):
     return os.path.join(base, rel)
 
 
+def insert_layer_rule_first(csv_path, row):
+    """layer_map 헤더 바로 아래에 규칙 한 줄을 넣는다. 규칙은 **선매칭 우선**이라 끝에 붙이면
+    'COL|기둥' 같은 넓은 규칙에 가려져 아무 일도 안 난다 — 파서 경고가 'COL 행 위에' 라고 하는 이유."""
+    with open(csv_path, encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    for i, line in enumerate(lines):
+        if line.strip().lower().startswith("pattern,"):
+            lines.insert(i + 1, row)
+            break
+    else:
+        raise ValueError(f"layer_map 헤더(pattern,…)가 없습니다: {csv_path}")
+    with open(csv_path, "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(lines) + "\n")
+
+
 def user_csv(name):
     """사용자 편집 가능한 CSV 경로. frozen(.exe) 이면 exe 폴더에 영구 사본 보장
     (없으면 번들본 복사) → 편집·저장이 재시작 후에도 유지. 소스 실행이면 그대로."""
@@ -722,25 +737,29 @@ class App:
             except Exception as exc:
                 self.root.after(0, lambda msg=str(exc): (self._log(msg), self._set_buttons("!disabled")))
         threading.Thread(target=run, daemon=True).start()
+        return True
 
     def _do_schedule_pick(self):
         """외부 창호일람 Excel 선택 → 다음 파싱에 사용."""
         p = filedialog.askopenfilename(
-            title="창호일람 Excel 선택",
-            filetypes=[("Excel", "*.xlsx"), ("All", "*.*")])
+            title="창호일람 선택 (Excel 양식 또는 창호일람표 DXF)",
+            filetypes=[("창호일람", "*.xlsx *.dxf"), ("Excel", "*.xlsx"), ("DXF", "*.dxf"), ("All", "*.*")])
         if p:
             self.v_schedule.set(p)
-            self._log(f"창호일람 Excel 지정: {p} (다음 'Parse'부터 적용)")
+            self._log(f"창호일람 지정: {p} (다음 'Parse'부터 적용)")
+        return p
 
     def _do_schedule_export(self):
         """현재 파싱된 창호일람(window_schedule)을 Excel 양식으로 저장.
         파싱 전이면 빈 양식 생성."""
         try:
-            from schedule_io import export_schedule_xlsx
+            from schedule_io import export_schedule_xlsx, schedule_with_marks
         except Exception as e:
             messagebox.showwarning("Excel", f"openpyxl 필요: {e}")
             return
-        sched = (self.data or {}).get("window_schedule", []) if self.data else []
+        # 평면의 블록 부호(W-1200 · D-900)는 폭·수량이 채워진 채 나간다 — 사용자는 높이·창대높이만 적는다.
+        sched = schedule_with_marks((self.data or {}).get("window_schedule", []),
+                                    (self.data or {}).get("window_marks", [])) if self.data else []
         base = self.geom_path or self.v_dxf.get().strip() or os.path.join(HERE, "창호일람")
         default = os.path.splitext(base)[0] + "_창호일람.xlsx"
         p = filedialog.asksaveasfilename(
@@ -848,10 +867,94 @@ class App:
                       f"({', '.join(l.split('$')[-1] for l in qa.get('wall_like_unmapped_layers', []))}) — "
                       f"면선커버 {qa.get('face_coverage_pct', '?')}% 는 벽으로 매핑된 레이어만 센 값이다")
         self._populate_review()
+        # 오답이 첫 화면이 되기 전에 묻는다 — 외벽이 기둥 레이어에 있거나 창호 높이가 추정치면 여기서 멈춘다.
+        if not self._is_mep_project() and self._prompt_after_parse(dxf):
+            return   # 다시 파싱 중 — _parse_done 이 한 번 더 온다
         # '열기…' 로 시작했으면 여기서 브라우저까지 간다 — 버튼을 세 번 누르게 하지 않는다.
         if self._open_after_parse:
             self._open_after_parse = False
             self._do_preview()
+
+    def _is_mep_project(self):
+        """설비 프로젝트(프로필이 있는 원본)에는 건축 질문을 하지 않는다 — 배경 XREF 의 A-COL·창호는 그 도면의 부재가 아니다."""
+        try:
+            return any((s.get('options') or {}).get('mep_profile')
+                       for s in self.project_session.store.read()['sources'])
+        except Exception:
+            return False
+
+    def _prompt_after_parse(self, dxf):
+        """파싱 결과가 사용자 결정을 기다리는 두 경우. True 면 재파싱을 시작했다(호출부는 멈춘다).
+        1) 기둥 레이어가 벽처럼 그려짐(`column_layers_like_wall`) — 아파트 A-COL 은 200mm 내력벽·외벽이다.
+           파서는 재분류하지 않는다(CLAUDE.md). 여기서 사용자가 layer_map 한 줄을 승인한다.
+        2) 창호 높이·창대높이가 추정치(`openings_dims_assumed`) — 평면도에 없는 값이라 일람을 받는다.
+        같은 도면·같은 질문은 한 세션에 한 번만 묻는다."""
+        asked = self.__dict__.setdefault("_prompted", set())
+        for ev in self.data.get("column_layers_like_wall") or []:
+            key = ("wall_layer", dxf, ev.get("layer"))
+            if key in asked or not ev.get("suggested_row"):
+                continue
+            asked.add(key)
+            short = str(ev.get("layer", "")).split("$")[-1]
+            csv_path = self.v_map.get().strip() or user_csv("layer_map.csv")   # 어느 파일에 넣는지 대화창에 보인다
+            if messagebox.askyesno(
+                    "외벽·내력벽이 기둥 레이어에 있습니다",
+                    f"'{short}' 레이어는 기둥(column)으로 매핑됐지만 선 {ev.get('lines')}개 중 "
+                    f"{ev.get('paired')}개가 {ev.get('spacing_mm')}mm 간격의 평행 짝입니다 — 벽처럼 그린 레이어입니다.\n"
+                    f"아파트 단위세대 도면의 A-COL 은 보통 외벽·세대간 내력벽입니다.\n\n"
+                    f"{csv_path} 에 다음 한 줄을 넣고 벽으로 다시 해석할까요?\n  {ev['suggested_row']}"):
+                try:
+                    insert_layer_rule_first(csv_path, ev["suggested_row"])
+                except Exception as exc:
+                    messagebox.showerror("layer_map 수정 실패", str(exc))
+                    return False
+                self.v_map.set(csv_path)
+                self._log(f"{csv_path} 에 추가: {ev['suggested_row']}  → 다시 해석")
+                return bool(self._do_parse())
+        assumed = self.data.get("openings_dims_assumed") or {}
+        marks = self.data.get("window_marks") or []
+        key = ("window_dims", dxf)
+        if assumed and marks and key not in asked:
+            asked.add(key)
+            choice = self._ask_window_dims(marks, max(assumed.values()))
+            if choice == "export":
+                self._do_schedule_export()
+                self._log("양식의 높이·창대높이를 채운 뒤 '창호일람 불러오기↑' 로 다시 해석하세요.")
+            elif choice == "load":
+                if self._do_schedule_pick():
+                    return bool(self._do_parse())
+                asked.discard(key)   # 파일 선택을 취소했으면 다음 파싱에 다시 묻는다
+        return False
+
+    def _ask_window_dims(self, marks, n_assumed):
+        """창호 부호 목록을 보이고 '양식 내보내기 / 일람 불러오기 / 추정치로 계속' 중 하나를 받는다."""
+        win = tk.Toplevel(self.root)
+        win.title("창호 치수가 필요합니다")
+        win.transient(self.root)
+        win.grab_set()
+        ttk.Label(win, justify="left", text=(
+            f"창·문 {n_assumed}개의 높이와 창대높이(슬래브 위 설치 높이)를 평면도에서 읽을 수 없어 추정치를 썼습니다\n"
+            "(창 높이 1200·창대 900, 문 높이 2100·문턱 0). 아래 부호별로 값을 주면 그대로 모델에 들어갑니다.")
+        ).pack(anchor="w", padx=12, pady=(12, 6))
+        box = tk.Text(win, height=min(12, len(marks) + 1), width=56, font=("Consolas", 10))
+        box.pack(padx=12)
+        kind = {"window": "창", "door": "문"}
+        for m in marks:
+            box.insert("end", f"{m['mark']:<14}{kind.get(m.get('subtype'), '?'):<4}폭 {m['width']:>5.0f}   ×{m['count']}\n")
+        box.config(state="disabled")
+        choice = {"v": "continue"}
+
+        def pick(v):
+            choice["v"] = v
+            win.destroy()
+        f = ttk.Frame(win)
+        f.pack(pady=10)
+        ttk.Button(f, text="일람 양식 내보내기(부호·폭 채워짐)…", command=lambda: pick("export")).pack(side="left", padx=4)
+        ttk.Button(f, text="창호일람 불러오기(Excel/DXF)…", command=lambda: pick("load")).pack(side="left", padx=4)
+        ttk.Button(f, text="추정치로 계속", command=lambda: pick("continue")).pack(side="left", padx=4)
+        win.protocol("WM_DELETE_WINDOW", lambda: pick("continue"))
+        win.wait_window()
+        return choice["v"]
 
     def _populate_review(self):
         self.tree.delete(*self.tree.get_children())

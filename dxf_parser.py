@@ -821,6 +821,73 @@ def _width_from_block_name(name):
     return float(m.group(1)) if m and 300 <= int(m.group(1)) <= 6000 else None
 
 
+def _mark_from_block_name(name):
+    """창호 블록 이름 → (부호, 종류). 'XREF…$0$W-1200' → ('W-1200', 'window'), 'FSD-1100' → door.
+    부호는 창호일람과 조인하는 열쇠다 — 평면도가 못 주는 높이·창대높이가 그 열쇠로 들어온다.
+    접두가 D 로 끝나면 문(D·PD·FSD·WD·SD), W/AG 는 창. 그 밖의 형식은 부호 없음."""
+    base = str(name or "").split("$")[-1]
+    m = re.match(r"^([A-Za-z]+)-\d{3,4}$", base)
+    if not m:
+        return None, None
+    pre = m.group(1).upper()
+    if "DW" in pre or pre.endswith("D"):       # ADW·DW(문+창)·D·PD·FSD·WD → 문. WINDOW_MARK_TYPES 와 같은 판정
+        sub = "door"
+    elif pre in ("W", "AG") or pre.endswith("W"):
+        sub = "window"
+    else:
+        sub = None
+    return base, sub
+
+
+def _block_opening_center(insert, exploded, cx, cy, width):
+    """창호 블록의 **실제 중심**(없으면 None). 아파트 창호 블록은 기준점이 창의 한쪽 끝이다(실측 단위세대 평면도: W-1200 은
+    로컬 X -1200~0, W-3600 은 0~3600, D-900 은 -940~40). 삽입점을 중심으로 쓰면 개구부가 반 폭만큼 옆 벽으로
+    밀려 벽 토막을 뚫고 정작 창 자리는 비었다.
+
+    블록 로컬 X·Y 축(회전·대칭 반영)으로 도형을 투영해, 범위가 이름의 폭과 20% 안인 축의 가운데로 옮긴다.
+    ★ 스윙 문은 두 축이 **모두** 문 폭이다(문짝 길이 = 호 반지름). 실측 블록 16종은 전부 열린 쪽이 로컬 X 였다.
+      그래서 X 가 기본이고, **폭 길이의 직선(문짝)이 X 에만 있고 Y 에는 없을 때만** 열린 쪽을 Y 로 본다
+      (D-900·WD-1000 은 문짝이 Y 에만 · FSD·PD 는 양쪽에 다 있어 X). 벽을 보고 고르지 않는다 — 벽 매핑이
+      틀린 도면에서 문짝이 기대는 직각 칸막이 쪽으로 옮겨졌다(실측 단위세대 평면도, A-COL 을 기둥으로 둔 규칙)."""
+    if not width or not exploded:
+        return None
+    try:
+        m = insert.matrix44()
+        dirs = [m.transform_direction((1.0, 0.0, 0.0)), m.transform_direction((0.0, 1.0, 0.0))]
+    except Exception:
+        return None
+    axes = []
+    for d in dirs:
+        ln = math.hypot(d.x, d.y)
+        axes.append((d.x / ln, d.y / ln) if ln > 1e-9 else None)
+    pts = [p for r in exploded for p in (r.get("points") or ([r["center"]] if r.get("center") else []))]
+    if len(pts) < 2 or None in axes:
+        return None
+    mids, leaf = [], [0, 0]
+    for k, (ux, uy) in enumerate(axes):
+        ts = [(p[0] - cx) * ux + (p[1] - cy) * uy for p in pts]
+        lo, hi = min(ts), max(ts)
+        mids.append((lo + hi) / 2.0 if abs((hi - lo) - width) <= 0.2 * width else None)
+    for r in exploded:
+        rp = r.get("points") or []
+        if r.get("from_arc"):
+            continue
+        for a, b in zip(rp, rp[1:] + (rp[:1] if r.get("closed") else [])):
+            L = math.hypot(b[0] - a[0], b[1] - a[1])
+            if L < 0.8 * width:
+                continue
+            for k, (ux, uy) in enumerate(axes):
+                if abs((b[0] - a[0]) * ux + (b[1] - a[1]) * uy) >= L * 0.995:
+                    leaf[k] += 1
+    k = 0 if mids[0] is not None else 1 if mids[1] is not None else None
+    if k == 0 and mids[1] is not None and leaf[0] and not leaf[1]:
+        k = 1
+    if k is None or abs(mids[k]) < 1.0:
+        return None
+    ux, uy = axes[k]
+    return [round(cx + ux * mids[k], 3), round(cy + uy * mids[k], 3)]
+
+
 def insert_to_records(insert, scale, category, attrs):
     """INSERT → geometry 레코드 리스트.
     1) virtual_entities()로 블록 내부 형상을 실좌표 explode → entity_to_record.
@@ -872,7 +939,17 @@ def insert_to_records(insert, scale, category, attrs):
                   "radius": round((size or named or 900.0) / 2.0, 3)}
         if named:
             marker["width_source"] = "block_name"
-        return [_tag_sig(marker)]
+        mark, sub = _mark_from_block_name(insert.dxf.name)
+        if mark:
+            marker["mark"] = mark
+            if sub:
+                marker["subtype"] = sub   # 문은 높이 2100·문턱 0 이 기본 — 창 기본값(1200/900)을 받으면 안 된다
+        _tag_sig(marker)                  # EID 는 **삽입점** 기준 그대로 — 아래에서 중심을 옮겨도 저장된 수정이 이어진다
+        center = _block_opening_center(insert, exploded, cx, cy, named)
+        if center:
+            marker["center"] = center
+            marker["anchor"] = [round(cx, 3), round(cy, 3)]
+        return [marker]
     if category == "slab":
         # 계단코어 등: 닫힌 폴리라인(윤곽선)만 슬래브로. 내부 LINE들(A-STAIR 등) 제외.
         closed = [r for r in exploded
@@ -1919,7 +1996,10 @@ def drop_opening_fragments(elements):
     중복되면 그것도 둘이 된다(실측: 폭 150·180mm 조각 8개 = 4곳 × 2, 전부 900mm 블록 문 폭 안). 크기만으로는
     못 자른다 — 50~200mm 는 설비 슬리브(원)와 겹친다. 그래서 **자기 폭의 두 배 이상인 개구부의 폭 안에 든 선
     조각(원이 아닌 것)** 과, 좌표까지 같은 중복(`_geom_key` — '중복 부재' 절과 같은 열쇠)만 버린다.
-    실측(지하3층): 1912mm 양개문 틀 안의 문짝선(868·874mm, 점 2개) 8개 — 틀이 이미 같은 void 를 뚫는다."""
+    실측(지하3층): 1912mm 양개문 틀 안의 문짝선(868·874mm, 점 2개) 8개 — 틀이 이미 같은 void 를 뚫는다.
+    ★ '폭 안' 은 조각이 개구부 폭 구간에 **닿는** 것까지다(중심 거리 ≤ (큰 폭 + 조각 폭)/2). 문설주 조각은 문 끝에
+      붙어 있다 — 블록 중심을 삽입점(문 끝)에서 실제 중심으로 옮기자 PD-750 옆 150mm 조각이 402mm(반 폭 375)에
+      서서 다시 개구부가 됐다(실측 단위세대 평면도 6개)."""
     info = [(op, _opening_center(op), _opening_extent(op), float(op.get("z_base") or 0.0))
             for op in elements.get("opening", [])]
     keep, dropped, seen = [], {}, set()
@@ -1927,7 +2007,7 @@ def drop_opening_fragments(elements):
         if c is not None:
             key = _geom_key(op)
             fragment = key in seen or (op.get("kind") != "circle" and any(
-                o is not op and cc is not None and e >= 2.0 * ext and math.dist(cc, c) <= e / 2.0
+                o is not op and cc is not None and e >= 2.0 * ext and math.dist(cc, c) <= (e + ext) / 2.0
                 and abs(zz - z) < FLOOR_TOL_MM for o, cc, e, zz in info))
             if fragment:
                 lay = op.get("layer") or "(블록)"
@@ -2154,6 +2234,212 @@ def link_openings_to_walls(elements, params):
             op["host_width"] = round(nearest[2], 1)
 
 
+# ── 창 위아래 벽 채움 ──────────────────────────────────────────────────────
+# 평면도는 창 높이에서 자른 단면이라 창·문 자리에 벽 선이 없다. 제도자가 그 자리에서 벽을 끊어 그리면
+# 3D 에는 바닥부터 천장까지 뚫린 틈이 남는다(실측: 단위세대 평면 외곽의 거실·침실 창). 창 아래 벽과
+# 창·문 위 벽(인방)은 도면에 없지만 **개구부 높이·창대높이와 옆 벽의 높이**로 정해진다 — 그것만 채운다.
+INFILL_MIN_MM = 50.0          # 이보다 얇거나 짧은 조각은 만들지 않는다(반올림 잔여 · 44mm 간격 중복 개구부의 틈)
+INFILL_PARALLEL_DEG = 5.0     # 같은 선 위 벽 판정 사이각
+
+
+def _intervals_minus(lo, hi, cover):
+    """[lo, hi] 에서 cover 구간들을 뺀 나머지(정렬된 목록)."""
+    out, cur = [], lo
+    for a, b in sorted(cover):
+        if b <= cur or a >= hi:
+            continue
+        if a > cur:
+            out.append((cur, min(a, hi)))
+        cur = max(cur, b)
+        if cur >= hi:
+            break
+    if cur < hi:
+        out.append((cur, hi))
+    return out
+
+
+def fill_around_openings(elements, params):
+    """벽이 끊긴 창·문 자리의 **창 아래 벽**과 **창·문 위 벽**을 벽 레코드로 채운다. 반환: 요약 dict.
+
+    - 옆 벽(같은 선 위, 개구부 끝에서 벽 두께 안에 끝나는 벽)이 두께·방향·층 높이를 준다. 없으면 만들지 않는다.
+    - 개구부 폭 중 **벽이 없는 구간만** 채운다. 벽이 이어져 있으면 빌더가 구멍을 뚫으므로 채울 것이 없다.
+      문설주 틈(개구부 끝 ~ 옆 벽 끝, 벽 두께 이내)까지 넓힌다.
+    - 높이는 빌더의 커터와 같은 규약: 창은 창대높이부터 높이만큼, 문은 바닥부터. 종류를 모르는 개구부는
+      빌더가 층 전체 높이로 뚫으므로 채우지 않는다.
+    - 창호 치수가 추정치면 채운 벽도 추정치다 — `dims_assumed` 로 남긴다.
+    - 벽 목록 **끝**에 붙인다. 개구부의 `wall_indices`(위치 인덱스)는 그대로 유효하고, 채운 벽은 개구부와
+      z 가 겹치지 않아 호스트가 되지 않는다.
+    - 옆 벽 방향을 몰라 X 축으로 그려지던 개구부(`host_dir` 없음)에는 그 방향을 적는다."""
+    walls = elements.get("wall", [])
+    openings = elements.get("opening", [])
+    summary = {"walls": 0, "openings": 0, "assumed": 0, "skipped": {}}
+    if not walls or not openings:
+        return summary
+    par = math.sin(math.radians(INFILL_PARALLEL_DEG))
+    segs = []
+    for i, w in enumerate(walls):
+        cl = w.get("centerline") or w.get("points") or []
+        pairs = list(zip(cl, cl[1:]))
+        if w.get("closed") and len(cl) > 2 and cl[-1] != cl[0]:
+            pairs.append((cl[-1], cl[0]))
+        ww = _GC.width_of(w, params, "wall")
+        z0, z1 = _GC.z_range("wall", w, params)
+        closed = bool(w.get("closed") or w.get("pairing") == "closed")
+        for a, b in pairs:
+            ux, uy, ln = _seg_dir(a, b)
+            if ln > 0:
+                # 기준 벽이 될 수 있는가 — 닫힌 폴리곤의 변은 축이 아니라 **면**이고(채움이 벽 면에 반쯤 걸린다),
+                # 두께보다 짧은 벽은 축이 벽을 가로지르는 매듭이다(실측 단위세대 평면도: 410x180 매듭이 문 인방 두께를 410 으로 만듦).
+                # 둘 다 구간을 덮는 데는 쓴다.
+                segs.append({"w": w, "a": a, "b": b, "u": (ux, uy), "ln": ln, "ww": ww, "z": (z0, z1),
+                             "ref_ok": not closed and ln >= ww})
+
+    def skip(reason):
+        summary["skipped"][reason] = summary["skipped"].get(reason, 0) + 1
+
+    def same_level(op, w):
+        return not (op.get("level") and w.get("level") and op["level"] != w["level"])
+
+    def op_z(op, sub):
+        ov = op.get("overrides") or {}
+        sill = float(ov.get("sill") if ov.get("sill") is not None else op.get("sill") or 0.0)
+        lo = _GC.base_z("opening", op) + (sill if sub == "window" else 0.0)
+        return lo, lo + _GC.height_of(op, params, "opening")
+
+    def op_half(op):
+        ov = op.get("overrides") or {}
+        return float(ov.get("width") if ov.get("width") is not None
+                     else op.get("width") or 2 * float(op.get("radius") or 0)) / 2.0
+
+    # 다른 개구부의 공간 — 문과 겹친 창의 창 아래 벽이 문 안에 서지 않게
+    voids = [(op, op["center"], op_half(op), op_z(op, op["subtype"])) for op in openings
+             if op.get("subtype") in ("window", "door") and op.get("center")]
+
+    made = []   # 이번에 만든 채움 벽 — 겹치는 두 개구부가 같은 자리를 두 번 채우지 않게
+    for op in openings:
+        sub = op.get("subtype")
+        if sub not in ("window", "door"):
+            skip("subtype_unknown")
+            continue
+        if not op.get("center") or not op.get("eid"):
+            skip("no_center")
+            continue
+        cx, cy = float(op["center"][0]), float(op["center"][1])
+        r = op_half(op)
+        if r <= 0:
+            skip("no_width")
+            continue
+        lo, hi = op_z(op, sub)
+
+        # 옆 벽: 축선이 개구부 중심을 지나고 끝이 개구부 끝에서 벽 두께 안 — link_openings_to_walls 와 같은 도달 거리
+        ref = None
+        for s in segs:
+            if not s["ref_ok"] or not same_level(op, s["w"]) or s["z"][0] >= hi or s["z"][1] <= lo:
+                continue
+            (ux, uy), a = s["u"], s["a"]
+            sx, sy = cx - a[0], cy - a[1]
+            along = sx * ux + sy * uy
+            perp = abs(-sx * uy + sy * ux)
+            over = max(0.0, -along, along - s["ln"])
+            reach = s["ww"] * 0.5 + (s["ww"] + OPENING_CUT_MARGIN_MM) * 0.5
+            if perp <= reach and over <= r + s["ww"] and (ref is None or perp < ref[0]):
+                ref = (perp, s)
+        if ref is None:
+            skip("no_wall_on_line")
+            continue
+        s = ref[1]
+        (ux, uy), ww, (z0, z1) = s["u"], s["ww"], s["z"]
+        t = (cx - s["a"][0]) * ux + (cy - s["a"][1]) * uy
+        px, py = s["a"][0] + ux * t, s["a"][1] + uy * t      # 개구부 중심을 옆 벽 축선에 내린 점
+
+        def on_line(q_a, q_b, q_u, q_ww):
+            """같은 선 위(평행 · 축 사이 거리 ≤ 두 반두께 중 큰 쪽)면 이 선 위 [t1, t2], 아니면 None."""
+            if abs(q_u[0] * uy - q_u[1] * ux) > par:
+                return None
+            if abs(-(px - q_a[0]) * q_u[1] + (py - q_a[1]) * q_u[0]) > max(q_ww, ww) / 2.0 + 1.0:
+                return None
+            t1 = (q_a[0] - px) * ux + (q_a[1] - py) * uy
+            t2 = (q_b[0] - px) * ux + (q_b[1] - py) * uy
+            return (min(t1, t2), max(t1, t2))
+
+        full = []   # (구간, z0, z1) — 원본 벽
+        for q in segs:
+            if not same_level(op, q["w"]):
+                continue
+            iv = on_line(q["a"], q["b"], q["u"], q["ww"])
+            if iv:
+                full.append((iv, q["z"]))
+        a_, b_ = -r, r
+        # 문설주 틈까지: 개구부 끝 바깥 벽 두께 안에서 끝나는 옆 벽 끝으로 넓힌다
+        ends = [iv[1] for iv, z in full if a_ - ww - 1.0 <= iv[1] <= a_ and z[0] < z1 and z[1] > z0]
+        starts = [iv[0] for iv, z in full if b_ <= iv[0] <= b_ + ww + 1.0 and z[0] < z1 and z[1] > z0]
+        if ends:
+            a_ = max(ends)
+        if starts:
+            b_ = min(starts)
+
+        parts = []
+        if sub == "window" and min(lo, z1) - z0 >= INFILL_MIN_MM:
+            parts.append(("below", z0, min(lo, z1), ["height"]))
+        if z1 - max(hi, z0) >= INFILL_MIN_MM:
+            parts.append(("above", max(hi, z0), z1, ["z_base", "height"]))
+        used = {"below": ("sill",), "above": ("sill", "height") if sub == "window" else ("height",)}
+        assumed_dims = set(op.get("dims_assumed") or [])
+        n_before = summary["walls"]
+        for part, zb, zt, keys in parts:
+            cover = [iv for iv, z in full if z[0] < zt and z[1] > zb]
+            cover += [iv for m in made for iv in [on_line(m["centerline"][0], m["centerline"][1], m["_u"], m["width_detected"])]
+                      if iv and m["_z"][0] < zt and m["_z"][1] > zb and same_level(op, m)]
+            for o2, c2, r2, (lo2, hi2) in voids:
+                if o2 is op or not same_level(op, o2) or lo2 >= zt or hi2 <= zb:
+                    continue
+                if abs(-(c2[0] - px) * uy + (c2[1] - py) * ux) > ww / 2.0 + 1.0:
+                    continue                     # 이 선 위가 아니다
+                t2 = (c2[0] - px) * ux + (c2[1] - py) * uy
+                cover.append((t2 - r2, t2 + r2))
+            pieces = [(u, v) for u, v in _intervals_minus(a_, b_, cover) if v - u >= INFILL_MIN_MM]
+            is_assumed = any(k in assumed_dims for k in used[part])
+            for k, (u, v) in enumerate(pieces):
+                # 그려진 벽과 같은 자릿수 — 0.1mm 반올림이 옆 벽 끝과 가짜 틈(편집 진단의 endpoint_gap)을 만든다
+                p1 = [round(px + ux * u, 3), round(py + uy * u, 3)]
+                p2 = [round(px + ux * v, 3), round(py + uy * v, 3)]
+                # 높이는 overrides.height 에 둔다 — 층고 선언·Pascal 되돌리기·평면 탭 분할이 모두 그 키를 읽고 쓴다
+                #   (최상위 height 에 두면 Pascal 저장마다 아무도 안 한 높이 수정이 생기고, 평면 탭에서 자르면 층 높이 벽이 된다).
+                # floor_z 는 옆 벽의 층 — z_base(2100 등)로 층을 고르면 가짜 층이 생기거나 빌드가 막힌다.
+                rec = {
+                    "kind": "polyline", "closed": False, "points": [p1, p2], "centerline": [p1, p2],
+                    "width_detected": round(ww, 1), "z_base": round(zb, 1),
+                    "floor_z": round(_GC.floor_z("wall", s["w"]), 1),
+                    "overrides": {"height": round(zt - zb, 1)},
+                    "layer": s["w"].get("layer", ""), "pairing": "infill", "source": "opening_infill",
+                    "infill_of": op["eid"], "infill_part": part, "confidence": 1.0, "needs_review": False,
+                    "source_signatures": [],
+                    "eid": element_eid(ELEMENT_EID_PREFIX["wall"], ["infill", op["eid"], part, str(k)]),
+                    "_u": (ux, uy), "_z": (zb, zt),
+                }
+                for key in ("level", "zone"):
+                    if s["w"].get(key) is not None:
+                        rec[key] = s["w"][key]
+                material = (s["w"].get("overrides") or {}).get("material")
+                if material:
+                    rec["overrides"]["material"] = material      # 옆 벽의 overrides 는 재질만 — 높이·폭까지 받으면 인방이 층 높이가 된다
+                if is_assumed:
+                    rec["dims_assumed"] = list(keys)
+                    summary["assumed"] += 1
+                made.append(rec)
+                summary["walls"] += 1
+        if summary["walls"] > n_before:
+            summary["openings"] += 1
+            if not op.get("host_dir"):
+                op["host_dir"] = [round(ux, 5), round(uy, 5)]
+                op["host_width"] = round(ww, 1)
+    for m in made:
+        m.pop("_u", None)
+        m.pop("_z", None)
+    walls.extend(made)
+    return summary
+
+
 # ── [창호 Phase 1] 창호 콜아웃/일람 추출 ─────────────────────────────────
 def _text_value(e):
     """TEXT/MTEXT 엔티티의 문자열(없으면 '')."""
@@ -2252,6 +2538,44 @@ def extract_window_schedule(msp, scale, layer_patterns=WINDOW_CALLOUT_LAYERS):
     return callouts, schedule
 
 
+def apply_schedule_to_openings(openings, schedule):
+    """창호일람 행을 **같은 부호**(블록 이름)의 개구부에 적용 — 높이·창대높이·종류.
+    평면도에는 이 값이 없다. 부호가 같고 높이가 있는 행만 쓴다(부호 목록만 낸 행은 건너뜀).
+    반환: 적용된 개구부 수."""
+    by_mark = {}
+    for s in schedule or []:
+        if s.get("mark") and s.get("height") is not None and float(s["height"]) > 0:
+            by_mark.setdefault(str(s["mark"]).upper(), s)
+    n = 0
+    for op in openings:
+        s = by_mark.get(str(op.get("mark") or "").upper())
+        if not s:
+            continue
+        op["height"] = float(s["height"])
+        if s.get("sill") is not None:           # 빈칸이면 건너뛴다 — 추정치(dims_assumed)로 남아 보고된다
+            op["sill"] = float(s["sill"])
+        if s.get("subtype") and not op.get("subtype"):   # 블록 이름이 말한 종류를 일람의 추정 종류가 덮지 않는다
+            op["subtype"] = s["subtype"]
+        op["dims_source"] = "schedule"
+        n += 1
+    return n
+
+
+def window_marks_of(openings):
+    """평면에서 본 창호 부호 목록(블록 이름) — 부호·종류·폭·수량. 높이·창대높이는 None(평면도가 모른다).
+    창호일람 양식에 이 행들을 미리 채워 사용자가 높이·창대높이만 적게 한다."""
+    agg = {}
+    for op in openings:
+        mk = op.get("mark")
+        if not mk or op.get("source") == "wall_gap_match":   # 끊김 매칭은 일람에서 온 것 — 평면이 보인 부호가 아니다
+            continue
+        k = (mk, op.get("subtype"), round(float(op.get("width") or (op.get("radius") or 0) * 2)))
+        r = agg.setdefault(k, {"mark": mk, "subtype": op.get("subtype"), "width": float(k[2]),
+                               "height": None, "sill": None, "count": 0})
+        r["count"] += 1
+    return sorted(agg.values(), key=lambda r: (-r["width"], r["mark"]))
+
+
 def detect_wall_openings(elements, schedule, params):
     """평면 벽의 끊김(gap)을 검출하고 창호일람 폭과 매칭해 opening 생성.
 
@@ -2265,7 +2589,9 @@ def detect_wall_openings(elements, schedule, params):
     if not walls or not schedule:
         return 0
 
-    # 기존 opening(문 스윙 호 등) 중심 — 중복 생성 방지
+    # 기존 opening(블록 창호·문 스윙 호) 중심 — 중복 생성 방지. 블록 창호는 삽입점이 창의 **끝**일 수 있어
+    # 중심 거리 500mm 로는 못 거른다(실측: 일람을 넣자 W-3600·W-1800 이 벽 끊김에서 한 번 더 생겼다, 10개).
+    # 그래서 '이 끊김 구간 안에 이미 개구부가 있는가' 를 같이 본다.
     existing = []
     for op in openings:
         c = op.get("center")
@@ -2320,8 +2646,11 @@ def detect_wall_openings(elements, schedule, params):
             t_mid = (a[1] + b[0]) / 2.0
             mx = base[0] + t_mid * dref[0]
             my = base[1] + t_mid * dref[1]
-            # 기존 opening 과 근접 중복 스킵
-            if any(math.hypot(mx - ex, my - ey) < 500.0 for ex, ey in existing):
+            # 기존 opening 과 근접 중복 스킵 — 중심이 가깝거나, 끊김 구간 안(선 옆 300mm 이내)에 있거나
+            if any(math.hypot(mx - ex, my - ey) < 500.0
+                   or (a[1] - 100.0 <= proj((ex, ey)) <= b[0] + 100.0
+                       and abs(-dref[1] * (ex - base[0]) + dref[0] * (ey - base[1])) <= 300.0)
+                   for ex, ey in existing):
                 continue
             gs = base[0] + a[1] * dref[0], base[1] + a[1] * dref[1]  # gap 시작 XY
             ge = base[0] + b[0] * dref[0], base[1] + b[0] * dref[1]  # gap 끝 XY
@@ -2335,7 +2664,9 @@ def detect_wall_openings(elements, schedule, params):
                 "width": round(gap, 1),
                 "radius": round(gap / 2.0, 1),
                 "height": float(match["height"]),
-                "sill": float(match["sill"]),
+                "sill": (float(match["sill"]) if match.get("sill") is not None
+                         else (0.0 if match.get("subtype") == "door" else 900.0)),
+                **({"dims_assumed": ["sill"]} if match.get("sill") is None else {}),
                 "subtype": match["subtype"],
                 "mark": match["mark"],
                 "sched_width": float(match["width"]),
@@ -2999,6 +3330,10 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         print("  [창호일람] " + ", ".join(
             f"{r['mark']} {r['width']:.0f}x{r['height']:.0f}×{r['count']}"
             for r in _win_schedule))
+    # 블록 창호(W-1200 · D-900)는 부호가 이름이다 — 일람 행을 그 부호로 개구부에 붙인다.
+    _n_sched = apply_schedule_to_openings(result["elements"].get("opening", []), _win_schedule)
+    if _n_sched:
+        print(f"  [창호일람] 부호로 개구부 {_n_sched}개에 높이·창대높이 적용")
 
     # ── [창호 Phase 2] 평면 벽 끊김 → opening + 콜아웃 폭 매칭 ──────────────
     try:
@@ -3021,6 +3356,8 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         print(f"  [개구부] 조각 {sum(_tiny.values())}개 드롭(<{OPENING_MIN_SIZE_MM:.0f}mm): "
               + ", ".join(f"{k}({v})" for k, v in sorted(_tiny.items())[:4]))
     _frag = drop_opening_fragments(result["elements"])
+    # 부호 목록은 조각·중복 개구부를 버린 뒤 센다 — 같은 자리의 중복 INSERT 가 수량을 부풀리지 않게
+    result["window_marks"] = window_marks_of(result["elements"].get("opening", []))
     if _frag:
         result["opening_fragments_dropped"] = _frag
         _msg = (f"문·창 기호 조각·중복 개구부 {sum(_frag.values())}개 드롭(더 큰 개구부 폭 안의 선 조각 · 같은 자리 중복): "
@@ -3117,19 +3454,6 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
     if edits:
         from element_id import apply_edits
         result["edits_report"] = _rep = apply_edits(result["elements"], edits)
-        _n = {k: len(_rep.get(k) or []) for k in
-              ("applied", "migrated", "added", "orphaned", "ambiguous")}
-        print(f"  [edits] 적용 {_n['applied']}건 · 옛 ID 에서 이어받음 {_n['migrated']}건 "
-              f"· 추가 {_n['added']}건 · 고아 {_n['orphaned']}건")
-        if _n["ambiguous"]:
-            print(f"    [!] 같은 EID 를 여러 부재가 공유해 적용하지 않은 것 "
-                  f"{_n['ambiguous']}건 — 좌표까지 같은 중복 부재다")
-        for _oid in (_rep.get("orphaned") or [])[:10]:
-            _e = edits.get(_oid) or {}
-            _at = _e.get("_at")
-            print(f"    [고아] {_oid}"
-                  + (f" @({_at[0]:.0f}, {_at[1]:.0f})" if _at else "")
-                  + f" — {', '.join(sorted(k for k in _e if not k.startswith('_'))) or '내용 없음'}")
 
     link_openings_to_walls(result["elements"], params)
     # 가정 치수를 요약해 알린다 — 개별 레코드의 dims_assumed 는 IFC 속성으로도 나간다.
@@ -3307,6 +3631,42 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
     result["floors"] = [{"z": float(z), "label": f"Level_{i+1}"}
                         for i, z in enumerate(sorted(_z_vals))]
     assign_zones(result["elements"], result["elements"].get("zone", []))
+    # ── 창 위아래 벽 채움 ── 층 감지·면선 QA **뒤**(채운 벽의 z_base 900·2100 이 층으로 잡히거나 원본 면선을
+    #   덮어 회수율을 부풀리지 않게), 구역 판정 뒤(옆 벽의 zone 을 물려받게), 수정 확정 앞.
+    _infill = fill_around_openings(result["elements"], params)
+    if _infill["walls"]:
+        result["opening_infill"] = _infill
+        _msg = (f"창·문 위아래 벽 {_infill['walls']}개를 채웠다(개구부 {_infill['openings']}개 — 도면이 창 자리에서 벽을 끊어 그림)"
+                + (f". 그중 {_infill['assumed']}개는 추정 창호 치수로 높이를 정했다 — 창호일람을 넣으면 바로잡힌다"
+                   if _infill["assumed"] else ""))
+        result["warnings"].append(_msg)
+        print("  [개구부] " + _msg)
+    if edits:
+        from element_id import apply_edits
+        _rep = result["edits_report"]
+        # 채운 벽은 수정 주입 뒤에 생긴다 — 그 EID 로 저장된 수정은 첫 적용에서 고아였다. 여기서 한 번 더 적용한다.
+        _infill_eids = {w["eid"] for w in result["elements"]["wall"] if w.get("source") == "opening_infill"}
+        _late = [e for e in _rep.get("orphaned") or [] if e in _infill_eids]
+        if _late:
+            _rep2 = apply_edits(result["elements"], {e: edits[e] for e in _late})
+            _rep["orphaned"] = sorted((set(_rep["orphaned"]) - set(_late)) | set(_rep2["orphaned"]))
+            _rep["applied"] = sorted(set(_rep.get("applied") or []) | set(_rep2["applied"]))
+            _rep["ambiguous"] = sorted(set(_rep.get("ambiguous") or []) | set(_rep2["ambiguous"]))
+        # 채운 벽까지 들어간 현재 EID — 브라우저가 이 목록으로 수정 대상의 존재를 판단한다
+        _rep["current_eids"] = sorted(r["eid"] for _items in result["elements"].values() for r in _items)
+        _n = {k: len(_rep.get(k) or []) for k in
+              ("applied", "migrated", "added", "orphaned", "ambiguous")}
+        print(f"  [edits] 적용 {_n['applied']}건 · 옛 ID 에서 이어받음 {_n['migrated']}건 "
+              f"· 추가 {_n['added']}건 · 고아 {_n['orphaned']}건")
+        if _n["ambiguous"]:
+            print(f"    [!] 같은 EID 를 여러 부재가 공유해 적용하지 않은 것 "
+                  f"{_n['ambiguous']}건 — 좌표까지 같은 중복 부재다")
+        for _oid in (_rep.get("orphaned") or [])[:10]:
+            _e = edits.get(_oid) or {}
+            _at = _e.get("_at")
+            print(f"    [고아] {_oid}"
+                  + (f" @({_at[0]:.0f}, {_at[1]:.0f})" if _at else "")
+                  + f" — {', '.join(sorted(k for k in _e if not k.startswith('_'))) or '내용 없음'}")
     # 미매핑 로그 (suggestions 는 위 [Phase B] 에서 이미 result["suggestions"] 설정)
     # AI 자동적용으로 해소된 항목은 suggestion 에 applied=True 표기됨.
     # 일람표 레이어는 '미매핑' 이 아니다 — 형상이 아니라 표로 소비했다.
@@ -3797,8 +4157,9 @@ def main():
 
     # 추출/병합된 창호일람을 Excel 양식으로 저장(검토·수정용)
     if args.schedule_out:
-        from schedule_io import export_schedule_xlsx
-        export_schedule_xlsx(data.get("window_schedule", []), args.schedule_out)
+        from schedule_io import export_schedule_xlsx, schedule_with_marks
+        export_schedule_xlsx(schedule_with_marks(data.get("window_schedule", []),
+                                                 data.get("window_marks", [])), args.schedule_out)
         print(f"  [창호일람] Excel 양식 저장 → {args.schedule_out}")
 
     if args.auto_map and args.map and data.get("suggestions"):

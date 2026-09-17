@@ -20,6 +20,7 @@ import math
 import os
 import sys
 
+import geom_contract as GC
 from geom_contract import poly_area as _poly_area
 from geom_contract import mep_dimensions
 
@@ -54,7 +55,7 @@ def aggregate(data):
     wg = {}
     for w in els.get("wall", []):
         ov = w.get("overrides") or {}
-        h = float(ov.get("height", ph))
+        h = GC.height_of(w, params, "wall")      # 계약과 같은 순서(overrides > 레코드 > params) — 창 위아래 벽은 짧다
         if w.get("closed") and len(w.get("points", [])) >= 3:
             pts = w["points"]
             L = _polyline_len(pts + [pts[0]])
@@ -69,16 +70,21 @@ def aggregate(data):
             t = float(w.get("width_detected") or ov.get("width") or pw)
             vol = L * h * t
             key = f"T{_r10(t)}"
-        g = wg.setdefault(key, {"count": 0, "len": 0.0, "area": 0.0, "vol": 0.0,
-                                "h": h})
+            if w.get("source") == "opening_infill":
+                # 창 아래 벽·인방은 같은 평면 선에 아래·위로 겹쳐 선다 — 벽 행에 섞으면 길이가 평면 길이의 두 배로 센다
+                key += " 창·문 위아래"
+        g = wg.setdefault(key, {"count": 0, "len": 0.0, "area": 0.0, "vol": 0.0, "hs": set()})
         g["count"] += 1
         g["len"] += L
         g["area"] += L * h
         g["vol"] += vol
-    rows = [[k, g["count"], round(g["len"] / 1000, 1), round(g["h"] / 1000, 2),
+        g["hs"].add(round(h))
+    rows = [[k, g["count"], round(g["len"] / 1000, 1),
+             round(next(iter(g["hs"])) / 1000, 2) if len(g["hs"]) == 1 else "",   # 높이가 섞이면 한 값을 대표로 쓰지 않는다
              round(g["area"] / 1e6, 1), round(g["vol"] / 1e9, 2)]
             for k, g in sorted(wg.items())]
-    tot = ["합계", sum(r[1] for r in rows), round(sum(r[2] for r in rows), 1), "",
+    # 길이 합계는 평면 길이다 — 창 아래 벽·인방은 같은 선을 두 번 세므로 뺀다(면적·체적에는 들어간다)
+    tot = ["합계", sum(r[1] for r in rows), round(sum(r[2] for r in rows if not str(r[0]).endswith("창·문 위아래")), 1), "",
            round(sum(r[4] for r in rows), 1), round(sum(r[5] for r in rows), 2)]
     out["벽"] = (["두께", "개수", "길이(m)", "높이(m)", "면적(㎡)", "체적(㎥)"], rows, tot)
 

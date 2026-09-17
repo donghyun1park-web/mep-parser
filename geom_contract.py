@@ -104,6 +104,17 @@ def base_z(category, rec):
     return float(value if value is not None else 0.0)
 
 
+def floor_z(category, rec):
+    """이 부재가 **어느 층에 속하는가**를 정하는 높이. 보통은 `base_z` 와 같다.
+
+    창 위 벽(인방)처럼 층 바닥보다 높이 떠서 시작하는 벽은 `z_base` 가 형상의 아랫면(예: 2100)이라, 그 값으로
+    층을 고르면 2.1m 짜리 가짜 층이 생기거나(파서 층 감지·Pascal 레벨) 어느 층에도 안 들어가 빌드가 막힌다
+    (V001 · 빌더 `_at_floor` · IFC 층 재검사). 그런 레코드는 `floor_z` 에 옆 벽의 층 높이를 적는다.
+    ★ 형상은 여전히 `z_range` 로만 읽는다. 층 판정만 이 함수로 한다."""
+    value = rec.get("floor_z")
+    return float(value) if value is not None else base_z(category, rec)
+
+
 def _positive(value, field):
     if isinstance(value, bool):
         raise ContractError(f'{field}: boolean is not a dimension')

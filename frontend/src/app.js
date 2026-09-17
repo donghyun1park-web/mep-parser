@@ -34,7 +34,7 @@ const CAT_COLOR = {
   wall:0x6b8fb5, column:0xc77dff, slab:0x8d99ae, beam:0x5a9aa8, zone:0x495057,
   opening:0xe85d5d, pipe:0x4cc9f0, duct:0xf4a261, tray:0x90be6d, equipment:0xf9c74f
 };
-const PAIR_COLOR = { paired:0x4caf50, single:0xff9800, single_offset:0xf44336, closed:0x26a69a };
+const PAIR_COLOR = { paired:0x4caf50, single:0xff9800, single_offset:0xf44336, closed:0x26a69a, infill:0x9fa8da };
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1e2127);
@@ -330,10 +330,11 @@ function fillPanel(rec, cat){
 // 그래야 도면이 바뀌어도 계속 적용되고, diff 에 남고, 고아가 되지 않는다.
 // 자동으로 쓰지 않는다: 붙여 넣을 줄을 만들어 줄 뿐이다("사람이 CSV 를 쓴다").
 function bulkHtml(rec, cat){
-  if(!rec || cat!=='wall' || !rec.layer) return '';
+  // 창 위아래 벽은 옆 벽의 레이어·두께를 물려받았을 뿐이다 — 그 높이(700 등)로 레이어 규칙을 권하면 층 전체 벽이 낮아진다
+  if(!rec || cat!=='wall' || !rec.layer || rec.source==='opening_infill') return '';
   const w=rec.width_detected;
   if(w==null) return '';
-  const same=(EFFECTIVE_ELEMENTS.wall||[]).filter(r=>
+  const same=(EFFECTIVE_ELEMENTS.wall||[]).filter(r=>r.source!=='opening_infill' &&
     r.layer===rec.layer && Math.abs((r.width_detected||-1)-w)<0.5);
   if(same.length<2) return '';
   const esc=t=>String(t).replace(new RegExp('[.*+?^${}()|[\\]]','g'), m=>'\\'+m);
@@ -806,7 +807,9 @@ floor2d.addEventListener('change',()=>{
 });
 
 function wallsAll(){
-  return EFFECTIVE_ELEMENTS.wall||[];
+  // 평면 탭은 도면에 그려진 벽만 다룬다. 창 위아래 벽은 개구부에서 파생되고 같은 평면 선에 아래·위 두 개가 겹쳐
+  // 하나만 집히며 스냅도 흐트러진다 — 3D 에서 고친다.
+  return (EFFECTIVE_ELEMENTS.wall||[]).filter(r=>r.source!=='opening_infill');
 }
 function clOf(r){ return r.centerline || r.points || []; }
 function isDel(r){ return !!(edits[r.eid] && edits[r.eid].deleted); }
@@ -1103,7 +1106,7 @@ function placeWindow(wallMesh, hitVec){
     center:[cx,cy], width:s.width, radius:s.width/2,
     height:s.height, sill:s.sill, subtype:s.subtype, mark:s.mark,
     host_dir:[ux,uy], host_width:ww, source:'manual_preview',
-    z_base:(rec.z_base||0)};
+    z_base:(rec.floor_z ?? rec.z_base ?? 0)};   // 창 위 벽을 클릭해도 창은 그 층 바닥 기준
   for(const key of ['level','floor','elevation','attrs']) if(rec[key]!=null) orec[key]=MepEdit.clone(rec[key]);
   const eid=MepEdit.makeId('om',undefined,rec.level);
   orec.eid=eid;
