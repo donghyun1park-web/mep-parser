@@ -24,6 +24,9 @@ import os
 _VALID = ("wall", "column", "slab", "zone", "opening",
           "pipe", "duct", "tray", "equipment")
 
+# 분류만 시키므로 effort=low. 캐시 키에 모델이 들어가 모델을 바꾸면 예전 답을 재사용하지 않는다.
+VISION_MODEL = "claude-opus-5"
+
 _VISION_SYSTEM = (
     "You are an architectural drawing analyst. You are shown a CROPPED region of a "
     "2D floor plan (black lines on white). Identify the single building element the "
@@ -174,8 +177,9 @@ def _vision_one(b64png, api_key):
     try:
         client = anthropic.Anthropic(api_key=api_key)
         msg = client.messages.create(
-            model="claude-haiku-4-5",
-            max_tokens=160,
+            model=VISION_MODEL,
+            max_tokens=1024,  # thinking 토큰이 같은 한도를 쓴다 — 160 이면 JSON 이 잘린다
+            output_config={"effort": "low"},
             system=_VISION_SYSTEM,
             messages=[{"role": "user", "content": [
                 {"type": "image", "source": {
@@ -183,7 +187,8 @@ def _vision_one(b64png, api_key):
                 {"type": "text", "text": "이 영역의 건축 요소를 분류하세요."},
             ]}],
         )
-        raw = msg.content[0].text.strip()
+        # thinking 이 기본 ON 이라 content[0] 이 text 블록이 아닐 수 있다
+        raw = next(b.text for b in msg.content if b.type == "text").strip()
         raw = _re.sub(r"```[a-z]*\n?", "", raw).strip().rstrip("`").strip()
         p = _json.loads(raw)
         cat = p.get("category", "").lower()
@@ -219,7 +224,7 @@ def vision_fallback(dxf_path, suggestions, unmapped_recs, api_key=None, cache=No
     png, transform, px_size = render_dxf_to_png(dxf_path)
     n = 0
     for s in targets:
-        key = "vis|" + s["layer"]
+        key = "vis|" + VISION_MODEL + "|" + s["layer"]
         cached = cache.get(key)
         if cached:
             res = (cached["cat"], cached.get("subtype"),
