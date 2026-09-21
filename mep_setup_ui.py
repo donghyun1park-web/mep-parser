@@ -22,16 +22,27 @@ def mep_property_overrides(category, width, height):
 
 
 def blender_review_status(receipt):
-    """Native file validity is distinct from unresolved source-drawing findings."""
+    """Native file validity is distinct from unresolved source-drawing findings.
+
+    The runner copies the gate warnings into ``diagnostics`` (blender_runner.py), so a
+    finding that appears in both is one item, not two. Repeats of one message are one
+    line with a count — 16 openings said the same sentence and filled the dialog.
+    """
     source = receipt.get('source_verification', {})
     warnings = [item for item in source.get('findings', []) if item.get('severity') == 'warn']
-    diagnostics = receipt.get('diagnostics', [])
-    count = source.get('warnings', len(warnings))
-    if not isinstance(count, int):
-        count = len(warnings)
-    detail = [f"{item.get('id', item.get('code', '검토'))}: {item.get('message', str(item))}"
-              if isinstance(item, dict) else str(item) for item in warnings + diagnostics]
-    return f"파일 검증 완료 / 도면 검토 {count + len(diagnostics)}건 남음", detail
+    lines, seen = {}, set()
+    for item in warnings + receipt.get('diagnostics', []):
+        if isinstance(item, dict):
+            text = f"{item.get('id', item.get('code', '검토'))}: {item.get('message', str(item))}"
+            key = (text, item.get('eid'))
+        else:
+            text = str(item); key = (text, None)
+        if key in seen:
+            continue
+        seen.add(key)
+        lines[text] = lines.get(text, 0) + 1
+    detail = [text if n == 1 else f'{text} ({n}건)' for text, n in lines.items()]
+    return f"파일 검증 완료 / 도면 검토 {len(seen)}건 남음", detail
 
 
 class MepSetupDialog:
@@ -54,11 +65,13 @@ class MepSetupDialog:
         self._build_mapping()
         self._build_levels()
         self._build_proposals()
-        self.source_tab, self.architecture_tab = ttk.Frame(self.tabs), ttk.Frame(self.tabs)
+        self.source_tab, self.architecture_tab, self.defaults_tab = ttk.Frame(self.tabs), ttk.Frame(self.tabs), ttk.Frame(self.tabs)
         self.tabs.insert(1, self.source_tab, text='설비 원본 필터')
         self.tabs.insert(2, self.architecture_tab, text='건축 분류')
+        self.tabs.insert(3, self.defaults_tab, text='프로젝트 기본값')
         self._build_source_filters()
         self._build_architecture()
+        self._build_defaults()
         # 핸들·정규식(설비 원본 필터)과 MCP 제안 검토는 현장에서 쓸 일이 없다 — 만들어 두고 숨긴다.
         # 위젯은 그대로 살아 있어 폼 값 왕복과 저장 경로는 바뀌지 않는다.
         self.expert_tabs = (self.source_tab, self.proposal_tab)
@@ -76,6 +89,7 @@ class MepSetupDialog:
         source = next(s for s in self.manifest['sources'] if s['id'] == self.source_id)
         current = source.get('options', {}).get('mep_profile') or {}
         self._load_profile(current)
+        self._load_defaults(source.get('options', {}).get('defaults'))
         self._draw_regions()
 
     def _toggle_expert(self):
@@ -136,7 +150,9 @@ class MepSetupDialog:
             ('center_elevation_mm', '중심 높이 mm', None), ('dimension_basis', '치수 근거', ['user', 'assumed', 'annotation']),
             ('color', '색상 필터 (선택)', None), ('linetype', '선종류 필터 (선택)', None)]):
             self.rule_vars[key] = self._entry(form, label, i, values)
-        for key, value in {'category': 'pipe', 'system': 'heating', 'representation': 'centerline', 'material': 'PB', 'placement': 'foam_top', 'dimension_basis': 'assumed'}.items():
+        # material 은 기본값을 안 채운다 — 채우면 새 규칙마다 '선언된 것'처럼 보여 프로젝트
+        # 기본값(project_default)이 영원히 발동하지 않는다(선택은 사람이 콤보박스에서 한다).
+        for key, value in {'category': 'pipe', 'system': 'heating', 'representation': 'centerline', 'placement': 'foam_top', 'dimension_basis': 'assumed'}.items():
             self.rule_vars[key].set(value)
         ttk.Button(form, text='선택 레이어에 설정 추가', command=self._add_mapping).grid(row=13, column=0, columnspan=2, pady=5)
         ttk.Button(form, text='선택 규칙 수정', command=self._update_mapping).grid(row=14, column=0, columnspan=2, pady=3)
@@ -217,6 +233,92 @@ class MepSetupDialog:
         selected = set(map(int, self.arch_tree.selection()))
         self.architecture_rules = [r for i, r in enumerate(self.architecture_rules) if i not in selected]
         self._refresh_architecture()
+
+    def _build_defaults(self):
+        """`source.options.defaults.mep` — 레이어·프로필 행에 선언이 없을 때만 채우는 프로젝트
+        단위 선언(재질·DN·용도·보온). 위 '설정 저장' 버튼(mep_profile)과는 다른 키라 이 탭은
+        저장 버튼을 따로 둔다 — `ProjectSession.configure_defaults` 를 직접 부른다."""
+        ttk.Label(self.defaults_tab, justify='left', wraplength=1000,
+                  text='레이어·행에 선언이 있으면 그게 항상 이깁니다. 여기는 선언이 없을 때만 채우는 프로젝트 기본값입니다 — '
+                       '카테고리로 재질·용도를 추정하지 않으니, 정말 이 프로젝트 전체에 해당할 때만 채우세요. '
+                       '비우고 저장하면 그 필드의 기본값을 지웁니다.').pack(anchor='w', padx=14, pady=(12, 6))
+        form = ttk.Frame(self.defaults_tab)
+        form.pack(anchor='nw', padx=12, pady=6)
+        for c, h in enumerate(['', '재질', '호칭지름(DN)', '용도', '보온 등급', '습한 곳', '유체온도 ℃']):
+            ttk.Label(form, text=h, font=('', 9, 'bold')).grid(row=0, column=c, padx=4, pady=4)
+        import construction_rules as CR
+        self.defaults_vars = {}
+        for i, (cat, label) in enumerate([('pipe', '배관'), ('duct', '덕트'), ('tray', '트레이')], 1):
+            ttk.Label(form, text=label).grid(row=i, column=0, sticky='w', padx=4)
+            v = dict(material=tk.StringVar(), nominal_size=tk.StringVar(), service=tk.StringVar(),
+                     grade=tk.StringVar(), humid=tk.BooleanVar(), fluid_temp_c=tk.StringVar())
+            ttk.Entry(form, textvariable=v['material'], width=14).grid(row=i, column=1, padx=4)
+            ttk.Entry(form, textvariable=v['nominal_size'], width=10).grid(row=i, column=2, padx=4)
+            ttk.Combobox(form, textvariable=v['service'], values=[''] + list(CR.SERVICES), width=16).grid(row=i, column=3, padx=4)
+            ttk.Combobox(form, textvariable=v['grade'], values=['', '가', '나', '다', '라'], width=4).grid(row=i, column=4, padx=4)
+            ttk.Checkbutton(form, variable=v['humid']).grid(row=i, column=5, padx=4)
+            ttk.Entry(form, textvariable=v['fluid_temp_c'], width=8).grid(row=i, column=6, padx=4)
+            self.defaults_vars[cat] = v
+        self.defaults_status = tk.StringVar()
+        ttk.Label(self.defaults_tab, textvariable=self.defaults_status, wraplength=1000).pack(anchor='w', padx=14, pady=6)
+        ttk.Button(self.defaults_tab, text='기본값 저장', command=self._save_defaults).pack(anchor='w', padx=14, pady=8)
+
+    def _load_defaults(self, defaults):
+        mep = (defaults or {}).get('mep') or {}
+        for cat, v in self.defaults_vars.items():
+            row = mep.get(cat) or {}
+            v['material'].set(row.get('material', ''))
+            v['nominal_size'].set(row.get('nominal_size', ''))
+            v['service'].set(row.get('service', ''))
+            ins = row.get('insulation') or {}
+            v['grade'].set(ins.get('grade', ''))
+            v['humid'].set(bool(ins.get('humid', False)))
+            v['fluid_temp_c'].set('' if ins.get('fluid_temp_c') is None else str(ins['fluid_temp_c']))
+
+    def _form_mep_defaults(self):
+        """`defaults_vars` 위젯 값 → `defaults.mep` 딕셔너리. 숫자 아닌 유체온도는 ValueError."""
+        mep = {}
+        for cat, v in self.defaults_vars.items():
+            row = {}
+            if v['material'].get().strip():
+                row['material'] = v['material'].get().strip()
+            if v['nominal_size'].get().strip():
+                row['nominal_size'] = v['nominal_size'].get().strip()
+            if v['service'].get().strip():
+                row['service'] = v['service'].get().strip()
+            if v['grade'].get().strip():
+                ins = {'grade': v['grade'].get().strip(), 'humid': bool(v['humid'].get())}
+                temp = v['fluid_temp_c'].get().strip()
+                if temp:
+                    ins['fluid_temp_c'] = float(temp)
+                row['insulation'] = ins
+            if row:
+                mep[cat] = row
+        return mep
+
+    def _save_defaults(self):
+        try:
+            mep = self._form_mep_defaults()
+        except ValueError:
+            messagebox.showerror('기본값 확인', '유체온도는 숫자여야 합니다.', parent=self.win)
+            return
+        source = next(s for s in self.manifest['sources'] if s['id'] == self.source_id)
+        defaults = dict((source.get('options') or {}).get('defaults') or {})
+        if mep:
+            defaults['mep'] = mep
+        else:
+            defaults.pop('mep', None)
+        self.defaults_status.set('저장 중…')
+
+        def run():
+            try:
+                state = self.session.configure_defaults(defaults, self.manifest['revision'], self.manifest['project_id'], self.source_id)
+                self.win.after(0, lambda: (self.defaults_status.set(f"기본값 저장 완료 (revision {state['revision']})."),
+                                           self._saved(state)))
+            except Exception as exc:
+                self.win.after(0, lambda msg=str(exc): (self.defaults_status.set('저장 실패.'),
+                                                         messagebox.showerror('기본값 저장 실패', msg, parent=self.win)))
+        threading.Thread(target=run, daemon=True).start()
 
     def _build_levels(self):
         from drawing_units_ui import unit_summary

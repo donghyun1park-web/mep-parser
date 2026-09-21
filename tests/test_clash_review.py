@@ -30,7 +30,7 @@ def test_duct_through_a_wall_is_one_located_penetration():
     assert find_clashes(g)["items"][0]["id"] == item["id"]                 # 다시 돌려도 같은 id
     assert result["summary"] == {"total": 1, "by_kind": {"wall_penetration": 1}, "through_openings": 0,
                                  "through_openings_assumed": 0, "assumed_basis": 0, "on_uncertain_walls": 0,
-                                 "skipped_structures": 0, "skipped_routes": 0}
+                                 "skipped_structures": 0, "skipped_routes": 0, "envelope_basis": 0}
     assert item["basis"] == "declared" and item["assumed"] == []      # 선언 두께·높이 + 도면 z
 
 
@@ -101,6 +101,61 @@ def test_a_penetration_at_a_drawn_sleeve_is_told_apart_from_one_without():
     assert kinds == {"d:in": "sleeve_provided", "d:out": "wall_penetration"}
 
 
+def test_a_sloped_drain_meets_the_slab_where_the_slope_puts_it():
+    """구배 선언(`GC.sloped_path3d`)이 붙은 경로는 구간마다 실제 높이로 대조된다 — 평평하게 뒀으면
+    안 걸렸을 슬래브를, 저점이 실제로 떨어지는 자리에서 잡아낸다."""
+    slab = {"eid": "s:1", "kind": "polyline", "closed": True, "z_base": 2400, "overrides": {"thickness": 100},
+            "points": [[1800, -500], [2200, -500], [2200, 500], [1800, 500]]}
+    flat = _pipe("p:flat", [[0, 0], [2000, 0]], elevation=2600, diameter=100)
+    g_flat = _geom(slab=[slab], pipe=[flat])
+    assert find_clashes(g_flat)["items"] == []                     # 평평하면 슬래브 z 범위를 안 건드린다
+
+    sloped = dict(flat, eid="p:sloped",
+                  path3d={"segments": GC.sloped_path3d([[0, 0], [2000, 0]], 0.15, "start")})
+    g_sloped = _geom(slab=[slab], pipe=[sloped])
+    (item,) = find_clashes(g_sloped)["items"]
+    assert item["kind"] == "slab_penetration" and item["at"][0] > 1000            # 저점(끝 쪽)에서 걸린다
+
+
+def test_an_insulated_pipe_widens_the_clash_band_only_when_the_profile_opts_in():
+    """보온 외피(`rec['insulation_mm']`)는 프로필 `rules.insulation_envelope: true` 일 때만 반영한다 —
+    기본은 나관 치수. 켜면 간섭 수가 늘 수 있다(opt-in 이라 사용자가 결정한다)."""
+    wall = _wall("w:1", [[0, 1000], [5000, 1000]])
+    duct = {"eid": "d:1", "kind": "polyline", "points": [[0, 1150], [2000, 1150]], "elevation": 2400,
+            "width_mm": 50.0, "height_mm": 50.0, "insulation_mm": 40.0}   # 나관 반폭 25 < 150mm 간격, 외피 반폭 65 >= 간격
+    g = _geom(wall=[wall], duct=[duct])
+    bare = find_clashes(g)
+    assert bare["items"] == [] and bare["summary"]["envelope_basis"] == 0
+    g_insulated = dict(g, mep_profile={"rules": {"insulation_envelope": True}})
+    insulated = find_clashes(g_insulated)
+    (item,) = insulated["items"]
+    assert item["kind"] == "wall_penetration" and item["mep"]["envelope"] == "insulated"
+    assert insulated["summary"]["envelope_basis"] == 1
+
+
+def test_a_drawn_sleeve_smaller_than_pipe_od_plus_40_is_its_own_row_and_names_the_clause():
+    """KCS 31 20 15 2.2.20 — 슬리브는 배관 외경 + 40mm 정도. 모자라면 슬리브가 있어도 '규격 부족'이다."""
+    pipe = {"eid": "p:in", "kind": "polyline", "points": [[2500, -1500], [2500, 1700]],
+            "elevation": 2400, "diameter": 100.0}
+    small = {"eid": "e:small", "kind": "polyline", "closed": True, "role": "sleeve", "z_base": 2200,
+             "points": [[2445, 40], [2555, 40], [2555, 160], [2445, 160]], "overrides": {"height": 400}}  # 110mm < 140mm
+    ok = {"eid": "e:ok", "kind": "polyline", "closed": True, "role": "sleeve", "z_base": 2200,
+          "points": [[4425, 25], [4575, 25], [4575, 175], [4425, 175]], "overrides": {"height": 400}}      # 150×150
+    away = {"eid": "p:ok", "kind": "polyline", "points": [[4500, -1500], [4500, 1700]],
+            "elevation": 2400, "diameter": 100.0}
+    g = _geom(wall=[_wall("w:1", [[0, 100], [5000, 100]])], equipment=[small, ok], pipe=[pipe, away])
+    by_eid = {c["mep"]["eid"]: c for c in find_clashes(g)["items"]}
+    small_item = by_eid["p:in"]
+    assert small_item["kind"] == "sleeve_undersized"
+    assert small_item["rule"] == {"id": "sleeve-diameter-from-pipe-and-insulation", "clause": "KCS 31 20 15 2.2.20",
+                                  "required_mm": 140.0, "measured_mm": 110.0}
+    assert by_eid["p:ok"]["kind"] == "sleeve_provided" and "rule" not in by_eid["p:ok"]
+    from clash_review import to_rows
+    row = next(r for r in to_rows({"items": [small_item]}) if r["mep_eid"] == "p:in")
+    assert (row["rule_id"], row["required_mm"], row["measured_mm"]) == (
+        "sleeve-diameter-from-pipe-and-insulation", 140.0, 110.0)
+
+
 def test_each_row_says_whether_the_heights_it_used_were_declared_or_assumed():
     """평면도에는 높이가 없다 — 가정으로 나온 줄이 도면이 말해 준 줄과 같아 보이면 안 된다."""
     door = {"eid": "o:1", "kind": "circle", "center": [1000, 100], "radius": 450, "width": 900, "height": 2100,
@@ -116,6 +171,16 @@ def test_each_row_says_whether_the_heights_it_used_were_declared_or_assumed():
     # 문 안을 지나 뺀 한 건은 그 문의 높이·문턱이 가정이라는 사실과 함께 센다.
     summary = result["summary"]
     assert (summary["through_openings"], summary["through_openings_assumed"], summary["assumed_basis"]) == (1, 1, 1)
+
+
+def test_an_edited_pipe_elevation_reports_declared_not_source():
+    """인스펙터에서 편집한 elevation 은 overrides 에 실린다 — height_basis 가 이미 'declared' 로 안다."""
+    edited_pipe = {"eid": "p:1", "kind": "polyline", "points": [[1000, -500], [1000, 700]],
+                   "elevation": 78, "overrides": {"elevation": 100}, "diameter": 15.9, "system": "heating"}
+    g = _geom(wall=[_wall("w:1", [[0, 100], [5000, 100]])], pipe=[edited_pipe])
+    result = find_clashes(g)
+    (row,) = result["items"]
+    assert row["mep"]["z_basis"] == "declared"
 
 
 def test_project_state_carries_the_clash_list_for_overlaid_drawings(tmp_path):

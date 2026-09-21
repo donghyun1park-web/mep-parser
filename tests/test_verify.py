@@ -51,6 +51,21 @@ def ids(rep):
     return {f.id for f in rep.findings}
 
 
+# ── V013 시공기준 위반(construction_rules.py) ───────────────────────────────
+def test_V013_fires_on_a_flat_duct():
+    d = clean()
+    d["elements"]["duct"] = [{"eid": "d1", "kind": "polyline", "points": [[0, 0], [2000, 0]],
+                              "elevation": 2600.0, "width_mm": 440.0, "height_mm": 100.0}]
+    assert "V013" in ids(V.verify_geometry(d))
+
+
+def test_V013_silent_on_a_compliant_duct():
+    d = clean()
+    d["elements"]["duct"] = [{"eid": "d1", "kind": "polyline", "points": [[0, 0], [2000, 0]],
+                              "elevation": 2600.0, "width_mm": 300.0, "height_mm": 300.0}]
+    assert "V013" not in ids(V.verify_geometry(d))
+
+
 # ── 기준선: 정상 데이터는 조용해야 한다 ────────────────────────────────────
 def test_clean_is_silent():
     rep = V.verify_geometry(clean())

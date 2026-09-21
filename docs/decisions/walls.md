@@ -83,6 +83,11 @@ paired 는 1470mm · 총연장 148.7m 대 1116.7m). 벽 마구리·문선 리턴
 (종전엔 두 곳에서 서로 다른 순서로 재구현해, `thin_pair` 벽이 **화면 50mm / 빌드 200mm**
 였다). 규칙을 JS 로 다시 쓰지 말 것.
 
+`boq_export.py` 도 2026-09-18 까지는 `width_detected or overrides.width or params` 순서로
+따로 재구현하고 있었다 — 순서가 계약과 **반대**였고 `thin_pair` 도 그대로 믿었다. 실측(골든
+664벽 도면): thin_pair 벽 7개가 빌더·간섭·미리보기에서는 200mm 인데 물량표에서만 T0×4·T50×3
+으로 잡혔다. `GC.width_of` 호출 하나로 고쳤다. 고정: `tests/test_boq.py`.
+
 ### ★ EID — 부재를 특정하는 열쇠
 `element_eid(prefix, _sigs + _span_sigs)`.
 - `_sigs` = 이 부재를 만든 **원본 엔티티** 시그니처 → 파라미터 변경에 불변.

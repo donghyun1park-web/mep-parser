@@ -42,6 +42,15 @@ id 는 이음 점 좌표에서 나와 재파싱해도 같고(다층은 `stack_bu
 (다리의 `_PROVENANCE`). 편집으로 상대가 지워지거나(`single_member`) 떨어지면(`members_apart`)
 **고치지 않고** V012 가 말한다(`joint_problems`) — 파싱 직후에는 생기지 않는다.
 
+★ **평면 탭에서 배관·덕트·트레이를 옮기면(delete+add) 같은 일이 난다.** `makeManualRecord`
+는 `joints` 를 옮긴 레코드로 복사하지 않고, `apply_edits` 뒤에 `assign_joints` 를 다시 돌리지도
+않는다(파싱 직후 전용이라는 원칙을 지킨다) — 그래서 이동한 배관은 짝을 잃고, 남은 짝은
+`joint_single_member` 로 V012 에 뜬다. 다시 닿은 자리는 이음이 아니라 `mep_network` 의
+연결 **후보**로 보여 `/bridges` 확정이 한 번 더 필요하다. 첫 배포는 이 동작을 그대로 받아들인다
+— `assign_joints` 재실행은 "도면이 이어 그린 곳" 이라는 이 절의 원칙을 편집에도 넓히는 별도
+결정이라 여기서 같이 하지 않는다. 고정: `tests/test_mep_workflow.py` 의
+`test_saving_an_added_pipe_and_moving_a_jointed_one_updates_connectivity_live`.
+
 - 부르는 곳: 레거시 파서(`connect_gap` 잇기 뒤) · MEP 프로필(`join_paths` 뒤, 프로필의
   `endpoint_tolerance_mm`). `join_paths` 는 가지점에서 잇기를 멈추므로 그 경로들이 이음으로 묶인다.
 - 물량 `MEP 이음` 표: 가지 수 3 = 티 · 4 = 크로스 · 2 는 꺾이면 엘보, 곧고 규격이 다르면 레듀서.

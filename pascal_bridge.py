@@ -106,6 +106,7 @@ _PROVENANCE = ("eid", "eid_v1", "layer", "pairing", "confidence", "needs_review"
                # ── MEP 출처: 원본 곡선의 길이·근거와 계통 정보. 다리가 다시 계산할
                #    수 없는 값들이라(샘플한 폴리선에는 원호가 없다) 반드시 실어 나른다.
                "system", "material", "nominal_size", "placement", "dimension_basis",
+               "declaration_basis",  # 프로젝트 기본값이 채운 필드 — 편집기가 그 값을 안 지어낸 것처럼 보이면 안 된다
                "dimension_status", "geometry_mode", "region_id", "level", "floor_id",
                "source_refs", "source_geometry", "source_length_mm", "sampled_length_mm",
                "length_basis", "source_elevation_mm", "curve_chord_error_mm", "_sigs",

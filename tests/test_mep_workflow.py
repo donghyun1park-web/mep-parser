@@ -99,6 +99,17 @@ def test_verified_files_still_show_source_review_findings():
     assert detail == ['V012: Selected source omitted: 2', 'floor_review: Wet-area details not evaluated']
 
 
+def test_review_count_drops_the_runner_copy_and_groups_one_message_per_line():
+    # blender_runner 가 게이트 경고를 diagnostics 에 복사한다 — 같은 건이 두 번 세어지면 안 된다.
+    from mep_setup_ui import blender_review_status
+    warn = {'id': 'V007', 'severity': 'warn', 'message': 'needs_review 2'}
+    summary, detail = blender_review_status({'source_verification': {'warnings': 1, 'findings': [warn]},
+        'diagnostics': [dict(warn, code='V007')] + [{'code': 'reference_not_solid', 'eid': f'o:{i}',
+        'message': 'Opening retained'} for i in range(16)]})
+    assert '17건' in summary
+    assert detail == ['V007: needs_review 2', 'reference_not_solid: Opening retained (16건)']
+
+
 def test_hidden_tk_profile_form_preserves_custom_region_and_site_values(workflow):
     import tkinter as tk
     from mep_setup_ui import MepSetupDialog
@@ -143,6 +154,41 @@ def test_hidden_tk_profile_form_preserves_custom_region_and_site_values(workflow
         root.destroy()
 
 
+def test_hidden_tk_defaults_tab_loads_and_forms_mep_declarations(workflow):
+    """'프로젝트 기본값' 소탭 — 선언 없으면 빈 채로, 채우면 defaults.mep 모양으로, 숫자 아닌 온도는 거절."""
+    import tkinter as tk
+    from mep_setup_ui import MepSetupDialog
+    session, profile = workflow
+    root = tk.Tk()
+    root.withdraw()
+    inventory = {'source_sha256': profile['source_sha256'], 'scale_to_mm': 1,
+                 'bounds_mm': [0, 0, 1000, 1000], 'layers': [],
+                 'regions': [{'id': 'layout_1', 'bounds_mm': [0, 0, 1000, 1000]}]}
+    dialog = None
+    try:
+        dialog = MepSetupDialog(root, session, inventory, lambda _s: None)
+        dialog.win.withdraw()
+        root.update_idletasks()
+        assert dialog._form_mep_defaults() == {}
+        dialog._load_defaults({'mep': {'pipe': {'material': '강관', 'service': 'domestic_cold',
+                                                 'insulation': {'grade': '나', 'humid': True, 'fluid_temp_c': 10}}}})
+        assert dialog.defaults_vars['pipe']['material'].get() == '강관'
+        assert dialog.defaults_vars['pipe']['service'].get() == 'domestic_cold'
+        assert dialog.defaults_vars['pipe']['grade'].get() == '나'
+        assert dialog.defaults_vars['pipe']['humid'].get() is True
+        assert dialog.defaults_vars['pipe']['fluid_temp_c'].get() == '10'
+        assert dialog._form_mep_defaults() == {'pipe': {'material': '강관', 'service': 'domestic_cold',
+                                                         'insulation': {'grade': '나', 'humid': True, 'fluid_temp_c': 10.0}}}
+        dialog.defaults_vars['duct']['grade'].set('가')
+        dialog.defaults_vars['duct']['fluid_temp_c'].set('오')
+        with pytest.raises(ValueError):
+            dialog._form_mep_defaults()
+    finally:
+        if dialog:
+            dialog.win.destroy()
+        root.destroy()
+
+
 def test_hidden_tk_proposals_only_show_active_source(workflow):
     import tkinter as tk
     from mep_setup_ui import MepSetupDialog
@@ -180,7 +226,7 @@ def test_hidden_tk_main_window_shows_four_controls_and_keeps_every_tool(workflow
         app = App(root)
         bar = root.winfo_children()[0]
         assert [child.cget('text') for child in bar.winfo_children()] == [
-            '열기…', '설비 도면 설정', '내보내기 ▾', '그 밖의 도구 ▾']
+            '열기…', '설비 도면 설정', '납품 ▾', '그 밖의 도구 ▾']
         assert not app.tools.winfo_manager()                 # 기본 접힘
         app.v_tools.set(True); app._toggle_tools(); root.update_idletasks()
         assert app.tools.winfo_manager()
@@ -194,6 +240,29 @@ def test_hidden_tk_main_window_shows_four_controls_and_keeps_every_tool(workflow
         buried = [w for w in app.tools.winfo_children() for w in w.winfo_children()
                   if isinstance(w, ttk.Button)]
         assert buried and all('disabled' in w.state() for w in buried)
+    finally:
+        root.destroy()
+
+
+def test_hidden_tk_delivery_menu_builds_ifc_directly_and_freecad_moves_to_the_tools_frame(workflow):
+    """납품 IFC 는 `ifc_builder`(ifcopenshell 직접)가 낸다 — FreeCAD 설치가 없어도 눌린다.
+    FreeCAD·Blender 는 지운 게 아니라 접은 '그 밖의 도구' 로 내렸다(핸들러도 살아 있다)."""
+    import tkinter as tk
+    from mep_gui import App
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        app = App(root)
+        labels = [app.export_menu.entrycget(i, 'label') for i in range(app.export_menu.index('end') + 1)]
+        assert labels == ['검토 목록 CSV', '물량 Excel', '창호일람 Excel 내보내기', '납품 검증 빌드 (IFC)']
+        assert 'FreeCAD' not in ' '.join(labels) and 'Blender' not in ' '.join(labels)
+        # FreeCAD 가 없는 PC 에서도 납품 항목은 눌려야 한다 — 그게 이 전환의 요점이다.
+        assert app.export_menu.entrycget(3, 'state') != 'disabled'
+        app.v_tools.set(True); app._toggle_tools(); root.update_idletasks()
+        tool_texts = [w.cget('text') for w in app.tools.winfo_children() for w in w.winfo_children()
+                      if isinstance(w, (ttk.Button, ttk.Checkbutton))]
+        assert any('FreeCAD' in t for t in tool_texts) and any('Blender' in t for t in tool_texts)
+        assert callable(app._do_build) and callable(app._do_blender_build)
     finally:
         root.destroy()
 
@@ -213,10 +282,10 @@ def test_hidden_tk_setup_dialog_hides_handle_and_proposal_tabs_until_expert(work
         root.update_idletasks()
         shown = lambda: [dialog.tabs.tab(t, 'text') for t in dialog.tabs.tabs()
                          if dialog.tabs.tab(t, 'state') == 'normal']
-        assert shown() == ['영역·레이어', '건축 분류', '높이·바닥 구성']
+        assert shown() == ['영역·레이어', '건축 분류', '프로젝트 기본값', '높이·바닥 구성']
         assert 'source_handles' in dialog.rule_vars and 'role' in dialog.rule_vars  # 숨겨도 변수는 산다
         dialog.v_expert.set(True); dialog._toggle_expert(); root.update_idletasks()
-        assert shown() == ['영역·레이어', '설비 원본 필터', '건축 분류', '높이·바닥 구성', 'Codex 제안 검토']
+        assert shown() == ['영역·레이어', '설비 원본 필터', '건축 분류', '프로젝트 기본값', '높이·바닥 구성', 'Codex 제안 검토']
     finally:
         if dialog:
             dialog.win.destroy()
@@ -241,3 +310,55 @@ def test_drawing_kind_is_guessed_from_layer_names_only(tmp_path):
     # 벽·기둥 이름이 하나도 없으면 해석할 건축이 없다 — 실무 환기 도면이 그렇다(배경은 XREF).
     assert guess_drawing_kind(drawing('vent.dxf', ['SA', 'RA', 'BACK'])) == '설비'
     assert guess_drawing_kind(str(tmp_path / 'missing.dxf')) == '건축'              # 못 읽으면 종전 경로
+
+
+def test_saving_an_added_pipe_and_moving_a_jointed_one_updates_connectivity_live(tmp_path):
+    """평면 탭이 만드는 두 가지 편집을 프로젝트 저장에 태운다.
+
+    (1) 새로 그린(added) 배관은 저장 즉시 열린 끝으로 mep_connectivity 에 잡힌다.
+    (2) 이음(joints)이 있던 배관을 delete+add(이동)로 옮기면 assign_joints 를 다시
+        돌리지 않으므로(파싱 직후에만 돈다) 짝은 옛 joint id 를 들고 있다가 상대를
+        잃는다 — verify_geometry 가 joint_single_member 로 알린다(현재 동작 기록).
+    """
+    import ezdxf
+    import geom_contract as GC
+    import verify
+
+    dxf = tmp_path / 'drawing.dxf'
+    doc = ezdxf.new(units=4)
+    doc.layers.new('MEP-PIPE')
+    msp = doc.modelspace()
+    msp.add_lwpolyline([(0, 0), (1000, 0)], dxfattribs={'layer': 'MEP-PIPE'})     # p:A
+    msp.add_lwpolyline([(1000, 0), (2000, 0)], dxfattribs={'layer': 'MEP-PIPE'})  # p:B, A 와 맞닿는다
+    doc.saveas(dxf)
+    layer_map = tmp_path / 'layer_map.csv'
+    layer_map.write_text('\n'.join(['pattern,category,width,height,thickness,opts', '^MEP-PIPE$,pipe,,,,']), encoding='utf-8')
+    store = ProjectStore(tmp_path / 'proj.mep').create(sources=[{'id': 'main', 'path': str(dxf), 'layer_map': str(layer_map)}])
+    sess = ProjectSession(store)
+    state = sess.state()
+    pipes = sorted(state['geometry']['elements']['pipe'], key=lambda r: r['points'][0][0])
+    a, b = pipes
+    assert a.get('joints') and b.get('joints'), '두 배관이 맞닿는 자리에서 이음이 안 잡혔다'
+    assert a['joints'][0]['id'] == b['joints'][0]['id']
+
+    moved_a_eid = 'main:wm:moved-a'
+    edits = {
+        a['eid']: {'deleted': True},
+        moved_a_eid: {'added': True, 'category': 'pipe', 'record': {
+            'kind': 'polyline', 'closed': False, 'points': [[0, 500], [1000, 500]],
+            'centerline': [[0, 500], [1000, 500]], 'pairing': 'manual', 'layer': '(수동)',
+            'confidence': 1, 'needs_review': False, 'source': 'manual_preview',
+            'overrides': {'diameter': a.get('diameter', 100.0)}, 'eid': moved_a_eid,
+            'level': 'main', 'elevation': a['elevation'], 'system': a.get('system')}},
+    }
+    saved = sess.save(edits, state['revision'], state['project_id'])
+
+    # (1) 열린 끝: 옮긴 배관 둘 + 짝을 잃은 b 도 이제 열린 끝이다.
+    open_ends = saved['geometry']['mep_connectivity']['open_ends']
+    assert len(open_ends) >= 2, open_ends
+
+    # (2) 이음 문제: b 가 여전히 들고 있는 joint id 의 상대가 사라졌다.
+    report = verify.verify_geometry(saved['geometry'])
+    joint_findings = [f for f in report.errors + report.warns if f.id == 'V012']
+    reasons = {item.get('reason') for f in joint_findings for item in f.payload.get('sample', [])}
+    assert 'joint_single_member' in reasons, joint_findings

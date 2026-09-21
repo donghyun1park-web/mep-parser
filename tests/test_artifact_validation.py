@@ -43,16 +43,20 @@ def test_circle_column_is_valid_preflight_geometry():
     assert not verify.verify_geometry(data).failed
 
 
-def test_simple_ifc_rejects_nonempty_unsupported_category_before_writing(tmp_path):
+def test_a_refused_build_invalidates_the_old_receipt_before_writing(tmp_path):
+    """납품 경로가 거부할 때 **먼저** 하는 일은 지난 영수증을 무효화하는 것이다.
+    (종전에는 pipe 하나로 거부를 유도했다 — 이제 설비도 짓는다. 남은 거부 하나로 본다.)"""
     ifc_builder = _ifc_builder()
     data = geometry()
-    data["elements"]["pipe"] = [{"eid": "pipe:p", "points": [[0, 0], [100, 0]]}]
+    data["elements"]["slab"] = [{"eid": "slab:s", "kind": "polyline", "closed": True,
+                                 "points": [[0, 0], [1000, 0], [1000, 1000], [0, 1000]],
+                                 "overrides": {"ifc_type": "Roof", "thickness": 200}}]
     src = tmp_path / "g.json"
     src.write_text(json.dumps(data), encoding="utf-8")
     out = tmp_path / "out.ifc"
     receipt = tmp_path / "out.build.json"
     receipt.write_text(json.dumps({"status": "verified", "provenance": {"run_id": "old"}}), encoding="utf-8")
-    with pytest.raises(ValueError, match="FreeCAD"):
+    with pytest.raises(ValueError, match="ifc_type"):
         ifc_builder.build(str(src), str(out))
     assert not out.exists()
     failed = json.loads(receipt.read_text(encoding="utf-8"))

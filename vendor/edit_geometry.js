@@ -54,7 +54,14 @@
       if (edit.deleted) continue;
       const target = edit.category || found.cat;
       const effective = clone(found.record);
-      if (edit.overrides) effective.overrides = Object.assign({}, effective.overrides || {}, clone(edit.overrides));
+      if (edit.overrides) {
+        const ov = Object.assign({}, effective.overrides || {});
+        for (const [key, value] of Object.entries(edit.overrides)) {
+          if (value == null) delete ov[key];   // null = 이 키를 지우고 도면값으로 되돌린다(병합은 union 만 하므로)
+          else ov[key] = clone(value);
+        }
+        effective.overrides = ov;
+      }
       (out[target] = out[target] || []).push(effective);
     }
     for (const edit of Object.values(edits || {})) {
@@ -133,7 +140,10 @@
   }
 
   const OMIT = new Set(['eid','points','centerline','kind','closed','pairing','confidence',
-    'needs_review','review_reason','review_resolved','review_ack_stale','source']);
+    'needs_review','review_reason','review_resolved','review_ack_stale','source',
+    // MEP 전용 — 도면이 이음 자리에서 끊어 그린 두 조각은 이 값들이 서로 달라도 결합 대상이다.
+    // 형상이 같은 물리적 경로면 조인한다; 계통·단면·elevation 이 다르면 아래 속성 비교가 여전히 막는다.
+    'joints','source_refs','source_length_mm','route_length_mm','dimension_status']);
   function propertyValue(rec) {
     const out={};
     for (const key of Object.keys(rec || {}).sort()) {
@@ -205,6 +215,15 @@
     return best.kind ? best : {point:point.slice(),distance:null,kind:null,eid:null};
   }
 
+  // Shift 직교 — 기준점에서 본 이동량이 큰 축만 남긴다(작은 축을 기준점 값으로 고정).
+  // 스냅보다 **먼저** 건다: 직교로 민 뒤 그 자리 근처의 끝점에 붙어야, 직교가 스냅을 이기고
+  // 어긋난 좌표가 남는 일이 없다. 기준점이 없으면(첫 클릭) 그대로 돌려준다.
+  function orthoPoint(from, to) {
+    if (!from || !to) return (to||[]).slice();
+    const dx=to[0]-from[0], dy=to[1]-from[1];
+    return Math.abs(dx) >= Math.abs(dy) ? [to[0], from[1]] : [from[0], to[1]];
+  }
+
   function randomUuid() {
     if (typeof crypto!=='undefined' && crypto.randomUUID) return crypto.randomUUID();
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{
@@ -215,18 +234,42 @@
     return (level == null || level === '' ? '' : String(level)+':')+prefix+':'+uuid();
   }
 
-  function makeManualWall(points, source, defaults={}, uuid=randomUuid) {
+  // 카테고리별 수동 치수 키. 벽은 항상 폭을 채운다(기본 200mm) — 도면에 맞댈 근거가
+  // 없는 새 벽도 치수 없이 세워지면 안 된다. 설비는 근거(이웃 부재·기본값)가 없으면 비워
+  // 두고 geom_contract 의 기본값(DEFAULT_DIMS)에 맡긴다.
+  const MANUAL_DIM_KEYS = {pipe:['diameter'], duct:['width_mm','height_mm'], tray:['width_mm','height_mm']};
+
+  function makeManualRecord(category, points, source, defaults={}, uuid=randomUuid) {
     const src=source || {}, overrides=Object.assign({},clone(src.overrides || {}));
-    if (overrides.width == null) overrides.width=defaults.width == null ? 200 : defaults.width;
-    if (overrides.height == null && defaults.height != null) overrides.height=defaults.height;
+    if (category === 'wall') {
+      if (overrides.width == null) overrides.width=defaults.width == null ? 200 : defaults.width;
+      if (overrides.height == null && defaults.height != null) overrides.height=defaults.height;
+    } else {
+      for (const key of (MANUAL_DIM_KEYS[category] || [])) {
+        if (overrides[key] == null && defaults[key] != null) overrides[key]=defaults[key];
+      }
+    }
     const out={kind:'polyline',closed:false,points:clone(points),centerline:clone(points),
       pairing:'manual',layer:src.layer || '(수동)',confidence:1,needs_review:false,
       source:'manual_preview',overrides,eid:makeId('wm',uuid,src.level)};
-    for (const key of ['level','floor','elevation','z_base','attrs']) {
+    // 수동 MEP 도 wm: 접두를 쓴다(Pascal 과 같은 규약) — category 는 EID 가 아니라 edits.json 의
+    // `category` 필드가 결정한다(project_store.validate_edits 가 added 편집에 필수로 요구한다).
+    for (const key of ['level','floor','elevation','z_base','attrs','system','section_shape']) {
       if (src[key] != null) out[key]=clone(src[key]);
     }
-    if (out.z_base == null) out.z_base=0;
+    if (category === 'wall' && out.z_base == null) out.z_base=0;
     return out;
+  }
+  function makeManualWall(points, source, defaults, uuid) {
+    return makeManualRecord('wall', points, source, defaults, uuid);
+  }
+
+  function applyZ(ov, values) {
+    // zKey 는 호출자가 정한다(geom_contract.ELEV_CATS 가 유일한 출처 — 여기서 카테고리를 다시 안 본다).
+    // z===null 은 "지우고 도면값으로 되돌린다", 유한수면 설정, 그 외(비었거나 숫자 아님)는 손대지 않는다.
+    if (!values.zKey) return;
+    if (values.z === null) delete ov[values.zKey];
+    else if (Number.isFinite(values.z)) ov[values.zKey] = values.z;
   }
 
   function applyProperties(existing, record, currentCategory, values) {
@@ -238,6 +281,7 @@
       edit.record.overrides=Object.assign({},edit.record.overrides || {});
       if (Number.isFinite(values.width)) edit.record.overrides.width=values.width;
       if (Number.isFinite(values.height)) edit.record.overrides[category==='slab'?'thickness':'height']=values.height;
+      applyZ(edit.record.overrides, values);
       if (values.deleted) edit.deleted=true; else delete edit.deleted;
     } else {
       if (category && (category!==currentCategory || edit.category)) edit.category=category;
@@ -245,6 +289,7 @@
       const ov=Object.assign({},edit.overrides || {});
       if (Number.isFinite(values.width)) ov.width=values.width;
       if (Number.isFinite(values.height)) ov[category==='slab'?'thickness':'height']=values.height;
+      applyZ(ov, values);
       if (Object.keys(ov).length) edit.overrides=ov; else delete edit.overrides;
       if (values.deleted) edit.deleted=true; else delete edit.deleted;
     }
@@ -313,6 +358,6 @@
     };
   }
 
-  return {clone,deriveBaseElements,materializeElements,mergePresentation,movePolylinePoint,splitPolyline,joinPolylines,snapPoint,
-          makeManualWall,makeId,applyProperties,backupKey,restoreBackup,createSaveQueue,propertyValue};
+  return {clone,deriveBaseElements,materializeElements,mergePresentation,movePolylinePoint,splitPolyline,joinPolylines,snapPoint,orthoPoint,
+          makeManualWall,makeManualRecord,makeId,applyProperties,backupKey,restoreBackup,createSaveQueue,propertyValue};
 });

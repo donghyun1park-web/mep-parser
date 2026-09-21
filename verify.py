@@ -20,6 +20,7 @@ import math
 import os
 import re
 
+import construction_rules as CR
 import geom_contract as GC
 
 # 검사 카탈로그 — id: (기본 severity, 한 줄 설명)
@@ -27,6 +28,7 @@ CHECKS = {
     "V010": ("error", "설비 좌표·외경·단면·높이 또는 경로가 유효하지 않음"),
     "V011": ("error", "설비 원본 추적·선택 영역·누락 검증 실패"),
     "V012": ("warn", "설비 연결·규격·설치 조건 검토 필요"),
+    "V013": ("warn", "시공기준 위반 — 단면 종횡비·최소 관경(선언된 DN·용도 기준, construction_rules.py)"),
     "V106": ("error", "필수 빌드 증거 누락 또는 미생성 요소"),
     "V107": ("error", "현재 실행 IFC 형상/식별자/층/속성 검증 실패"),
     "V001": ("error", "floors[] 에 매칭되지 않는 구조 요소(빌드 시 어느 층에도 안 들어가 IFC 에서 누락)"),
@@ -320,6 +322,19 @@ def _check_mep(data, policy):
                               ("V012", review, "설비 검토 항목")):
         if items:
             findings.append(Finding(cid, _sev(cid, policy), f"{label} {len(items)}건", {"count": len(items), "sample": items[:20]}))
+    # V013 — 시공기준 위반(construction_rules.py 의 verdict=confirmed 규칙만). 정보 항목(kind=info,
+    # 예: 배수 구배 필요 낙차)은 위반이 아니라 여기서 올리지 않는다 — needs_review 전체를 신호로
+    # 쓰지 않는다는 clash-review 의 교훈과 같다.
+    try:
+        rule_items = [i for i in CR.review(data).get("items", []) if i.get("kind") == "violation"]
+    except Exception:
+        rule_items = []
+    if rule_items:
+        by_rule = {}
+        for it in rule_items:
+            by_rule[it["rule"]] = by_rule.get(it["rule"], 0) + 1
+        findings.append(Finding("V013", _sev("V013", policy), f"시공기준 위반 {len(rule_items)}건",
+                                {"count": len(rule_items), "by_rule": by_rule, "sample": rule_items[:20]}))
     return findings
 
 

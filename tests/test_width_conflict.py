@@ -68,3 +68,26 @@ def test_untrustworthy_measurements_are_excluded():
     thin_pair 는 이미 '잘못 잰 값' 으로 걸러진 것이다 — 두 번 보고하지 않는다."""
     assert _conflicts([_wall(450.0, 200.0, pairing="single_offset")]) == []
     assert _conflicts([_wall(50.0, 200.0, reason="thin_pair")]) == []
+
+
+def test_a_structured_suggestion_offers_the_measured_width(tmp_path):
+    """검토 화면의 [적용] 버튼은 이 구조를 읽는다 — 선언을 실측값으로 바꾸는 제안이다."""
+    import io
+    import contextlib
+    import ezdxf
+    doc = ezdxf.new()
+    doc.header["$INSUNITS"] = 4
+    msp = doc.modelspace()
+    for y0 in (0, 3000):                         # 두 벽, 양면 2선 450mm — 선언은 200mm
+        msp.add_line((0, y0), (5000, y0), dxfattribs={"layer": "A-CON"})
+        msp.add_line((0, y0 + 450), (5000, y0 + 450), dxfattribs={"layer": "A-CON"})
+    path = tmp_path / "conflict.dxf"
+    doc.saveas(path)
+    rules = [("^A-CON$", "wall", {"width": 200.0})]
+    with contextlib.redirect_stdout(io.StringIO()):
+        d = dp.parse(str(path), rules, block_rules=[])
+    assert d["width_conflicts"] == [{"layer": "A-CON", "declared": 200.0, "detected": 450.0, "count": 2}]
+    (suggestion,) = [s for s in d["suggestions_apply"] if s["code"] == "width_conflict"]
+    assert suggestion["row_layer"] == "A-CON" and suggestion["pattern"] == "^A\\-CON$"
+    assert suggestion["op"] == "set_width" and suggestion["width"] == 450.0
+    assert suggestion["evidence"] == {"declared_mm": 200.0, "detected_mm": 450.0, "count": 2}

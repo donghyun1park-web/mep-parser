@@ -103,7 +103,8 @@ def prepare_payload(data):
                 'dimension_basis': rec.get('dimension_basis'), 'z_bounds_mm': [z0, z1],
                 'source_points_mm': points, 'covered_only': False}
             for key in ('system', 'circuit_id', 'source_layer', 'source_layers', 'layer', 'region_id',
-                        'layout_id', 'assumptions', 'nominal_size'):
+                        'layout_id', 'assumptions', 'nominal_size', 'source', 'dims_assumed',
+                        'declaration_basis'):
                 if key in rec: base[key] = rec[key]
             if (rec.get('overrides') or {}).get('system') is not None:
                 base['system'] = rec['overrides']['system']      # 편집 화면에서 고친 계통(선언이 이긴다)

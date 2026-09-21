@@ -2,6 +2,7 @@ import importlib.util
 import json
 import concurrent.futures
 from pathlib import Path
+import ezdxf
 import pytest
 
 
@@ -157,6 +158,48 @@ def test_edit_validation_rejects_unknown_category_and_negative_dimensions(tmp_pa
         with pytest.raises(ValueError):
             store.replace_edits({'L:1':edit},0,state['project_id'])
     assert store.read()['revision'] == 0
+
+def test_elevation_accepts_zero_and_negative_but_not_a_string_or_infinity(tmp_path):
+    """배관 중심 높이·벽 하단 z — 지하층은 음수가 정상이라 폭·높이와 같은 '양수만' 규칙을 쓰면 안 된다."""
+    store=create(tmp_path)
+    state=store.read()
+    for value in (0, -1500, 2600.5):
+        store.replace_edits({'L:1':{'overrides':{'elevation':value}}},state['revision'],state['project_id'])
+        state=store.read()
+    for bad in ('abc', float('inf'), float('nan')):
+        with pytest.raises(ValueError):
+            store.replace_edits({'L:2':{'overrides':{'elevation':bad}}},state['revision'],state['project_id'])
+    assert store.read()['revision'] == 3
+
+def test_added_edit_without_category_is_rejected():
+    """category 없으면 서버는 'opening', 클라이언트는 'wall' 로 말없이 갈린다 — 여기서 막는다."""
+    from project_store import validate_edits
+    with pytest.raises(ValueError, match='category'):
+        validate_edits({'wm:1':{'added':True,'record':{'eid':'wm:1'}}})
+    validate_edits({'wm:1':{'added':True,'category':'pipe','record':{'eid':'wm:1'}}})  # 통과
+
+def test_null_override_deletes_the_key_instead_of_storing_a_stale_none(tmp_path):
+    """편집은 union 병합만 되므로(element_id.apply_edits), null 은 '이 키를 지우고 도면값으로
+    되돌린다'는 뜻으로 해석해야 값이 영원히 남지 않는다."""
+    dxf = tmp_path / 'drawing.dxf'
+    doc = ezdxf.new(units=4)
+    doc.layers.new('MEP-PIPE')
+    doc.modelspace().add_lwpolyline([(0, 0), (1000, 0)], dxfattribs={'layer': 'MEP-PIPE'})
+    doc.saveas(dxf)
+    layer_map = tmp_path / 'layer_map.csv'
+    layer_map.write_text('pattern,category,width,height,thickness,opts\n^MEP-PIPE$,pipe,,,,\n', encoding='utf-8')
+    store = store_class()(tmp_path / 'proj.mep').create(sources=[{'id':'main','path':str(dxf),'layer_map':str(layer_map)}])
+    state = store.read()
+    import dxf_parser as P
+    rules = P.load_layer_map(str(layer_map))
+    data = P.parse(str(dxf), rules)
+    eid = data['elements']['pipe'][0]['eid']
+    after = store.replace_edits({eid: {'overrides': {'elevation': 2600}}}, state['revision'], state['project_id'])
+    reparsed = P.parse(str(dxf), rules, edits=after['edits_by_floor']['main'])
+    assert reparsed['elements']['pipe'][0]['overrides']['elevation'] == 2600
+    cleared = store.replace_edits({eid: {'overrides': {'elevation': None}}}, after['revision'], state['project_id'])
+    reparsed = P.parse(str(dxf), rules, edits=cleared['edits_by_floor']['main'])
+    assert 'elevation' not in (reparsed['elements']['pipe'][0].get('overrides') or {})
 
 def test_unresolved_stack_alignment_is_rejected_without_manifest(tmp_path):
     source=tmp_path/'floor.dxf'; source.write_text('source')

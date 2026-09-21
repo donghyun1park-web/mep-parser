@@ -36,6 +36,7 @@ import Arch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import geom_contract as GC
 import artifact_validation as AV
+import construction_rules as CR
 
 
 def vec(p, z=0.0):
@@ -101,7 +102,11 @@ def set_ifc_props(obj, rec):
         ("SourceLength",  "IfcReal",       rec.get("source_length_mm")),
         # 이음 — 같은 id 를 든 부재끼리 도면에서 이어 그려졌다(`geom_contract.assign_joints`).
         ("Joints",        "IfcText",       json.dumps(rec["joints"], ensure_ascii=False) if rec.get("joints") else None),
+        ("FittingKind",   "IfcLabel",      rec.get("fitting_kind")),     # elbow·reducer·tee·cross — 물량표와 같은 판정
         ("Assumptions",   "IfcText",       json.dumps(rec.get("assumptions") or [], ensure_ascii=False)),
+        # 프로젝트 기본값이 채운 필드 — 카테고리 추정이 아니라 선언이지만, 레이어·프로필 선언과는
+        # 구분해 둔다(뷰어에서 어느 값이 사람이 프로젝트를 열 때 적은 것인지 알 수 있게).
+        ("DeclarationBasis", "IfcText",    json.dumps(rec.get("declaration_basis") or {}, ensure_ascii=False)),
         ("MemberName",    "IfcLabel",      sec.get("name") or rec.get("member_name")),
         ("Section",       "IfcLabel",      sec.get("size")),
         ("Pairing",       "IfcLabel",      rec.get("pairing")),
@@ -925,6 +930,17 @@ def _pipe_solid(pts, radius, elev):
     return result
 
 
+def _ring_solid(part):
+    """링 목록(`GC.rect_parts` 의 한 조각) → 평면 면만의 닫힌 솔리드."""
+    verts, faces = GC.rect_sweep_mesh(part)
+    V = [App.Vector(*p) for p in verts]
+    solid = Part.Solid(Part.Shell([Part.Face(Part.makePolygon([V[k] for k in f] + [V[f[0]]]))
+                                   for f in faces]))
+    if solid.Volume < 0:
+        solid.reverse()
+    return solid
+
+
 def _rect_solid(route, width, height, roll=0.0, sides=None):
     """사각 단면 관(덕트·트레이) — `geom_contract.rect_rings` 로 만든 **평면 면**만의 솔리드.
 
@@ -937,15 +953,7 @@ def _rect_solid(route, width, height, roll=0.0, sides=None):
     ★ 면을 한 셸로 꿰매므로 상자 fuse 의 공면 이음매(IFC 비다양체, 실측 V107 7건)가 없다.
     ★ 부피는 샘플 꺾은선 길이 × 단면적과 **정확히** 같다 — 마이터 관의 성질이다.
     """
-    solids = []
-    for part in GC.rect_parts(route, width, height, roll, sides):
-        verts, faces = GC.rect_sweep_mesh(part)
-        V = [App.Vector(*p) for p in verts]
-        solid = Part.Solid(Part.Shell([Part.Face(Part.makePolygon([V[k] for k in f] + [V[f[0]]]))
-                                       for f in faces]))
-        if solid.Volume < 0:
-            solid.reverse()
-        solids.append(solid)
+    solids = [_ring_solid(part) for part in GC.rect_parts(route, width, height, roll, sides)]
     if not solids:
         return None
     # 짧은 급꺾임은 뒤집히지 않게 직각 토막으로 나뉘어 온다(`GC.rect_parts`) — 합친다.
@@ -1002,8 +1010,8 @@ def build_mep(doc, mep_elements, params=None):
 
     계약 v3: 경로는 `GC.path3d_segments`/`GC.route_points`, 단면은 `GC.mep_section`
     하나다 — Blender·Pascal 이 같은 함수를 쓴다.
-    - 원형 단면(배관·원형 덕트): 단일 평면 직선만 `Arch.makePipe`를 사용한다.
-      꺾임·곡선·수직 구간은 정다각형 마이터 관(`_rect_solid(..., sides=)`)으로 만든다.
+    - 원형 단면(배관·원형 덕트): `Arch.makePipe`(곡면)는 쓰지 않는다 — 정다각형 마이터 관
+      (`_rect_solid(..., sides=)`)으로 만든다(V107, 아래 주석).
     - 사각 단면은 `_rect_solid` — 공통 마이터 링으로 만든 평면 면 솔리드.
     - 외곽선 덕트(footprint)와 장비는 평면 외곽 압출 그대로다.
     """
@@ -1039,23 +1047,20 @@ def build_mep(doc, mep_elements, params=None):
                     shape, counted = _footprint_solid(el, GC.z_range(cat, el, params)[0], h), True
                 else:
                     section = GC.mep_section(cat, el, params)
-                    if section["shape"] == "round" and len(pts) == 2 and GC.is_planar_polyline_route(el):
-                        ax = make_wire([[p[0], p[1]] for p in pts], bool(el.get("closed")), doc=doc,
-                                       label=f"{cat.capitalize()}Axis_{i}")
-                        if ax is None:
-                            continue
-                        ax.Placement.Base.z = pts[0][2]
-                        obj = Arch.makePipe(ax, diameter=section["diameter"])
-                    elif section["shape"] == "round":
-                        # Arch also invents curved elbows on bent line paths; their
-                        # IFC serialization can exceed 900s. Keep the contract's
-                        # line vertices with the same miter rings used for 3D paths.
-                        # ★ `Arch.makePipe` 는 원 단면을 첫 구간의 **현(chord)** 에 수직으로 놓아 원호·스플라인
-                        #   으로 시작하는 관을 찌그러뜨린다(실측: R1000 사분원 위 Ø100 덕트 부피 70.7%). 그렇다고
-                        #   해석 와이어를 `makePipeShell` 로 직접 스윕하면 **IFC 에서 깨진다** — FreeCAD 1.1 실측:
-                        #   수직으로 꺾인 Ø20 입상관이 V107(비다양체 메시), R500 원호 Ø125 덕트는 IFC 단계에서
-                        #   240초 넘게 멈췄다. 사각 덕트와 **같은 마이터 링**을 원에 내접한 정다각형으로 꿰매
-                        #   평면 면만의 관을 만든다(`GC.ROUND_SIDES` 변, 부피는 원의 98.9%).
+                    if section["shape"] == "round":
+                        # ★ `Arch.makePipe` 는 안 쓴다 — 단일 평면 직선(가장 흔한 경우)에서도 쓴다.
+                        #   원 단면을 첫 구간의 **현(chord)** 에 수직으로 놓아 원호·스플라인으로 시작하는 관을
+                        #   찌그러뜨리고(실측: R1000 사분원 위 Ø100 덕트 부피 70.7%), 해석 와이어를
+                        #   `makePipeShell` 로 직접 스윕하면 **IFC 에서 깨졌다**(수직으로 꺾인 Ø20 입상관이
+                        #   V107). 그런데 **`Arch.makePipe`(단일 평면 직선, "안전한" 경우로 썼던 것) 자체도
+                        #   V107 이다** — 곡면 있는 형상은 IFC 로 `SERIALIZE`(IfcAdvancedBrep) 하는데,
+                        #   `ifcopenshell` 이 그 곡면을 다시 삼각분할할 때 이음매가 안 맞아 전체 메시가
+                        #   통째로 비다양체가 된다(실측 최소 재현: Ø20 직선관 1개, 삼각형 4,978개 **전부**
+                        #   양쪽 짝이 안 맞음 — 경계 몇 개가 아니라 메시 전체). R500 원호 Ø125 덕트는 IFC
+                        #   단계에서 240초 넘게 멈췄다. 그래서 원형이든 사각이든 **곡면을 아예 안 만든다** —
+                        #   사각 덕트와 같은 마이터 링을 원에 내접한 정다각형으로 꿰매 평면 면만의 관을
+                        #   만든다(`GC.ROUND_SIDES` 변, 부피는 원의 98.9%). 경위는
+                        #   [mep-geometry.md](docs/decisions/mep-geometry.md) '곡면은 안 만든다'.
                         d = section["diameter"]
                         shape = _rect_solid(GC.route_points(cat, el), d, d, 0.0, sides=GC.ROUND_SIDES)
                     else:
@@ -1087,6 +1092,60 @@ def build_mep(doc, mep_elements, params=None):
             except Exception as e:
                 print(f"[warn] MEP {label}: {e}")
     return objs
+
+
+_FITTING_IFC_TYPE = {"pipe": "Pipe Fitting", "duct": "Duct Fitting", "tray": "Cable Carrier Fitting"}
+FITTINGS = {}        # build.json 의 fittings — 세운 몸체 수·형식과, 세우지 않은 이음의 사유
+
+
+def build_fittings(doc, elements, params=None, same_storey=None):
+    """이음(`joints`) → IfcPipeFitting · IfcDuctFitting · IfcCableCarrierFitting. **경로 부재는 건드리지 않는다.**
+
+    형식과 몸체는 `GC.joint_fittings` 하나다 — 물량표 `MEP 이음` 이 같은 함수로 센다. 원본 부재가 아니므로
+    `SourceEIDs` 에 이음 구성원 EID 를 싣는다(IFC 재검사가 모든 제품에 원본을 요구한다).
+    ★ 가지 토막을 **합치지 않고** 묶음(compound)으로 싣는다. 합치면 윗면이 L자 같은 오목 면이 되는데, FreeCAD
+      평면 면 내보내기는 면의 앞뒤를 첫 두 꼭짓점과 무게중심으로 정해 오목 면에서 뒤집힐 수 있다(IFC 부피 재검사).
+      토막마다 볼록 면만 가진 닫힌 셸이라 그 판정에 기대지 않는다.
+    ★ 구성원이 서로 다른 층에 배정되면 세우지 않는다 — 몸체는 한 층에만 들어가고, IFC 재검사는 구성원마다 층을 본다."""
+    result = GC.joint_fittings(elements, params)
+    FITTINGS.clear()
+    FITTINGS.update({"built": 0, "by_kind": {}, "straight": result["straight"], "skipped": list(result["skipped"])})
+    objs, src = [], []
+    for fitting in result["fittings"]:
+        members = [rec for _c, rec, _p, _a in fitting["members"]]
+        cat, jid = fitting["category"], fitting["joint"]
+        skip = {"joint": jid, "eids": fitting["eids"]}
+        if same_storey is not None and not same_storey(members):
+            FITTINGS["skipped"].append(dict(skip, reason="members_on_different_storeys"))
+            continue
+        obj = None
+        try:
+            shape = Part.makeCompound([_ring_solid(part) for part in fitting["parts"]])
+            if shape.isNull() or not shape.isValid() or shape.Volume <= 0:
+                raise ValueError("invalid fitting shape")
+            obj = Arch.makeComponent()
+            obj.Shape = shape
+            obj.IfcType = _FITTING_IFC_TYPE[cat]
+            obj.Label = f"{cat.capitalize()}Fitting_{len(objs)}"
+        except Exception as exc:
+            if obj is not None:
+                doc.removeObject(obj.Name)             # 층 밖에 남은 빈 객체가 FCStd 에 실리지 않게
+            FITTINGS["skipped"].append(dict(skip, reason="shape_failed", detail=str(exc)))
+            continue
+        FACETED_EXPORT.add(obj.Name)
+        first = members[0]
+        review = [r for r in members if r.get("needs_review")]
+        rec = {"eid": fitting["eids"][0], "_artifact_source_eids": fitting["eids"],
+               "needs_review": bool(review), "review_reason": (review[0].get("review_reason") if review else None),
+               "level": first.get("level"), "elevation": GC.base_z(cat, first),   # overrides.elevation 을 이긴다
+               "system": (first.get("overrides") or {}).get("system", first.get("system")),
+               "fitting_kind": fitting["kind"], "joints": [{"id": jid}]}
+        set_ifc_props(obj, rec)
+        objs.append(obj)
+        src.append(rec)
+        FITTINGS["by_kind"][f"{cat}:{fitting['kind']}"] = FITTINGS["by_kind"].get(f"{cat}:{fitting['kind']}", 0) + 1
+    FITTINGS["built"] = len(objs)
+    return objs, src
 
 
 # ── [Phase 5b] 구조 vs MEP 간섭(clash) 검사 ─────────────────
@@ -1282,11 +1341,12 @@ def _main_impl():
     _hits = {}          # id(obj) -> 매칭된 층 인덱스 목록
     _meta = {}          # id(obj) -> (라벨, z_base)
 
-    def _at_floor(obj_list, src_list, fz, fi):
+    def _at_floor(obj_list, src_list, fz, fi, cat):
         out = []
         for obj, el_r in zip(obj_list, src_list):
-            # 층 판정 높이 — 창 위 벽(z_base 2100)은 floor_z 에 옆 벽의 층을 든다(geom_contract.floor_z)
-            zb = float(el_r.get("floor_z", el_r.get("z_base", el_r.get("elevation", 0.0))) or 0.0)
+            # 층 판정 높이 — 창 위 벽(z_base 2100)은 floor_z 에 옆 벽의 층을 든다. overrides 도 읽는다
+            # (편집한 z_base 가 층 배정에서는 무시되고 형상만 움직이던 것을 막는다 — geom_contract.floor_z).
+            zb = GC.floor_z(cat, el_r)
             _meta.setdefault(id(obj), (getattr(obj, "Label", "?"), zb))
             _hits.setdefault(id(obj), [])
             floor_match = not el_r.get("level") or GC.floor_has_level(floors_info[fi], el_r["level"])
@@ -1295,23 +1355,29 @@ def _main_impl():
                 out.append(obj)
         return out
 
-    def _in_story(obj_list, src_list, fi):
+    def _mep_elev(el_r):
+        # _story_owner/_in_story 는 언제나 MEP(pipe/duct/tray/equipment)·이음 레코드만 받는다 —
+        # 이 카테고리들은 전부 GC._ELEV_CATS 소속이라 base_z 의 키는 항상 'elevation' 이다.
+        return float((el_r.get("overrides") or {}).get("elevation", el_r.get("elevation", 0.0)) or 0.0)
+
+    def _story_owner(el_r):
         """MEP 전용 배정. 배관 elevation(예: 2600)이 층 z 와 '일치' 할 리 없다 —
         층 안에서 도는 설비이므로 elevation 을 포함하는 층(가장 큰 z <= elev)에 넣는다.
         정확 매칭을 요구하면 MEP 는 영원히 고아가 되어 IFC 에서 빠진다."""
+        elev = _mep_elev(el_r)
+        if el_r.get("level"):
+            named = [k for k, floor in enumerate(floors_info) if GC.floor_has_level(floor, el_r["level"])]
+            return named[0] if len(named) == 1 else None
+        below = [k for k, z in enumerate(_fz_list) if z <= elev + _FLOOR_TOL]
+        return max(below, key=lambda k: _fz_list[k]) if below else \
+            min(range(len(_fz_list)), key=lambda k: abs(_fz_list[k] - elev))
+
+    def _in_story(obj_list, src_list, fi):
         out = []
         for obj, el_r in zip(obj_list, src_list):
-            elev = float(el_r.get("elevation", 0.0) or 0.0)
-            _meta.setdefault(id(obj), (getattr(obj, "Label", "?"), elev))
+            _meta.setdefault(id(obj), (getattr(obj, "Label", "?"), _mep_elev(el_r)))
             _hits.setdefault(id(obj), [])
-            below = [k for k, z in enumerate(_fz_list) if z <= elev + _FLOOR_TOL]
-            if el_r.get("level"):
-                named = [k for k, floor in enumerate(floors_info) if GC.floor_has_level(floor, el_r["level"])]
-                owner = named[0] if len(named) == 1 else None
-            else:
-                owner = max(below, key=lambda k: _fz_list[k]) if below else \
-                    min(range(len(_fz_list)), key=lambda k: abs(_fz_list[k] - elev))
-            if owner == fi:
+            if _story_owner(el_r) == fi:
                 _hits[id(obj)].append(fi)
                 out.append(obj)
         return out
@@ -1319,17 +1385,24 @@ def _main_impl():
     # MEP 도 그룹핑 대상에 넣는다 — 지금까지 src_els 가 없어 구조적으로 제외돼
     # IFC 에서 항상 누락됐다. elevation 을 z_base 자리에 넣어 동일하게 다룬다.
     mep_src = [BUILT_RECORDS[o.Name] for o in mep_objs]
+    # 이음 몸체 — 경로 부재 뒤에 세운다. 간섭 검사(`check_clashes`)에는 넣지 않는다: 같은 자리의 경로가 이미 센다.
+    fit_objs, fit_src = build_fittings(doc, el, params,
+                                       same_storey=lambda recs: len({_story_owner(r) for r in recs}) == 1)
+    if fit_objs or FITTINGS["skipped"]:
+        print(f"  이음 몸체 {len(fit_objs)}개 {FITTINGS['by_kind']}"
+              + (f" · 세우지 않음 {len(FITTINGS['skipped'])}: {[s['reason'] for s in FITTINGS['skipped'][:6]]}"
+                 if FITTINGS["skipped"] else ""))
 
     floor_containers = []
     for fi, finfo in enumerate(floors_info):
         fz    = float(finfo.get("z", 0.0))
         flbl  = finfo.get("label", f"Level_{fi+1}")
-        fw  = _at_floor(walls,   wall_src,  fz, fi)
-        fc  = _at_floor(cols,    col_src,   fz, fi)
-        fs  = _at_floor(slabs,   slab_src,  fz, fi)
-        fb  = _at_floor(beams,   beam_src,  fz, fi)
-        fsp = _at_floor(spaces,  space_src, fz, fi)
-        fm  = _in_story(mep_objs, mep_src, fi)
+        fw  = _at_floor(walls,   wall_src,  fz, fi, "wall")
+        fc  = _at_floor(cols,    col_src,   fz, fi, "column")
+        fs  = _at_floor(slabs,   slab_src,  fz, fi, "slab")
+        fb  = _at_floor(beams,   beam_src,  fz, fi, "beam")
+        fsp = _at_floor(spaces,  space_src, fz, fi, "zone")
+        fm  = _in_story(mep_objs, mep_src, fi) + _in_story(fit_objs, fit_src, fi)
         try:
             fl = Arch.makeFloor(fw + fc + fs + fb + fsp + fm)
             fl.Label = flbl
@@ -1449,7 +1522,7 @@ def _main_impl():
     #   영수증에는 {'wall': 88} 만 찍혔다 — 덕트가 조용히 사라져도 build.json 이
     #   말해 주지 않는 상태였다(보가 그렇게 사라진 적이 있다: D3b 참조).
     _by_ifctype = {}
-    for _o in (walls + cols + slabs + beams + mep_objs):
+    for _o in (walls + cols + slabs + beams + mep_objs + fit_objs):
         _t = str(getattr(_o, "IfcType", "") or "").strip().lower().replace(" ", "")
         if _t:
             _by_ifctype[_t] = _by_ifctype.get(_t, 0) + 1
@@ -1474,8 +1547,10 @@ def _main_impl():
         "ifctype_counts": _by_ifctype,
         "built": {"walls": len(walls), "columns": len(cols), "slabs": len(slabs),
                   "beams": len(beams), "spaces": len(spaces), "mep": len(mep_objs),
-                  "floors": len(floor_containers)},
+                  "fittings": len(fit_objs), "floors": len(floor_containers)},
         "mep_volume": dict(MEP_VOLUME),
+        "fittings": dict(FITTINGS, skipped=FITTINGS["skipped"][:20]),
+        "construction_rules": CR.review(data)["receipt"],
         "beams_without_section": n_nosec,
         "materials": dict(MATERIALS_APPLIED),
         "null_walls_repaired": _n_fixed,

@@ -7,7 +7,7 @@ Pascal 편집 화면은 CI 에 없으므로 사람이 한 번 돌리고 결과�
 그러면 게이트가 무거워져 아무도 안 돌린다. 대신 **순수 함수는 전부 node:test 로 잠갔다**
 (`review_logic.js` — 행 HTML·배너·요청 본문·이스케이프). 여기 남은 것은 '붙는 자리' 확인이다.
 
-## 5가지
+## 8가지
 
 | # | 확인할 것 | 통과 기준 |
 |---|---|---|
@@ -15,7 +15,8 @@ Pascal 편집 화면은 CI 에 없으므로 사람이 한 번 돌리고 결과�
 | 2 | **일괄 확정 1회** — '일상 이음 후보 N건 일괄 확정' | revision 이 **한 번만** 오르고 결정 기록 한 건에 후보 id 가 N개. 확정한 수만큼 무리가 준다 |
 | 3 | **Pascal 인스펙터 치수 1회** — 편집 화면에서 부재 치수를 바꾼다 | 저장 요청 1번 → revision +1, 그 뒤 메아리 저장은 `no_changes`(revision 그대로). 표시 revision 이 화면에서 바뀐다 |
 | 4 | **(3b) 검토 목록 CSV** — GUI 버튼 | `<프로젝트>/review/clash_r<rev>.csv` · `connectivity_r<rev>.csv` 가 생기고 Excel 이 바로 연다(한글 안 깨짐) |
-| 5 | **납품 검증 빌드 1회** — `(4) 납품 검증 빌드` | FCStd·IFC 둘 다 `verified`. `build.json` 의 `stage_seconds` 를 아래 표에 적는다(다음 사람이 소요를 안다) |
+| 5 | **납품 검증 빌드 1회** — `납품 ▾ → 납품 검증 빌드 (IFC)` 뒤 Bonsai 에서 열기 | `.ifc` 가 `verified` · Bonsai 에서 **개구부가 뚫려 보이고** 배관/덕트/이음이 보이고 `NeedsReview` 필터가 먹는다. 소요를 아래 표에 적는다 |
+| 5b | **FreeCAD 빌드(동결 경로)** — `.FCStd` 가 필요할 때만 | FCStd·IFC 둘 다 `verified`. 건드리지 않았으면 `—` |
 | 6 | **설비 도면 열기** — GUI `열기…` → 환기 평면도 | 종류 대화의 기본 선택이 '설비' · 확인하면 **설정 창**이 열린다(파싱하지 않는다) · 저장하면 브라우저까지 한 번에 · 검토 대기에 배경 기둥이 없다 |
 | 7 | **건축 도면 열기** — GUI `열기…` → 건축 평면도 | 기본 선택이 '건축' · 확인하면 파싱 후 브라우저가 열린다(버튼 한 번) |
 
@@ -24,9 +25,22 @@ Pascal 편집 화면은 CI 에 없으므로 사람이 한 번 돌리고 결과�
 | 날짜 | 버전 | 1 | 2 | 3 | 4 | 5 | 비고 |
 |---|---|---|---|---|---|---|---|
 | 2026-09-16 | `70ae182` | ✅ 합성 덕트 r0→r1→r2 | ✅ 합성 덕트 3건 → r1, 결정 1건 | — | ✅ 통합 24행 · 연결 110행 | — | 3·5 는 이번 변경이 안 건드려 생략 |
+| 2026-09-21 | 미커밋(납품 경로 전환) | — | — | — | — | ⚠️ 반쪽 | `.ifc` 는 골든 5건 전부 `verified`(코드로 확인). **Bonsai 로 열어 보지 않았다** — 개구부 뚫림·설비 보임·`NeedsReview` 필터는 미확인. 5b(FreeCAD)는 여유 RAM 부족으로 미실행 |
 
 `—` 는 그 릴리스에서 건드리지 않아 돌리지 않았다는 뜻이다. **건드렸는데 비워 두지 말 것** — 비어 있으면
 다음 사람은 '통과' 로 읽는다.
+
+**아직 안 돌린 것(2026-09-21 납품 경로 전환):** ① Bonsai 로 열어 보기(5번) ② PyInstaller onefile 에서
+납품 빌드가 실제로 도는지 — `build_exe.bat` 이 이제 `--selftest` 를 게이트로 돌리지만 그건 import 까지만
+본다 ③ 같은 골든을 FreeCAD 로 빌드한 나란한 수치(5b). 실무 도면 소요는 **쟀다** — 골든 5건 전부
+`verified`, 가장 느린 것이 난방 33.8초([ifc-builder.md](decisions/ifc-builder.md) 의 표).
+
+## 시공기준 표 원문 확인 (수시 — 릴리스마다 아님)
+
+`construction_rules.RULES` 의 `source_kind: "mirror"` 행은 kcsc.re.kr(국가건설기준센터) 원문 PDF 를
+못 열어 미러 사이트 전사로 읽은 것이다. `python -c "import construction_rules as C; print([r['id'] for r in C.RULES if r['source_kind']=='mirror'])"`
+로 목록을 뽑아, 여유 있을 때 KCSC 원문과 대조해 `source_kind: "primary"` 로 올린다. 값이 다르면
+`correction` 필드를 고치고 [construction-rules.md](decisions/construction-rules.md) 에 적는다.
 
 ## 골든 등록 (새 실무 도면이 들어왔을 때)
 

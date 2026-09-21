@@ -39,6 +39,35 @@ def test_source_hash_binding_rejects_changed_input(tmp_path):
         validate_profile(p, 'a' * 64)
 
 
+def test_service_is_optional_but_must_be_a_known_value(tmp_path):
+    """`service` 는 construction_rules.SERVICES 열거형이다 — 계통 이름(system)과 다르다."""
+    from mep_profile import validate_profile
+    _, path = source(tmp_path)
+    p = profile(path)
+    assert validate_profile(p, p['source_sha256'])['layers'][0].get('service') is None   # 선언 안 해도 통과
+    p['layers'][0]['service'] = 'drain'
+    assert validate_profile(p, p['source_sha256'])['layers'][0]['service'] == 'drain'
+    p['layers'][0]['service'] = 'heating'   # SERVICES 에 없다(system 과 혼동한 흔한 오타)
+    with pytest.raises(ValueError, match='service'):
+        validate_profile(p, p['source_sha256'])
+
+
+def test_insulation_declares_grade_and_temperature_and_the_parser_stamps_the_looked_up_thickness(tmp_path):
+    """보온은 등급이 필수, 다습·유온은 선택 — 파서가 시공기준 표를 조회해 rec 에 한 번만 박는다."""
+    from mep_profile import validate_profile
+    _, path = source(tmp_path)
+    p = profile(path, layers=[{**profile(path)['layers'][0], 'nominal_size': '50A', 'service': 'domestic_hot',
+                               'insulation': {'grade': '가', 'fluid_temp_c': 80}}])
+    validated = validate_profile(p, p['source_sha256'])
+    assert validated['layers'][0]['insulation'] == {'grade': '가', 'fluid_temp_c': 80.0}
+    with pytest.raises(ValueError, match='grade'):
+        validate_profile(profile(path, layers=[{**profile(path)['layers'][0], 'insulation': {'grade': 'X'}}]),
+                         p['source_sha256'])
+    result = dp.parse(str(path), [], block_rules=[], mep_profile=p)
+    rec = result['elements']['pipe'][0]
+    assert rec['insulation_mm'] == 35.0 and rec['insulation_table'] == 'hot_90'   # 표 2.5-3 DN40~125, 가
+
+
 def test_unknown_units_require_explicit_scale(tmp_path):
     from mep_profile import inspect_mep_source
     _, path = source(tmp_path, 0)

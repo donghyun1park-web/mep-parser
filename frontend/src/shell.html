@@ -21,11 +21,16 @@
       <button id="tlinked" class="on">도면 + 3D</button>
       <button id="t3d">3D 보기</button>
       <button id="t2d">평면 편집</button>
+      <button id="tside">평면 + 3D</button>
       <span id="tools2d">
+        <select id="cat2d" style="width:auto;padding:3px">
+          <option value="wall">벽</option><option value="pipe">배관</option>
+          <option value="duct">덕트</option><option value="tray">트레이</option>
+        </select>
         <button data-m="select" class="on">선택/이동</button>
         <button data-m="split">분할</button>
         <button data-m="join">결합</button>
-        <button data-m="draw">벽 그리기</button>
+        <button data-m="draw">그리기</button>
         <span id="floorwrap" class="muted">층 <select id="floor2d" style="width:auto;padding:3px"></select></span>
         <span id="hint2d" class="muted"></span>
       </span>
@@ -50,8 +55,13 @@
     <div id="err">3D 화면을 시작하지 못했습니다. 브라우저의 WebGL 지원을 확인하세요.</div>
   </div>
   <div id="panel">
-    <h2>3D 미리보기 <span class="muted" id="src"></span></h2>
+    <h2>3D 미리보기 <span class="muted" id="src"></span> <span class="badge-review">검토용 모델 — 시공 승인 아님</span></h2>
     <div id="counts"></div>
+    <section id="boqSection">
+      <h3>물량 요약 <span class="muted">(저장 시 갱신)</span></h3>
+      <div id="boqHeightBasis" class="muted"></div>
+      <div id="boqBody" class="muted">없음</div>
+    </section>
     <section id="sectionControls">
       <h3>수평 단면</h3>
       <label><input id="sectionEnabled" type="checkbox"/> 위쪽 숨기기 (렌더링 전용)</label>
@@ -76,9 +86,11 @@
         <select id="e_cat"></select></div>
       <div class="row"><label>폭/지름 (mm)</label><input id="e_w" type="number"/></div>
       <div class="row"><label>높이/두께 (mm)</label><input id="e_h" type="number"/></div>
+      <div class="row" id="e_zrow"><label>중심 높이 (mm)</label><input id="e_z" type="number"/></div>
       <div class="row"><label><input type="checkbox" id="e_del" style="width:auto"/> 삭제</label></div>
       <div class="row" id="reviewrow"><label><input type="checkbox" id="e_review" style="width:auto"/> 이 형상을 확인하고 검토 완료</label></div>
       <button id="apply">수정 적용</button>
+      <button id="editInPlan" hidden style="margin-top:4px">평면에서 고치기</button>
       <div id="bulk"></div>
     </div>
     <h3>창호 배치 (반자동)</h3>

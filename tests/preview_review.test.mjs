@@ -16,6 +16,12 @@ import {
   fitDistance,
   recordOnEditFloor,
   editBackdropState,
+  REASON,
+  summarizeBoq,
+  boqHeightBasisText,
+  boqBodyHtml,
+  BOQ_SCOPE_NOTE,
+  createHistory,
 } from '../frontend/src/review_logic.js';
 
 test('camera framing fits the bounding sphere in both split and wide viewports', () => {
@@ -63,6 +69,58 @@ test('clash rows lead the review queue in the given order and select the MEP ele
   assert.deepEqual(rows.map(x=>[x.kind,x.eid,x.category]),
     [['clash','B:d:1','간섭'],['clash','A:p:1','간섭'],['element','A:w:9','wall']]);
   assert.match(rows[0].reason, /\(2500, 100\) z 2250~2550 · wall A:w:1 두께 200mm ↔ SA 400×300/);
+});
+
+test('construction-rule violations lead the queue after clashes, and info items never appear', () => {
+  const clashes=[{id:'c',action:'벽 관통',at:[0,0],z:[0,1],struct:{eid:'w:1'},mep:{eid:'d:a'}}];
+  const rules=[
+    {eid:'d:flat',rule:'duct-aspect-ratio',kind:'violation',standard:'KCS 31 20 20',clause:'3.2.1(2)②',
+     values:{ratio:4.4}},
+    {eid:'p:drain',rule:'drain-slope-by-diameter',kind:'info',standard:'KDS 31 30 25',clause:'4.1',
+     values:{required_fall_mm:100}}];
+  const rows=buildReviewEntries({},{},clashes,{},rules);
+  assert.deepEqual(rows.map(x=>[x.kind,x.eid,x.category]),
+    [['clash','d:a','간섭'],['rule','d:flat','시공기준']]);          // info 는 목록에 없다
+  assert.match(rows[1].reason,/KCS 31 20 20 3\.2\.1\(2\)② 위반 · ratio=4\.4/);
+  assert.deepEqual(buildReviewEntries({},{},[],{},[]),[]);           // 규칙 0건은 조용하다
+});
+
+test('layer-rule suggestions follow rules, carry an apply payload, and never leak onto other rows', () => {
+  const clashes=[{id:'c',action:'벽 관통',at:[0,0],z:[0,1],struct:{eid:'w:1'},mep:{eid:'d:a'}}];
+  const suggestions=[
+    {code:'thin_pair', row_layer:'A-CON', pattern:'^A\\-CON$', op:'set_opts', category:'wall',
+     opts:{pair_min:83}, evidence:{median_mm:250, count:2}},
+    {code:'width_conflict', row_layer:'A-STEEL', pattern:'^A-STEEL$', op:'set_width', category:'wall',
+     width:450, evidence:{declared_mm:200, detected_mm:450, count:3}}];
+  const rows=buildReviewEntries({},{},clashes,{},[],suggestions);
+  assert.deepEqual(rows.map(x=>[x.kind,x.category,x.label]),
+    [['clash','간섭',undefined],['suggestion','레이어 제안','A-CON'],['suggestion','레이어 제안','A-STEEL']]);
+  assert.match(rows[1].reason, /얇은 오결합.*250mm.*2개.*pair_min=83/);
+  assert.match(rows[2].reason, /두께 불일치.*450mm ≠ 선언 200mm.*3개/);
+  assert.deepEqual(rows[1].apply, suggestions[0]);
+  assert.equal(rows[0].apply, undefined);                              // 간섭 줄에는 새지 않는다
+  assert.deepEqual(buildReviewEntries({},{},[],{},[],[]),[]);          // 제안 0건은 조용하다
+});
+
+test('reviewRowHtml renders an apply button only for suggestion rows with a server, and escapes the payload', () => {
+  const entry={key:'suggestion:thin_pair:A-CON', kind:'suggestion', eid:null, label:'A-CON',
+    category:'레이어 제안', floor:'', reason:'제안 문구',
+    apply:{code:'thin_pair', row_layer:'A-CON', opts:{pair_min:83}}};
+  const saved=reviewRowHtml(entry, true);
+  assert.match(saved, /class="apply-suggest"/);
+  assert.deepEqual(JSON.parse(saved.match(/data-apply='([^']*)'/)[1].replace(/&quot;/g,'"').replace(/&#39;/g,"'")), entry.apply);
+  const standalone=reviewRowHtml(entry, false);
+  assert.ok(!standalone.includes('apply-suggest'));                    // 서버 없이 연 독립 HTML 에는 못 쓴다
+  const clashRow=reviewRowHtml({key:'clash:1', kind:'clash', eid:'d:a', category:'간섭', floor:'', reason:'r'}, true);
+  assert.ok(!clashRow.includes('apply-suggest'));                      // apply 없는 행에는 버튼이 없다
+});
+
+test('every review_reason code the parser/profile/edit_review emit has a Korean REASON entry', () => {
+  const codes=['thin_pair','single','single_offset','closed','axis',
+    'column_layer_looks_like_wall','column_boundary_unresolved','column_outline_inferred',
+    'project_architecture_classification','mep_source_gap','mep_dimensions_assumed',
+    'sleeve_symbol','equipment_symbol_envelope','wall_overlap','endpoint_gap','opening_host_missing'];
+  for (const code of codes) assert.ok(REASON[code] && REASON[code].length > 0, code);
 });
 
 test('connection candidates follow clashes, name the gap and partner, and conflicts name both systems', () => {
@@ -247,4 +305,117 @@ test('the source pane frames the parsed building, not the change-note blocks aro
   assert.ok(modelBounds(twoFloors,'2F').x > 80000);
   // 원(기둥)도 반지름만큼 담는다.
   assert.ok(modelBounds({column:[{eid:'c', center:[0,0], radius:300}]}).w >= 600);
+});
+
+// ── 되돌리기·다시 실행(Planform 대조에서 가져온 편집기 손맛) ─────────────
+test('createHistory walks back and forward, and a new action drops the redo branch', () => {
+  const h = createHistory('a');
+  h.push('b'); h.push('c');
+  assert.deepEqual(h.sizes(), {undo: 2, redo: 0});
+  assert.equal(h.undo(), 'b');
+  assert.equal(h.undo(), 'a');
+  assert.equal(h.undo(), null);                       // 더 갈 곳이 없으면 null (호출측은 아무것도 안 한다)
+  assert.equal(h.redo(), 'b');
+  assert.equal(h.redo(), 'c');
+  assert.equal(h.redo(), null);
+  // 되돌린 뒤 새 동작 → 되돌릴 미래는 버린다(분기를 남기지 않는다)
+  h.undo();
+  h.push('d');
+  assert.equal(h.sizes().redo, 0);
+  assert.equal(h.redo(), null);
+  assert.equal(h.current(), 'd');
+});
+
+test('createHistory ignores a no-op and caps the stack', () => {
+  const h = createHistory('a');
+  assert.equal(h.push('a'), false);                   // 같은 값은 단계를 만들지 않는다
+  assert.deepEqual(h.sizes(), {undo: 0, redo: 0});
+  const capped = createHistory('0', 3);
+  for (const s of ['1', '2', '3', '4']) capped.push(s);
+  assert.equal(capped.sizes().undo, 3);
+  // ★ 저장 응답(rebase)은 기준선만 옮긴다 — 되돌릴 미래를 먹으면 안 된다.
+  //   되돌리기가 저장을 부르고 그 저장이 redo 를 지우면 '다시 실행'이 영원히 안 된다(브라우저 QA 실측).
+  const served = createHistory('a');
+  served.push('b');
+  assert.equal(served.undo(), 'a');
+  served.rebase('a');                                 // 저장 응답 — 로컬 상태는 그대로다
+  assert.equal(served.sizes().redo, 1, 'a save acknowledgement must not eat the redo branch');
+  assert.equal(served.redo(), 'b');
+});
+
+// ── Phase 4: 물량 요약 패널 ────────────────────────────────────────────
+const SAMPLE_BOQ = {
+  '벽': [['두께','개수','길이(m)','높이(m)','면적(㎡)','체적(㎥)'],
+         [['T200', 5, 45.2, 2.8, 126.6, 25.3], ['T300', 2, 10.1, '', 28.3, 8.5]],
+         ['합계', 7, 55.3, '', 154.9, 33.8]],
+  'MEP': [['구분','규격(mm)','개수','길이(m)','길이기준'],
+          [['배관', '100', 3, 12.5, '원본(2D)'], ['덕트', '400x300', 2, 8.0, '모델(수정·경사 포함)']],
+          ['합계', '', 5, 20.5, '']],
+  '창호': [['구분','규격(mm)','개수'], [['창', '1200x1200', 4], ['문', '900x2100', 2]], ['합계', '', 6]],
+};
+
+test('summarizeBoq extracts wall/MEP/opening rows by the exact aggregate() column order', () => {
+  const s = summarizeBoq(SAMPLE_BOQ);
+  assert.equal(s.error, null);
+  assert.deepEqual(s.wall, [{key:'T200', lengthM:45.2, heightM:2.8, volumeM3:25.3},
+                             {key:'T300', lengthM:10.1, heightM:'', volumeM3:8.5}]);
+  assert.deepEqual(s.mep, [{label:'배관', size:'100', lengthM:12.5, basis:'원본(2D)'},
+                            {label:'덕트', size:'400x300', lengthM:8.0, basis:'모델(수정·경사 포함)'}]);
+  assert.deepEqual(s.openings, [{kind:'창', size:'1200x1200', count:4}, {kind:'문', size:'900x2100', count:2}]);
+});
+
+test('summarizeBoq reuses aggregate() totals instead of re-adding them on screen', () => {
+  const withSlab = Object.assign({}, SAMPLE_BOQ, {
+    '슬래브': [['번호','레이어','면적(㎡)','두께(mm)','체적(㎥)'],
+               [['Slab_0','A-SLAB',120.5,200,24.1]], ['합계','',120.5,'',24.1]]});
+  const t = summarizeBoq(withSlab).totals;
+  assert.equal(t.wallCount, 7);          // 합계행 그대로 — 화면이 다시 더하지 않는다
+  assert.equal(t.wallLengthM, 55.3);
+  assert.equal(t.slabAreaM2, 120.5);
+  assert.equal(t.windows, 4);
+  assert.equal(t.doors, 2);
+  const html = boqBodyHtml(withSlab);
+  assert.match(html, /슬래브 120\.5㎡/);
+  assert.match(html, /벽 55\.3m · 7개/);
+  assert.match(html, /문\/창 2\/4/);
+  assert.match(html, /개구부 미차감/);     // 물량표가 무엇을 안 세는지 화면에도 적는다
+  assert.ok(BOQ_SCOPE_NOTE.includes('검토용'));
+  // 벽이 없는 설비 도면 — 0 을 실측처럼 적지 않는다(합계 줄에서 아예 뺀다)
+  const mepOnly = boqBodyHtml({'벽': [['두께','개수','길이(m)','높이(m)','면적(㎡)','체적(㎥)'], [], ['합계',0,0,'',0,0]],
+                               'MEP': SAMPLE_BOQ['MEP']});
+  assert.doesNotMatch(mepOnly, /벽 0m|0개/);
+});
+
+test('summarizeBoq tolerates missing sections and a project_server error fallback', () => {
+  assert.deepEqual(summarizeBoq({}), {error:null, wall:[], mep:[], openings:[],
+    totals:{wallCount:null, wallLengthM:null, slabAreaM2:null, doors:0, windows:0}});
+  assert.equal(summarizeBoq(null).totals, null);     // boq 자체가 없으면 합계도 없다(0 으로 꾸미지 않는다)
+  const failed = summarizeBoq({error:'ValueError: boom'});
+  assert.equal(failed.error, 'ValueError: boom');
+  assert.deepEqual(failed.wall, []);
+  assert.equal(failed.totals, null);
+  assert.equal(boqBodyHtml({}), '없음');              // 빈 물량표에는 각주도 안 붙인다
+});
+
+test('boqHeightBasisText names the source, and the panel actually carries the column it points to', () => {
+  // 어긋난 적 있음(리뷰 발견): "행마다 높이 열 참고"라 해 놓고 패널에 높이가 안 보였다.
+  // 문구가 가리키는 h= 값이 boqBodyHtml 출력에 실제로 있는지 여기서 같이 잠근다.
+  assert.match(boqHeightBasisText(true), /선언/);
+  assert.match(boqHeightBasisText(false), /기본값/);
+  assert.match(boqBodyHtml(SAMPLE_BOQ), /h2\.8m/);
+});
+
+test('boqBodyHtml renders each section (including the honest per-row height), escapes content, and says so when aggregate() failed', () => {
+  const html = boqBodyHtml(SAMPLE_BOQ);
+  assert.match(html, /T200/);
+  assert.match(html, /h2\.8m · 45\.2m · 25\.3㎥/);     // 단일 높이 — 그대로 보여준다
+  assert.match(html, /T300/);
+  assert.match(html, /h\?m · 10\.1m · 8\.5㎥/);          // 섞인 높이 — 숫자 하나를 대표로 꾸며내지 않는다
+  assert.match(html, /배관 100/);
+  assert.match(html, /모델\(수정·경사 포함\)/);
+  assert.match(html, /창 1200x1200/);
+  assert.equal(boqBodyHtml({}), '없음');
+  const failed = boqBodyHtml({error:'<script>x</script>'});
+  assert.doesNotMatch(failed, /<script>x<\/script>/);
+  assert.match(failed, /물량 계산 실패/);
 });

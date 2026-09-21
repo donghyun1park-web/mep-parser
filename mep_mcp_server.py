@@ -35,6 +35,7 @@ BLOCK_MAP = os.path.join(HERE, "block_map.csv")
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 import dxf_parser as _P  # noqa: E402
+import layer_map_io as _LM  # noqa: E402
 from project_server import open_source_project, session_from_geometry, verified_artifacts
 from project_store import RevisionConflict, atomic_json
 
@@ -175,9 +176,13 @@ def get_review_items(json_path: str = DEFAULT_JSON) -> str:
                     "review_reason": item.get("review_reason"),
                     "edit_diagnostics": item.get("edit_diagnostics", []),
                     "overrides": item.get("overrides", {}),
+                    # 프로젝트 기본값이 채운 필드 — 카테고리 추정이 아니라 선언이지만, 레이어·프로필
+                    # 선언과는 구분해 AI 가 "무엇을 확인할지" 판단할 수 있게 한다.
+                    "declaration_basis": item.get("declaration_basis", {}),
                 })
     clash = data.get("clash_review") or {}
     net = data.get("mep_connectivity") or {}
+    rules = data.get("construction_rules") or {}
     out = {
         "project": data.get("project"),
         "edits_report": data.get("edits_report", {}),
@@ -188,10 +193,13 @@ def get_review_items(json_path: str = DEFAULT_JSON) -> str:
         # 설비 연결 — 원본 반영(source_coverage)과 따로. 이음 후보는 모델에 쓰지 않았다(확정은 사람).
         "mep_connectivity": {"summary": net.get("summary", {}), "candidates": (net.get("candidates") or [])[:50],
                              "conflicts": (net.get("conflicts") or [])[:20]},
+        # 시공기준(construction_rules.py) — verdict=confirmed 규칙만. 형상은 바꾸지 않는다.
+        "construction_rules": {"summary": rules.get("summary", {}), "items": (rules.get("items") or [])[:50]},
         "summary": (f"{len(suggestions)} unmapped layer/block(s), "
                     f"{len(review_elements)} element(s) need review, "
                     f"{(clash.get('summary') or {}).get('total', 0)} clash candidate(s), "
-                    f"{(net.get('summary') or {}).get('candidates', 0)} MEP connection candidate(s)."),
+                    f"{(net.get('summary') or {}).get('candidates', 0)} MEP connection candidate(s), "
+                    f"{(rules.get('summary') or {}).get('violations', 0)} construction-rule violation(s)."),
     }
     return json.dumps(out, indent=2, ensure_ascii=False)
 
@@ -548,9 +556,10 @@ def apply_layer_rule(layer_pattern: str, category: str,
     h = str(height) if height else ""
     t = str(thickness) if thickness else ""
     try:
-        with open(LAYER_MAP, "a", encoding="utf-8") as f:
-            f.write(f"\n{layer_pattern},{category},{w},{h},{t},{opts}")
-        return (f"Added rule '{layer_pattern}' -> {category} to layer_map.csv. "
+        # 헤더 바로 아래에 넣는다 — 끝에 붙이면 선매칭 규칙에 가려져 아무 일도 안 난다
+        # (layer_map_io — project_server.apply_layer_suggestion 과 같은 함수).
+        _LM.insert_layer_rule_first(LAYER_MAP, f"{layer_pattern},{category},{w},{h},{t},{opts}")
+        return (f"Added rule '{layer_pattern}' -> {category} to layer_map.csv (above existing rules). "
                 "Re-run parse_dxf to apply.")
     except Exception as e:
         return f"Error writing layer_map.csv: {e}"
@@ -617,7 +626,12 @@ def diagnose_build(json_path: str = DEFAULT_JSON, top_n: int = 10,
 @mcp.tool()
 def build_freecad(out_name: str, json_path: str = DEFAULT_JSON) -> str:
     """
-    Step 4: geometry.json 을 FreeCAD 3D 모델(.FCStd)과 IFC 로 빌드한다. 마지막 단계.
+    Step 4: geometry.json 을 FreeCAD 3D 모델(.FCStd)과 IFC 로 빌드한다.
+
+    ★ 이건 **동결된 경로**다(2026-09-21, docs/decisions/ifc-builder.md). 납품 IFC 는
+    `ifc_builder.build` 가 내고 FreeCAD 설치가 필요 없으며 몇 배 빠르다 — GUI 의
+    '납품 ▾ → 납품 검증 빌드 (IFC)' 또는 `python ifc_builder.py <geometry.json> <out.ifc>`.
+    여기는 `.FCStd` 가 필요하거나 두 경로를 대조할 때만 쓴다.
 
     최신 프로젝트 revision을 재파싱하고 격리된 FreeCAD 실행기로 빌드한다.
     현재 실행의 검사 영수증, 입력 지문, 실제 파일 해시가 일치할 때만 verified를 반환한다.

@@ -108,6 +108,43 @@ def test_boq_counts_vertical_runs_and_round_ducts():
     assert by[("덕트", "110x54")][3] == pytest.approx(2.0)
 
 
+def test_the_support_sheet_says_it_is_a_lower_bound_and_names_the_clause():
+    """시공기준 표(construction_rules.py)의 지지 개수는 하한 추정 — 근거 열에 규칙 id·조항을 싣는다."""
+    supply = {"eid": "p:sup", "points": [[0, 0], [10000, 0]], "elevation": 2600.0, "diameter": 20.0,
+              "nominal_size": "DN80", "material": "강관"}
+    headers, rows, tot = boq_export.aggregate(_data(pipe=[supply]))["MEP 지지·청소구"]
+    assert headers[-1] == "근거"
+    (row,) = rows
+    assert row[3] == "DN80" and "pipe-support-spacing-horizontal" in row[-1] and "3.4" in row[-1]
+    assert tot[6] == row[6]                                   # 합계행이 개수(하한) 열을 더한다
+
+
+def test_the_insulation_sheet_reads_the_thickness_mep_profile_already_looked_up():
+    """rec['insulation_mm'] 는 파싱(mep_profile._assign) 시점에 한 번만 계산된 값 — BOQ 는 다시 계산하지 않는다."""
+    hot = {"eid": "p:hot", "points": [[0, 0], [10000, 0]], "elevation": 2600.0, "diameter": 60.5,
+           "service": "domestic_hot", "insulation_mm": 35.0, "insulation_table": "hot_90"}
+    headers, rows, tot = boq_export.aggregate(_data(pipe=[hot]))["MEP 보온"]
+    assert headers == ["구분", "용도", "규격", "두께(mm)", "길이(m)", "근거"]
+    (row,) = rows
+    assert row[:4] == ["배관", "domestic_hot", "Ø60.5", 35.0] and row[4] == pytest.approx(10.0)
+    assert "insulation-thickness-hot-water" in row[-1] and "최소값" in row[-1]
+    assert tot[4] == pytest.approx(row[4])
+    assert "MEP 보온" not in boq_export.aggregate(_data(duct=[FLAT]))                 # 선언 없으면 섹션 자체가 없다
+
+
+def test_the_support_and_insulation_sheets_flag_project_default_material_and_grade():
+    """근거 열에 '프로젝트 기본값' 을 붙인다 — 검토자가 선언과 기본값을 구분할 수 있게."""
+    supply = {"eid": "p:sup", "points": [[0, 0], [10000, 0]], "elevation": 2600.0, "diameter": 20.0,
+              "nominal_size": "DN80", "material": "강관", "declaration_basis": {"material": "project_default"}}
+    _, (row,), _ = boq_export.aggregate(_data(pipe=[supply]))["MEP 지지·청소구"]
+    assert "재질=프로젝트 기본값" in row[-1]
+    hot = {"eid": "p:hot", "points": [[0, 0], [10000, 0]], "elevation": 2600.0, "diameter": 60.5,
+           "service": "domestic_hot", "insulation_mm": 35.0, "insulation_table": "hot_90",
+           "declaration_basis": {"insulation": "project_default"}}
+    _, (irow,), _ = boq_export.aggregate(_data(pipe=[hot]))["MEP 보온"]
+    assert "등급=프로젝트 기본값" in irow[-1]
+
+
 def test_broken_path3d_is_stopped_by_the_build_gate():
     broken = dict(SLOPED, eid="d:broken", path3d={"segments": [
         {"type": "line", "start": [0, 0, 0], "end": [1000, 0, 0]},

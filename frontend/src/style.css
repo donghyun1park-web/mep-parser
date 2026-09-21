@@ -15,6 +15,10 @@ html,body{margin:0;height:100%;overflow:hidden;font-family:"Segoe UI",sans-serif
   select,input{width:100%;box-sizing:border-box;background:#1e2127;color:#e6e6e6;border:1px solid #4a5364;border-radius:4px;padding:6px}
   .muted{color:#7a8290;font-size:12px}
   .kv{display:flex;justify-content:space-between;font-size:12px;margin:3px 0}
+  .boq-total{font-weight:600;color:#dfe6f2;border-bottom:1px solid #3a4150;padding-bottom:4px;margin-bottom:6px}
+  .boq-note{margin-top:6px;font-size:11px;line-height:1.5;color:#9aa4b2}
+  .badge-review{font-size:10px;font-weight:600;color:#efc687;border:1px solid #6b5a33;
+      border-radius:3px;padding:1px 5px;vertical-align:middle;white-space:nowrap}
   .kv span:first-child{color:#9aa4b2}
   #editbox{display:none}
   #dl{width:100%;margin-top:14px;background:#2d8a4e;border-color:#2d8a4e}
@@ -42,6 +46,13 @@ html,body{margin:0;height:100%;overflow:hidden;font-family:"Segoe UI",sans-serif
 #editSourceGeometry{pointer-events:none}
 #editSourceGeometry .edit-source-line{fill:none;stroke:#c3cbd7;stroke-width:1.2;vector-effect:non-scaling-stroke}
 #view2d.source-on .w:not(.sel){stroke-opacity:.65}
+/* 평면 + 3D 나란히 — 왼쪽은 편집하는 평면, 오른쪽은 저장 없이도 따라 바뀌는 3D(보기 전용).
+   `#view2d` 는 본래 전체 오버레이라 오른쪽 절반만 비워 주면 된다. */
+/* ★ `#view2d` 는 SVG(치환 요소)다 — `width:auto` 로 두면 left/right 가 아니라 **viewBox 종횡비**로
+   폭이 정해진다(실측: 높이 720 × 1.266 = 911.8px, 오른쪽 절반을 덮었다). 폭을 직접 준다. */
+#view.side #view2d{display:block;width:50%;right:auto;border-right:1px solid #3a3f4a}
+#view.side #linkedWorkspace{display:grid;grid-template-columns:1fr;left:50%}
+#view.side #sourcePane{display:none}
 #linkedWorkspace{position:absolute;inset:0;display:grid;grid-template-columns:minmax(280px,42%) 1fr;padding-top:72px;box-sizing:border-box}
 #linkedWorkspace.three-only{grid-template-columns:1fr;padding-top:72px}
 #linkedWorkspace.three-only #sourcePane{display:none}
@@ -71,10 +82,14 @@ html,body{margin:0;height:100%;overflow:hidden;font-family:"Segoe UI",sans-serif
 .review-item small{display:block;color:#9aa4b2;margin-top:2px;white-space:normal}
 .source-legend{font-weight:600}.source-legend.original{color:#b4bdc9}.source-legend.derived{color:#55b8ff}
 #view2d .w{stroke:#6f9fe0;fill:none;stroke-linecap:butt}
+#view2d .w.pipe{stroke:#4cc9f0}
+#view2d .w.duct{stroke:#f4a261}
+#view2d .w.tray{stroke:#90be6d}
 #view2d .w.sel{stroke:#ffd24a}
 #view2d .w.rev{stroke:#e07b7b}
 #view2d .w.man{stroke:#5fd08a}
 #view2d .w.del{stroke:#555;stroke-dasharray:6 6}
+#view2d .w-bg{stroke:#3a4152;fill:none;stroke-linecap:butt;pointer-events:none}
 #view2d .col{fill:#c060c0;opacity:.75}
 #view2d .op{fill:#e08040;opacity:.85}
 #view2d .hnd{fill:#ffd24a;stroke:#000;stroke-width:1;cursor:grab}

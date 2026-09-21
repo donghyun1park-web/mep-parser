@@ -1,3 +1,30 @@
+// 검토 사유 코드 → 한국어 문장. 사용자가 고칠 대상을 보는 유일한 화면(인스펙터 `whyHtml`)에
+// 원문 코드가 그대로 찍히면 안 된다. 파서·프로필·edit_review 가 내는 코드를 전부 담는다.
+export const REASON = {
+  'thin_pair': '두께가 이 레이어 중앙값의 1/3 미만 — 벽면 옆 마감선과 짝지었을 수 있다. '
+             + '실제 두께가 맞으면 layer_map 에 opts pair_min 을 주면 통과한다.',
+  'single': '반대편 면선을 못 찾아 이 선 하나를 중심선으로 썼다 — 두께는 기본값이다.',
+  'single_offset': '반대편 면선이 없어 중심선을 폭의 절반만큼 밀어 추정했다 — '
+                 + '위치·두께 둘 다 추정치다.',
+  'closed': '닫힌 폴리선을 그대로 압출했다(면선 페어링을 거치지 않음).',
+  'axis': '치수선(DIMENSION)에서 뽑은 축선이다 — 단면은 부재일람표에서 온다.',
+  // 기둥 세 사유는 종전에 원문 키가 그대로 찍혔다 — 사용자가 고칠 대상을 보는 유일한 화면인데.
+  'column_layer_looks_like_wall': '이 레이어의 선은 기둥이 아니라 **벽처럼** 그려졌다(평행 짝). '
+             + 'layer_map 한 줄이면 해결된다 — 경고 맨 위에 붙여 넣을 줄이 있다.',
+  'column_boundary_unresolved': '기둥 경계를 닫지 못했다 — 원본 선이 실제로 면을 이루지 않는다. '
+             + '레이어 분류가 맞는지 먼저 보고, 맞다면 도면의 경계를 확인한다.',
+  'column_outline_inferred': '원본 선이 닫은 면으로 기둥을 복원했다 — 분류가 맞는지 확인이 필요하다.',
+  'project_architecture_classification': '레이어명이 아니라 이 프로젝트가 선언한 건축 분류'
+             + '(architecture_layers) 규칙으로 분류됐다 — 확인이 필요하다.',
+  'mep_source_gap': '이어 그린 조각을 하나로 합쳤는데, 원본 도면에 그 이음 자리 틈이 있었다 — 확인이 필요하다.',
+  'mep_dimensions_assumed': '치수가 선언되지 않아 프로필 기본값을 썼다 — 실제 규격을 선언하면 사라진다.',
+  'sleeve_symbol': '슬리브 기호에서 만든 장비 몸체다 — 실제 규격(관통 구멍 크기)을 확인해야 한다.',
+  'equipment_symbol_envelope': '장비 기호의 외곽선을 그대로 몸체로 썼다 — 실제 장비 치수를 확인해야 한다.',
+  'wall_overlap': '편집한 벽이 다른 벽과 겹친다 — 중복인지 확인한 뒤 하나를 지우거나 끝점을 옮긴다.',
+  'endpoint_gap': '편집한 끝점이 이웃과 완전히 안 붙었다 — 평면 탭에서 스냅해 확인한다.',
+  'opening_host_missing': '이 개구부를 담을 벽을 찾지 못했다 — 위치를 확인해 가까운 벽에 다시 놓는다.',
+};
+
 export function floorKeyOf(record={}) {
   if (record.level != null) return String(record.level);
   if (record.floor != null) return String(record.floor);
@@ -67,8 +94,41 @@ export function routineCandidateIds(connectivity={}) {
   return (connectivity.candidates||[]).filter(c=>c.routine).map(c=>c.id);
 }
 
-export function buildReviewEntries(elements={}, report={}, clashes=[], connectivity={}) {
+// 파서가 낸 구조화 제안(dxf_parser.suggestions_apply) → 검토 줄 문구. 경고 문장과 같은 숫자를
+// 사람이 검산할 수 있게 evidence 를 그대로 보여준다.
+function suggestionReasonText(s={}) {
+  const ev=s.evidence||{};
+  if (s.code==='thin_pair')
+    return `[얇은 오결합] 두께가 중앙값 ${Math.round(ev.median_mm||0)}mm 의 1/3 미만인 벽 ${ev.count||0}개 — pair_min=${s.opts?.pair_min} 을 주면 통과한다.`;
+  if (s.code==='column_layer_looks_like_wall')
+    return `[분류 의심] '${s.row_layer}' 은 column 인데 벽처럼 그려짐 — 짝 ${ev.paired||0}개, ${Math.round(ev.spacing_mm||0)}mm 간격.`;
+  if (s.code==='width_conflict')
+    return `[두께 불일치] 실측 ${Math.round(ev.detected_mm||0)}mm ≠ 선언 ${Math.round(ev.declared_mm||0)}mm · ${ev.count||0}개.`;
+  return `'${s.row_layer}' 레이어 제안(${s.code}).`;
+}
+
+export function buildReviewEntries(elements={}, report={}, clashes=[], connectivity={}, rules=[], suggestions=[]) {
   const entries=[];
+  // 시공기준 위반(construction_rules.py) — 간섭 다음, 형상은 안 바뀐다. 정보 항목(kind:'info', 예:
+  // 배수 구배 필요 낙차)은 위반이 아니라 여기 안 싣는다 — V013 이 위반만 올리는 것과 같은 이유다.
+  (rules || []).filter(r=>r.kind==='violation').forEach((rule, order) => {
+    entries.push({
+      key:`rule:${rule.rule}:${rule.eid}`, kind:'rule', eid:rule.eid||null, category:'시공기준', order,
+      floor:'', action:'select',
+      reason:`${rule.standard||''} ${rule.clause||''} 위반`.trim()
+        +(rule.values?` · ${Object.entries(rule.values).map(([k,v])=>`${k}=${v}`).join(', ')}`:''),
+    });
+  });
+  // 레이어 규칙 제안 — 간섭·시공기준 다음. 클릭 한 번으로 layer_map.csv 를 고친다(project_server
+  // 의 /layer-rule). 파서가 이미 계산을 끝낸 세 가지만(thin_pair·column_layer_looks_like_wall·
+  // width_conflict) — 사람 판단이 남은 일괄 수정(bulkHtml)과는 다른 신뢰 수준이다.
+  (suggestions || []).forEach((suggestion, order) => {
+    entries.push({
+      key:`suggestion:${suggestion.code}:${suggestion.row_layer}`, kind:'suggestion',
+      eid:null, label:suggestion.row_layer, category:'레이어 제안', order, floor:'', action:'select',
+      apply:suggestion, reason:suggestionReasonText(suggestion),
+    });
+  });
   // 간섭은 목록 맨 앞에, 받은 순서(조치 종류 → 위치) 그대로 — 건축 분류 확인 수십 건에 묻히지 않게.
   (clashes || []).forEach((clash, order) => {
     const s=clash.struct||{}, m=clash.mep||{}, at=clash.at||[0,0], z=clash.z||[0,0];
@@ -132,10 +192,11 @@ export function buildReviewEntries(elements={}, report={}, clashes=[], connectiv
       entries.push({key:`stale:${eid}`,kind:'stale',eid:null,category:'stale',floor:'',
         reason:'이전 검토 또는 수정의 원본 형상이 변경됨',action:'open-orphan',orphan:eid});
   const categoryOrder=['wall','column','slab','beam','zone','opening','pipe','duct','tray','equipment'];
-  const rank=entry=>({clash:-2,gap:-1,element:0})[entry.kind]??1;
+  const rank=entry=>({clash:-4,rule:-3,suggestion:-2,gap:-1,element:0})[entry.kind]??1;
   const catRank=entry=>{ const index=categoryOrder.indexOf(entry.category); return index<0?999:index; };
+  const ordered=new Set(['clash','gap','rule','suggestion']);
   return entries.sort((a,b)=> rank(a)-rank(b) ||
-    (a.kind===b.kind&&(a.kind==='clash'||a.kind==='gap') ? a.order-b.order :
+    (a.kind===b.kind&&ordered.has(a.kind) ? a.order-b.order :
     a.floor.localeCompare(b.floor,undefined,{numeric:true}) ||
     catRank(a)-catRank(b) || a.key.localeCompare(b.key)));
 }
@@ -150,12 +211,16 @@ export function escHtml(value) {
 
 export function reviewRowHtml(entry, canSave=false) {
   const head=`<button class="review-item" data-eid="${escHtml(entry.eid||'')}" data-orphan="${escHtml(entry.orphan||'')}">`
-    +`<b>${escHtml(entry.eid||entry.orphan||entry.kind)}</b> · ${escHtml(entry.category)}`
+    +`<b>${escHtml(entry.eid||entry.orphan||entry.label||entry.kind)}</b> · ${escHtml(entry.category)}`
     +`${entry.floor?' · 층 '+escHtml(entry.floor):''}<small>${escHtml(entry.reason)}</small></button>`;
-  // 이음 확정은 서버(프로젝트)에 저장된다 — 독립 HTML 로 연 미리보기에는 저장할 곳이 없어 버튼을 두지 않는다.
-  if (!entry.confirm || !canSave) return head;
-  return `<div class="review-row">${head}<button class="confirm-gap" data-gap="${escHtml(entry.confirm.id)}"`
-    +` data-confirmed="${entry.confirm.confirmed?'1':''}">${entry.confirm.confirmed?'확정 취소':'이음 확정'}</button></div>`;
+  // 이음 확정·규칙 적용은 서버(프로젝트)에 저장된다 — 독립 HTML 로 연 미리보기에는 저장할 곳이
+  // 없어 버튼을 두지 않는다.
+  if (entry.confirm && canSave)
+    return `<div class="review-row">${head}<button class="confirm-gap" data-gap="${escHtml(entry.confirm.id)}"`
+      +` data-confirmed="${entry.confirm.confirmed?'1':''}">${entry.confirm.confirmed?'확정 취소':'이음 확정'}</button></div>`;
+  if (entry.apply && canSave)
+    return `<div class="review-row">${head}<button class="apply-suggest" data-apply='${escHtml(JSON.stringify(entry.apply))}'>적용</button></div>`;
+  return head;
 }
 
 export function batchButtonHtml(ids, canSave=false) {
@@ -217,4 +282,96 @@ export function fitDistance(radius, verticalFovDegrees, aspect) {
   const vertical=verticalFovDegrees*Math.PI/360;
   const horizontal=Math.atan(Math.tan(vertical)*Math.max(.01,aspect));
   return Math.max(radius,.5)/Math.sin(Math.min(vertical,horizontal))*1.1;
+}
+
+// 되돌리기·다시 실행 — `edits` 는 평평한 객체라 스냅샷 **문자열** 스택 둘이면 충분하다.
+// '한 동작 = 한 단계'(같은 값은 단계를 만들지 않는다). 새 동작은 redo 를 버린다 — 분기를 남기면
+// 되돌린 뒤 다른 편집을 했을 때 '다시 실행'이 어느 미래로 가는지 아무도 모른다.
+// ★ `rebase()` 는 기준선만 옮긴다 — **되돌릴 미래를 지우지 않는다**. 저장 응답(onAck)이 이걸 부르는데,
+//   여기서 redo 를 비우면 되돌리기가 저장을 부르고 그 저장이 redo 를 먹어 '다시 실행'이 영원히 안 된다
+//   (브라우저 QA 에서 실제로 그랬다). 미래를 버리는 것은 **새 동작**(push)뿐이다.
+export function createHistory(initial, limit = 100) {
+  let last = initial;
+  const undoStack = [], redoStack = [];
+  return {
+    push(snapshot) {
+      if (snapshot === last) return false;
+      undoStack.push(last); last = snapshot; redoStack.length = 0;
+      if (undoStack.length > limit) undoStack.shift();
+      return true;
+    },
+    rebase(snapshot) { last = snapshot; },
+    undo() { if (!undoStack.length) return null; redoStack.push(last); last = undoStack.pop(); return last; },
+    redo() { if (!redoStack.length) return null; undoStack.push(last); last = redoStack.pop(); return last; },
+    current() { return last; },
+    sizes() { return {undo: undoStack.length, redo: redoStack.length}; },
+  };
+}
+
+// 물량 요약 패널(Phase 4) — `boq_export.aggregate()` 의 `{섹션: [헤더, rows, 합계]}` 를 화면이
+// 쓰는 모양으로 축약한다. 저장할 때마다 서버가 다시 계산해 보내므로(`geometry.boq`) 여기는 순수
+// 변환만 — 언제 다시 부르는지는 app.js 가 정한다.
+export function summarizeBoq(boq) {
+  if (!boq || boq.error) return {error: (boq && boq.error) || null, wall: [], mep: [], openings: [], totals: null};
+  const rowsOf = key => ((boq[key] || [[], []])[1]) || [];
+  const totOf = key => ((boq[key] || [])[2]) || null;
+  const openings = rowsOf('창호').map(r => ({kind: r[0], size: r[1], count: r[2]}));
+  const wallTot = totOf('벽'), slabTot = totOf('슬래브');
+  // 합계는 `aggregate()` 가 이미 낸 합계행을 그대로 쓴다 — 화면이 다시 더하면 두 수가 갈라진다.
+  const totals = {
+    wallCount: wallTot ? wallTot[1] : null,
+    wallLengthM: wallTot ? wallTot[2] : null,
+    slabAreaM2: slabTot ? slabTot[2] : null,
+    doors: openings.filter(o => o.kind === '문').reduce((n, o) => n + (o.count || 0), 0),
+    windows: openings.filter(o => o.kind === '창').reduce((n, o) => n + (o.count || 0), 0),
+  };
+  return {
+    error: null,
+    wall: rowsOf('벽').map(r => ({key: r[0], lengthM: r[2], heightM: r[3], volumeM3: r[5]})),
+    mep: rowsOf('MEP').map(r => ({label: r[0], size: r[1], lengthM: r[3], basis: r[4]})),
+    openings,
+    totals,
+  };
+}
+
+// 물량표가 무엇을 세고 무엇을 안 세는지 — 이 문장이 없으면 읽는 사람이 "개구부는 당연히 뺐겠지"
+// 로 읽는다(벽 면적은 중심선 길이×높이 그대로다, `boq_export.py`). 같은 문장이 Excel 2행에도 간다.
+export const BOQ_SCOPE_NOTE =
+  '벽 면적·체적은 중심선 길이×높이×두께(개구부 미차감) · 접합부 중복·마감·할증 미포함 · 지지 개수는 하한 · 검토용';
+
+// 벽·기둥 표에는 근거 열이 없다 — 개별 높이는 이미 계약대로 정직하지만(overrides > 레코드 > params,
+// 섞이면 그 행은 높이를 비운다), 그 값이 '질문에서 선언'인지 'params 기본값'인지는 표만 보면 모른다.
+// 숫자를 다시 말하지 않고 출처만 말한다 — 숫자는 행마다 이미 있다(아래 boqBodyHtml 의 h= 값).
+export function boqHeightBasisText(heightDeclared) {
+  return heightDeclared
+    ? '층고: 열 때 선언한 값 (행마다 h= 참고)'
+    : '층고: 미선언 — 레이어·params 기본값 사용';
+}
+
+export function boqBodyHtml(boq) {
+  const s = summarizeBoq(boq);
+  if (s.error) return `<div>물량 계산 실패: ${escHtml(s.error)}</div>`;
+  const parts = [];
+  const t = s.totals;
+  if (t) {
+    // 없는 것은 줄이지 않고 **빼낸다** — 벽이 없는 설비 도면에 "벽 0m" 을 적으면 0 을 실측처럼 읽는다.
+    const bits = [];
+    if (t.slabAreaM2) bits.push(`슬래브 ${t.slabAreaM2}㎡`);
+    if (t.wallCount) bits.push(`벽 ${t.wallLengthM}m · ${t.wallCount}개`);
+    if (t.doors || t.windows) bits.push(`문/창 ${t.doors}/${t.windows}`);
+    if (bits.length) parts.push(`<div class="kv boq-total"><span>합계</span><span>${escHtml(bits.join(' · '))}</span></div>`);
+  }
+  if (s.wall.length) parts.push('<div><b>벽</b>'
+    + s.wall.map(w => `<div class="kv"><span>${escHtml(w.key)}</span>`
+      + `<span>h${w.heightM===''?'?':w.heightM}m · ${w.lengthM}m · ${w.volumeM3}㎥</span></div>`).join('')
+    + '</div>');
+  if (s.mep.length) parts.push('<div><b>MEP</b>'
+    + s.mep.map(m => `<div class="kv"><span>${escHtml(m.label)} ${escHtml(m.size)}</span><span>${m.lengthM}m(${escHtml(m.basis)})</span></div>`).join('')
+    + '</div>');
+  if (s.openings.length) parts.push('<div><b>창호</b>'
+    + s.openings.map(o => `<div class="kv"><span>${escHtml(o.kind)} ${escHtml(o.size)}</span><span>${o.count}개</span></div>`).join('')
+    + '</div>');
+  if (!parts.length) return '없음';
+  parts.push(`<div class="boq-note">${escHtml(BOQ_SCOPE_NOTE)}</div>`);
+  return parts.join('');
 }

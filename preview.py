@@ -40,7 +40,7 @@ def _asset(name):
 
 def contract_script():
     # The Python geometry contract remains the only source of dimension rules.
-    return _GC.js_constants() + "\nglobalThis.MepContract = {gcDim,gcSectionShape,gcMepDimensions,gcZRange,gcWidthOf,gcCcw,gcBeamRings};"
+    return _GC.js_constants() + "\nglobalThis.MepContract = {gcDim,gcSectionShape,gcMepDimensions,gcZRange,gcWidthOf,gcCcw,gcBeamRings,ELEV_CATS};"
 
 
 if sys.stdout is not None and getattr(sys.stdout, "encoding", None) \
@@ -92,11 +92,20 @@ def build_html(data):
         "qa": data.get("qa", {}),
         # 레이어 분류의 근거·의심을 화면이 볼 수 있어야 한다 — 종전엔 GUI 로그에만 있었다.
         "suggestions": data.get("suggestions", []),
+        # 파서가 값까지 계산해 낸 구조화 제안(thin_pair·column_layer_looks_like_wall·width_conflict)
+        # — 검토 목록의 [적용] 버튼이 이걸 그대로 `/layer-rule` 에 보낸다.
+        "suggestions_apply": data.get("suggestions_apply", []),
         "column_layers_like_wall": data.get("column_layers_like_wall", []),
         "unhandled": data.get("unhandled", {}),
         "edits_report": data.get("edits_report", {}),
         "clash_review": data.get("clash_review", {}),
         "mep_connectivity": data.get("mep_connectivity", {}),
+        "construction_rules": data.get("construction_rules", {}),
+        "boq": data.get("boq", {}),
+        # 벽·기둥 높이가 선언(층고 질문)인지 params 기본값인지 — BOQ 패널 머리 한 줄의 근거.
+        # 값이 아니라 **선언 여부**(키 존재)가 신호라 불리언으로 낸다 — 0 도 선언이다(층고가
+        # 기존 개별 높이와 우연히 같아 덮어쓴 게 없을 뿐).
+        "level_height_declared": "level_height_overrode" in data,
         "project_runtime": data.get("project_runtime"),
         "project_edits": data.get("project_edits", {}),
         "source_drawing": data.get("source_drawing", {"status":"unavailable","floors":[],"warnings":["원본 DXF가 연결되지 않았습니다."]}),

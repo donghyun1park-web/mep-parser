@@ -765,6 +765,126 @@ def joint_problems(elements, tol_mm=JOINT_TOL_MM):
     return problems
 
 
+# ── 이음 몸체(피팅) — 형식은 물량표와 **같은 함수**, 크기는 제품 치수표가 아니라 도면의 틈과 단면에서 ──
+FITTING_STRAIGHT_DEG = 1.0      # 두 가지가 이 각도 안에서 마주 보면 곧다(물량표 `MEP 이음` 의 종전 기준 그대로)
+
+
+def _size_key(section):
+    """규격이 같은가 — 물량표 표기(`boq_export._size_label`)와 같은 해상도(%g)로 비교한다."""
+    if "diameter" in section:
+        return ("d", "%g" % section["diameter"])
+    return ("r", "%g" % section["width_mm"], "%g" % section["height_mm"])
+
+
+def _polyline_dir(pts, s):
+    """꺾은선 시작에서 길이 s 인 점의 진행 방향 — 꼭짓점 위면 다음 구간."""
+    for a, b in zip(pts, pts[1:]):
+        length = math.dist(a, b)
+        if s < length:
+            return _unit(_sub(b, a))
+        s -= length
+    return _unit(_sub(pts[-1], pts[-2]))
+
+
+def _half_extent(leg, v):
+    """가지 단면이 방향 v 로 차지하는 반폭 — 다른 가지가 얼마나 뒤로 물러나야 모서리가 비지 않는가."""
+    if leg["sides"]:
+        along = _dot(v, leg["u"])
+        return 0.5 * leg["width"] * math.sqrt(max(0.0, 1.0 - along * along))
+    w, h = section_axes(leg["u"], leg["roll"])
+    return 0.5 * (abs(_dot(v, w)) * leg["width"] + abs(_dot(v, h)) * leg["height"])
+
+
+def _corner(legs, size):
+    """두 끝의 축선이 만나는 점. 확정한 엘보는 모서리가 두 끝 앞의 틈 안에 있다 — 멀거나 어긋나면 None."""
+    (p, u), (q, v) = (legs[0]["p"], legs[0]["u"]), (legs[1]["p"], legs[1]["u"])
+    b, w0 = _dot(u, v), _sub(p, q)
+    den = 1.0 - b * b
+    if den < 1e-6:
+        return None
+    d, e = _dot(u, w0), _dot(v, w0)
+    s, t = (b * e - d) / den, (e - b * d) / den
+    c1, c2 = _add(p, _mul(u, s)), _add(q, _mul(v, t))
+    limit = math.dist(p, q) + size
+    if math.dist(c1, c2) > size or abs(s) > limit or abs(t) > limit:
+        return None
+    return _mul(_add(c1, c2), 0.5)
+
+
+def _joint_fitting(jid, members, params):
+    legs, sizes = [], set()
+    for cat, rec, port, at in members:
+        sec = mep_section(cat, rec, params)
+        sizes.add(_size_key(sec))
+        leg = ({"width": sec["diameter"], "height": sec["diameter"], "roll": 0.0, "sides": ROUND_SIDES}
+               if sec["shape"] == "round" else
+               {"width": sec["width_mm"], "height": sec["height_mm"], "roll": sec["roll"], "sides": None})
+        pts = route_points(cat, rec)
+        if port == "tap":
+            leg.update(p=_polyline_at(pts, float(at)), u=_polyline_dir(pts, float(at)), through=True)
+        else:
+            a, b = (pts[0], pts[1]) if port == "start" else (pts[-1], pts[-2])
+            leg.update(p=list(a), u=_unit(_sub(b, a)), through=False)     # u: 이음에서 경로 쪽으로
+        legs.append(leg)
+    n = sum(2 if leg["through"] else 1 for leg in legs)
+    if n == 2:
+        straight = _dot(legs[0]["u"], legs[1]["u"]) < -math.cos(math.radians(FITTING_STRAIGHT_DEG))
+        if straight and len(sizes) == 1:
+            return None                     # 곧고 같은 규격 — 피팅이 아니라 선을 끊어 그린 자리
+        kind = "reducer" if straight else "elbow"
+    else:
+        kind = {3: "tee", 4: "cross"}.get(n, "branch%d" % n)
+    size = max(max(leg["width"], leg["height"]) for leg in legs)
+    taps = [leg["p"] for leg in legs if leg["through"]]
+    center = _corner(legs, size) if kind == "elbow" else None       # 엘보는 끝 둘뿐이다(가지가 없다)
+    if center is None:
+        pool = taps or [leg["p"] for leg in legs]
+        center = _mul([sum(p[k] for p in pool) for k in range(3)], 1.0 / len(pool))
+    parts = []
+    for i, leg in enumerate(legs):
+        u = leg["u"]
+        # 다른 가지 단면 밖으로 자기 단면 반만큼 나온다 — 모서리 쐐기와 가지 구멍을 덮는 최소 크기다.
+        back = max((_half_extent(o, u) for j, o in enumerate(legs) if j != i), default=0.0)
+        reach = back + 0.5 * max(leg["width"], leg["height"])
+        t = _dot(_sub(leg["p"], center), u)          # 중심에서 이 가지 끝까지 — 확정 이음이면 도면이 비워 둔 틈
+        axis = _sub(leg["p"], _mul(u, t))            # 중심을 이 가지 축선에 내린 점
+        start = _sub(axis, _mul(u, reach if leg["through"] else back))
+        end = _add(axis, _mul(u, reach if leg["through"] else max(t, reach)))
+        parts.extend(rect_parts([start, end], leg["width"], leg["height"], leg["roll"], leg["sides"]))
+    return {"joint": jid, "category": members[0][0], "kind": kind, "center": center, "parts": parts,
+            "members": members, "eids": sorted(str(rec.get("eid")) for _c, rec, _p, _a in members)}
+
+
+def joint_fittings(elements, params=None):
+    """이음 → 피팅 몸체 {"fittings": [...], "skipped": [...], "straight": n}. 입력을 바꾸지 않는다.
+
+    형식은 **이 함수가 규칙이다**(물량표 `MEP 이음` 과 IFC 피팅이 같이 쓴다): 가지 수 3 = tee · 4 = cross ·
+    2 는 꺾이면 elbow, 곧고 규격이 다르면 reducer, 곧고 같은 규격은 피팅이 아니다(`straight` 로 센다).
+    끊긴 이음(`joint_problems`)은 몸체를 세우지 않고 사유와 함께 `skipped` 로 말한다.
+
+    몸체는 가지마다 **곧은 관 토막 하나**(`parts` — `rect_parts` 의 링)이고 합치지 않는다. 가지 토막은 경로 축선
+    위에서 중심 뒤로 다른 가지의 반폭만큼(모서리가 비지 않게), 앞으로는 도면의 틈(확정 이음) 또는 다른 가지 단면
+    밖으로 자기 단면 반만큼 나온다. 제품 치수표를 쓰지 않는다 — 강관·PB·덕트마다 표가 다르고 직관을 자르지
+    않으므로 곡률 엘보는 어차피 표현할 수 없다. 이 크기는 자리 표시이지 제품 치수가 아니다."""
+    problems = {p["joint"]: p["problem"] for p in joint_problems(elements)}
+    out = {"fittings": [], "skipped": [], "straight": 0}
+    for jid, members in sorted(mep_joints(elements).items()):
+        eids = sorted(str(rec.get("eid")) for _c, rec, _p, _a in members)
+        if jid in problems:
+            out["skipped"].append({"joint": jid, "reason": problems[jid], "eids": eids})
+            continue
+        try:
+            fitting = _joint_fitting(jid, members, params)
+        except (ContractError, KeyError, TypeError, ValueError, IndexError) as exc:
+            out["skipped"].append({"joint": jid, "reason": "unresolved", "detail": str(exc), "eids": eids})
+            continue
+        if fitting is None:
+            out["straight"] += 1
+        else:
+            out["fittings"].append(fitting)
+    return out
+
+
 def reverse_segments(segments):
     """경로 방향 뒤집기 — 원호는 법선을, 스플라인은 매듭을 함께 뒤집는다."""
     out = []
@@ -812,6 +932,28 @@ def polyline_segments(points):
             for a, b in zip(pts, pts[1:]) if math.dist(a, b) > _EPS]
 
 
+def sloped_path3d(points, ratio, high_end):
+    """평면 2D 점열 → 구배를 적용한 path3d 구간(mm, **상대** z). 평면도에는 유향이 없다 — 어느 끝이
+    높은지(`high_end: "start"|"end"`)와 구배(`ratio` = rise/run, 예: 1/100 → 0.01)를 **둘 다** 선언
+    받아야 부른다. `high_end` 쪽 dz = 0(그 점이 `elevation` — 다른 소비자에겐 여전히 '중심축' 한 값
+    이므로, 여기서는 **높은 끝의** 중심으로 고정한다). 중간 점은 시작에서부터의 2D 누적 거리에
+    비례해 선형 보간한다 — 평면 위 꺾은선의 실제 굴곡을 그대로 따라간다."""
+    pts = [[float(p[0]), float(p[1])] for p in points]
+    if len(pts) < 2:
+        raise ContractError("sloped path needs at least two points")
+    if high_end not in ("start", "end"):
+        raise ContractError("high_end must be 'start' or 'end'")
+    cum = [0.0]
+    for a, b in zip(pts, pts[1:]):
+        cum.append(cum[-1] + math.dist(a, b))
+    total = cum[-1]
+    if total <= _EPS:
+        raise ContractError("zero-length sloped path")
+    dz = [-ratio * c for c in cum] if high_end == "start" else [-ratio * (total - c) for c in cum]
+    return [{"type": "line", "start": [pts[i][0], pts[i][1], dz[i]],
+             "end": [pts[i + 1][0], pts[i + 1][1], dz[i + 1]]} for i in range(len(pts) - 1)]
+
+
 def path3d_problems(rec, tol_mm=1e-6):
     """path3d 가 정의대로인가. 빈 목록이면 정상. 구간끼리 끊겨 있으면 그 자리를 말한다."""
     if not rec.get("path3d"):
@@ -835,6 +977,27 @@ def mep_section(category, rec, params=None):
     ov = rec.get("overrides") or {}
     roll = ov.get("section_roll", rec.get("section_roll", 0.0))
     return dict(dims, shape=section_shape(category, rec), roll=float(roll or 0.0))
+
+
+def mep_envelope(category, rec, params=None):
+    """단면 + 보온 외피 — 관 형상(`mep_section`)은 그대로 두고 **판정용 바깥 치수**만 부풀린다.
+
+    `rec['insulation_mm']` 는 파싱 시점(`mep_profile._assign`)에 프로필의 보온 선언(등급·다습·유온)을
+    시공기준 표로 조회해 박아 둔 값이다 — 여기서 다시 계산하지 않는다(이 모듈은 `construction_rules`
+    를 import 할 수 없다: 역방향이면 순환 참조). 선언이 없으면(`insulation_mm` 없음) `mep_section` 과
+    같다 — 보온을 부풀린 것이 아니라 **모른다**는 뜻이고, 그때는 나관 치수로 판정한다."""
+    sec = mep_section(category, rec, params)
+    ins = rec.get("insulation_mm")
+    if not ins:
+        return dict(sec, insulated=False)
+    ins = float(ins)
+    out = dict(sec, insulated=True)
+    if "diameter" in out:
+        out["diameter"] = out["diameter"] + 2 * ins
+    else:
+        out["width_mm"] = out["width_mm"] + 2 * ins
+        out["height_mm"] = out["height_mm"] + 2 * ins
+    return out
 
 
 def section_axes(direction, roll=0.0):

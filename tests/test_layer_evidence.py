@@ -90,6 +90,10 @@ def test_a_column_layer_drawn_as_walls_says_so_and_offers_the_layer_map_row(tmp_
     assert like["layer"] == "S-COL" and like["spacing_mm"] == 200
     assert like["suggested_row"] == "^S\\-COL$,wall,,2800,"
     assert data["warnings"][0].startswith("[분류 의심]") and "S-COL" in data["warnings"][0]
+    (suggestion,) = [s for s in data["suggestions_apply"] if s["code"] == "column_layer_looks_like_wall"]
+    assert (suggestion["row_layer"], suggestion["pattern"], suggestion["op"]) == ("S-COL", "^S\\-COL$", "insert_row")
+    assert (suggestion["category"], suggestion["height"]) == ("wall", 2800)
+    assert suggestion["evidence"]["spacing_mm"] == 200
     assert {r["review_reason"] for r in data["elements"]["column"]} == {"column_layer_looks_like_wall"}
     # 게이트 문구가 원인을 가리킨다 — 종전엔 '기둥 경계' 만 말해 사람이 기둥을 들여다봤다.
     v005 = [f for f in verify.verify_geometry(data).findings if f.id == "V005"]

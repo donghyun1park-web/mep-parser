@@ -152,3 +152,41 @@ MEP는 "추출은 곧, 3D 빌드는 나중"으로 분할(D 합의). 스키마 �
       `add-floor` 는 `--dry-run` offset 을 보여주고 **멈추는 것**이 절차의 핵심이고,
       `verify-model` 은 검사ID→진단→조치 표가 본체다. 상시 사실(z 규약·opts)은 여기 CLAUDE.md,
       절차와 중단지점은 스킬 — 나누는 기준이 그거다.
+
+## "쉽고 재미있는 루프" (2026-09-18, `docs/plans/2026-09-18-easy-loop.md`)
+목표(사용자): 2D 도면 → 3D 자동 모델링(MEP 포함) → 간섭체크 → 물량내역을 **아주 쉽고 재미있게**.
+출력 경로 다섯 개(FreeCAD·Blender GLB·Pascal·ifc_builder 직접·미리보기)와 규칙 표가 이미 "틀리지
+않는 것"엔 성공했다는 판단 아래, 새 규칙·새 경로를 더 얹는 대신 **① 브라우저 편집기 ② 검토 항목의
+버튼화 ③ 선언 표면(프로젝트 기본값) ④ 살아 있는 물량**을 먼저 만들고, 쓰지 않는 경로 셋을 접었다.
+
+- [x] **Phase 0 — 기반**: BOQ 벽 두께가 `GC.width_of` 계약을 따르도록 수정 · 저장 한 번이 파싱
+      한 번만 하도록(재파싱 중복 제거) · 편집 저장 경계 강화(elevation 유한성 검증, `overrides` 의
+      `null` 은 "지운다", `added` 는 `category` 필수).
+- [x] **Phase 1 — 브라우저 편집기**: 인스펙터에 높이 칸(MEP 먼저) · 2D 평면 탭에 배관·덕트·트레이
+      선택·분할·결합·그리기 · 3D 클릭 → "평면에서 고치기" 버튼.
+- [x] **Phase 2 — 검토 항목을 버튼으로**: 파서가 이미 계산해 둔 제안(얇은 오결합·기둥이 벽처럼
+      그려짐·두께 불일치)을 구조로도 내고(`suggestions_apply`), `/layer-rule` 엔드포인트가 프로젝트
+      소유 `layer_map.csv` 에 쓴다. 검토 행에 `[적용]` 버튼.
+- [x] **Phase 3 — 선언: 프로젝트 기본값**: `source.options.defaults` — 레이어·프로필 선언이 없을
+      때만 채우는 재질·DN·용도·보온 등급. `declaration_basis` 로 자기보고, 영수증은 `defaulted` 와
+      `missing` 을 따로 센다. GUI 는 건축 도면을 열 때 층고·창호일람·재질을 한 번 묻고, 이미 연
+      프로젝트는 '그 밖의 도구 ▾ → 프로젝트 기본값' 으로 다시 연다.
+- [x] **Phase 4 — 살아 있는 물량**: `ProjectSession._parse` 가 매 파싱마다 `boq_export.aggregate()`
+      를 얹는다 — 저장 한 번이 곧 물량 갱신이다(재요청 없음). 3-에이전트 병렬 리뷰가 다층 조립
+      (`stack_build.py`)에서 이 신호가 항상 빠지는 것과, 패널 문구가 없는 열을 가리키는 것을
+      찾아 고쳤다.
+- [x] **Phase 5 — 동결·정리·납품 메뉴**: `내보내기 ▾` → `납품 ▾`(검토 CSV·물량·창호일람·검증
+      빌드 넷만). IFC 직접 내보내기·Blender/GLB 는 메뉴에서 빼되 '그 밖의 도구' 버튼은 남긴다
+      (지운 게 아니라 일상 경로가 아니라는 뜻). Pascal 코드는 안 건드리고 [pascal.md](pascal.md)
+      에 상태 줄만 — 일상 편집은 평면 탭, Pascal 은 계통·재질 롤·단면 롤·장면 트리가 필요할 때만.
+      `docs/modeling_techniques.md` 의 죽은 문구("난방관은 편집 가능한 Blender Curve") 정정 —
+      `prepare_payload` 는 원형이든 사각이든 항상 mesh 만 낸다.
+
+### 2026-09-21 — 납품 IFC 를 FreeCAD 에서 ifcopenshell 직접 생성으로
+
+사흘 전 동결한 `ifc_builder.py` 가 납품 경로가 되고 `freecad_builder.py` 가 동결됐다. 동결 때 적은
+사유("개구부 불리언과 MEP 솔리드는 FreeCAD 커널이 필요하다")를 실측이 깼다 — 개구부는 IFC 에서
+절삭이 아니라 선언이고, FreeCAD 경로도 IFC 에는 같은 void 선언만 실었다. 같은 날 `Arch.makePipe`
+(곡면)가 V107 비다양체를 내는 것을 추적해 곡면 API 를 통째로 걷어낸 것이 결정적이었다: 형상은
+이미 전부 `geom_contract` 가 계산하고 있었고, FreeCAD 는 그걸 스키마에 옮겨 쓰는 라이터였다.
+경위·측정·되돌리는 측정은 [ifc-builder.md](ifc-builder.md).

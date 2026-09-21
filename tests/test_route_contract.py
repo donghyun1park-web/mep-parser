@@ -225,3 +225,21 @@ def test_rect_parts_cut_the_inverted_segment_into_a_straight_piece():
     assert total == pytest.approx(length * 200 * 100, rel=1e-9)
     gentle = [[0, 0, 0], [1000, 0, 0], [1000, 800, 0]]
     assert GC.rect_parts(gentle, 200, 100) == [GC.rect_rings(gentle, 200, 100)]     # 멀쩡하면 한 조각
+
+
+def test_a_declared_slope_lowers_the_low_end_by_length_over_ratio_and_says_so():
+    """길이 10m, 구배 1/100 → 저점이 100mm 낮다. 높은 끝(dz=0)이 `elevation` 의 기준이다 — 기존 v3
+    소비자(route_points·route_length·path3d_dz_range)가 다시 구현하지 않고 그대로 읽는다."""
+    pts = [[0, 0], [6000, 0], [6000, 4000]]                 # 2D 꺾은선, 총 길이 10,000mm
+    segs = GC.sloped_path3d(pts, 0.01, "start")              # start 가 높은 끝
+    rec = {"path3d": {"segments": segs}, "elevation": 2600.0, "diameter": 100.0}
+    dz_lo, dz_hi = GC.path3d_dz_range(rec)
+    assert dz_hi == 0.0 and dz_lo == pytest.approx(-100.0)    # 10,000mm × 1/100
+    route = GC.route_points("pipe", rec)
+    assert route[0][2] == pytest.approx(2600.0) and route[-1][2] == pytest.approx(2500.0)
+    assert GC.route_length(rec) == pytest.approx(math.hypot(10000.0, 100.0), rel=1e-4)  # 경사만큼 실제 길이가 길다
+    # 반대쪽을 높은 끝으로 선언하면 부호가 뒤집힌다 — 같은 도면이 반대 방향 유향을 가질 수 있다
+    flipped = GC.sloped_path3d(pts, 0.01, "end")
+    assert flipped[0]["start"][2] == pytest.approx(-100.0) and flipped[-1]["end"][2] == 0.0
+    with pytest.raises(GC.ContractError):
+        GC.sloped_path3d(pts, 0.01, "middle")                 # 잘못된 쪽 선언은 조용히 안 받는다

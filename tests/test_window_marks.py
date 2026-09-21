@@ -4,6 +4,7 @@
 실측(아파트 단위세대 평면도): 창·문 16개가 전부 높이 1200·창대 900 추정치였고, 문(D-900·PD-750·FSD-1100)까지
 창 기본값을 받았다. 블록 이름이 부호이므로 그 부호로 일람과 조인한다 — 사용자는 양식의 빈칸(높이·창대)만 채운다.
 """
+import os
 import sys
 from pathlib import Path
 
@@ -89,6 +90,41 @@ def test_a_gap_that_already_holds_a_block_opening_is_not_opened_twice(tmp_path):
     g = _parse(str(p), ext_schedule=sched)
     ops = g["elements"]["opening"]
     assert [(o.get("mark"), o.get("source")) for o in ops] == [("W-3600", None)], ops
+
+
+def test_open_defaults_into_threads_height_and_fans_material_out_to_all_four_categories():
+    """열 때 물은 층고·재질 기본값 → open_source_project 인자. tkinter 없이 순수 함수만 검사한다
+    (이 코드베이스의 관례: `_do_parse`/다이얼로그를 직접 몰지 않는다 — GUI 이벤트루프 없이는 걸린다)."""
+    import mep_gui
+    options = {"use_ai": False}
+    height = mep_gui._open_defaults_into({"height": 3000.0, "material": "콘크리트"}, options)
+    assert height == 3000.0
+    assert options["defaults"] == {"architecture": {
+        "wall": {"material": "콘크리트"}, "column": {"material": "콘크리트"},
+        "slab": {"material": "콘크리트"}, "beam": {"material": "콘크리트"}}}
+
+
+def test_open_defaults_into_is_a_noop_on_an_empty_pending():
+    import mep_gui
+    options = {"use_ai": False}
+    assert mep_gui._open_defaults_into({}, options) is None
+    assert "defaults" not in options
+
+
+def test_merge_material_default_sets_all_four_architecture_categories_and_keeps_other_keys():
+    """'그 밖의 도구 → 프로젝트 기본값' 저장 버튼의 병합 로직 — 재질만 다룬다(층고는 생성 시점 전용)."""
+    import mep_gui
+    merged = mep_gui._merge_material_default({"mep": {"pipe": {"service": "drain"}}}, "콘크리트")
+    assert merged == {
+        "mep": {"pipe": {"service": "drain"}},
+        "architecture": {"wall": {"material": "콘크리트"}, "column": {"material": "콘크리트"},
+                          "slab": {"material": "콘크리트"}, "beam": {"material": "콘크리트"}}}
+
+
+def test_merge_material_default_clears_architecture_on_an_empty_string():
+    import mep_gui
+    merged = mep_gui._merge_material_default({"architecture": {"wall": {"material": "PB"}}}, "")
+    assert merged == {}
 
 
 def _fake_app(data, csv_path):

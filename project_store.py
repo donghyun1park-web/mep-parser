@@ -65,11 +65,22 @@ def validate_edits(edits):
             if key in ('width','height','thickness','diameter','width_mm','height_mm'):
                 if type(value) not in (int,float) or value <= 0:
                     raise ValueError(f'{key} must be a positive number')
+            elif key in ('elevation','z_base'):
+                # 배관 중심 높이·벽 하단 z. 지하층은 음수가 정상이라 0 이하도 받는다.
+                # null 은 "이 편집을 지우고 도면값으로 되돌린다"는 뜻이라 여기서는 통과시킨다
+                # (element_id.apply_edits/JS materializeElements 가 병합 뒤 지운다).
+                if value is not None and type(value) not in (int, float):
+                    raise ValueError(f'{key} must be a finite number or null')
         for field in ('added', 'deleted', 'review_resolved', 'acknowledge'):
             if field in edit and not isinstance(edit[field], bool):
                 raise ValueError(f'{field} must be boolean')
-        if edit.get('added') and not isinstance(edit.get('record'), dict):
-            raise ValueError('added edits require a record')
+        if edit.get('added'):
+            if not isinstance(edit.get('record'), dict):
+                raise ValueError('added edits require a record')
+            if not edit.get('category'):
+                # category 가 없으면 서버는 'opening', 클라이언트는 'wall' 로 말없이 갈린다
+                # (element_id.apply_edits / vendor/edit_geometry.js materializeElements).
+                raise ValueError('added edits require a category')
 
 
 class ProjectStore:
@@ -270,8 +281,12 @@ class ProjectStore:
                 after['decisions'].extend(copy.deepcopy(decisions))
             return self._commit(before, after)
 
-    def refresh_inputs(self):
-        """Source/map changes invalidate browser CAS just like an explicit project edit."""
+    def refresh_inputs(self, decisions=None):
+        """Source/map changes invalidate browser CAS just like an explicit project edit.
+
+        `decisions` 는 감지된 변경과 **같은 커밋**에만 실린다(예: layer_map.csv 를 코드로
+        고친 직후 — 그 자체가 project.json 편집은 아니지만 결과는 같아야 한다). 변경이
+        없으면(멱등 재적용 등) 조용히 버린다 — 아무 일도 안 났는데 결정만 남길 수 없다."""
         with self.locked():
             before = self.read()
             after = copy.deepcopy(before)
@@ -287,7 +302,11 @@ class ProjectStore:
                 if observed != source.get('observed_fingerprints', source.get('fingerprints', {})):
                     changed = True
                     source['observed_fingerprints'] = observed
-            return self._commit(before, after) if changed else before
+            if not changed:
+                return before
+            if decisions:
+                after['decisions'].extend(copy.deepcopy(decisions))
+            return self._commit(before, after)
 
     def changed_inputs(self, state=None):
         state = state or self.read()

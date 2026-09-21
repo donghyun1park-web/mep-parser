@@ -284,6 +284,11 @@ def build_stack(spec, base_dir=".", dry_run=False):
         if not out["params"]:
             out["params"] = data.get("params", {})
         n_ov = data.get('level_height_overrode', 0)
+        # 이 층이 층고를 선언했다는 사실 자체(값이 아니라 **키 존재**)를 합친 geometry 로 들어 올린다.
+        # `preview.py` 의 '선언/기본값' 신호(`level_height_declared`)가 여기(top-level `out`)를 읽는다 —
+        # 안 올리면 원본이 여럿인 프로젝트는 층고를 선언해도 항상 '기본값'으로 보인다(실측 버그, Phase 4 리뷰).
+        if 'level_height_overrode' in data:
+            out['level_height_overrode'] = out.get('level_height_overrode', 0) + n_ov
         # ★ `wall_indices` 는 **그 층 안에서의** 위치다. 층을 이어붙이면 같은 숫자가
         #   아래층 벽을 가리키게 되어, 위층 문이 아래층 벽에 구멍을 뚫는다 —
         #   형상은 멀쩡하고 검사도 통과한다. 이어붙인 만큼 밀어 준다.

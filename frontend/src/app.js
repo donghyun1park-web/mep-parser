@@ -3,7 +3,8 @@ import MepEdit from 'mep-edit';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { buildReviewEntries, reviewBannerText, bridgeRequest, routineCandidateIds,
-         escHtml, reviewRowHtml, batchButtonHtml, modelBounds, deriveSectionRange, floorKeyOf, isZVisible, reconcileSection, uniqueByEid, fitDistance, recordOnEditFloor, editBackdropState } from './review_logic.js';
+         escHtml, reviewRowHtml, batchButtonHtml, modelBounds, deriveSectionRange, floorKeyOf, isZVisible, reconcileSection, uniqueByEid, fitDistance, recordOnEditFloor, editBackdropState, REASON,
+         boqHeightBasisText, boqBodyHtml, createHistory } from './review_logic.js';
 import { screenToDrawing, drawingUnitsPerPixel } from './svg_coordinates.js';
 import { linearMepGeometry, footprintMepGeometry, mepPropertyKeys } from './mep_preview_geometry.js';
 
@@ -12,6 +13,10 @@ const RUNTIME = DATA.project_runtime || null;
 let EDITS_REPORT=DATA.edits_report || {};
 let CLASH_REVIEW=DATA.clash_review || {};
 let CONNECTIVITY=DATA.mep_connectivity || {};
+let CONSTRUCTION_RULES=DATA.construction_rules || {};
+let SUGGESTIONS_APPLY=DATA.suggestions_apply || [];
+let BOQ=DATA.boq || {};
+let LEVEL_HEIGHT_DECLARED=!!DATA.level_height_declared;
 function excludedEditIds(report){ return [...((report||{}).orphaned||[]),...((report||{}).ambiguous||[])]; }
 let BASE_ELEMENTS = MepEdit.deriveBaseElements(DATA.elements || {},DATA.project_edits || {},excludedEditIds(DATA.edits_report));
 let CANONICAL_PRESENTATION = MepEdit.clone(DATA.elements || {});
@@ -21,7 +26,7 @@ window.addEventListener('error', e => {
     document.getElementById('err').style.display='block';
 });
 
-const {gcDim,gcZRange,gcWidthOf,gcCcw,gcBeamRings,gcMepDimensions,gcSectionShape} = globalThis.MepContract;
+const {gcDim,gcZRange,gcWidthOf,gcCcw,gcBeamRings,gcMepDimensions,gcSectionShape,ELEV_CATS} = globalThis.MepContract;
 
 const S = 0.001;                  // mm -> m
 const CX = DATA.center[0], CY = DATA.center[1];
@@ -143,7 +148,7 @@ function buildOpening(rec){
   const isWin = rec.subtype==='window';
   const wmm = rec.overrides?.width ?? rec.width ?? (rec.radius? rec.radius*2 : 900);
   const hmm = rec.overrides?.height ?? rec.height ?? (isWin?1200:2100);
-  const sill = (isWin ? (rec.sill??900) : 0) + (rec.z_base||0);
+  const sill = (isWin ? (rec.overrides?.sill ?? rec.sill ?? 900) : 0) + (rec.z_base||0);  // 편집값 먼저 — 납품 IFC(ifc_builder._opening_box)와 같은 순서
   const depth = (rec.host_width ?? (P.wall?.width) ?? 250);
   const dir = rec.host_dir || [1,0];
   const geo=new THREE.BoxGeometry(wmm*S, depth*S, hmm*S);
@@ -151,10 +156,21 @@ function buildOpening(rec){
   const q=toM(c); m.position.x=q[0]; m.position.y=q[1];
   m.position.z=(sill+hmm/2)*S; m.rotation.z=Math.atan2(dir[1],dir[0]);
 }
+// 계약 v3 path3d 는 납품 IFC 빌더·Blender·Pascal 이 읽지만 이 미리보기는 아직 안 읽는다(js_constants 에
+// route/path3d 함수가 없다) — 경사·수직 구간을 평균 높이의 평평한 관으로 보여준다. 조용히 다르게
+// 그리는 대신, 다르다는 사실을 말한다(배수 구배 opt-in 이 처음으로 이 자리를 만든다).
+function pathIsSloped(rec){
+  const segs=rec.path3d&&rec.path3d.segments; if(!segs||!segs.length) return false;
+  const z0=segs[0].start[2], eps=1e-6;
+  return segs.some(s=>Math.abs(s.start[2]-z0)>eps||Math.abs(s.end[2]-z0)>eps);
+}
 function buildMepLinear(rec, cat){
   try {
     const dims=gcMepDimensions(cat,rec,P), range=gcZRange(cat,rec,P);
     const elev=(range[0]+range[1])*S/2;
+    if(pathIsSloped(rec))
+      mepRenderWarnings.push(`${rec.eid||rec.layer||cat}: 3D 미리보기는 경사·수직 구간을 평균 높이의 `
+        +`평평한 관으로 보여준다 — 실제 형상은 납품 IFC 를 뷰어(Bonsai 등)로 확인`);
     if(rec.geometry_mode==='footprint'){
       const outer=rec.points||rec.outer||rec.footprint?.outer;
       if(!outer||outer.length<3) throw new Error('Footprint boundary is missing');
@@ -236,22 +252,6 @@ const ray=new THREE.Raycaster(), mouse=new THREE.Vector2();
 let selected=null;
 // 검토 사유 → 사람이 읽을 수 있는 한 줄 + 조치. 코드 한 단어만 보여 주면
 // 사용자는 무엇을 볼지 모른다(실측: 검토 대상 180개 중 154개가 사유 없음이었다).
-const REASON = {
-  'thin_pair': '두께가 이 레이어 중앙값의 1/3 미만 — 벽면 옆 마감선과 짝지었을 수 있다. '
-             + '실제 두께가 맞으면 layer_map 에 opts pair_min 을 주면 통과한다.',
-  'single': '반대편 면선을 못 찾아 이 선 하나를 중심선으로 썼다 — 두께는 기본값이다.',
-  'single_offset': '반대편 면선이 없어 중심선을 폭의 절반만큼 밀어 추정했다 — '
-                 + '위치·두께 둘 다 추정치다.',
-  'closed': '닫힌 폴리선을 그대로 압출했다(면선 페어링을 거치지 않음).',
-  'axis': '치수선(DIMENSION)에서 뽑은 축선이다 — 단면은 부재일람표에서 온다.',
-  // 기둥 세 사유는 종전에 원문 키가 그대로 찍혔다 — 사용자가 고칠 대상을 보는 유일한 화면인데.
-  'column_layer_looks_like_wall': '이 레이어의 선은 기둥이 아니라 **벽처럼** 그려졌다(평행 짝). '
-             + 'layer_map 한 줄이면 해결된다 — 경고 맨 위에 붙여 넣을 줄이 있다.',
-  'column_boundary_unresolved': '기둥 경계를 닫지 못했다 — 원본 선이 실제로 면을 이루지 않는다. '
-             + '레이어 분류가 맞는지 먼저 보고, 맞다면 도면의 경계를 확인한다.',
-  'column_outline_inferred': '원본 선이 닫은 면으로 기둥을 복원했다 — 분류가 맞는지 확인이 필요하다.',
-};
-
 const edits = MepEdit.clone(DATA.project_edits || {}); // canonical server snapshot + local changes
 const CATS=['wall','column','slab','beam','zone','opening','pipe','duct','tray','equipment'];
 const sel=document.getElementById('e_cat'); CATS.forEach(c=>{const o=document.createElement('option');o.value=o.textContent=c;sel.appendChild(o);});
@@ -317,7 +317,19 @@ function fillPanel(rec, cat){
     document.getElementById('e_w').value=edits[eid]?.overrides?.width ?? rec.overrides?.width ?? rec.width_detected ?? rec.width ?? '';
     document.getElementById('e_h').value=edits[eid]?.overrides?.height ?? rec.overrides?.height ?? rec.overrides?.thickness ?? '';
   }
+  // 높이(elevation) 편집은 첫 배포에서 MEP(배관·덕트·트레이·장비)만 — 벽/기둥의 z_base 는
+  // floor_z 가 없는 레코드에서 층 배정을 옮길 수 있어(geom_contract.floor_z) 뒤로 미룬다.
+  const zwrap=document.getElementById('e_zrow');
+  if(ELEV_CATS.includes(cat)){
+    zwrap.style.display='block';
+    document.getElementById('e_z').value=edits[eid]?.overrides?.elevation ?? rec.overrides?.elevation ?? rec.elevation ?? '';
+  } else {
+    zwrap.style.display='none';
+    document.getElementById('e_z').value='';
+  }
   document.getElementById('e_del').checked=!!edits[eid]?.deleted;
+  // 평면 탭이 다루는 카테고리일 때만 — 기둥·슬래브·개구부 등은 넘길 곳이 없다.
+  document.getElementById('editInPlan').hidden=!EDIT_CATS.includes(cat);
   const reviewRow=document.getElementById('reviewrow');
   reviewRow.style.display=(rec.needs_review||rec.review_ack_stale)?'block':'none';
   document.getElementById('e_review').checked=false;
@@ -364,6 +376,11 @@ function whyHtml(rec, cat){
   }
   if(rec.review_resolved) out.push('<span style="color:#6a6">검토 완료로 표시됨</span>');
   if(rec.review_ack_stale) out.push('<b style="color:#e93">형상이 바뀌어 이전 검토 확인이 만료됨</b>');
+  if(ELEV_CATS.includes(cat) && rec.overrides?.elevation!=null)
+    out.push('높이: 인스펙터에서 선언 '+Math.round(rec.overrides.elevation)+'mm');
+  // 프로젝트 기본값이 채운 필드 — 카테고리 추정이 아니라 사람이 프로젝트를 열 때 적은 선언이다.
+  if(rec.declaration_basis && Object.keys(rec.declaration_basis).length)
+    out.push('프로젝트 기본값: '+Object.keys(rec.declaration_basis).join(', '));
   const wd=rec.width_detected, ov=rec.overrides?.width;
   if(wd!=null&&ov!=null&&Math.abs(wd-ov)>Math.max(20,ov*0.15))
     out.push('두께: 도면 실측 <b>'+Math.round(wd)+'</b>mm ≠ layer_map 선언 <b>'
@@ -389,8 +406,12 @@ document.getElementById('apply').addEventListener('click', ()=>{
   const rec=selRec; if(!rec) return; const eid=rec.eid; if(!eid){alert('이 요소는 EID가 없어 수정 저장 불가');return;}
   const cat=sel.value;
   const w=parseFloat(document.getElementById('e_w').value), h=parseFloat(document.getElementById('e_h').value);
+  const zraw=document.getElementById('e_z').value.trim();
+  // 빈 칸 = 도면값으로 되돌린다(null → applyProperties 가 overrides 에서 지운다). 숫자 아닌 값은 무시한다.
+  const z=ELEV_CATS.includes(cat) ? (zraw===''?null:parseFloat(zraw)) : undefined;
   const e=MepEdit.applyProperties(edits[eid],rec,selCat,{
     category:cat,width:w,height:h,
+    zKey:ELEV_CATS.includes(cat)?'elevation':undefined, z,
     deleted:document.getElementById('e_del').checked,
     reviewResolved:document.getElementById('e_review').checked
   });
@@ -402,25 +423,25 @@ document.getElementById('apply').addEventListener('click', ()=>{
   if(!Object.keys(e).filter(k=>k[0]!=='_').length) delete edits[eid];
   refreshEdits();
 });
-// 되돌리기 — edits 는 평평한 객체라 스냅샷 스택 하나면 충분하다.
+// 3D 는 기하 보기 전용이다 — 끝점·경로 편집은 평면 탭에서만. 이 버튼은 탭 전환(setTab)에
+// 얹는다: 카테고리·층·선택 동기화는 setTab 이 이미 한다(2D 평면 탭 절 참조).
+document.getElementById('editInPlan').addEventListener('click', ()=>{ setTab(true); });
+// 되돌리기·다시 실행 — 스택 로직은 `review_logic.createHistory`(순수 함수, node 테스트가 잠근다).
 // 시간 디바운스가 아니라 '한 동작 = 한 단계' 다. 무동작(값이 같음)은 쌓지 않는다.
-const UNDO=[]; let _lastSnap=JSON.stringify(edits);
-function pushUndo(){
-  const cur=JSON.stringify(edits);
-  if(cur===_lastSnap) return;            // 바뀐 게 없으면 단계를 만들지 않는다
-  UNDO.push(_lastSnap); _lastSnap=cur;
-  if(UNDO.length>100) UNDO.shift();
-}
-function undo(){
-  if(!UNDO.length) return;
-  const prev=UNDO.pop();
+const HISTORY=createHistory(JSON.stringify(edits));
+function pushUndo(){ HISTORY.push(JSON.stringify(edits)); }
+function applySnapshot(snapshot){
+  if(snapshot==null) return;
   for(const k of Object.keys(edits)) delete edits[k];
-  Object.assign(edits, JSON.parse(prev));
-  _lastSnap=prev; persistAndQueue(); syncEffective();
+  Object.assign(edits, JSON.parse(snapshot));
+  persistAndQueue(); syncEffective();
 }
 window.addEventListener('keydown', ev=>{
   if(ACTION_LOCK) return;
-  if((ev.ctrlKey||ev.metaKey) && ev.key.toLowerCase()==='z'){ ev.preventDefault(); undo(); }
+  if(!(ev.ctrlKey||ev.metaKey)) return;
+  const k=ev.key.toLowerCase();
+  if(k==='z' && !ev.shiftKey){ ev.preventDefault(); applySnapshot(HISTORY.undo()); }
+  else if(k==='y' || (k==='z' && ev.shiftKey)){ ev.preventDefault(); applySnapshot(HISTORY.redo()); }
 });
 
 // 서버의 기준 revision 과 함께 보관해야 오래된 오프라인 사본이 새 서버 상태를 덮지 않는다.
@@ -475,8 +496,17 @@ function mergeServerPresentation(response){
   EDITS_REPORT=response.geometry.edits_report || {};
   CLASH_REVIEW=response.geometry.clash_review || {};
   CONNECTIVITY=response.geometry.mep_connectivity || {};
+  CONSTRUCTION_RULES=response.geometry.construction_rules || {};
+  SUGGESTIONS_APPLY=response.geometry.suggestions_apply || [];
+  BOQ=response.geometry.boq || {};
+  LEVEL_HEIGHT_DECLARED=!!response.geometry.level_height_declared;
   orphanSuggestions=((response.geometry.edits_report)||{}).relink_suggestions||[];
   renderOrphans();
+  renderBoq();
+}
+function renderBoq(){
+  document.getElementById('boqHeightBasis').textContent=boqHeightBasisText(LEVEL_HEIGHT_DECLARED);
+  document.getElementById('boqBody').innerHTML=boqBodyHtml(BOQ);
 }
 let SAVE_QUEUE=null;
 if(RUNTIME){
@@ -493,7 +523,7 @@ if(RUNTIME){
       try{ localStorage.removeItem(LSKEY); }catch(e){}
       RUNTIME.revision=response.revision; LSKEY=MepEdit.backupKey(RUNTIME);
       if(!unchanged) saveLocal();
-      _lastSnap=JSON.stringify(edits); syncEffective();
+      HISTORY.rebase(JSON.stringify(edits)); syncEffective();
     },
     onStatus:kind=>{
       if(kind==='saving') setSaveStatus('saving','저장 중…');
@@ -525,6 +555,14 @@ function refreshEditsOnly(){
         const L=cl.length>1?Math.hypot(cl[cl.length-1][0]-cl[0][0],
                                        cl[cl.length-1][1]-cl[0][1]):0;
         lbl='벽 '+Math.round(L)+'mm · 두께 '+Math.round(r.overrides?.width||0);
+      } else if(['pipe','duct','tray'].includes(v.category)){
+        const cl=r.centerline||r.points||[];
+        const L=cl.length>1?Math.hypot(cl[cl.length-1][0]-cl[0][0],
+                                       cl[cl.length-1][1]-cl[0][1]):0;
+        const ov=r.overrides||{};
+        const dim=ov.diameter!=null?'Ø'+Math.round(ov.diameter)
+                 :(ov.width_mm!=null||ov.height_mm!=null)?Math.round(ov.width_mm||0)+'×'+Math.round(ov.height_mm||0):'';
+        lbl=(CAT_LABEL[v.category]||v.category)+' '+Math.round(L)+'mm'+(dim?' · '+dim:'');
       } else {
         lbl=(r.mark||'창호')+' '+Math.round(r.width||0)+'×'+Math.round(r.height||0);
       }
@@ -690,7 +728,7 @@ sectionInput.addEventListener('input',ev=>{
 
 const reviewFloor=document.getElementById('reviewFloor'), reviewCategory=document.getElementById('reviewCategory');
 function renderReview(){
-  const entries=buildReviewEntries(EFFECTIVE_ELEMENTS,EDITS_REPORT,CLASH_REVIEW.items||[],CONNECTIVITY);
+  const entries=buildReviewEntries(EFFECTIVE_ELEMENTS,EDITS_REPORT,CLASH_REVIEW.items||[],CONNECTIVITY,CONSTRUCTION_RULES.items||[],SUGGESTIONS_APPLY);
   const floors=[...new Set(entries.map(x=>x.floor).filter(Boolean))].sort();
   const categories=[...new Set(entries.map(x=>x.category).filter(Boolean))].sort();
   const keepFloor=reviewFloor.value, keepCategory=reviewCategory.value;
@@ -729,9 +767,27 @@ document.getElementById('reviewBatch').addEventListener('click',ev=>{
   if(ACTION_LOCK||!ev.target.closest('.confirm-gap')) return;
   confirmGap(routineCandidateIds(CONNECTIVITY),true);
 });
+async function applySuggestion(suggestion){
+  setSaveStatus('saving','저장 중…');
+  try{
+    const response=await apiPost('/layer-rule',
+      {project_id:RUNTIME.project_id, expected_revision:RUNTIME.revision, suggestion});
+    RUNTIME.revision=response.revision;
+    if(response.geometry&&response.geometry.elements)
+      BASE_ELEMENTS=MepEdit.deriveBaseElements(response.geometry.elements,response.edits||{},excludedEditIds(response.geometry.edits_report));
+    mergeServerPresentation(response);
+    syncEffective();
+    setSaveStatus('saved','서버에 저장됨 — layer_map.csv 갱신, 다시 해석됨');
+  }catch(error){
+    setSaveStatus('error','규칙 적용 실패 — 프로젝트는 그대로입니다: '+error.message);
+  }
+  renderReview();
+}
 reviewFloor.addEventListener('change',renderReview); reviewCategory.addEventListener('change',renderReview);
 document.getElementById('reviewList').addEventListener('click',ev=>{
   if(ACTION_LOCK) return;
+  const applyBtn=ev.target.closest('.apply-suggest');
+  if(applyBtn){ applySuggestion(JSON.parse(applyBtn.dataset.apply)); return; }
   const gap=ev.target.closest('.confirm-gap');
   if(gap){ confirmGap(gap.dataset.gap,!gap.dataset.confirmed); return; }
   const row=ev.target.closest('.review-item'); if(!row) return;
@@ -754,13 +810,33 @@ document.getElementById('reviewList').addEventListener('click',ev=>{
 // 전부 그걸 배워야 한다.
 const SVG2NS='http://www.w3.org/2000/svg';
 const svg2=document.getElementById('view2d'), g2=document.getElementById('g2d');
-let mode2='select', sel2=[], vb=null, dragging=null, drawFrom=null;
+let mode2='select', cat2='wall', sel2=[], vb=null, dragging=null, drawFrom=null;
 const SNAP_PX=12;          // 스냅은 화면 기준(집기 편하게)
 const JOIN_TOL_MM=600;     // 결합은 실치수 기준(줌과 무관해야 한다)
-const HINT2={select:'벽을 클릭 → 끝점을 끌어 옮깁니다. Delete 로 삭제.',
-             split:'벽 위의 나눌 지점을 클릭합니다.',
-             join:'이어 붙일 벽 2개를 차례로 클릭합니다.',
-             draw:'시작점과 끝점을 클릭해 벽을 그립니다.'};
+const EDIT_CATS=['wall','pipe','duct','tray'];   // 평면 탭에서 고를 수 있는 카테고리
+const CAT_LABEL={wall:'벽',pipe:'배관',duct:'덕트',tray:'트레이'};
+const HINT2={
+  wall:{select:'벽을 클릭 → 끝점을 끌어 옮깁니다. Delete 삭제 · Ctrl+Z 되돌리기 · Ctrl+Y 다시 · Shift 직교 · Space 드래그 이동.',
+        split:'벽 위의 나눌 지점을 클릭합니다.',
+        join:'이어 붙일 벽 2개를 차례로 클릭합니다.',
+        draw:'시작점과 끝점을 클릭해 벽을 그립니다. Shift 로 직교, Esc 취소.'},
+  pipe:{select:'배관을 클릭 → 끝점을 끌어 옮깁니다. Delete 삭제 · Ctrl+Z 되돌리기 · Ctrl+Y 다시 · Shift 직교 · Space 드래그 이동.',
+        split:'배관 위의 나눌 지점을 클릭합니다.',
+        join:'이어 붙일 배관 2개를 차례로 클릭합니다.',
+        draw:'시작점과 끝점을 클릭해 배관을 그립니다. Shift 로 직교, Esc 취소.'},
+  duct:{select:'덕트를 클릭 → 끝점을 끌어 옮깁니다. Delete 삭제 · Ctrl+Z 되돌리기 · Ctrl+Y 다시 · Shift 직교 · Space 드래그 이동.',
+        split:'덕트 위의 나눌 지점을 클릭합니다.',
+        join:'이어 붙일 덕트 2개를 차례로 클릭합니다.',
+        draw:'시작점과 끝점을 클릭해 덕트를 그립니다. Shift 로 직교, Esc 취소.'},
+  tray:{select:'트레이를 클릭 → 끝점을 끌어 옮깁니다. Delete 삭제 · Ctrl+Z 되돌리기 · Ctrl+Y 다시 · Shift 직교 · Space 드래그 이동.',
+        split:'트레이 위의 나눌 지점을 클릭합니다.',
+        join:'이어 붙일 트레이 2개를 차례로 클릭합니다.',
+        draw:'시작점과 끝점을 클릭해 트레이를 그립니다. Shift 로 직교, Esc 취소.'}};
+const JOIN_FAIL={
+  wall:'결합 불가: 같은 층의 직선 벽이며 끝점과 모든 치수·속성이 같아야 합니다. 빈 간격은 벽으로 메우지 않습니다.',
+  pipe:'결합 불가: 같은 층의 직선 배관이며 끝점과 모든 치수·속성이 같아야 합니다. 빈 간격은 배관으로 메우지 않습니다.',
+  duct:'결합 불가: 같은 층의 직선 덕트며 끝점과 모든 치수·속성이 같아야 합니다. 빈 간격은 덕트로 메우지 않습니다.',
+  tray:'결합 불가: 같은 층의 직선 트레이며 끝점과 모든 치수·속성이 같아야 합니다. 빈 간격은 트레이로 메우지 않습니다.'};
 const LEVEL_INFO=new Map();
 for(const records of Object.values(BASE_ELEMENTS)) for(const rec of records||[])
   if(rec.level!=null && !LEVEL_INFO.has(String(rec.level))) LEVEL_INFO.set(String(rec.level),{
@@ -806,14 +882,30 @@ floor2d.addEventListener('change',()=>{
   setSourceFloor(floor2d.value); fitView(); render2();
 });
 
-function wallsAll(){
-  // 평면 탭은 도면에 그려진 벽만 다룬다. 창 위아래 벽은 개구부에서 파생되고 같은 평면 선에 아래·위 두 개가 겹쳐
-  // 하나만 집히며 스냅도 흐트러진다 — 3D 에서 고친다.
-  return (EFFECTIVE_ELEMENTS.wall||[]).filter(r=>r.source!=='opening_infill');
+function editable2(){
+  // 평면 탭은 현재 선택한 카테고리(cat2)만 편집 대상으로 다룬다. 창 위아래 벽은 개구부에서
+  // 파생되고 같은 평면 선에 아래·위 두 개가 겹쳐 하나만 집히며 스냅도 흐트러진다 — 3D 에서 고친다.
+  // 외곽선(footprint) 덕트는 축선이 없어 경로 편집 대상이 아니다(mep_network 도 건너뛴다).
+  const records=EFFECTIVE_ELEMENTS[cat2]||[];
+  return cat2==='wall' ? records.filter(r=>r.source!=='opening_infill')
+                        : records.filter(r=>r.geometry_mode!=='footprint');
 }
 function clOf(r){ return r.centerline || r.points || []; }
 function isDel(r){ return !!(edits[r.eid] && edits[r.eid].deleted); }
-function recByEid(eid){ return wallsAll().find(r=>r.eid===eid); }
+function recByEid(eid){ return editable2().find(r=>r.eid===eid); }
+function nearestOnFloor(point){
+  // 새로 그린 설비의 치수·높이 기본값을 물려받을 이웃 — 같은 층, 같은 카테고리에서 가장 가까운 것.
+  if(!point) return null;
+  let best=null, bestD=Infinity;
+  for(const r of editable2()){
+    if(!onEditFloor(r)) continue;
+    for(const p of clOf(r)){
+      const d=Math.hypot(p[0]-point[0],p[1]-point[1]);
+      if(d<bestD){ bestD=d; best=r; }
+    }
+  }
+  return best;
+}
 
 function fitView(){
   const b=editBackdropState(sourceDrawing,floor2d.value).floor?.bbox||DATA.bbox; if(!b) return;
@@ -862,11 +954,20 @@ function render2(){
     const pts=src.centerline||src.points||[];
     if(pts.length>1) g2.appendChild(mk2('polyline',{points:pts.map(p=>p[0]+','+p[1]).join(' '),class:'orphan-old'}));
   }
-  for(const rec of wallsAll()){
+  if(cat2!=='wall'){
+    // 설비를 고르면 벽은 배경으로만 — 편집 대상은 아니지만 자리를 잡을 때 보여야 한다.
+    for(const r of (EFFECTIVE_ELEMENTS.wall||[])){
+      if(!onEditFloor(r) || r.source==='opening_infill') continue;
+      const cl=clOf(r); if(cl.length<2) continue;
+      g2.appendChild(mk2('polyline',{points:cl.map(p=>p[0]+','+p[1]).join(' '),
+                                      class:'w-bg','stroke-width':Math.max(30,gcWidthOf(r,P,'wall'))}));
+    }
+  }
+  for(const rec of editable2()){
     if(!onEditFloor(rec)) continue;
     const cl=clOf(rec); if(cl.length<2) continue;
-    const w=Math.max(30, gcWidthOf(rec,P,'wall'));
-    const cls=['w'];
+    const w=strokeWidthOf2(rec);
+    const cls=['w',cat2];
     if(isDel(rec)) cls.push('del');
     else if(sel2.indexOf(rec.eid)>=0) cls.push('sel');
     else if(rec.pairing==='manual') cls.push('man');
@@ -883,7 +984,7 @@ function render2(){
   }
   for(const end of CONNECTIVITY.open_ends||[])
     if(onEditFloor({level:end.level})) g2.appendChild(mk2('circle',{cx:end.at[0],cy:end.at[1],r:5*k,class:'mep-end '+end.status}));
-  for(const rec of wallsAll()){
+  for(const rec of editable2()){
     if(!onEditFloor(rec) || sel2.indexOf(rec.eid)<0 || isDel(rec)) continue;
     const cl=clOf(rec);
     for(const i of cl.map((_,i)=>i)){
@@ -891,15 +992,32 @@ function render2(){
       h.dataset.eid=rec.eid; h.dataset.i=i; g2.appendChild(h);
     }
   }
-  document.getElementById('hint2d').textContent = HINT2[mode2] || '';
+  document.getElementById('hint2d').textContent = (HINT2[cat2]||HINT2.wall)[mode2] || '';
 }
 
-function manualWall(points, src){
-  src=src||activeFloorSource();
-  return MepEdit.makeManualWall(points,src,{
-    width:Math.round(src?gcWidthOf(src,P,'wall'):((P.wall&&P.wall.width)||200)),height:wallH});
+function strokeWidthOf2(rec){
+  if(cat2==='wall') return Math.max(30, gcWidthOf(rec,P,'wall'));
+  try{ const dims=gcMepDimensions(cat2,rec,P); return Math.max(30, dims.diameter ?? dims.width_mm ?? 100); }
+  catch{ return 30; }
 }
-function addWall(rec){ edits[rec.eid]={added:true, category:'wall', record:rec}; }
+
+function manualRec(points, src){
+  if(cat2==='wall'){
+    src=src||activeFloorSource();
+    return MepEdit.makeManualWall(points,src,{
+      width:Math.round(src?gcWidthOf(src,P,'wall'):((P.wall&&P.wall.width)||200)),height:wallH});
+  }
+  // 이웃(끌어온 src, 없으면 같은 층·같은 카테고리에서 가장 가까운 것)의 치수·높이를 물려받는다.
+  // 아무것도 없으면 geom_contract 기본값(DEFAULT_DIMS)과 층 소스의 높이로 떨어진다.
+  const base=src||nearestOnFloor(points[0])||{};
+  let dims={};
+  try{ dims=gcMepDimensions(cat2,base,P); }catch{}
+  const seed=Object.assign({},base);
+  if(seed.elevation==null) seed.elevation=activeFloorSource().elevation ?? 0;
+  if(seed.level==null) seed.level=floor2d.value;
+  return MepEdit.makeManualRecord(cat2, points, seed, dims);
+}
+function addWall(rec){ edits[rec.eid]={added:true, category:cat2, record:rec}; }
 function stripBaseEid(eid){ for(const cat of Object.keys(BASE_ELEMENTS)) BASE_ELEMENTS[cat]=(BASE_ELEMENTS[cat]||[]).filter(r=>r.eid!==eid); }
 function delWall(rec){
   if(edits[rec.eid] && edits[rec.eid].added){ stripBaseEid(rec.eid); delete edits[rec.eid]; }
@@ -908,18 +1026,23 @@ function delWall(rec){
 
 // 끝점 스냅 — 수동 벽은 파서의 코너 스냅·junction 치유를 건너뛴다(주입이 그 뒤라서).
 // 그래서 여기서 사람이 **보면서** 붙인다. 파서가 나중에 몰래 옮기는 것보다 낫다.
-function snapPoint(pt, skipEid){
+// Shift 직교는 **스냅보다 먼저** 건다(edit_geometry.orthoPoint 주석 참조).
+function snapPoint(pt, skipEid, orthoFrom){
+  if(orthoFrom) pt=MepEdit.orthoPoint(orthoFrom, pt);
   const source=(skipEid&&recByEid(skipEid))||activeFloorSource();
-  const floor=source?{level:source.level,floor:source.floor,elevation:source.elevation,z_base:source.z_base}:{};
-  return MepEdit.snapPoint(pt,wallsAll().filter(onEditFloor),Object.assign({skipEid,
+  // MEP 는 elevation 을 층 프로브에서 뺀다 — 넣으면 sameFloor(edit_geometry.js)가 level/floor 없을 때
+  // elevation 으로 폴백해, 높이가 다른 배관끼리는 서로 안 붙는다.
+  const floor=source?(cat2==='wall'?{level:source.level,floor:source.floor,elevation:source.elevation,z_base:source.z_base}
+                                    :{level:source.level,floor:source.floor}):{};
+  return MepEdit.snapPoint(pt,editable2().filter(onEditFloor),Object.assign({skipEid,
     screenToleranceMm:SNAP_PX*px2world(),physicalToleranceMm:50},floor)).point;
 }
 
 function splitWall(rec, pt){
   const parts=MepEdit.splitPolyline(rec,pt); if(parts.length!==2) return;
-  const w1=manualWall(clOf(parts[0]),rec), w2=manualWall(clOf(parts[1]),rec);
+  const w1=manualRec(clOf(parts[0]),rec), w2=manualRec(clOf(parts[1]),rec);
   delWall(rec); addWall(w1); addWall(w2); sel2=[w1.eid,w2.eid];
-  refreshEdits(); fillPanel(w1,'wall'); render2();
+  refreshEdits(); fillPanel(w1,cat2); render2();
 }
 
 function joinWalls(r1, r2){
@@ -927,17 +1050,28 @@ function joinWalls(r1, r2){
   if(!r1 || !r2 || r1===r2){ render2(); return; }
   const joined=MepEdit.joinPolylines(r1,r2,{joinTolerance:JOIN_TOL_MM,coordinateTolerance:1});
   if(!joined){
-    document.getElementById('hint2d').textContent='결합 불가: 같은 층의 직선 벽이며 끝점과 모든 치수·속성이 같아야 합니다. 빈 간격은 벽으로 메우지 않습니다.';
+    document.getElementById('hint2d').textContent=JOIN_FAIL[cat2]||JOIN_FAIL.wall;
     render2(); return;
   }
-  const nw=manualWall(clOf(joined),r1);
+  const nw=manualRec(clOf(joined),r1);
   delWall(r1); delWall(r2); addWall(nw); sel2=[nw.eid];
-  refreshEdits(); fillPanel(nw,'wall'); render2();
+  refreshEdits(); fillPanel(nw,cat2); render2();
 }
+
+// 화면 이동(팬) — 확대해 놓으면 편집할 자리로 갈 방법이 없었다. 원본 DXF 창의 `sourceDrag` 와
+// 같은 방식이다(중버튼이나 Space 를 누른 채 드래그). 선택·그리기와 겹치지 않게 조건을 먼저 본다.
+let spaceHeld=false, pan2=null;
+window.addEventListener('keydown', ev=>{ if(ev.code==='Space'&&svg2.classList.contains('on')){ spaceHeld=true;
+  if(ev.target===document.body) ev.preventDefault(); } });
+window.addEventListener('keyup', ev=>{ if(ev.code==='Space') spaceHeld=false; });
+window.addEventListener('blur', ()=>{ spaceHeld=false; pan2=null; });
 
 svg2.addEventListener('pointerdown', ev=>{
   if(ACTION_LOCK) return;
   const pt=evtWorld(ev); if(!pt) return;
+  if(ev.button===1 || spaceHeld){
+    pan2={last:pt}; svg2.setPointerCapture(ev.pointerId); ev.preventDefault(); return;
+  }
   const t=ev.target;
   if(t.classList && t.classList.contains('hnd')){
     dragging={eid:t.dataset.eid, i:+t.dataset.i};
@@ -945,10 +1079,10 @@ svg2.addEventListener('pointerdown', ev=>{
   }
   const eid=(t.dataset && t.dataset.eid) || null;
   if(mode2==='draw'){
-    const p=snapPoint(pt,null);
+    const p=snapPoint(pt,null,ev.shiftKey?drawFrom:null);
     if(!drawFrom){ drawFrom=p;
       document.getElementById('hint2d').textContent='끝점을 클릭하세요 (Esc 취소).'; }
-    else { addWall(manualWall([drawFrom,p],null)); drawFrom=null;
+    else { addWall(manualRec([drawFrom,p],null)); drawFrom=null;
       refreshEdits(); render2(); }
     return;
   }
@@ -960,15 +1094,22 @@ svg2.addEventListener('pointerdown', ev=>{
     if(sel2.length===2) joinWalls(recByEid(sel2[0]), recByEid(sel2[1]));
     render2(); return;
   }
-  sel2=[eid]; fillPanel(rec,'wall'); render2();
+  sel2=[eid]; fillPanel(rec,cat2); render2();
 });
 
 svg2.addEventListener('pointermove', ev=>{
+  if(pan2){
+    const pt=evtWorld(ev); if(!pt) return;
+    vb={...vb, x:vb.x-(pt[0]-pan2.last[0]), y:vb.y-(pt[1]-pan2.last[1])};
+    applyVB(); pan2.last=evtWorld(ev); return;
+  }
   if(!dragging) return;
   const rec=recByEid(dragging.eid); if(!rec) return;
   const pt=evtWorld(ev); if(!pt) return;
   const cl=clOf(rec).map(p=>p.slice());
-  cl[dragging.i]=snapPoint(pt, rec.eid);
+  // 직교 기준은 **끌지 않는 이웃 끝점** 이다 — 그래야 그 구간이 수평·수직으로 선다.
+  const neighbour=cl[dragging.i===0?1:dragging.i-1];
+  cl[dragging.i]=snapPoint(pt, rec.eid, ev.shiftKey?neighbour:null);
   dragging.preview=cl;
   for(const e of g2.querySelectorAll('polyline.w'))
     if(e.dataset.eid===dragging.eid) e.setAttribute('points', cl.map(p=>p[0]+','+p[1]).join(' '));
@@ -979,6 +1120,7 @@ svg2.addEventListener('pointermove', ev=>{
 });
 
 svg2.addEventListener('pointerup', ()=>{
+  if(pan2){ pan2=null; return; }
   if(!dragging) return;
   const rec=recByEid(dragging.eid), cl=dragging.preview, movedIndex=dragging.i;
   dragging=null;
@@ -990,10 +1132,10 @@ svg2.addEventListener('pointerup', ()=>{
     nw=MepEdit.movePolylinePoint(rec,movedIndex,cl[movedIndex]);
     edits[rec.eid]=Object.assign({},edits[rec.eid],{record:nw});
   } else {
-    nw=manualWall(cl,rec); delWall(rec); addWall(nw);
+    nw=manualRec(cl,rec); delWall(rec); addWall(nw);
   }
   sel2=[nw.eid];
-  refreshEdits(); fillPanel(nw,'wall'); render2();
+  refreshEdits(); fillPanel(nw,cat2); render2();
 });
 
 svg2.addEventListener('wheel', ev=>{
@@ -1024,28 +1166,44 @@ for(const b of document.querySelectorAll('#tools2d button'))
       x.classList.toggle('on', x===b);
     render2();
   });
+const cat2Select=document.getElementById('cat2d');
+if(cat2Select) cat2Select.addEventListener('change', ()=>{
+  cat2=cat2Select.value; dragging=null; drawFrom=null; sel2=[];
+  fillPanel(null,null); render2();
+});
 
 function setTab(mode){
-  const two=mode===true||mode==='edit', three=mode==='three';
+  // 'side' = 평면 편집 + 3D 나란히. 편집 경로는 그대로다 — 3D 는 계속 보기 전용이고,
+  // `syncEffective→rebuild()` 가 이미 매 편집마다 3D 를 다시 만든다(저장을 기다리지 않는다).
+  const side=mode==='side';
+  const two=mode===true||mode==='edit'||side, three=mode==='three';
   const wasTwo=svg2.classList.contains('on');
-  document.getElementById('t2d').classList.toggle('on', two);
+  document.getElementById('t2d').classList.toggle('on', two&&!side);
+  document.getElementById('tside').classList.toggle('on', side);
   document.getElementById('t3d').classList.toggle('on', three);
   document.getElementById('tlinked').classList.toggle('on', !two&&!three);
   document.getElementById('tools2d').classList.toggle('on', two);
   svg2.classList.toggle('on', two);
-  document.getElementById('editSourceControls').classList.toggle('on',two);
-  document.getElementById('linkedWorkspace').style.display=two?'none':'grid';
+  document.getElementById('view').classList.toggle('side', side);
+  document.getElementById('editSourceControls').classList.toggle('on',two&&!side);
+  document.getElementById('linkedWorkspace').style.display=(two&&!side)?'none':'grid';
   document.getElementById('linkedWorkspace').classList.toggle('three-only',three);
   if(two){
-    if(!wasTwo && selCat==='wall' && selRec && recByEid(selRec.eid)){
-      sel2=[selRec.eid]; setSourceFloor(floor2d.value); focusSourceEid(selRec.eid);
-      if(sourceVB){ vb={...sourceVB}; applyVB(); }
+    // 3D 에서 고른 부재를 평면으로 넘긴다 — 카테고리를 먼저 맞춰야 editable2() 가 찾는다.
+    if(!wasTwo && EDIT_CATS.includes(selCat) && selRec){
+      cat2=selCat;
+      if(cat2Select) cat2Select.value=cat2;
+      if(recByEid(selRec.eid)){
+        sel2=[selRec.eid]; setSourceFloor(floor2d.value); focusSourceEid(selRec.eid);
+        if(sourceVB){ vb={...sourceVB}; applyVB(); }
+      }
     }
     if(!vb) fitView(); render2();
   }
-  else requestAnimationFrame(()=>{cam.aspect=W()/H();cam.updateProjectionMatrix();renderer.setSize(W(),H());if(!three){renderSourceBackdrop();renderSourceOverlay();}});
+  if(!two || side) requestAnimationFrame(()=>{cam.aspect=W()/H();cam.updateProjectionMatrix();renderer.setSize(W(),H());if(!three&&!side){renderSourceBackdrop();renderSourceOverlay();}});
 }
 document.getElementById('t2d').addEventListener('click', ()=>setTab(true));
+document.getElementById('tside').addEventListener('click', ()=>setTab('side'));
 document.getElementById('tlinked').addEventListener('click', ()=>setTab(false));
 document.getElementById('t3d').addEventListener('click', ()=>setTab('three'));
 
@@ -1161,7 +1319,7 @@ async function orphanRequest(path,body){
     CANONICAL_PRESENTATION=response.geometry?MepEdit.clone(response.geometry.elements):null;
     mergeServerPresentation(response);
     try{ localStorage.removeItem(LSKEY); }catch(e){} LSKEY=MepEdit.backupKey(RUNTIME);
-    _lastSnap=JSON.stringify(edits); syncEffective(); renderOrphans();
+    HISTORY.rebase(JSON.stringify(edits)); syncEffective(); renderOrphans();
     setSaveStatus('saved','서버에 저장됨');
     return true;
   }catch(error){
@@ -1201,13 +1359,14 @@ document.getElementById('src').textContent = (DATA.source||'').split(/[\\/]/).po
 if(RUNTIME) document.getElementById('roundtripHelp').innerHTML='수정은 이 프로젝트에 자동 저장됩니다.<br>서버 확인 뒤에만 “저장됨”으로 표시합니다.';
 const _restored = loadEdits();
 if(_restored!==null){
-  _lastSnap=JSON.stringify(edits);
+  HISTORY.rebase(JSON.stringify(edits));
   EFFECTIVE_ELEMENTS=MepEdit.materializeElements(BASE_ELEMENTS,edits);
 }
 if(_restored!==null) persistAndQueue();
 else setSaveStatus(RUNTIME?'saved':'unsaved',RUNTIME?'서버에 저장됨':'서버 연결 없음 — edits.json 다운로드 사용');
 renderOrphans();
 renderWarnings();
+renderBoq();
 if(_restored!==null){
   const b=document.getElementById('warnbox');
   b.insertAdjacentHTML('afterbegin',

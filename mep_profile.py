@@ -8,6 +8,7 @@ import re
 
 import ezdxf
 from drawing_units import scale_to_mm, unit_review
+import construction_rules as CR
 import geom_contract as GC
 from mep_paths import extract_curve, join_paths, _signature
 
@@ -75,6 +76,75 @@ def _number(value, label, positive=False):
     return value
 
 
+def _validate_insulation(ins):
+    """보온 선언 — 프로필 행과 프로젝트 기본값(`validate_defaults`)이 같은 판정을 쓴다."""
+    if not isinstance(ins, dict) or ins.get('grade') not in ('가', '나', '다', '라'):
+        raise ValueError("insulation requires a grade of 가/나/다/라")
+    if 'humid' in ins and not isinstance(ins['humid'], bool):
+        raise ValueError('insulation.humid must be a boolean')
+    if ins.get('fluid_temp_c') is not None:
+        ins['fluid_temp_c'] = _number(ins['fluid_temp_c'], 'insulation.fluid_temp_c')
+
+
+_MEP_DEFAULT_CATEGORIES = ('pipe', 'duct', 'tray')
+_ARCH_DEFAULT_CATEGORIES = ('wall', 'column', 'slab', 'beam')
+
+
+def validate_defaults(defaults):
+    """프로젝트 기본값(`source.options.defaults`) — 오타는 저장 시점에 거절한다(다음 파싱까지
+    미루지 않는다). 레이어·프로필 선언이 없을 때만 채우는 값이라 여기서는 **형식만** 본다 —
+    어느 레코드에 적용될지는 `dxf_parser.parse`/`mep_profile._assign` 이 결정한다."""
+    if not isinstance(defaults, dict):
+        raise ValueError('defaults must be an object')
+    out = {}
+    mep = defaults.get('mep')
+    if mep is not None:
+        if not isinstance(mep, dict):
+            raise ValueError('defaults.mep must be an object')
+        out_mep = {}
+        for cat, cat_def in mep.items():
+            if cat not in _MEP_DEFAULT_CATEGORIES:
+                raise ValueError(f'Unknown MEP category in defaults: {cat}')
+            if not isinstance(cat_def, dict):
+                raise ValueError(f'defaults.mep.{cat} must be an object')
+            row = {}
+            for key in ('material', 'nominal_size'):
+                if cat_def.get(key) is not None:
+                    if not isinstance(cat_def[key], str) or not cat_def[key].strip():
+                        raise ValueError(f'defaults.mep.{cat}.{key} must be a non-empty string')
+                    row[key] = cat_def[key].strip()
+            if cat_def.get('service') is not None:
+                if cat_def['service'] not in CR.SERVICES:
+                    raise ValueError(f"defaults.mep.{cat}.service must be one of {CR.SERVICES}")
+                row['service'] = cat_def['service']
+            if cat_def.get('insulation') is not None:
+                ins = copy.deepcopy(cat_def['insulation'])
+                _validate_insulation(ins)
+                row['insulation'] = ins
+            if row:
+                out_mep[cat] = row
+        if out_mep:
+            out['mep'] = out_mep
+    arch = defaults.get('architecture')
+    if arch is not None:
+        if not isinstance(arch, dict):
+            raise ValueError('defaults.architecture must be an object')
+        out_arch = {}
+        for cat, cat_def in arch.items():
+            if cat not in _ARCH_DEFAULT_CATEGORIES:
+                raise ValueError(f'Unknown architecture category in defaults: {cat}')
+            if not isinstance(cat_def, dict):
+                raise ValueError(f'defaults.architecture.{cat} must be an object')
+            mat = cat_def.get('material')
+            if mat is not None:
+                if not isinstance(mat, str) or not mat.strip():
+                    raise ValueError(f'defaults.architecture.{cat}.material must be a non-empty string')
+                out_arch[cat] = {'material': mat.strip()}
+        if out_arch:
+            out['architecture'] = out_arch
+    return out
+
+
 def validate_profile(profile, source_sha256=None):
     """Validate without changing the caller's data. Hash mismatch requires rebinding."""
     if not isinstance(profile, dict) or profile.get('version') != 1:
@@ -105,6 +175,12 @@ def validate_profile(profile, source_sha256=None):
         if bounds[0] >= bounds[2] or bounds[1] >= bounds[3]:
             raise ValueError('Region bounds must have positive area')
         region['bounds_mm'] = bounds
+    rules_opts = out.get('rules')
+    if rules_opts is not None:
+        if not isinstance(rules_opts, dict) or 'insulation_envelope' not in rules_opts:
+            raise ValueError('rules must be an object with insulation_envelope')
+        if not isinstance(rules_opts['insulation_envelope'], bool):
+            raise ValueError('rules.insulation_envelope must be a boolean')
     levels = out.setdefault('levels', {})
     if not isinstance(levels, dict):
         raise ValueError('levels must be an object')
@@ -157,6 +233,18 @@ def validate_profile(profile, source_sha256=None):
         _validate_filters(row)
         if not isinstance(row.get('system'), str) or not row['system'].strip():
             raise ValueError('A MEP system name is required')
+        if row.get('service') is not None and row['service'] not in CR.SERVICES:
+            raise ValueError('Unsupported service: ' + str(row['service']))
+        if row.get('insulation') is not None:
+            _validate_insulation(row['insulation'])
+        if row.get('slope') is not None:
+            slope = row['slope']
+            if not isinstance(slope, dict) or slope.get('high_end') not in ('start', 'end'):
+                raise ValueError('slope requires high_end: start or end')
+            ratio = slope.get('ratio')
+            if not (isinstance(ratio, str) and
+                    (re.fullmatch(r'[1-9]\d*/[1-9]\d*', ratio) or ratio == 'rule:drain-slope-by-diameter')):
+                raise ValueError("slope.ratio must be '<rise>/<run>' (e.g. '1/100') or 'rule:drain-slope-by-diameter'")
         row.setdefault('representation', 'centerline')
         if row['representation'] not in ('centerline', 'outline') or (row['representation'] == 'outline' and cat == 'pipe') or (cat == 'equipment' and row['representation'] != 'outline'):
             raise ValueError('Equipment requires outline; pipe requires centerline')
@@ -612,13 +700,31 @@ def _region_status(bounds, region):
     return 'crossing'
 
 
-def _assign(record, row, index, profile):
+def _assign(record, row, index, profile, defaults=None):
     rec = copy.deepcopy(record); cat = row['category']
-    rec.update(category=cat, system=row['system'], material=row.get('material', ''),
-               nominal_size=row.get('nominal_size', ''), dimension_basis=row['dimension_basis'],
+    # 프로젝트 기본값(source.options.defaults) — 레이어 행의 선언이 없을 때만 채운다. 프로필
+    # 폼이 매번 재조립하는 profile 안에 두지 않는다(GUI 저장 때마다 사라진다). 기본값도 **선언**
+    # 이다 — 카테고리 추정이 아니라 사람이 프로젝트를 열 때 한 번 적은 값이라 declaration_basis
+    # 로 자기보고한다.
+    cat_defaults = ((defaults or {}).get('mep') or {}).get(cat) or {}
+    material = row.get('material') or cat_defaults.get('material', '')
+    nominal_size = row.get('nominal_size') or cat_defaults.get('nominal_size', '')
+    service = row.get('service') or cat_defaults.get('service', '')
+    declared_basis = {}
+    if not row.get('material') and cat_defaults.get('material'):
+        declared_basis['material'] = 'project_default'
+    if not row.get('nominal_size') and cat_defaults.get('nominal_size'):
+        declared_basis['nominal_size'] = 'project_default'
+    if not row.get('service') and cat_defaults.get('service'):
+        declared_basis['service'] = 'project_default'
+    rec.update(category=cat, system=row['system'], material=material,
+               nominal_size=nominal_size, service=service,
+               dimension_basis=row['dimension_basis'],
                dimension_status='assumed' if row['dimension_basis'] == 'assumed' else 'specified',
                placement=row['placement'], _profile_rule=index,
                region_id=(profile.get('region') or {}).get('id', 'whole_drawing'))
+    if declared_basis:
+        rec['declaration_basis'] = declared_basis
     if cat == 'equipment':
         height = rec['height'] = row['height_mm']
         rec['role'] = row['role']
@@ -643,6 +749,28 @@ def _assign(record, row, index, profile):
         rec['review_reason'] = 'sleeve_symbol' if row['role'] == 'sleeve' else 'equipment_symbol_envelope'
     if row.get('material'):
         rec.setdefault('overrides', {})['material'] = row['material']
+    insulation = row.get('insulation') or cat_defaults.get('insulation')
+    if insulation:
+        if not row.get('insulation'):
+            declared_basis['insulation'] = 'project_default'
+            rec['declaration_basis'] = declared_basis
+        # 보온 두께는 여기서 **한 번만** 계산해 박아 둔다 — geom_contract.mep_envelope(Phase 4)와
+        # construction_rules 의 'MEP 보온' BOQ 가 둘 다 이 값을 그대로 읽는다(계약 순환 참조를 피한다:
+        # geom_contract 는 construction_rules 를 import 할 수 없다).
+        rec['insulation_decl'] = dict(insulation)
+        mm, table = CR.insulation_mm(cat, rec, insulation)
+        if mm is not None:
+            rec['insulation_mm'] = mm
+            rec['insulation_table'] = table
+    if row.get('slope'):
+        # 유향은 평면도에 없다 — 비율·높은 끝을 **둘 다** 선언했을 때만 dz 를 만든다. 'elevation' 은
+        # 그대로 두고(placement 규칙이 이미 계산한 값) path3d 의 높은 끝 dz=0 이 그 값과 만난다.
+        ratio_spec = row['slope']['ratio']
+        ratio = (CR.drain_slope_ratio(rec) if ratio_spec == 'rule:drain-slope-by-diameter'
+                else (lambda a, b: a / b)(*(float(x) for x in ratio_spec.split('/'))))
+        if ratio is not None:
+            rec['path3d'] = {'segments': GC.sloped_path3d(rec['points'], ratio, row['slope']['high_end'])}
+            rec['slope_basis'] = 'declared'
     if row['dimension_basis'] == 'assumed':
         rec['needs_review'] = True; rec['review_reason'] = 'mep_dimensions_assumed'
         rec['dims_assumed'] = ['height'] if cat == 'equipment' else ['diameter'] if 'diameter' in rec else ['width_mm', 'height_mm']
@@ -766,7 +894,7 @@ def _equipment_overlaps(output, issues):
                 'source_refs': output[i]['source_refs'] + output[j]['source_refs']})
 
 
-def apply_mep_profile(doc, result, profile):
+def apply_mep_profile(doc, result, profile, defaults=None):
     source_hash = hashlib.sha256(Path(result['source']).read_bytes()).hexdigest()
     profile = validate_profile(profile, source_hash)
     scale = scale_to_mm(doc, profile.get('unit_scale_to_mm'))
@@ -804,7 +932,7 @@ def apply_mep_profile(doc, result, profile):
                            'bounds_mm': _bounds(rec['points'])})
             continue
         rec['layer'] = appearance['layer']
-        grouped[index].append(_assign(rec, row, index, profile))
+        grouped[index].append(_assign(rec, row, index, profile, defaults))
     for index, (_, row) in enumerate(rules):
         missing_handles = set(row.get('source_handles', [])) - {r[0] for r in seen[index]}
         missing_refs = {_ref_key(r) for r in row.get('source_refs', [])} - seen[index]

@@ -116,7 +116,12 @@ def apply_edits(elements, edits):
             orphans.append(eid)
             continue
         if edit.get("overrides"):
-            rec.setdefault("overrides", {}).update(copy.deepcopy(edit["overrides"]))
+            ov = rec.setdefault("overrides", {})
+            for key, value in edit["overrides"].items():
+                if value is None:
+                    ov.pop(key, None)   # null = 이 키를 지우고 도면값으로 되돌린다(병합은 union 만 하므로)
+                else:
+                    ov[key] = copy.deepcopy(value)
         if edit.get("review_resolved"):
             rec["review_resolved"] = True
             rec['_review_signature'] = edit.get('_review_signature')

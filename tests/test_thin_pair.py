@@ -72,3 +72,15 @@ def test_warning_names_the_layer_and_the_remedy():
     d = _run(_walls([250] * 8 + [50, 50]))
     w = [x for x in d["warnings"] if "얇은 오결합" in x]
     assert w and "A-CON" in w[0] and "pair_min=" in w[0], d["warnings"]
+
+
+def test_a_structured_suggestion_carries_the_same_row_and_value_as_the_sentence():
+    """검토 화면의 [적용] 버튼은 이 구조를 읽는다 — 문장은 사람만 읽고 그대로 둔다."""
+    d = _run(_walls([250] * 8 + [50, 50]))
+    (suggestion,) = [s for s in d["suggestions_apply"] if s["code"] == "thin_pair"]
+    assert suggestion["row_layer"] == "A-CON" == suggestion["evidence"]["source_layer"]
+    assert suggestion["pattern"] == "^A\\-CON$"
+    assert suggestion["op"] == "set_opts" and suggestion["category"] == "wall"
+    assert suggestion["opts"] == {"pair_min": round(250 / 3)}
+    assert suggestion["evidence"]["median_mm"] == 250 and suggestion["evidence"]["count"] == 2
+    assert f"'pair_min={suggestion['opts']['pair_min']}'" in [x for x in d["warnings"] if "얇은 오결합" in x][0]

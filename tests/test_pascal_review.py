@@ -24,12 +24,18 @@ def test_review_lists_flags_unlinked_openings_and_broken_joints_only(tmp_path, m
     GC.assign_joints(elements)
     elements["pipe"] = pipes[:1]                                                    # 상대를 지웠다
     geometry = {"source": "t.dxf", "units": "mm", "params": {}, "elements": elements,
-                "contract": GC.contract_block()}
+                "contract": GC.contract_block(),
+                "construction_rules": {"items": [
+                    {"eid": "d:1", "rule": "duct-aspect-ratio", "kind": "violation",
+                     "standard": "KCS 31 20 20", "clause": "3.2.1(2)②", "values": {"ratio": 4.4}},
+                    {"eid": "p:x", "rule": "drain-slope-by-diameter", "kind": "info",
+                     "standard": "KDS 31 30 25", "clause": "4.1"}]}}  # info 는 목록에 안 나간다
     sess = ProjectSession.__new__(ProjectSession)
     monkeypatch.setattr(sess, "state", lambda: {"project_id": "p", "revision": 3, "geometry": geometry})
     got = sess.pascal_review()
     assert got["revision"] == 3
     assert [(i["category"], i["eid"], i["reason"]) for i in got["items"]] == [
         ("wall", "w:1", "single_offset"), ("opening", "o:1", "opening_no_wall_on_this_line"),
-        ("joint", "p:a", "joint_single_member")]
+        ("joint", "p:a", "joint_single_member"),
+        ("rule", "d:1", "KCS 31 20 20 3.2.1(2)② 위반")]
     assert {u["eid"] for u in got["unconvertible"]} == {"o:1", "o:2"}               # 벽 없는 개구부는 못 보낸다

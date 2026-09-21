@@ -372,6 +372,19 @@ def test_centerline_bad_spec_fails_at_load_not_silently():
     assert dp._parse_opts("centerline=color:1") == {"centerline": "color:1"}
 
 
+def test_nominal_and_service_opts_are_free_and_enum_respectively():
+    """`nominal=` 은 자유 문자열(construction_rules.parse_dn 이 읽는다), `service=` 는
+    construction_rules.SERVICES 열거형 — 오타는 로드 시점에 실패한다."""
+    assert dp._parse_opts("nominal=DN100") == {"nominal": "DN100"}
+    assert dp._parse_opts("service=drain") == {"service": "drain"}
+    try:
+        dp._parse_opts("service=drainn")
+    except dp.LayerMapError:
+        pass
+    else:
+        raise AssertionError("알 수 없는 service 가 통과했다")
+
+
 # ── 개구부가 붙을 벽을 못 찾은 사유 — z 불일치는 평면 문제가 아니다 ──────────
 def _open_at(z_base, sill=900.0, height=1200.0, x=1000.0):
     return {"eid": "o:t", "kind": "circle", "center": [x, 0.0], "radius": 450.0,

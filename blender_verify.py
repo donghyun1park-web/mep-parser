@@ -13,7 +13,9 @@ if str(Path(__file__).resolve().parent) not in sys.path:
 TOL_M = 0.00005  # 0.05 mm: float32 export, after local-origin normalization.
 METADATA_KEYS = ('eid', 'source_eid', 'category', 'source_length_mm', 'sampled_length_mm',
     'needs_review', 'dimension_basis', 'system', 'layer', 'source_layers', 'source_layer',
-    'region_id', 'layout_id', 'material', 'circuit_id', 'nominal_size', 'assumptions')
+    'region_id', 'layout_id', 'material', 'circuit_id', 'nominal_size', 'assumptions',
+    'source', 'dims_assumed',
+    'declaration_basis')   # 가정한 치수·생성 사유·프로젝트 기본값은 모델 안에서도 보여야 한다
 
 
 def require(ok, message):

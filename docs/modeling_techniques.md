@@ -42,11 +42,12 @@ source slab 외곽이 없으면 `floor_footprint_not_available` 진단을 표시
 
 - 호스트 Python에서 Shapely 2.1 이상으로 메시 payload를 준비한다. Blender의 Python에 Shapely를 별도로 설치할 필요가 없다. constrained Delaunay 지원이 없으면 준비 단계가 명시적으로 실패한다.
 - Polygon 외곽·구멍의 감김을 정규화하고 constrained Delaunay로 상·하면을 만든다. 공선 꼭짓점을 임의 삭제하지 않고 모든 ring의 측면과 대응시킨다. 모든 모서리가 두 면에 사용되는지와 방향·체적을 검사한다.
-- 난방관은 편집 가능한 Blender Curve다. 직경을 화면상 잘 보이게 부풀리지 않는다. 짝수 bevel resolution을 사용하고 평가된 실제 메시의 상·하단을 다시 측정한다.
+- 원형 배관(난방관 포함)도 사각 경로와 같은 방식 — 마이터 링 닫힌 메시로 나간다. **Blender Curve(베벨)는 쓰지 않는다** — `prepare_payload`(`blender_builder.py`)는 항상 `kind:'mesh'` 만 채운다. `kind:'curve'` 를 받는 소비 분기(`blender_builder.py:240`)와 검증(`blender_verify.py`)은 남아 있지만 지금 실행되지 않는다 — 직경을 부풀리지 않는다는 목적은 메시 단계의 실제 반지름을 그대로 쓰는 것으로 이미 달성된다. 고정: `tests/test_blender_export.py::test_payload_never_emits_curves`.
 - 사각 경로 중 평면 직선 경로는 수평 평면에서 miter를 갖는 연속 외곽을 만든 뒤 높이 압출한다. 수직·경사·곡선 경로(계약 v3 `path3d`)는 `geom_contract.rect_parts`의 마이터 링으로 닫힌 관을 만든다 — FreeCAD와 같은 링이다. 제작용 피팅, 내부 유체 공간이나 판 두께를 구현한 모델은 아니다.
 - FreeCAD 원형 관은 단일 평면 직선에서만 Arch Pipe를 사용한다. 꺾인 직선 경로도 공통 24각 마이터로 생성해 자동 곡면 이음을 만들지 않는다. 이 근사는 원형 체적의 약 98.8616%이며, 외경 125mm에서 최대 반경 편차는 약 0.535mm다. 외경 메타데이터·원본 경로는 보존하지만 제조사 엘보 형상이나 정밀 관 체적을 뜻하지 않는다.
 - 기본 `MEP_EXPOSED` 장면에서는 최상부 바닥층을 숨겨 배관을 검토하고, `MEP_COVERED`에서 모든 바닥층을 확인한다. 원본 없는 건축·장비·플렉시블을 추가 생성하지 않는다.
-- zone과 opening은 독립 물리 솔리드로 만들지 않고 입력과 진단에 보존한다. 임의 Boolean 벽체 타공은 수행하지 않는다.
+- zone과 opening은 독립 물리 솔리드로 만들지 않고 입력과 진단에 보존한다. 임의 Boolean 벽체 타공은 수행하지 않는다 — 진단 `reference_not_solid` 가 개구부마다 한 줄이다. **FreeCAD 경로는 Arch `Subtractions` 로 뚫으므로 두 출력의 벽이 다르다**(도면이 이미 벽을 끊어 놓은 자리는 차이가 없다). 고정: `tests/test_blender_export.py::test_openings_are_diagnosed_and_the_wall_is_the_same_solid_as_without_them`
+- 저장본의 객체 속성에 `source`(예: `opening_infill`)와 `dims_assumed` 를 함께 싣는다. 가정으로 세운 창대·인방 벽이 모델 안에서 확정값처럼 보이지 않게. 고정: `tests/test_blender_export.py::test_assumed_opening_dimensions_and_infill_reason_reach_the_saved_model`
 
 ## 파일 검증과 실행 영수증
 

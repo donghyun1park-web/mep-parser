@@ -12,6 +12,15 @@ function rec(eid, points, extra={}) {
 }
 
 async function main() {
+  // Shift 직교 — 이동량이 큰 축만 남긴다. 기준점이 없으면(첫 클릭) 손대지 않는다.
+  assert.deepEqual(E.orthoPoint([0,0],[1000,40]), [1000,0], 'nearly horizontal must snap to the axis');
+  assert.deepEqual(E.orthoPoint([0,0],[40,1000]), [0,1000], 'nearly vertical must keep x');
+  assert.deepEqual(E.orthoPoint([100,200],[300,400]), [300,200], 'a tie takes the horizontal axis');
+  assert.deepEqual(E.orthoPoint(null,[7,9]), [7,9], 'no anchor yet means no constraint');
+  const anchor=[10,20], orthoed=E.orthoPoint(anchor,[99,21]);
+  assert.deepEqual(anchor, [10,20], 'orthoPoint must not mutate its anchor');
+  assert.deepEqual(orthoed, [99,20]);
+
   const base = {wall:[rec('w:1', [[0,0],[1000,0],[1000,800]])], opening:[]};
   const edits = {
     'w:1':{deleted:true, _source:{centerline:[[0,0],[1000,0],[1000,800]]}},
@@ -38,6 +47,13 @@ async function main() {
   assert.equal(cleanBase.wall[0].needs_review,true);
   assert.deepEqual(E.materializeElements(cleanBase,{}).wall.map(r=>r.eid),['w:moved'],
                    'an offline empty snapshot must visibly undo all canonical edits');
+
+  const withElevation = {wall:[], pipe:[rec('p:1',[[0,0],[1000,0]],{overrides:{width:200,height:2800,elevation:2600}})]};
+  const clearedElevation = E.materializeElements(withElevation, {'p:1':{overrides:{elevation:null}}});
+  assert.equal(clearedElevation.pipe[0].overrides.elevation, undefined,
+               'null override merges as a delete, not a stored null (edit_geometry.js materializeElements)');
+  assert.equal(clearedElevation.pipe[0].overrides.width, 200, 'unrelated overrides survive a null-key merge');
+
   const changedSource={wall:[rec('w:same',[[20,0],[1020,0]],{overrides:{width:350}})]};
   const changedBase=E.deriveBaseElements(changedSource,{
     'w:same':{overrides:{width:350},_source:{eid:'w:same',category:'wall',centerline:[[0,0],[1000,0]],points:[[0,0],[1000,0]]}},
@@ -73,6 +89,32 @@ async function main() {
   assert.equal(E.joinPolylines(left, rec('w:gap', [[1200,0],[2000,0]]), {joinTolerance:600, coordinateTolerance:1}), null,
                'a gap must remain visible instead of becoming wall');
 
+  // 평면 탭 설비 편집 — makeManualRecord 는 카테고리별 치수 키를 쓰고, 도면 값이 아니라
+  // wm: 접두를 유지한다(category 는 edits.json 의 필드가 결정한다 — Pascal 과 같은 규약).
+  const pipeSrc = {level:'L2', elevation:2600, system:'heating', section_shape:'round', layer:'H-PIPE'};
+  const madePipe = E.makeManualRecord('pipe', [[0,0],[1000,0]], pipeSrc, {diameter:15.9},
+                                       ()=>'11111111-2222-4333-8444-555555555555');
+  assert.equal(madePipe.eid, 'L2:wm:11111111-2222-4333-8444-555555555555');
+  assert.equal(madePipe.pairing, 'manual');
+  assert.equal(madePipe.elevation, 2600); assert.equal(madePipe.system, 'heating');
+  assert.equal(madePipe.section_shape, 'round');
+  assert.equal(madePipe.overrides.diameter, 15.9);
+  assert.equal(madePipe.z_base, undefined, '배관은 z_base 를 지어내지 않는다(elevation 이 기준)');
+
+  const madeDuct = E.makeManualRecord('duct', [[0,0],[1000,0]], {}, {width_mm:200, height_mm:100});
+  assert.deepEqual([madeDuct.overrides.width_mm, madeDuct.overrides.height_mm], [200, 100]);
+  assert.equal(madeDuct.overrides.width, undefined, '설비는 width/height 키를 쓰지 않는다');
+
+  // 이음 자리에서 끊어 그린 두 조각 — joints/source_refs/source_length_mm 만 달라도 결합된다.
+  const pipeA = rec('p:a', [[0,0],[1000,0]], {overrides:{diameter:100}, elevation:2600,
+    joints:[{id:'j1'}], source_refs:[{handle:'A'}], source_length_mm:1000, route_length_mm:1000, dimension_status:'specified'});
+  const pipeB = rec('p:b', [[1000,0],[2000,0]], {overrides:{diameter:100}, elevation:2600,
+    joints:[{id:'j2'}], source_refs:[{handle:'B'}], source_length_mm:1000, route_length_mm:1000, dimension_status:'assumed'});
+  assert.deepEqual(E.joinPolylines(pipeA, pipeB, {joinTolerance:600}).centerline, [[0,0],[1000,0],[2000,0]]);
+  const pipeElsewhere = rec('p:c', [[1000,0],[2000,0]], {overrides:{diameter:100}, elevation:3200});
+  assert.equal(E.joinPolylines(pipeA, pipeElsewhere, {joinTolerance:600}), null,
+               '높이(elevation)가 다르면 여전히 막는다 — OMIT 확장은 이음 부기용 필드에만 한정된다');
+
   const snapped = E.snapPoint([23,10], [
     rec('w:s', [[0,0],[100,0]], {level:'L1'}),
     rec('w:t', [[20,10],[20,30]], {level:'L2'})
@@ -105,6 +147,19 @@ async function main() {
   const recategorized=E.applyProperties({category:'column',_source:{category:'wall'}},made,'column',
                                         {category:'column',width:300,reviewResolved:false});
   assert.equal(recategorized.category,'column','editing a recategorized element must preserve its absolute category');
+
+  // 높이(elevation) 편집 — zKey 는 호출자(app.js)가 정한다. 여기서는 카테고리를 다시 보지 않는다.
+  const pipeRec = rec('p:1', [[0,0],[1000,0]], {overrides:{diameter:100}});
+  const zSet = E.applyProperties(undefined, pipeRec, 'pipe', {category:'pipe', zKey:'elevation', z:2600});
+  assert.equal(zSet.overrides.elevation, 2600);
+  assert.equal(zSet.overrides.diameter, undefined, '기존 overrides 에 없던 diameter 를 applyProperties 가 지어내면 안 된다');
+  const zCleared = E.applyProperties(zSet, pipeRec, 'pipe', {category:'pipe', zKey:'elevation', z:null});
+  assert.equal(zCleared.overrides, undefined, 'null 은 지운다 — 남은 override 가 없으면 overrides 자체를 지운다');
+  const zUntouched = E.applyProperties(zSet, pipeRec, 'pipe', {category:'pipe', zKey:'elevation', z:NaN});
+  assert.equal(zUntouched.overrides.elevation, 2600, '숫자가 아니면(빈 입력 아님) 손대지 않는다');
+  const addedPipe = {added:true, category:'pipe', record:pipeRec};
+  const zAdded = E.applyProperties(addedPipe, pipeRec, 'pipe', {category:'pipe', zKey:'elevation', z:2400});
+  assert.equal(zAdded.record.overrides.elevation, 2400, 'added 레코드도 같은 규칙');
 
   const acked = E.applyProperties({_review_signature:'old'}, Object.assign({}, made, {needs_review:true}), 'wall',
                                   {category:'wall', reviewResolved:true});

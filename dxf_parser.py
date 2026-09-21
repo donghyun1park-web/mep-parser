@@ -37,6 +37,7 @@ import ezdxf
 from element_id import raw_entity_sig, element_eid
 import geom_contract as _GC   # z 기준면 규약의 단일 출처(계약 블록 기입용)
 import schedule_table as _ST  # 부재일람표(TEXT 격자) 복원 — opts 의 schedule= 소비자
+import construction_rules as _CR  # opts 의 service= 값 검증(SERVICES 열거형)
 
 try:
     from shapely.geometry import Point, Polygon
@@ -290,6 +291,10 @@ OPT_SPEC = {
     "elevation": ("str",   "MEP 부재의 z 배치를 **선언**한다: `top:<mm>` 은 부재 **상단**을 "
                            "그 높이에 맞춘다(천장 슬래브 하단에 붙이는 규칙), "
                            "`center:<mm>` 은 중심축을 그 높이에. 평면도에는 고저가 없다"),
+    "nominal":   ("str",   "MEP 부재의 호칭지름(DN). 시공기준(construction_rules.py)이 요구하는 "
+                           "선언 — 외경(diameter)에서 역산하지 않는다"),
+    "service":   ("str",   "MEP 부재의 용도(배수/소화전 가지 등) — construction_rules.SERVICES 열거형. "
+                           "system(SA/RA 같은 계통 이름)과는 다른 것이다"),
 }
 ELEVATION_KINDS = ("top", "center")
 # `centerline=` 값의 형식. 로드 시점에 검증한다 — 오타난 판정 기준을 조용히 안 먹고
@@ -337,6 +342,10 @@ def _parse_opts(raw, csv_path="", lineno=0):
             raise LayerMapError(
                 f"{os.path.basename(csv_path)} {lineno}행: opts centerline={v!r} 형식 오류 — "
                 f"{' 또는 '.join(x + ':<값>' for x in CENTERLINE_KINDS)} 여야 한다")
+        if k == "service" and v not in _CR.SERVICES:
+            raise LayerMapError(
+                f"{os.path.basename(csv_path)} {lineno}행: opts service={v!r} 는 알 수 없는 용도다. "
+                f"사용 가능: {', '.join(_CR.SERVICES)}")
     return out
 
 
@@ -704,7 +713,12 @@ def annotate_mep(rec, cat, attrs, elevation):
     elif cat in ("duct", "tray"):
         rec["width_mm"] = attrs.get("width")
         rec["height_mm"] = attrs.get("height")
-    dec = declared_elevation(cat, rec, (attrs or {}).get("_opts"))
+    opts = (attrs or {}).get("_opts") or {}
+    if opts.get("nominal"):
+        rec["nominal_size"] = opts["nominal"]        # 시공기준(construction_rules.py)의 DN 선언
+    if opts.get("service"):
+        rec["service"] = opts["service"]              # 용도 선언 — system(SA/RA)과는 다른 것
+    dec = declared_elevation(cat, rec, opts)
     if dec is not None:
         rec["elevation"] = dec
         rec["elevation_source"] = "declared"       # 산출물이 스스로 말한다
@@ -2810,6 +2824,16 @@ def layer_rule_pattern(layer_name):
     return "^" + re.escape(layer_name) + "$"
 
 
+def _suggestion_target_layer(layer, rule_layer, rules):
+    """제안이 고칠 layer_map 행의 레이어 — 그 레이어가 **자기 규칙을 가질 수 없을 때만** 블록을
+    놓은 INSERT 레이어로 넘긴다(`thin_pairs` 경고와 같은 판정). explode 된 벽은 블록 안쪽 레이어명을
+    달고 있어서, 그 이름으로 행을 써 봐야 아무 일도 안 난다."""
+    _rl = sorted(rule_layer.get(layer) or ())
+    if len(_rl) == 1 and classify(layer, rules)[0] is None:
+        return _rl[0]
+    return layer
+
+
 def build_suggestions(unmapped_recs, rules, kind="layer"):
     """미매핑 레이어/블록별: 기하 투표 + 이름 fuzzy → 비강제 제안(사람/AI 검토용).
     kind: 'layer'|'block' — 제안에 source 표기. classify_geometry 4-튜플 사용.
@@ -2994,14 +3018,18 @@ def apply_member_schedule(msp, layers, elements):
 def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAMS,
           use_ai=False, use_vision=False, api_key=None, ai_threshold=0.8,
           ext_schedule=None, member_schedule=None, edits=None, level_height=None,
-          mep_profile=None, unit_scale_to_mm=None, legacy_units=False):
+          mep_profile=None, unit_scale_to_mm=None, legacy_units=False, defaults=None):
     """DXF → geometry.json dict.
     use_ai: 텍스트 LLM 분류 + 고신뢰 자동적용. use_vision: Vision 폴백.
     ai_threshold: best_classification confidence 이 값 초과면 자동 카테고리 적용.
     ext_schedule: 외부 창호일람(Excel/별도 DXF에서 로드한 schedule 레코드 목록).
         주어지면 DXF 내부 추출본과 병합(외부 우선) 후 벽 끊김 매칭에 사용.
     member_schedule: 부재일람표 레이어명 목록(CLI --member-schedule).
-        layer_map 의 opts `schedule=<레이어>` 와 합집합으로 쓰인다."""
+        layer_map 의 opts `schedule=<레이어>` 와 합집합으로 쓰인다.
+    defaults: 프로젝트 기본값(source.options.defaults) — 레이어·프로필 선언이 없을 때만 채우는
+        선언이다({"mep": {"pipe": {"material":...}, ...}, "architecture": {"wall": {"material":...}, ...}}).
+        카테고리 추정이 아니다 — 사람이 프로젝트를 열 때 한 번 적은 값이고 `declaration_basis` 로
+        자기보고한다. 레이어·프로필 선언이 항상 이긴다."""
     from drawing_units import option_scale, unit_review
     explicit_scale = option_scale({'mep_profile': mep_profile, 'unit_scale_to_mm': unit_scale_to_mm})
     if mep_profile is not None:
@@ -3257,6 +3285,11 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
                 f"{_c['spacing_mm']:.0f}mm 짝 → 벽 레이어일 수 있다. layer_map 에 '{_c['suggested_row']}' 를 "
                 f"COL 행 위에 넣고 다시 해석"))
             print(f"  {result['warnings'][0]}")
+            result.setdefault("suggestions_apply", []).insert(0, {
+                "code": "column_layer_looks_like_wall", "row_layer": _c["layer"],
+                "pattern": layer_rule_pattern(_c["layer"]), "op": "insert_row",
+                "category": "wall", "height": 2800,
+                "evidence": {"lines": _c["lines"], "paired": _c["paired"], "spacing_mm": _c["spacing_mm"]}})
 
     # 좌표까지 같은 중복 부재 제거. 기둥·슬래브는 벽과 달리 페어링·병합을 안 거쳐
     # 중복을 흡수할 기회가 없다 — 실측: 같은 기둥 블록이 같은 자리에 두 번 들어가
@@ -3369,7 +3402,7 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         with open(dxf_path, 'rb') as source_stream:
             if hashlib.sha256(source_stream.read()).hexdigest() != source_hash:
                 raise ValueError('Source SHA256 changed during parsing; model discarded')
-        apply_mep_profile(doc, result, mep_profile)
+        apply_mep_profile(doc, result, mep_profile, defaults)
     # [라운드트립] 각 요소에 EID 부여 — 원본 raw 엔티티 시그니처 기반(element_id.py).
     # 파라미터(폭/높이 등) 변경에 불변, grouping이 실제로 바뀔 때만 EID 변경.
     for _cat, _recs in result["elements"].items():
@@ -3509,16 +3542,20 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
             #   A-CON 처럼 제 행이 있는 레이어는 블록에서 나온 벽이 좀 섞여 있어도
             #   제 행으로 고쳐야 한다(안 그러면 블록이 놓인 레이어를 가리켜 버린다 —
             #   실측: A-CON 이 '#CHK_U_250212' 행을 고치라고 했다).
-            _rl = sorted(_rule_layer.get(_ly) or ())
-            _where = (f"'{_rl[0]}' 행(이 벽들은 그 레이어에 놓인 블록에서 나왔다)"
-                      if len(_rl) == 1 and classify(_ly, rules)[0] is None
-                      else f"'{_ly}' 행")
+            _row_layer = _suggestion_target_layer(_ly, _rule_layer, rules)
+            _where = (f"'{_row_layer}' 행(이 벽들은 그 레이어에 놓인 블록에서 나왔다)"
+                      if _row_layer != _ly else f"'{_ly}' 행")
+            _pair_min = round(_med / 3)
             _msg = (f"[얇은 오결합] 레이어 '{_ly}': 두께가 중앙값 {_med:.0f}mm 의 "
                     f"{THIN_PAIR_RATIO:.0%} 미만인 벽 {_cnt}개. 벽면 옆 마감선과 짝지은 "
                     f"것일 수 있다 — layer_map 의 {_where}에 opts "
-                    f"'pair_min={_med / 3:.0f}' 를 주면 진짜 두께가 통과한다.")
+                    f"'pair_min={_pair_min}' 를 주면 진짜 두께가 통과한다.")
             result["warnings"].append(_msg)
             print("  " + _msg)
+            result.setdefault("suggestions_apply", []).append({
+                "code": "thin_pair", "row_layer": _row_layer, "pattern": layer_rule_pattern(_row_layer),
+                "op": "set_opts", "category": "wall", "opts": {"pair_min": _pair_min},
+                "evidence": {"median_mm": _med, "count": _cnt, "source_layer": _ly}})
 
     # ── 실측폭 vs 선언폭 교차검증 ───────────────────────────────────────────
     # layer_map 의 width 는 **레이어 하나에 한 번 적는 기본값**이고, width_detected
@@ -3557,6 +3594,11 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         for _e in result["width_conflicts"][:6]:
             print(f"      {_e['layer']:10s} 선언 {_e['declared']:.0f} ≠ 실측 "
                   f"{_e['detected']:.0f}mm  x{_e['count']}")
+        for _e in result["width_conflicts"]:
+            result.setdefault("suggestions_apply", []).append({
+                "code": "width_conflict", "row_layer": _e["layer"], "pattern": layer_rule_pattern(_e["layer"]),
+                "op": "set_width", "category": "wall", "width": _e["detected"],
+                "evidence": {"declared_mm": _e["declared"], "detected_mm": _e["detected"], "count": _e["count"]}})
 
     # [자기검증 QA] 원본 면선 대비 최종 벽 회수율 + 누락 의심 리스트
     _qa = build_qa(_qa_face_segs, result["elements"]["wall"], params)
@@ -3641,6 +3683,38 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
                    if _infill["assumed"] else ""))
         result["warnings"].append(_msg)
         print("  [개구부] " + _msg)
+    # 프로젝트 기본값 — 창대·인방 채움 **뒤**(그 벽도 선언이 없으면 기본값을 받아야 한다), 수정
+    # 확정 **앞**(사람이 나중에 넣은 layer_map 선언이나 편집이 항상 이긴다). 카테고리 추정이
+    # 아니다 — `overrides`(layer_map 선언)나 이미 채워진 값이 있으면 절대 안 건드린다. 최상위
+    # 필드에만 쓴다: overrides 에 쓰면 review_signature(effective_overrides)가 바뀌어 이미 확인한
+    # 부재가 전부 '검토 필요' 로 되돌아간다.
+    #
+    # MEP 프로필(_assign)이 이미 처리한 레코드는 건너뛴다(`_profile_rule` 이 그 표식이다) — 같은
+    # defaults 를 두 번 적용하지 않는다. 여기서 채우는 것은 **평면 layer_map 으로만** 분류된
+    # pipe/duct/tray(annotate_mep 경로, 프로필을 안 쓰는 프로젝트)다.
+    if defaults:
+        for _cat, _cat_def in (defaults.get("architecture") or {}).items():
+            _mat = _cat_def.get("material")
+            if not _mat:
+                continue
+            for _rec in result["elements"].get(_cat, []):
+                if (_rec.get("overrides") or {}).get("material") or _rec.get("material"):
+                    continue
+                _rec["material"] = _mat
+                _rec.setdefault("declaration_basis", {})["material"] = "project_default"
+        for _cat, _cat_def in (defaults.get("mep") or {}).items():
+            for _rec in result["elements"].get(_cat, []):
+                if "_profile_rule" in _rec:
+                    continue
+                _basis = _rec.get("declaration_basis") or {}
+                if _cat_def.get("material") and not ((_rec.get("overrides") or {}).get("material") or _rec.get("material")):
+                    _rec["material"] = _cat_def["material"]; _basis["material"] = "project_default"
+                if _cat_def.get("nominal_size") and not _rec.get("nominal_size"):
+                    _rec["nominal_size"] = _cat_def["nominal_size"]; _basis["nominal_size"] = "project_default"
+                if _cat_def.get("service") and not _rec.get("service"):
+                    _rec["service"] = _cat_def["service"]; _basis["service"] = "project_default"
+                if _basis:
+                    _rec["declaration_basis"] = _basis
     if edits:
         from element_id import apply_edits
         _rep = result["edits_report"]
@@ -3723,6 +3797,15 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
     if _per_layer:
         _eff["per_layer"] = _per_layer
     result["tolerances_effective"] = _eff
+    if defaults is not None:
+        # 기본값이 실제로 몇 군데 채웠는지 — declarations_missing 과 짝을 이룬다(construction_rules
+        # 의 영수증은 defaulted 를 missing 과 따로 센다). 선언 공백은 기본값이 채워도 계속 보인다.
+        _def_tally: dict = {}
+        for _recs in result["elements"].values():
+            for _rec in _recs:
+                for _key in (_rec.get("declaration_basis") or {}):
+                    _def_tally[_key] = _def_tally.get(_key, 0) + 1
+        result["defaults_effective"] = {"source": defaults, "applied": _def_tally}
 
     return result
 

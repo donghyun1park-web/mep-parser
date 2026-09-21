@@ -11,7 +11,6 @@ Design:
   Shows unmapped layers from last parse for quick one-click add.
 """
 import contextlib
-import csv
 import glob
 import io
 import json
@@ -26,6 +25,7 @@ from tkinter import filedialog, messagebox, ttk
 import dxf_parser as P
 from project_server import ProjectSession, open_source_project, verified_artifacts
 from project_store import ProjectStore, ProjectCorrupt, RevisionConflict, atomic_json
+from layer_map_io import insert_layer_rule_first, CSV_FIELDS, _read_csv_rows, _write_csv_rows
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -35,21 +35,6 @@ def resource_path(rel):
     dir), 아니면 소스 디렉터리. layer_map/block_map/freecad_builder.py/vendor 용."""
     base = getattr(sys, "_MEIPASS", None) or HERE
     return os.path.join(base, rel)
-
-
-def insert_layer_rule_first(csv_path, row):
-    """layer_map 헤더 바로 아래에 규칙 한 줄을 넣는다. 규칙은 **선매칭 우선**이라 끝에 붙이면
-    'COL|기둥' 같은 넓은 규칙에 가려져 아무 일도 안 난다 — 파서 경고가 'COL 행 위에' 라고 하는 이유."""
-    with open(csv_path, encoding="utf-8") as f:
-        lines = f.read().splitlines()
-    for i, line in enumerate(lines):
-        if line.strip().lower().startswith("pattern,"):
-            lines.insert(i + 1, row)
-            break
-    else:
-        raise ValueError(f"layer_map 헤더(pattern,…)가 없습니다: {csv_path}")
-    with open(csv_path, "w", encoding="utf-8", newline="\n") as f:
-        f.write("\n".join(lines) + "\n")
 
 
 def user_csv(name):
@@ -104,56 +89,7 @@ def find_freecadcmd():
     return None
 
 
-# ── Layer Map CSV helpers ─────────────────────────────────────────────────────
-
-CSV_FIELDS = ["pattern", "category", "width", "height", "thickness", "opts"]
-
-
-def _read_csv_rows(csv_path):
-    """layer_map.csv → [{...CSV_FIELDS, "_before": [원문 주석줄]}]
-
-    ★ `opts` 와 주석을 **반드시 왕복**시킨다. 종전 구현은 5컬럼만 읽고 5컬럼만 써서,
-    편집기에서 '저장' 을 누르면 `pair_max`·`pair_min`·`from=dim`·`member_re`·
-    `schedule=`·`material=` 과 주석이 통째로 사라졌다 — 사용자가 알 방법이 없었다.
-    (파서가 이번에 넣은 `row.get(None) → LayerMapError` 가드도 이건 못 잡는다.
-     쓰기가 자기 일관적이라 5컬럼 파일로 조용히 로드되기 때문이다.)
-
-    주석은 **바로 뒤 규칙에 붙여** 두었다가 저장 시 그 앞에 다시 쓴다 — 주석은
-    보통 다음 규칙을 설명하므로 그게 의미를 지킨다.
-    """
-    rows, pending, seen_header = [], [], False
-    if not os.path.exists(csv_path):
-        return rows
-    with open(csv_path, encoding="utf-8") as f:
-        for ln in f.read().splitlines():
-            t = ln.strip()
-            if not t or t.startswith("#"):
-                pending.append(ln)
-                continue
-            vals = next(csv.reader([ln]))
-            if not seen_header:
-                seen_header = True          # 헤더 줄
-                continue
-            r = {k: (vals[i].strip() if i < len(vals) else "")
-                 for i, k in enumerate(CSV_FIELDS)}
-            r["_before"], pending = pending, []
-            rows.append(r)
-    if pending and rows:                    # 파일 끝 주석
-        rows[-1]["_after"] = pending
-    return rows
-
-
-def _write_csv_rows(csv_path, rows):
-    """rows → layer_map.csv. `opts`·주석을 읽은 그대로 되돌려 놓는다."""
-    with open(csv_path, "w", encoding="utf-8", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(CSV_FIELDS)
-        for r in rows:
-            for c in r.get("_before") or []:
-                print(c, file=f)
-            w.writerow([r.get(k, "") for k in CSV_FIELDS])
-            for c in r.get("_after") or []:
-                print(c, file=f)
+# ── Layer Map CSV helpers — layer_map_io.py 에서 가져온다(project_server·MCP 와 공유) ────
 
 
 # ── Layer Map Editor Window ───────────────────────────────────────────────────
@@ -328,6 +264,26 @@ class LayerMapEditor:
             messagebox.showerror("Save error", str(e), parent=self.win)
 
 
+def _merge_material_default(defaults, material):
+    """기존 `source.options.defaults` 에 architecture 재질을 얹거나(문자열 있으면) 지운다(없으면).
+    tkinter 의존 없음(단위테스트용)."""
+    defaults = dict(defaults or {})
+    if material:
+        defaults['architecture'] = {cat: {'material': material} for cat in ('wall', 'column', 'slab', 'beam')}
+    else:
+        defaults.pop('architecture', None)
+    return defaults
+
+
+def _open_defaults_into(pending, options):
+    """`_ask_arch_defaults()` 의 답을 `open_source_project` 인자로 편다. tkinter 의존 없음(단위테스트용).
+    `options` 는 제자리에서 수정한다. 반환값은 height(없으면 None)."""
+    if pending.get('material'):
+        options['defaults'] = {'architecture': {cat: {'material': pending['material']}
+                                                 for cat in ('wall', 'column', 'slab', 'beam')}}
+    return pending.get('height')
+
+
 # ── Main App ──────────────────────────────────────────────────────────────────
 
 class App:
@@ -341,6 +297,9 @@ class App:
         self.project_server = None
         # 열기 한 번으로 브라우저까지 간다 — 파싱이 끝나면 이 표시를 보고 미리보기를 연다.
         self._open_after_parse = False
+        # `_ask_arch_defaults` 의 답 — 새로 만드는 프로젝트에만 쓰고 한 번 쓰면 비운다(다시 해석
+        # 버튼이 두 번째 파싱에서 층고를 또 덮어쓰면 안 된다).
+        self._pending_open_defaults = {}
         root.protocol("WM_DELETE_WINDOW", self._close)
 
         self.v_dxf = tk.StringVar()
@@ -364,17 +323,15 @@ class App:
         f.pack(fill="x", padx=8, pady=8)
         ttk.Button(f, text="열기…", command=self._do_open).pack(side="left", padx=4)
         ttk.Button(f, text="설비 도면 설정", command=self._do_mep_setup).pack(side="left", padx=4)
-        self.btn_export = ttk.Menubutton(f, text="내보내기 ▾")
-        menu = tk.Menu(self.btn_export, tearoff=0)
+        self.btn_export = ttk.Menubutton(f, text="납품 ▾")
+        # ★ 납품 IFC 는 `ifc_builder`(ifcopenshell 직접)가 낸다 — FreeCAD 설치가 필요 없다.
+        # FreeCAD 빌드·Blender/GLB 는 '그 밖의 도구' 로 내렸다(동결, docs/decisions/ifc-builder.md).
+        self.export_menu = menu = tk.Menu(self.btn_export, tearoff=0)
         for label, command in [("검토 목록 CSV", self._do_review_csv),
                                ("물량 Excel", self._do_boq),
                                ("창호일람 Excel 내보내기", self._do_schedule_export),
-                               ("IFC 직접 내보내기", self._do_ifc_build),
-                               ("납품 검증 빌드 (FreeCAD · 느림)", self._do_build),
-                               ("Blender / GLB", self._do_blender_build)]:
+                               ("납품 검증 빌드 (IFC)", self._do_ifc_build)]:
             menu.add_command(label=label, command=command)
-        if find_freecadcmd() is None:
-            menu.entryconfigure("납품 검증 빌드 (FreeCAD · 느림)", state="disabled")
         self.btn_export["menu"] = menu
         self.btn_export.pack(side="left", padx=4)
         self.v_tools = tk.BooleanVar(value=False)
@@ -416,6 +373,7 @@ class App:
         ttk.Button(f, text="도면 단위 확인", command=lambda: self._do_mep_setup(units_only=True)).pack(side="left", padx=4)
         ttk.Button(f, text="설비 도면 설정 · Codex 제안", command=self._do_mep_setup).pack(side="left", padx=4)
         ttk.Button(f, text="같은 층 도면 추가(설비)", command=self._do_add_source).pack(side="left", padx=4)
+        ttk.Button(f, text="프로젝트 기본값", command=self._do_project_defaults).pack(side="left", padx=4)
         ttk.Button(f, text="(2) 다시 해석", command=self._do_parse).pack(side="left", padx=4)
         ttk.Button(f, text="(2b) 누락 진단",
                    command=self._do_diag).pack(side="left", padx=4)
@@ -425,12 +383,11 @@ class App:
                    command=self._do_review_csv).pack(side="left", padx=4)
         ttk.Button(f, text="edits.json 불러오기",
                    command=self._pick_edits).pack(side="left", padx=4)
-        self.btn_ifc = ttk.Button(f, text="선택: IFC 직접 내보내기",
+        self.btn_ifc = ttk.Button(f, text="(4) 납품 검증 빌드 (IFC)",
                                   command=self._do_ifc_build)
-        # FreeCAD is the primary build action; direct IFC remains optional.
-        # 일상 검토는 (2)→(3b) 에서 끝난다. FreeCAD 불리언은 같은 자리를 훨씬 느리게 다시 찾으므로
-        # 납품 검증용이라고 이름으로 말한다(실측 통합 빌드 421초 대 2.5D 목록 0.1초).
-        self.btn_build = ttk.Button(f, text="(4) 납품 검증 빌드 (FreeCAD · 느림)", command=self._do_build)
+        # FreeCAD 빌드는 **동결**이다 — 납품은 위 IFC 경로 하나다(docs/decisions/ifc-builder.md).
+        # 지우지 않고 여기 남긴다(`.FCStd` 가 필요하거나 두 경로를 대조할 때).
+        self.btn_build = ttk.Button(f, text="FreeCAD 빌드 (동결 · 느림)", command=self._do_build)
         self.btn_build.pack(side="left", padx=4)
         ttk.Button(f, text="Blender / GLB 내보내기", command=self._do_blender_build).pack(side="left", padx=4)
         self.btn_ifc.pack(side="left", padx=4)
@@ -516,6 +473,9 @@ class App:
         kind = self._ask_drawing_kind(guess_drawing_kind(dxf))
         if kind is None:
             return
+        # 건축이면 한 번 더 — 층고·창호일람·재질 기본값(전부 선택 사항). 설비는 설비 도면
+        # 설정 창에서 따로 다룬다(architecture_layers 자동 적용은 아직 없다).
+        self._pending_open_defaults = self._ask_arch_defaults() if kind == "건축" else {}
         self._open_after_parse = True
         # 설비는 파싱하지 않고 설정부터 — 저장하면 그 콜백이 `_parse_done` 을 부른다.
         self._do_mep_setup() if kind == "설비" else self._do_parse()
@@ -551,6 +511,95 @@ class App:
         win.grab_set()
         self.root.wait_window(win)
         return picked.get("kind")
+
+    def _ask_arch_defaults(self):
+        """건축 도면을 열 때 한 번 — 층고·창호일람·재질 기본값. 셋 다 **선언**이다(카테고리
+        추정이 아니다). 빈 칸은 손대지 않는다: 층고는 layer_map 개별 높이를 덮지 않고, 재질은
+        레이어·편집 선언이 항상 이긴다(construction_rules.py '프로젝트 기본값' 참조).
+        취소해도 파일 열기 자체는 막지 않는다 — 셋 다 빈 답으로 취급한다."""
+        win = tk.Toplevel(self.root)
+        win.title("건축 도면 기본값")
+        win.transient(self.root)
+        win.resizable(False, False)
+        ttk.Label(win, text="이 프로젝트의 기본값 (전부 선택 사항)", font=("", 10, "bold")).pack(anchor="w", padx=14, pady=(12, 2))
+        ttk.Label(win, justify="left", wraplength=430,
+                  text="레이어별 선언이 있으면 그게 항상 이깁니다 — 여기 값은 선언이 없을 때만 채웁니다. "
+                       "나중에 '그 밖의 도구 ▾ → 프로젝트 기본값'에서 다시 바꿀 수 있습니다.").pack(anchor="w", padx=14)
+        form = ttk.Frame(win); form.pack(fill="x", padx=14, pady=8)
+        v_height = tk.StringVar(); v_material = tk.StringVar()
+        ttk.Label(form, text="층고 (mm, 비우면 도면 그대로)").grid(row=0, column=0, sticky="w", pady=3)
+        ttk.Entry(form, textvariable=v_height, width=22).grid(row=0, column=1, sticky="w", padx=6)
+        ttk.Label(form, text="벽·기둥·슬래브·보 기본 재질").grid(row=1, column=0, sticky="w", pady=3)
+        ttk.Entry(form, textvariable=v_material, width=22).grid(row=1, column=1, sticky="w", padx=6)
+        ttk.Label(form, text="창호일람").grid(row=2, column=0, sticky="w", pady=3)
+        sched_row = ttk.Frame(form); sched_row.grid(row=2, column=1, sticky="w", padx=6)
+        ttk.Label(sched_row, textvariable=self.v_schedule, width=18).pack(side="left")
+        ttk.Button(sched_row, text="선택…", command=self._do_schedule_pick, width=8).pack(side="left", padx=4)
+        picked = {}
+        row = ttk.Frame(win); row.pack(fill="x", padx=12, pady=(4, 12))
+
+        def confirm():
+            h = v_height.get().strip()
+            if h:
+                try:
+                    picked["height"] = float(h)
+                except ValueError:
+                    messagebox.showwarning("층고", "숫자만 입력하세요(mm).")
+                    return
+            if v_material.get().strip():
+                picked["material"] = v_material.get().strip()
+            win.destroy()
+        ttk.Button(row, text="확인", command=confirm).pack(side="right", padx=4)
+        ttk.Button(row, text="건너뛰기", command=win.destroy).pack(side="right")
+        win.bind("<Return>", lambda _event: confirm())
+        win.bind("<Escape>", lambda _event: win.destroy())
+        win.grab_set()
+        self.root.wait_window(win)
+        return picked   # 취소·건너뛰기 = {} (전부 빈 답으로 진행)
+
+    def _do_project_defaults(self):
+        """이미 연 프로젝트의 재질 기본값을 다시 연다. 층고는 새 프로젝트에서만 받으므로
+        (`open_source_project` 의 `height` 는 생성 시점 전용) 여기서는 재질만 다룬다."""
+        if not self.project_session:
+            messagebox.showinfo('프로젝트 필요', '먼저 프로젝트를 열거나 Parse 하세요.')
+            return
+        session = self.project_session
+        manifest = session.store.read()
+        source = manifest['sources'][0]
+        arch = ((source.get('options') or {}).get('defaults') or {}).get('architecture') or {}
+        current_material = (arch.get('wall') or {}).get('material', '')
+
+        win = tk.Toplevel(self.root)
+        win.title('프로젝트 기본값')
+        win.transient(self.root)
+        win.resizable(False, False)
+        ttk.Label(win, text='벽·기둥·슬래브·보 기본 재질', font=('', 10, 'bold')).pack(anchor='w', padx=14, pady=(12, 2))
+        ttk.Label(win, justify='left', wraplength=380,
+                  text='레이어·편집의 선언이 있으면 그게 항상 이깁니다. 비우고 저장하면 기본값을 지웁니다.'
+                  ).pack(anchor='w', padx=14)
+        v_material = tk.StringVar(value=current_material)
+        ttk.Entry(win, textvariable=v_material, width=24).pack(anchor='w', padx=14, pady=8)
+        row = ttk.Frame(win); row.pack(fill='x', padx=12, pady=(4, 12))
+
+        def confirm():
+            defaults = _merge_material_default((source.get('options') or {}).get('defaults'), v_material.get().strip())
+            win.destroy()
+            self._set_buttons('disabled')
+
+            def run():
+                try:
+                    state = session.configure_defaults(defaults, manifest['revision'], manifest['project_id'])
+                    self.root.after(0, lambda: (self._log('프로젝트 기본값 저장 완료.'),
+                                                self._parse_done(state['geometry'], source['path'])))
+                except Exception as exc:
+                    self.root.after(0, lambda msg=str(exc): (self._log(msg), self._set_buttons('!disabled'),
+                                                             messagebox.showerror('저장 실패', msg)))
+            threading.Thread(target=run, daemon=True).start()
+        ttk.Button(row, text='저장', command=confirm).pack(side='right', padx=4)
+        ttk.Button(row, text='취소', command=win.destroy).pack(side='right')
+        win.bind('<Return>', lambda _event: confirm())
+        win.bind('<Escape>', lambda _event: win.destroy())
+        win.grab_set()
 
     def _pick_dxf(self):
         p = filedialog.askopenfilename(
@@ -684,13 +733,17 @@ class App:
         if not dxf:
             return
         options = dict(use_ai=bool(self.v_llm.get()), use_vision=bool(self.v_vision.get()))
+        # `_ask_arch_defaults` 의 답 — 새로 만드는 프로젝트에만 쓴다. 한 번 쓰면 비워서, '(2) 다시
+        # 해석' 버튼을 눌러도 두 번째 파싱에서 층고를 또 덮어쓰지 않는다.
+        pending = self._pending_open_defaults; self._pending_open_defaults = {}
+        height = _open_defaults_into(pending, options)
         try:
             same = self.project_session and self.project_session.store.read()['sources'][0]['path'] == os.path.abspath(dxf)
             if not same:
                 try:
                     self.project_session = open_source_project(dxf, layer_map=self.v_map.get().strip() or None,
                         block_map=self.v_block.get().strip() or None, options=options,
-                        schedule=self.v_schedule.get().strip() or None)
+                        schedule=self.v_schedule.get().strip() or None, height=height)
                 except ProjectCorrupt as exc:
                     folder = os.path.splitext(dxf)[0] + '.mep'
                     if not messagebox.askyesno("프로젝트 복구", str(exc) + "\n이전 정상 저장본으로 복구할까요?"):
@@ -704,7 +757,7 @@ class App:
                         return
                     self.project_session = open_source_project(dxf, folder=folder,
                         layer_map=self.v_map.get().strip() or None, block_map=self.v_block.get().strip() or None,
-                        options=options, schedule=self.v_schedule.get().strip() or None)
+                        options=options, schedule=self.v_schedule.get().strip() or None, height=height)
             manifest = self.project_session.store.read()
             sources = manifest['sources']
             source = sources[0]
@@ -1169,7 +1222,8 @@ class App:
                     self._log('  [검토] ' + message)
                 for kind, item in receipt.get('artifacts', {}).items():
                     self._log(f"  {kind}: {item.get('path', '')}")
-                messagebox.showinfo('Blender / GLB 생성 완료', review_summary + '\n' + '\n'.join(detail[:8]) + '\n\n' + '\n'.join(item.get('path', '') for item in receipt['artifacts'].values()))
+                shown = detail[:8] + ([f'… 그 밖에 {len(detail) - 8}줄 — 로그 창에 전부 있습니다.'] if len(detail) > 8 else [])
+                messagebox.showinfo('Blender / GLB 생성 완료', review_summary + '\n' + '\n'.join(shown) + '\n\n' + '\n'.join(item.get('path', '') for item in receipt['artifacts'].values()))
             else:
                 messagebox.showwarning('내보내기 미완료', '\n'.join(map(str, receipt.get('errors', []) + receipt.get('diagnostics', []))) or str(receipt.get('status')))
         def run():
@@ -1300,9 +1354,10 @@ class App:
                 import ifc_builder as IB
                 build_input, build_state = self.project_session.export_geometry()
                 stats = IB.build(build_input, out, storey="Level", connect=connect)
-                receipt_path = out + '.client-receipt.json'
-                atomic_json(receipt_path, stats)
-                artifacts = verified_artifacts(receipt_path, build_state['geometry'], stats.get('provenance', {}).get('run_id'))
+                # 빌더가 스스로 쓴 영수증을 본다 — GUI 가 다시 쓴 사본이 아니라.
+                receipt_path = os.path.splitext(out)[0] + '.build.json'
+                artifacts = verified_artifacts(receipt_path, build_state['geometry'],
+                                               stats.get('provenance', {}).get('run_id'))
                 self.root.after(0, lambda: self._ifc_done(out, stats, artifacts.get('ifc')))
             except Exception as e:
                 msg = str(e)
@@ -1312,8 +1367,17 @@ class App:
         threading.Thread(target=run, daemon=True).start()
 
     def _ifc_done(self, out, stats, receipt=None):
-        receipt = receipt or {'status':'failed','error':'Current artifact receipt missing'}
+        receipt = receipt or {'status': 'failed', 'error': 'Current artifact receipt missing'}
+        built = stats.get('built') or {}
+        if built:
+            self._log("  " + " ".join(f"{k}={v}" for k, v in built.items() if v))
+        for note, value in (("개구부", stats.get('openings_void')),
+                            ("이음", (stats.get('fittings') or {}).get('built')),
+                            ("미생성 레코드", stats.get('skip'))):
+            if value:
+                self._log(f"  {note}: {value}")
         self._log(f"IFC: {receipt['status']} — {receipt.get('path') or receipt.get('error', '')}")
+        self._log(f"검사 보고서: {os.path.splitext(out)[0]}.build.json")
         self.btn_ifc.state(["!disabled"])
 
     def _do_build(self):
@@ -1428,8 +1492,18 @@ def _selftest():
             if abs(pipe['source_length_mm'] - (1000 + math.pi * 50)) > 1e-6:
                 raise RuntimeError('MEP analytic curve length failed')
             payload = BB.prepare_payload(heat)
-            if not any(item.get('kind') == 'curve' for item in payload['objects']):
-                raise RuntimeError('Blender payload has no source pipe curve')
+            # `prepare_payload` 는 원형이든 사각이든 **항상 mesh** 를 낸다(편집 가능한 Curve 는 없어졌다).
+            # 종전 이 자리의 'curve' 단언은 그때 같이 안 고쳐져 .exe 스모크가 조용히 실패하고 있었다.
+            if not any(item.get('kind') == 'mesh' for item in payload['objects']):
+                raise RuntimeError('Blender payload has no pipe mesh')
+            # ★ 납품 IFC 경로가 번들에 실제로 들어갔는지 — `.exe` 에서 이게 유일한 신호다.
+            #   여기서 죽으면 `mep_parser.spec` 의 collect_all 이나 pip 설치가 빠진 것이다.
+            try:
+                import ifc_builder  # noqa: F401
+                import ifcopenshell.geom  # noqa: F401
+            except (ImportError, SystemExit) as exc:
+                raise RuntimeError(
+                    f'납품 IFC 경로가 없다 — pip install ifcopenshell numpy ({exc})') from None
         msg = (f"[selftest] parse OK: elements={n}, "
                f"shapely={'on' if P.HAS_SHAPELY else 'off'}\n"
                f"[selftest] preview OK: html={len(html)} bytes, "

@@ -168,6 +168,43 @@ def test_split_is_expressed_as_delete_plus_two_adds():
     assert all(r["pairing"] == "manual" for r in els["wall"])
 
 
+def _manual_pipe(eid, a, b, **kw):
+    rec = {"kind": "polyline", "closed": False, "points": [a, b], "centerline": [a, b],
+           "pairing": "manual", "layer": "(수동)", "confidence": 1, "needs_review": False,
+           "source": "manual_preview", "overrides": {"diameter": 100.0}, "eid": eid,
+           "level": "main", "elevation": 2600.0, "system": "heating"}
+    rec.update(kw)
+    return {"added": True, "category": "pipe", "record": rec}
+
+
+def test_a_manual_pipe_reaches_route_points_network_and_verify_clean():
+    """평면 탭에서 그린 배관 — 파서 이후 파이프라인이 새 카테고리를 그대로 받는다(0줄 변경 확인)."""
+    import geom_contract as GC
+    import mep_network as MN
+    import verify
+
+    els = {"pipe": []}
+    rep = apply_edits(els, {"main:wm:p1": _manual_pipe("main:wm:p1", [0, 0], [2000, 0])})
+    assert rep["added"] == ["main:wm:p1"]
+    rec = els["pipe"][0]
+    assert rec["source"] == "manual_preview"  # setdefault 라 편집이 이미 채운 값을 apply_edits 가 안 덮어쓴다
+    assert GC.route_points("pipe", rec) == [[0, 0, 2600.0], [2000, 0, 2600.0]]
+    section = GC.mep_section("pipe", rec, {})
+    assert section["shape"] == "round" and section["diameter"] == 100.0
+
+    data = {"contract": GC.contract_block(), "floors": [{"z": 0.0, "label": "Level_1", "id": "main"}],
+            "elements": els}
+    net = MN.analyze(data)
+    assert len(net["open_ends"]) == 2, net["open_ends"]      # 이음 재부여는 안 한다 — 열린 끝 둘
+
+    profile = {"unit_scale_to_mm": 1.0, "layers": [{"pattern": "^X$", "category": "pipe",
+               "system": "heating", "representation": "centerline", "dimension_basis": "user"}]}
+    data["mep_profile"] = profile
+    report = verify.verify_geometry(data)
+    ids = {f.id for f in report.errors + report.warns}
+    assert "V010" not in ids and "V011" not in ids, [f.message for f in report.errors + report.warns]
+
+
 def test_manual_walls_are_not_touched_by_wall_post_processing():
     """★ '사용자 편집이 항상 이긴다' 의 근거 — 주입이 후처리 **뒤**라서,
     수동 레코드는 병합·스냅·치유 흐름에 애초에 들어가지 않는다.

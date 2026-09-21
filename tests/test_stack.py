@@ -122,6 +122,45 @@ def test_level_height_only_touches_vertical_elements():
     assert "height" not in s["overrides"]
 
 
+def _wall_pair_dxf(tmp_path, name="arch.dxf"):
+    import ezdxf
+    doc = ezdxf.new(units=4)
+    for y in (0, 200):
+        doc.modelspace().add_line((0, y), (5000, y), dxfattribs={"layer": "A-WALL"})
+    p = tmp_path / name
+    doc.saveas(p)
+    return str(p)
+
+
+def test_a_declared_level_height_reaches_the_merged_geometry_as_a_presence_flag(tmp_path):
+    """물량 패널의 '선언/기본값' 신호(`level_height_overrode` 키 존재, `preview.py`)는 원본이
+    하나뿐인 프로젝트만 본 게 아니다 — `build_stack()` 도 같은 계약을 지켜야 한다. 종전엔 이 키를
+    합친 geometry 에 전혀 안 올려서, 원본이 여럿인 프로젝트는 층고를 선언해도 패널이 늘
+    '미선언'이라고 잘못 말했다(Phase 4 리뷰에서 발견: 실무 흐름은 단일 원본으로 열어 층고를
+    선언한 뒤 '같은 층 도면 추가'로 두 번째 원본을 얹는 것이라, 드문 경우가 아니다)."""
+    g = SB.build_stack({"levels": [{"id": "L1", "source": _wall_pair_dxf(tmp_path), "z": 0, "height": 3000}]})
+    assert "level_height_overrode" in g          # 덮은 개수가 0 이어도 선언 자체는 남는다
+    assert g["level_height_overrode"] == 0
+    assert g["elements"]["wall"][0]["overrides"]["height"] == 3000.0   # 형상은 종전에도 이미 맞았다
+
+
+def test_an_undeclared_level_height_leaves_the_merged_geometry_without_the_key(tmp_path):
+    g = SB.build_stack({"levels": [{"id": "L1", "source": _wall_pair_dxf(tmp_path), "z": 0}]})
+    assert "level_height_overrode" not in g
+
+
+def test_level_height_declared_on_one_of_two_sources_still_reports_presence(tmp_path):
+    """실제 트리거: 단일 원본으로 열어 층고를 선언한 뒤 '같은 층 도면 추가'로 두 번째 원본이
+    붙는다 — 두 번째 원본은 층고를 선언하지 않아도(설비 도면은 보통 안 한다) 신호는 살아야 한다."""
+    arch = _wall_pair_dxf(tmp_path, "arch.dxf")
+    mep = _wall_pair_dxf(tmp_path, "mep.dxf")
+    g = SB.build_stack({"levels": [
+        {"id": "A", "source": arch, "z": 0, "floor": "L1", "height": 3000},
+        {"id": "B", "source": mep, "z": 0, "floor": "L1", "categories": ["wall"]},
+    ]})
+    assert "level_height_overrode" in g
+
+
 def test_stacked_openings_keep_pointing_at_their_own_level():
     """★ `wall_indices` 는 **그 층 안에서의 위치**다.
 

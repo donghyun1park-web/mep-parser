@@ -20,6 +20,7 @@ import math
 import os
 import sys
 
+import construction_rules as CR
 import geom_contract as GC
 from geom_contract import poly_area as _poly_area
 from geom_contract import mep_dimensions
@@ -45,7 +46,6 @@ def aggregate(data):
     """geometry.json dict → 섹션별 집계 rows. 반환 {섹션명: (헤더, rows, 합계행)}."""
     els = data.get("elements", {})
     params = data.get("params", {})
-    pw = float(params.get("wall", {}).get("width", 200.0))
     ph = float(params.get("wall", {}).get("height", 2800.0))
     pcol_h = float(params.get("column", {}).get("height", 3000.0))
     pslab_t = float(params.get("slab", {}).get("thickness", 200.0))
@@ -54,7 +54,6 @@ def aggregate(data):
     # ── 벽: 두께별 ───────────────────────────────────────────
     wg = {}
     for w in els.get("wall", []):
-        ov = w.get("overrides") or {}
         h = GC.height_of(w, params, "wall")      # 계약과 같은 순서(overrides > 레코드 > params) — 창 위아래 벽은 짧다
         if w.get("closed") and len(w.get("points", [])) >= 3:
             pts = w["points"]
@@ -67,7 +66,7 @@ def aggregate(data):
             if len(cl) < 2:
                 continue
             L = _polyline_len(cl)
-            t = float(w.get("width_detected") or ov.get("width") or pw)
+            t = GC.width_of(w, params, "wall")   # 계약과 같은 순서 — thin_pair 실측을 믿지 않는다(geom_contract.width_of)
             vol = L * h * t
             key = f"T{_r10(t)}"
             if w.get("source") == "opening_infill":
@@ -181,56 +180,55 @@ def aggregate(data):
                 footprints.append([label, m.get("eid") or m.get("layer", ""), dims["height_mm"], round(area / 1e6, 6)])
                 continue
             key = (label, _size_label(cat, dims))
-            g = mg.setdefault(key, {"count": 0, "len": 0.0})
+            g = mg.setdefault(key, {"count": 0, "len": 0.0, "basis": set()})
             g["count"] += 1
             length = m.get("source_length_mm")
-            # 원본 길이는 손대지 않은 원본 경로의 길이다. 편집했거나 사람이 그린 경로는
-            # 현재 모델 경로의 길이(수직·경사 구간 포함, 계약 v3)를 센다.
+            # 원본 길이는 손대지 않은 원본 경로(2D)의 길이다. 편집했거나 사람이 그린 경로는
+            # 현재 모델 경로의 길이(수직·경사 구간 포함, 계약 v3)를 센다. **배수 구배(opt-in)** 는
+            # 원본 길이를 그대로 쓴다 — 1/100 구배가 늘리는 실제 길이는 0.005% 라 물량에 안 보이지만,
+            # 어느 쪽을 썼는지는 숨기지 않는다(길이기준 열).
+            basis = "원본(2D)"
             if length is None or m.get("geometry_modified"):
                 from geom_contract import route_length
                 length = route_length(m)
+                basis = "모델(수정·경사 포함)"
             g["len"] += float(length)
-    rows = [[k[0], k[1], g["count"], round(g["len"] / 1000, 3)]
+            g["basis"].add(basis)
+    rows = [[k[0], k[1], g["count"], round(g["len"] / 1000, 3),
+            next(iter(g["basis"])) if len(g["basis"]) == 1 else "혼합"]
             for k, g in sorted(mg.items())]
-    tot = ["합계", "", sum(r[2] for r in rows), round(sum(r[3] for r in rows), 3)]
-    out["MEP"] = (["구분", "규격(mm)", "개수", "길이(m)"], rows, tot)
+    tot = ["합계", "", sum(r[2] for r in rows), round(sum(r[3] for r in rows), 3), ""]
+    out["MEP"] = (["구분", "규격(mm)", "개수", "길이(m)", "길이기준"], rows, tot)
     out["MEP 외곽"] = (["구분", "원본 식별자", "높이(mm)", "평면 면적(㎡)"], footprints,
                        ["합계", "", "", round(sum(r[3] for r in footprints), 6)])
 
     # ── MEP 이음: 형식·규격별 개수 — 도면이 실제로 이어 그린 곳(`joints`)만 센다 ──
-    #   같은 규격이 곧게 이어진 곳은 피팅이 아니라 선을 끊어 그린 자리라 세지 않는다.
-    from geom_contract import ContractError, mep_joints, route_points
+    #   형식 판정은 IFC 피팅 몸체와 같은 함수다(`GC.joint_fittings`) — 물량표와 모델의 피팅 수가 갈라지지 않게.
+    #   같은 규격이 곧게 이어진 곳은 피팅이 아니라 선을 끊어 그린 자리라 세지 않는다. 끊긴 이음은 V012 가 말한다.
+    kinds = {"elbow": "엘보", "reducer": "레듀서", "tee": "티", "cross": "크로스"}
     fg = {}
-    for members in mep_joints(els).values():
-        if len(members) < 2:
-            continue                                  # 끊긴 이음 — V012 가 말한다
-        legs, outward, sizes = 0, [], set()
-        try:
-            for c, rec, port, _at in members:
-                sizes.add(_size_label(c, mep_dimensions(c, rec, params)))
-                if port == "tap":
-                    legs += 2                         # 줄기는 지나가며 양쪽으로 센다
-                    continue
-                legs += 1
-                pts = route_points(c, rec)
-                a, b = (pts[0], pts[1]) if port == "start" else (pts[-1], pts[-2])
-                v = [b[i] - a[i] for i in range(3)]
-                norm = math.sqrt(sum(x * x for x in v)) or 1.0
-                outward.append([x / norm for x in v])
-        except (ContractError, KeyError, TypeError, ValueError, IndexError):
-            continue
-        if legs == 2 and len(outward) == 2:
-            straight = sum(p * q for p, q in zip(*outward)) < -math.cos(math.radians(1.0))
-            if straight and len(sizes) == 1:
-                continue
-            kind = "레듀서" if straight else "엘보"
-        else:
-            kind = {3: "티", 4: "크로스"}.get(legs, f"분기{legs}")
-        cat = members[0][0]
+    for fitting in GC.joint_fittings(els, params)["fittings"]:
+        sizes = {_size_label(c, mep_dimensions(c, rec, params)) for c, rec, _p, _a in fitting["members"]}
+        kind = kinds.get(fitting["kind"]) or "분기" + fitting["kind"][len("branch"):]
+        cat = fitting["category"]
         key = ({"pipe": "배관", "duct": "덕트", "tray": "트레이"}.get(cat, cat), kind, "/".join(sorted(sizes)))
         fg[key] = fg.get(key, 0) + 1
     rows = [[k[0], k[1], k[2], count] for k, count in sorted(fg.items())]
     out["MEP 이음"] = (["구분", "형식", "규격(mm)", "개수"], rows, ["합계", "", "", sum(r[3] for r in rows)])
+
+    # ── 설비 지지·청소구 — 시공기준(construction_rules.py). 개수는 하한 추정이다 ──
+    support_rows = CR.supports(data)
+    if support_rows:
+        tot = ["합계", "", "", "", round(sum(r[4] for r in support_rows), 3), "",
+               sum(r[6] for r in support_rows), ""]
+        out["MEP 지지·청소구"] = (["구분", "용도", "재질", "규격(DN)", "길이(m)", "간격(m)", "개수(하한)", "근거"],
+                                 support_rows, tot)
+
+    # ── 설비 보온 — 프로필의 보온 선언(등급·다습·유온)이 있는 배관·덕트만. 두께는 최소 기준이다 ──
+    insulation_rows = CR.insulation(data)
+    if insulation_rows:
+        tot = ["합계", "", "", "", round(sum(r[4] for r in insulation_rows), 3), ""]
+        out["MEP 보온"] = (["구분", "용도", "규격", "두께(mm)", "길이(m)", "근거"], insulation_rows, tot)
     return out
 
 
@@ -264,7 +262,11 @@ def export_boq_xlsx(data, path, title=None):
     t.font = Font(size=14, bold=True)
     t.alignment = Alignment(horizontal="center")
     qa = data.get("qa") or {}
-    meta = f"파싱 커버리지 {qa.get('face_coverage_pct', '—')}%  ·  단위: m/㎡/㎥"
+    # ★ 무엇을 세고 무엇을 안 세는지 — 이 줄이 없으면 받는 사람이 "개구부는 당연히 뺐겠지" 로 읽는다.
+    #   화면 물량 패널도 같은 문장을 쓴다(`review_logic.js` 의 `BOQ_SCOPE_NOTE`).
+    meta = (f"파싱 커버리지 {qa.get('face_coverage_pct', '—')}%  ·  단위: m/㎡/㎥"
+            "  ·  벽 면적·체적은 중심선 길이×높이×두께(개구부 미차감)"
+            "  ·  접합부 중복·마감·할증 미포함  ·  지지 개수는 하한  ·  검토용")
     ws.merge_cells("A2:F2")
     m = ws.cell(row=2, column=1, value=meta)
     m.font = Font(italic=True, color="7A8290")

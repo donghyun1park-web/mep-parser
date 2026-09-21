@@ -66,6 +66,16 @@ class ProjectSession:
             # 간섭 목록은 검토 보조다 — 실패해도 모델·수정은 막지 않되, 못 만든 사실은 남긴다.
             data['clash_review'] = {'items': [], 'summary': {'total': 0, 'error': f'{type(exc).__name__}: {exc}'}}
         try:
+            import construction_rules
+            data['construction_rules'] = construction_rules.review(data)
+        except Exception as exc:
+            data['construction_rules'] = {'items': [], 'summary': {'error': f'{type(exc).__name__}: {exc}'}}
+        try:
+            import boq_export
+            data['boq'] = boq_export.aggregate(data)
+        except Exception as exc:
+            data['boq'] = {'error': f'{type(exc).__name__}: {exc}'}
+        try:
             from mep_network import analyze, apply_bridges
             net = analyze(data)
             # 확정한 이음을 기록하고 **그 뒤 상태**를 다시 센다 — 확정한 자리가 화면에 계속 '끊긴 끝'·'후보' 로
@@ -199,6 +209,81 @@ class ProjectSession:
                         'unit_edits_held': held_edits}
             if proposal_id:
                 decision['proposal_id'] = proposal_id
+            self.store.update_sources(proposed['sources'], proposed['options'], expected_revision,
+                                      project_id, decisions=[decision], edits_by_floor=proposed['edits_by_floor'])
+            return self.state()
+
+    def apply_layer_suggestion(self, suggestion, expected_revision, project_id, source_id='main'):
+        """파서가 낸 구조화된 제안(`suggestions_apply`) 하나를 layer_map.csv 에 적용한다.
+
+        브라우저는 **명시적 클릭에만, 프로젝트 소유 CSV 에만** 쓴다 — 저장소 동봉 기본 CSV 는
+        절대 건드리지 않는다(`edits-and-preview.md`). 실패하면(오타난 opts·매칭 행 없음·적용 뒤
+        파싱 실패) 파일을 원래대로 되돌린다."""
+        import layer_map_io as LM
+        import dxf_parser as parser
+        with self._mutex:
+            manifest = self.store.refresh_inputs()
+            self.store.check_revision(manifest, expected_revision, project_id)
+            source = next((s for s in manifest['sources'] if s['id'] == source_id), None)
+            if source is None:
+                raise ValueError(f'Unknown source: {source_id}')
+            if (source.get('options') or {}).get('mep_profile'):
+                # 설비 프로필의 architecture_layers 자동 적용은 아직 없다 — 설비 도면 설정에서
+                # 직접 고친다. 반쯤 되는 구현을 넣느니 정직하게 거절한다.
+                raise ValueError('이 소스는 설비 프로필입니다 — 자동 적용은 아직 없습니다. '
+                                  '설비 도면 설정에서 architecture_layers 를 직접 고치세요.')
+            csv_path = source.get('layer_map')
+            if not csv_path or not Path(csv_path).exists():
+                raise ValueError('이 소스에는 프로젝트 로컬 layer_map 이 없습니다 — 동봉 CSV 를 '
+                                  '프로젝트에 복사한 뒤 다시 시도하세요(저장소 기본 CSV 는 쓰지 않습니다).')
+            original = Path(csv_path).read_text(encoding='utf-8')
+            op = suggestion.get('op')
+            try:
+                if op == 'set_opts':
+                    LM.set_opts(csv_path, suggestion['row_layer'], suggestion['opts'])
+                elif op == 'set_width':
+                    LM.set_width(csv_path, suggestion['row_layer'], suggestion['width'])
+                elif op == 'insert_row':
+                    LM.insert_row(csv_path, suggestion['pattern'], suggestion['category'],
+                                   height=suggestion.get('height'), width=suggestion.get('width'))
+                else:
+                    raise ValueError(f'Unknown suggestion op: {op}')
+                parser.load_layer_map(csv_path)   # 오타난 opts 는 여기서 LayerMapError 로 던진다
+            except Exception:
+                Path(csv_path).write_text(original, encoding='utf-8')
+                raise
+            decision = {'action': 'apply_layer_rule', 'source_id': source_id,
+                        'revision': expected_revision, 'suggestion': suggestion}
+            self.store.refresh_inputs(decisions=[decision])
+            try:
+                return self.state()
+            except Exception as exc:
+                Path(csv_path).write_text(original, encoding='utf-8')
+                self.store.refresh_inputs()
+                raise ValueError('적용 후 다시 해석하는 데 실패해 되돌렸습니다: ' + str(exc)) from exc
+
+    def configure_defaults(self, defaults, expected_revision, project_id, source_id='main'):
+        """프로젝트 기본값(`source.options.defaults`) 을 검증하고 저장한다 — `configure_source`
+        와 같은 규칙(검증 → 시험 파싱 → 그때만 커밋). 레이어·프로필 선언이 없을 때만 채우는
+        선언이라 형상은 안 바뀐다."""
+        from mep_profile import validate_defaults
+        with self._mutex:
+            manifest = self.store.refresh_inputs()
+            self.store.check_revision(manifest, expected_revision, project_id)
+            normalized = validate_defaults(defaults)
+            proposed = copy.deepcopy(manifest)
+            source = self._profile_source(proposed, source_id)
+            options = source.setdefault('options', {})
+            if normalized:
+                options['defaults'] = normalized
+            else:
+                options.pop('defaults', None)
+            try:
+                self._parse(proposed)
+            except Exception as exc:
+                raise ValueError('Defaults cannot be parsed; project was not changed: ' + str(exc)) from exc
+            self.store.check_revision(self.store.refresh_inputs(), expected_revision, project_id)
+            decision = {'action': 'configure_defaults', 'source_id': source_id, 'revision': expected_revision}
             self.store.update_sources(proposed['sources'], proposed['options'], expected_revision,
                                       project_id, decisions=[decision], edits_by_floor=proposed['edits_by_floor'])
             return self.state()
@@ -418,14 +503,20 @@ class ProjectSession:
             proposed = copy.deepcopy(manifest)
             proposed['edits_by_floor'] = self.store.local_edits(captured, manifest)
             try:
-                self._parse(proposed)
+                geometry = self._parse(proposed)
             except Exception as exc:
                 raise ValueError('Proposed edits cannot be parsed; project was not changed: ' + str(exc)) from exc
             if dry_run:
                 return {'dry_run': True, 'project_id': project_id, 'revision': expected_revision}
             self.store.check_revision(self.store.refresh_inputs(), expected_revision, project_id)
-            self.store.replace_edits(captured, expected_revision, project_id, decisions=decisions)
-            return self.state()
+            after = self.store.replace_edits(captured, expected_revision, project_id, decisions=decisions)
+            # 검증 파싱을 그대로 커밋 상태로 쓴다 — 저장마다 파싱을 두 번 하지 않는다. replace_edits 가
+            # 방금 자기 revision 검사를 통과했으므로 sources·edits_by_floor 는 검증 때와 같고, 바뀌는 건
+            # revision 번호뿐이다(커밋 전엔 아직 못 찍는다).
+            geometry['project']['revision'] = after['revision']
+            self._cached_state = {'project_id': project_id, 'revision': after['revision'],
+                    'edits': self.store.flat_edits(after), 'geometry': geometry}
+            return copy.deepcopy(self._cached_state)
 
     def confirm_bridge(self, candidate_id, expected_revision, project_id, confirmed=True, reason=''):
         """이음 후보 하나를 사람이 확정(또는 취소)한다. 형상은 바뀌지 않고 `joints` 에만 기록된다."""
@@ -574,6 +665,11 @@ class ProjectSession:
         for problem in GC.joint_problems(elements):
             items.append({'category': 'joint', 'eid': (problem['eids'] or [None])[0],
                           'eids': problem['eids'], 'reason': 'joint_' + problem['problem']})
+        for rule_item in (state['geometry'].get('construction_rules') or {}).get('items', []):
+            if rule_item.get('kind') != 'violation':
+                continue
+            items.append({'category': 'rule', 'eid': rule_item.get('eid'),
+                          'reason': f"{rule_item.get('standard', '')} {rule_item.get('clause', '')} 위반".strip()})
         for clash in (state['geometry'].get('clash_review') or {}).get('items', []):
             items.append({'category': 'clash', 'eid': clash['mep']['eid'], 'layer': clash['struct'].get('layer'),
                           # 합성 슬래브는 부재가 아니라 EID 가 없다 — 목록에서 고를 수 있는 것만 싣는다.
@@ -730,7 +826,7 @@ class ProjectServer:
 
             def do_POST(self):
                 path = urlsplit(self.path).path
-                if path not in ('/edits', '/discard', '/relink', '/defer', '/pascal/apply', '/source-units', '/bridges'):
+                if path not in ('/edits', '/discard', '/relink', '/defer', '/pascal/apply', '/source-units', '/bridges', '/layer-rule', '/defaults'):
                     self.reply(404, {'error':'Unknown endpoint'})
                     return
                 if not self.authorized():
@@ -764,6 +860,12 @@ class ProjectServer:
                     elif path == '/pascal/apply':
                         result = session.pascal_apply(body['scene'], *common, body['snapshot_sha256'],
                                                       body['op_id'], bool(body.get('dry_run', False)))
+                    elif path == '/layer-rule':
+                        result = session.apply_layer_suggestion(body['suggestion'], *common,
+                                                                 body.get('source_id', 'main'))
+                    elif path == '/defaults':
+                        result = session.configure_defaults(body['defaults'], *common,
+                                                             body.get('source_id', 'main'))
                     else:
                         result = session.relink(body['orphan'],body['target'], *common)
                     self.reply(200, result)
@@ -793,11 +895,13 @@ class ProjectServer:
         self.close()
 
 
-def open_source_project(dxf_path, folder=None, layer_map=None, block_map=None, options=None, schedule=None):
+def open_source_project(dxf_path, folder=None, layer_map=None, block_map=None, options=None, schedule=None, height=None):
     dxf_path = str(Path(dxf_path).resolve())
     store = ProjectStore(folder or Path(dxf_path).with_suffix('.mep'))
     if not store.path.exists():
         source = dict(id='main', path=dxf_path, layer_map=layer_map, block_map=block_map, options=options or {}, schedule=schedule)
+        if height is not None:
+            source['height'] = height   # 층고는 프로젝트 기본값이다(dxf_parser.parse 의 level_height) — 새 프로젝트에서만 받는다
         store.create([source])
     elif store.read()['sources'][0]['path'] != dxf_path:
         raise ValueError('Project belongs to a different source drawing')
@@ -826,7 +930,9 @@ def verified_artifacts(report_path, geometry, expected_run_id):
     except (OSError, ValueError) as exc:
         return {kind:{'status':'failed','error':f'Build receipt unavailable: {exc}'} for kind in ('fcstd','ifc')}
     result = {}
-    for kind in ('fcstd','ifc'):
+    # ★ 영수증이 선언한 산출물만 본다 — 납품 IFC 경로(`ifc_builder`)는 `.FCStd` 를 내지 않는다.
+    #   종전처럼 'fcstd' 를 무조건 세면 성공한 빌드가 '검증 안 됨' 으로 보인다.
+    for kind in (tuple(report.get('artifacts') or ()) or ('fcstd','ifc')):
         receipt = copy.deepcopy(report.get('artifacts', {}).get(kind) or {'status':'failed'})
         proof = receipt.get('provenance') or {}
         try:

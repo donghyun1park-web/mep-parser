@@ -39,6 +39,17 @@ def test_pipe_source_path_and_contract_z_preserved():
     assert data == source(), "Export preparation must not mutate the source contract"
 
 
+def test_payload_never_emits_curves():
+    """Phase 5 동결 — `docs/modeling_techniques.md` 는 한때 '난방관은 편집 가능한 Blender Curve'
+    라고 적었지만, `prepare_payload` 는 원형이든 사각이든 항상 `kind:'mesh'` 만 채운다
+    (`_mesh`·`geometry_method` 둘 다). `kind:'curve'` 소비 분기(`blender_builder.py`·
+    `blender_verify.py`)는 남아 있지만 지금 어떤 입력으로도 나오지 않는다 — 이 테스트가 그 사실을
+    잠근다. 문구를 정정했으니 다음에 curve 를 실제로 채우기 시작하면 이 테스트가 먼저 깨진다."""
+    payload = BB.prepare_payload(source())
+    assert payload["objects"], "fixture must actually produce objects to make this assertion meaningful"
+    assert {o["kind"] for o in payload["objects"]} == {"mesh"}
+
+
 def test_canonical_source_context_and_material_override_survive_payload():
     data = source()
     rec = data['elements']['pipe'][0]
@@ -55,6 +66,37 @@ def test_architecture_not_invented_from_coil_bounds():
     payload = BB.prepare_payload(source())
     assert not any(o["category"] in ("wall", "slab", "floor_layer") for o in payload["objects"])
     assert any(d["code"] == "floor_footprint_not_available" for d in payload["diagnostics"])
+
+
+def test_openings_are_diagnosed_and_the_wall_is_the_same_solid_as_without_them():
+    """Blender 경로는 개구부를 뚫지 않는다(docs/modeling_techniques.md '메시와 편집 파일')."""
+    wall = {"eid": "w:1", "points": [[0, 0], [3000, 0]], "width_detected": 200.0, "z_base": 0.0, "height": 2600.0}
+    opening = {"eid": "o:1", "kind": "circle", "center": [1500, 0], "radius": 450.0,
+               "width": 900.0, "height": 2100.0, "sill": 0.0, "wall_indices": [0]}
+    with_opening = BB.prepare_payload({"units": "mm", "params": {}, "elements": {"wall": [wall], "opening": [opening]}})
+    without = BB.prepare_payload({"units": "mm", "params": {}, "elements": {"wall": [wall]}})
+    assert not any(o["category"] in ("opening", "zone") for o in with_opening["objects"])
+    assert [d for d in with_opening["diagnostics"] if d["code"] == "reference_not_solid"] == [
+        {"code": "reference_not_solid", "eid": "o:1", "category": "opening",
+         "message": "Zone/opening is retained in input; no unverified Boolean opening is cut."}]
+    assert with_opening["objects"] == without["objects"]   # 벽은 온전한 덩어리 그대로다
+
+
+def test_assumed_opening_dimensions_and_infill_reason_reach_the_saved_model():
+    infill = {"eid": "w:2", "points": [[0, 0], [900, 0]], "width_detected": 200.0, "z_base": 2100.0,
+              "height": 500.0, "source": "opening_infill", "dims_assumed": ["height", "sill"]}
+    obj = BB.prepare_payload({"units": "mm", "params": {}, "elements": {"wall": [infill]}})["objects"][0]
+    assert obj["source"] == "opening_infill" and obj["dims_assumed"] == ["height", "sill"]
+    assert {"source", "dims_assumed"} <= set(BV.METADATA_KEYS)   # 저장본 재검사가 같이 대조한다
+
+
+def test_declaration_basis_reaches_the_saved_model():
+    """프로젝트 기본값이 채운 필드 — 편집기가 지어낸 값처럼 보이면 안 된다."""
+    rec = {"eid": "p:1", "points": [[0, 0], [1000, 0]], "elevation": 2600.0, "diameter": 100.0,
+           "declaration_basis": {"material": "project_default"}}
+    obj = BB.prepare_payload({"units": "mm", "params": {}, "elements": {"pipe": [rec]}})["objects"][0]
+    assert obj["declaration_basis"] == {"material": "project_default"}
+    assert "declaration_basis" in BV.METADATA_KEYS
 
 
 def test_rectangular_footprint_with_hole_stays_closed_and_preserves_volume():

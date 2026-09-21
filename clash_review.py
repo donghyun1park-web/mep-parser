@@ -14,6 +14,7 @@ from shapely.geometry import LineString, Point, Polygon, box
 from shapely.ops import unary_union
 from shapely.strtree import STRtree
 
+import construction_rules as CR
 import geom_contract as GC
 
 STRUCT_CATS = ("wall", "column", "slab", "beam")
@@ -35,11 +36,12 @@ ACTIONS = {
     "structure_penetration": "기둥·보 관통 — 경로 변경 검토",
     "wall_penetration": "벽 관통 — 슬리브·개구 확인",
     "sleeve_provided": "슬리브 자리 관통 — 도면의 슬리브 규격·위치와 대조",
+    "sleeve_undersized": "슬리브 자리 관통 — 도면 슬리브가 외경+40mm 미만(KCS 31 20 15 2.2.20)",
     "under_wall": "바닥 매립 설비가 벽 아래를 지남 — 문 하부 경로·벽 선시공 여부 확인",
     "suspect_thin_wall": "벽 두께가 비정상(면선 오결합 의심) — 도면 확인",
 }
 LABELS = {"slab_penetration": "슬래브 관통", "structure_penetration": "기둥·보 관통", "wall_penetration": "벽 관통",
-          "sleeve_provided": "슬리브 관통",
+          "sleeve_provided": "슬리브 관통", "sleeve_undersized": "슬리브 규격 부족",
           "under_wall": "벽 하부 통과", "suspect_thin_wall": "두께 의심 벽"}
 
 
@@ -151,8 +153,10 @@ def _plan_bounds(geometry):
 
 
 def _sleeves(geometry):
-    """슬리브 자리(프로필 `role: sleeve`)의 평면. **부재가 아니라 판정 근거**다 — 도면이 "여기는 뚫어 뒀다"
-    고 말한 자리라 같은 관통이라도 조치가 다르다(슬리브 없는 관통은 새로 뚫어야 한다)."""
+    """슬리브 자리(프로필 `role: sleeve`)의 평면 + 실측 규격. **부재가 아니라 판정 근거**다 — 도면이
+    "여기는 뚫어 뒀다"고 말한 자리라 같은 관통이라도 조치가 다르다(슬리브 없는 관통은 새로 뚫어야
+    한다). `size_mm` 은 그려진 슬리브의 최소 변(원은 지름) — `sleeve-diameter-from-pipe-and-insulation`
+    이 이 값을 배관 외경+40mm 와 대조한다(`clash_review.find_clashes`)."""
     out = []
     for rec in (geometry.get("elements") or {}).get("equipment") or []:
         if (rec.get("role") or (rec.get("overrides") or {}).get("role")) != "sleeve":
@@ -161,13 +165,19 @@ def _sleeves(geometry):
         if len(pts) >= 3:
             poly = Polygon(pts).buffer(0)
             if not poly.is_empty:
-                out.append(poly.buffer(SLEEVE_MARGIN_MM))
+                mrr = poly.minimum_rotated_rectangle.exterior.coords
+                size_mm = min(math.dist(mrr[i], mrr[i + 1]) for i in range(len(mrr) - 1))
+                out.append({"poly": poly.buffer(SLEEVE_MARGIN_MM), "size_mm": size_mm})
     return out
 
 
-def _bands(cat, rec, params):
-    """설비 경로 → 구간별 (평면 띠, 축선, 아래 z, 위 z). 원형은 폭 = 지름."""
-    sec = GC.mep_section(cat, rec, params)
+def _bands(cat, rec, params, use_envelope=False):
+    """설비 경로 → 구간별 (평면 띠, 축선, 아래 z, 위 z) + (규격 문자열, 보온 외피 반영 여부).
+    원형은 폭 = 지름. `use_envelope` 는 프로필 `rules.insulation_envelope: true` 일 때만 참이고,
+    그때만 `rec['insulation_mm']`(있으면) 만큼 띠가 넓어진다 — 슬리브 대조(`required_sleeve_mm`)와
+    같은 `geom_contract.mep_envelope` 를 쓴다."""
+    sec = GC.mep_envelope(cat, rec, params) if use_envelope else GC.mep_section(cat, rec, params)
+    envelope = bool(sec.get("insulated"))
     if sec.get("diameter"):
         half_w = half_h = float(sec["diameter"]) / 2
         size = "Ø%g" % sec["diameter"]
@@ -184,7 +194,7 @@ def _bands(cat, rec, params):
             axis = LineString([a[:2], b[:2]])
             band = axis.buffer(half_w, cap_style=2, join_style=2)
         bands.append((band, axis, min(a[2], b[2]) - half_h, max(a[2], b[2]) + half_h))
-    return bands, size
+    return bands, size, envelope
 
 
 def _kind(prism, z1):
@@ -204,6 +214,8 @@ def _kind(prism, z1):
 def find_clashes(geometry):
     """geometry.json dict → {"items": [...], "summary": {...}}. 입력을 바꾸지 않는다."""
     params = geometry.get("params")
+    # opt-in: 켜지면 간섭 폭이 보온 외피만큼 넓어져 간섭 수가 늘 수 있다(사용자 확인 사항 — 기본 꺼짐).
+    use_envelope = bool(((geometry.get("mep_profile") or {}).get("rules") or {}).get("insulation_envelope"))
     prisms, skipped_structures = _prisms(geometry)
     prisms += _level_slabs(geometry)       # 도면에 몸체가 없는 바닥·천장 — 간섭 계산에만 선다
     voids = _voids(geometry)
@@ -213,7 +225,7 @@ def find_clashes(geometry):
     for cat in ROUTE_CATS:
         for rec in (geometry.get("elements") or {}).get(cat) or []:
             try:
-                bands, size = _bands(cat, rec, params)
+                bands, size, envelope = _bands(cat, rec, params, use_envelope)
             except Exception:
                 skipped_routes += 1
                 continue
@@ -243,8 +255,19 @@ def find_clashes(geometry):
                         through_assumed += any(inside)
                         continue
                     kind = _kind(prism, max(p[4] for p in members))
-                    if kind == "wall_penetration" and any(s.contains(at) for s in sleeves):
-                        kind = "sleeve_provided"
+                    rule_info = None
+                    if kind == "wall_penetration":
+                        matched = next((s for s in sleeves if s["poly"].contains(at)), None)
+                        if matched is not None:
+                            required = CR.required_sleeve_mm(cat, rec, params)
+                            if required is not None and matched["size_mm"] < required:
+                                kind = "sleeve_undersized"
+                                rule_info = {"id": "sleeve-diameter-from-pipe-and-insulation",
+                                            "clause": "KCS 31 20 15 2.2.20",
+                                            "required_mm": round(required, 1),
+                                            "measured_mm": round(matched["size_mm"], 1)}
+                            else:
+                                kind = "sleeve_provided"
                     struct = prism["rec"]
                     assumed = sorted(set(prism["basis"]["assumed"] + mep_basis["assumed"]))
                     action = ACTIONS[kind]
@@ -257,6 +280,7 @@ def find_clashes(geometry):
                         "at": [round(at.x, 1), round(at.y, 1)], "z": [round(z0, 1), round(z1, 1)],
                         "crossing_mm": round(sum(p[1] for p in members), 1), "area_mm2": round(part.area, 1),
                         "level": rec.get("level") or struct.get("level"),
+                        **({"rule": rule_info} if rule_info else {}),
                         # 이 줄의 높이가 도면에서 온 것인지 가정인지 — 판정과 **같이** 보여야 한다.
                         "basis": "assumed" if assumed else "declared", "assumed": assumed,
                         # 벽이 간섭 품질의 바닥이다 — 그 줄이 선 벽을 파서가 어떻게 잡았는지 같이 싣는다
@@ -270,9 +294,10 @@ def find_clashes(geometry):
                                            ("review_reason", struct.get("review_reason")),
                                            ("uncertain", _uncertain_wall(prism["category"], struct) or None))
                                           if v}),
-                        "mep": {"eid": rec.get("eid"), "category": cat, "size": size, "layer": rec.get("layer"),
-                                "system": rec.get("system") or (rec.get("overrides") or {}).get("system"),
-                                "z_basis": mep_basis["z"]},
+                        "mep": dict({"eid": rec.get("eid"), "category": cat, "size": size, "layer": rec.get("layer"),
+                                    "system": rec.get("system") or (rec.get("overrides") or {}).get("system"),
+                                    "z_basis": mep_basis["z"]},
+                                   **({"envelope": "insulated"} if envelope else {})),
                     })
     order = list(ACTIONS)
     items.sort(key=lambda c: (order.index(c["kind"]), c["at"][1], c["at"][0], c["id"]))
@@ -284,14 +309,16 @@ def find_clashes(geometry):
                         "through_openings_assumed": through_assumed,
                         "assumed_basis": sum(1 for c in items if c["basis"] == "assumed"),
                         "on_uncertain_walls": sum(1 for c in items if c["struct"].get("uncertain")),
-                        "skipped_structures": skipped_structures, "skipped_routes": skipped_routes},
+                        "skipped_structures": skipped_structures, "skipped_routes": skipped_routes,
+                        "envelope_basis": sum(1 for c in items if c["mep"].get("envelope"))},
             "method": "2.5D plan intersection with z ranges (geom_contract widths, elevations, routes)"}
 
 
 CSV_COLUMNS = ("id", "kind", "label", "action", "level", "x_mm", "y_mm", "z0_mm", "z1_mm", "crossing_mm",
                "struct_eid", "struct_category", "struct_layer", "struct_width_mm",
                "struct_pairing", "struct_review_reason",
-               "mep_eid", "mep_category", "mep_system", "mep_size", "basis", "assumed")
+               "mep_eid", "mep_category", "mep_system", "mep_size", "basis", "assumed",
+               "rule_id", "required_mm", "measured_mm")
 
 
 def to_rows(review):
@@ -312,6 +339,9 @@ def to_rows(review):
             "mep_eid": mep.get("eid"), "mep_category": mep.get("category"), "mep_system": mep.get("system"),
             "mep_size": mep.get("size"), "basis": item.get("basis"),
             "assumed": " ".join(item.get("assumed") or ()),
+            "rule_id": (item.get("rule") or {}).get("id"),
+            "required_mm": (item.get("rule") or {}).get("required_mm"),
+            "measured_mm": (item.get("rule") or {}).get("measured_mm"),
         })
     return rows
 
@@ -338,6 +368,8 @@ def main(argv=None):
     parser.add_argument("-o", "--out", help="간섭 목록 CSV (기본: <geometry>_clash.csv)")
     parser.add_argument("--connectivity", nargs="?", const=True,
                         help="설비 연결 목록도 CSV 로 (기본: <geometry>_connectivity.csv)")
+    parser.add_argument("--rules", nargs="?", const=True,
+                        help="시공기준 지지·청소구 목록도 CSV 로 (기본: <geometry>_rules.csv)")
     args = parser.parse_args(argv)
     with open(args.geometry, encoding="utf-8") as handle:
         data = json.load(handle)
@@ -355,6 +387,12 @@ def main(argv=None):
         out = args.connectivity if isinstance(args.connectivity, str) else stem + "_connectivity.csv"
         path, count = write_csv(out, mep_network.to_rows(net), mep_network.CSV_COLUMNS)
         print("연결 목록 %d행 -> %s" % (count, path))
+    if args.rules:
+        import construction_rules
+        out = args.rules if isinstance(args.rules, str) else stem + "_rules.csv"
+        support_rows = construction_rules.supports(data)
+        path, count = write_csv(out, construction_rules.to_rows(support_rows), construction_rules.CSV_COLUMNS)
+        print("시공기준 지지·청소구 %d행 -> %s" % (count, path))
     return 0
 
 
