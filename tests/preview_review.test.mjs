@@ -33,6 +33,7 @@ import {
   levelHeightDeclared,
   shownClashItems,
   legendHtml,
+  panelEdits,
 } from '../frontend/src/review_logic.js';
 
 test('camera framing fits the bounding sphere in both split and wide viewports', () => {
@@ -555,4 +556,20 @@ test('the legend is a hide switch per category that says what is hidden and esca
   assert.match(hidden, /<details open><summary>색상 범례 · 숨김 1<\/summary>/);   // 모르는 이름은 세지 않는다
   assert.match(hidden, /class="legend-cat off" data-cat="wall"[^>]*aria-pressed="true"><span class="sw" style="background:#6b8fb5"><\/span>wall \(숨김\)/);
   assert.ok(legendHtml({'<b>':1},new Set()).includes('&lt;b&gt;'));
+});
+
+test('inspector apply saves only the fields the user touched, so an assumed height never turns into a declared one', () => {
+  const shown={w:'100', h:'', z:'2600'};
+  // 폭만 고쳤다 — 높이는 보여 준 그대로라 저장하지 않는다(undefined = applyProperties 가 손대지 않음).
+  assert.deepEqual(panelEdits(shown,{w:'110',h:'',z:'2600'}), {width:110, height:NaN, z:undefined});
+  // 아무것도 안 고치고 '검토 완료' 만 눌렀다 — thin_pair 벽의 폭 칸이 무엇을 보여 줬든 치수를 쓰지 않는다.
+  assert.deepEqual(panelEdits({w:'50',h:'',z:''},{w:'50',h:'',z:''}), {width:NaN, height:NaN, z:undefined});
+  // 같은 수를 다르게 적어도 같은 값이다.
+  assert.deepEqual(panelEdits(shown,{w:'100.0',h:' ',z:'2600'}), {width:NaN, height:NaN, z:undefined});
+  // 높이를 비우면 null — 편집을 지우고 도면값으로 되돌린다. 새 값은 숫자로.
+  assert.equal(panelEdits(shown,{...shown,z:''}).z, null);
+  assert.equal(panelEdits(shown,{...shown,z:'3000'}).z, 3000);
+  // 숫자가 아닌 것은 NaN — applyProperties·applyZ 가 무시한다(종전과 같은 규약).
+  assert.ok(Number.isNaN(panelEdits(shown,{...shown,z:'abc'}).z));
+  assert.equal(panelEdits(shown,{...shown,h:'300'}).height, 300);
 });

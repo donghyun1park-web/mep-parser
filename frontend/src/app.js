@@ -6,7 +6,7 @@ import { buildReviewEntries, reviewBannerText, bridgeRequest, routineCandidateId
          escHtml, reviewRowHtml, batchButtonHtml, modelBounds, deriveSectionRange, floorKeyOf, isZVisible, reconcileSection, uniqueByEid, fitDistance, recordOnEditFloor, editBackdropState, REASON,
          boqHeightBasisText, boqBodyHtml, createHistory,
          joinedEids, joinedText, systemLineText, isTypingTarget, clashMarkerSpecs, reviewCounts, changeSummaryText,
-         levelHeightDeclared, shownClashItems, legendHtml } from './review_logic.js';
+         levelHeightDeclared, shownClashItems, legendHtml, panelEdits } from './review_logic.js';
 import { screenToDrawing, drawingUnitsPerPixel } from './svg_coordinates.js';
 import { linearMepGeometry, footprintMepGeometry, mepPropertyKeys } from './mep_preview_geometry.js';
 
@@ -387,7 +387,10 @@ function fillPanel(rec, cat){
     try { const dims=gcMepDimensions(cat,rec,P); document.getElementById('e_w').value=dims.diameter??dims.width_mm??''; document.getElementById('e_h').value=dims.height_mm??''; }
     catch { document.getElementById('e_w').value=''; document.getElementById('e_h').value=''; }
   } else {
-    document.getElementById('e_w').value=edits[eid]?.overrides?.width ?? rec.overrides?.width ?? rec.width_detected ?? rec.width ?? '';
+    // 벽은 **세워진 두께**(gcWidthOf — 빌더·물량과 같은 계약)를 보여 준다. 실측을 보여 주면 thin_pair 벽에서
+    // 칸은 50 인데 모델은 200 이었다. 실측은 아래 '이유' 줄이 따로 말한다.
+    document.getElementById('e_w').value=cat==='wall' ? Math.round(gcWidthOf(rec,P,'wall')*10)/10
+      : (edits[eid]?.overrides?.width ?? rec.overrides?.width ?? rec.width_detected ?? rec.width ?? '');
     document.getElementById('e_h').value=edits[eid]?.overrides?.height ?? rec.overrides?.height ?? rec.overrides?.thickness ?? '';
   }
   // 높이(elevation) 편집은 첫 배포에서 MEP(배관·덕트·트레이·장비)만 — 벽/기둥의 z_base 는
@@ -409,7 +412,10 @@ function fillPanel(rec, cat){
   if(rec.level!=null && document.getElementById('floor2d')) document.getElementById('floor2d').value=String(rec.level);
   document.getElementById('e_why').innerHTML=whyHtml(rec, cat);
   document.getElementById('bulk').innerHTML=bulkHtml(rec, cat);
+  PANEL_SHOWN={w:document.getElementById('e_w').value, h:document.getElementById('e_h').value, z:document.getElementById('e_z').value};
 }
+// fillPanel 이 칸에 채워 보여 준 값 — '수정 적용' 은 이것과 달라진 칸만 저장한다(panelEdits).
+let PANEL_SHOWN={w:'',h:'',z:''};
 
 // 일괄 수정은 **규칙**이다 — 개별 EID 41개가 아니라 layer_map 한 줄이어야 한다.
 // 그래야 도면이 바뀌어도 계속 적용되고, diff 에 남고, 고아가 되지 않는다.
@@ -478,10 +484,11 @@ function whyHtml(rec, cat){
 document.getElementById('apply').addEventListener('click', ()=>{
   const rec=selRec; if(!rec) return; const eid=rec.eid; if(!eid){alert('이 요소는 EID가 없어 수정 저장 불가');return;}
   const cat=sel.value;
-  const w=parseFloat(document.getElementById('e_w').value), h=parseFloat(document.getElementById('e_h').value);
-  const zraw=document.getElementById('e_z').value.trim();
-  // 빈 칸 = 도면값으로 되돌린다(null → applyProperties 가 overrides 에서 지운다). 숫자 아닌 값은 무시한다.
-  const z=ELEV_CATS.includes(cat) ? (zraw===''?null:parseFloat(zraw)) : undefined;
+  // **손댄 칸만** 저장한다 — 보여 준 값을 그대로 다시 쓰면 가정 높이·치수가 '선언' 이 된다(panelEdits 주석).
+  // 높이 칸을 비우면 null = 편집을 지우고 도면값으로. 숫자가 아닌 값은 무시한다.
+  const changed=panelEdits(PANEL_SHOWN,{w:document.getElementById('e_w').value,h:document.getElementById('e_h').value,
+                                          z:document.getElementById('e_z').value});
+  const w=changed.width, h=changed.height, z=ELEV_CATS.includes(cat) ? changed.z : undefined;
   const e=MepEdit.applyProperties(edits[eid],rec,selCat,{
     category:cat,width:w,height:h,
     zKey:ELEV_CATS.includes(cat)?'elevation':undefined, z,

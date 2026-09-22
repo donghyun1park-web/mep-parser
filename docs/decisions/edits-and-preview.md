@@ -114,6 +114,17 @@ materializeElements`) 양쪽 다 **합집합만** 한다 — 한 번 넣은 키�
 칸을 **비우면** `null` 을 보내 편집을 지운다("저장 경계"절의 null=삭제 규약을 여기서
 처음 실제로 쓴다). 숫자가 아닌 값은 무시한다(빈 칸도 아니고 숫자도 아니면 손대지 않는다).
 
+★ **'수정 적용' 은 손댄 칸만 저장한다**(2026-09-22, `review_logic.panelEdits`). 종전엔 `fillPanel` 이 채워 보여 준
+값을 그대로 다시 썼다 — 배관 지름만 고쳐도 `{"elevation":2600,"diameter":110}` 이 저장돼, 가정이던 높이·치수가
+`overrides` 가 되고 `height_basis` 는 그걸 **선언**으로 셌다(가정 높이 배너와 줄마다의 '높이 근거: 가정' 이 조용히 줄었다).
+더 나쁜 경우는 thin_pair 벽이었다: 폭 칸이 버린 실측(60)을 보여 주는데 모델은 계약 두께(200)로 섰고, '검토 완료' 만
+눌러도 60 이 `overrides.width` 로 굳어 벽이 얇아졌다. 그래서 두 가지를 같이 고쳤다 — 벽의 폭 칸은 **세워진 두께**
+(`gcWidthOf`, 빌더·물량과 같은 계약)를 보여 주고(실측은 '이유' 줄이 따로 말한다), 적용은 보여 준 값과 달라진 칸만 보낸다
+("2600" 과 "2600.0" 은 같은 값). 같은 값을 다시 적어서 '선언' 을 만들 수는 없다 — 선언은 설비 설정·프로필의 자리다.
+고정: `tests/preview_review.test.mjs` 의 `'inspector apply saves only the fields the user touched, so an assumed height never turns into a declared one'`.
+수동 QA: thin_pair 벽(같은 레이어 200mm 짝 넷 + 60mm 짝 하나)에서 폭 칸 200 · '검토 완료' 적용 뒤 저장된 편집에 치수 없음 ·
+배관 지름만 바꾸면 `{"diameter":110}` 만 · 높이 2700 입력은 선언, 비우면 삭제.
+
 `vendor/edit_geometry.js` 의 `applyProperties` 는 어떤 카테고리가 elevation 을 쓰는지
 **모른다** — 호출자(`app.js`)가 `values.zKey` 로 알려 준다. 그래서 이 함수는 여전히
 브라우저 전역(`globalThis.MepContract`) 없이 Node 로 단위테스트할 수 있다.

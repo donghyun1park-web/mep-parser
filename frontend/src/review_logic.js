@@ -400,6 +400,22 @@ export function clashMarkerSpecs(items = []) {
   return out;
 }
 
+// 인스펙터 '수정 적용' 은 **손댄 칸만** 저장한다. 채워 보여 준 값을 그대로 다시 쓰면 가정 높이·가정 치수가
+// 선언(overrides)으로 바뀌었고(geom_contract.height_basis 는 overrides 를 선언으로 센다 — 가정 높이 배너가 조용히
+// 줄었다), 폭 칸이 실측 오결합 두께를 보여 주던 thin_pair 벽은 '검토 완료' 만 눌러도 그 두께로 굳었다.
+// 반환: width/height 는 손대지 않았으면 NaN(applyProperties 가 무시), z 는 손대지 않았으면 undefined,
+// 비웠으면 null(= 편집을 지우고 도면값으로), 그 밖에는 숫자. "2600" 과 "2600.0" 은 같은 값이다.
+export function panelEdits(shown = {}, now = {}) {
+  const text = v => String(v ?? '').trim();
+  const num = v => { const n = parseFloat(v); return Number.isFinite(n) ? n : NaN; };
+  const touched = key => text(now[key]) !== text(shown[key]) && !(num(now[key]) === num(shown[key]));
+  return {
+    width: touched('w') ? num(now.w) : NaN,
+    height: touched('h') ? num(now.h) : NaN,
+    z: touched('z') ? (text(now.z) === '' ? null : num(now.z)) : undefined,
+  };
+}
+
 // 3D 간섭 고리는 **검토 목록에 보이는 간섭만** — 층·종류 필터를 바꾸면 고리도 따라간다(목록과 장면이 같은 말을 한다).
 export function shownClashItems(items = [], shownEntries = []) {
   const keys = new Set((shownEntries || []).filter(e => e && e.kind === 'clash').map(e => e.key));
