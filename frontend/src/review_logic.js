@@ -161,6 +161,19 @@ export function buildReviewEntries(elements={}, report={}, clashes=[], connectiv
          +assumedHeightText(gap),
     });
   });
+  // 끊긴 끝 — 이어질 곳도(후보), 끝날 곳도(장비·단말·슬리브) 못 찾은 끝만(status 'open'). 종전엔 평면의 점과
+  // 배너 숫자뿐이라 3D 로 갈 길이 없었다. 행이 끝의 좌표를 들고 가서 클릭하면 카메라가 **그 끝**으로 간다.
+  (connectivity?.open_ends||[]).filter(end=>end && end.status==='open' && end.eid).forEach((end, order) => {
+    const at=end.at||[0,0], z=Number(end.z);
+    entries.push({
+      key:`end:${end.eid}:${end.port}`, kind:'end', eid:end.eid, category:'끊긴 끝', order,
+      floor:end.level!=null?String(end.level):'', action:'select',
+      at:[Number(at[0]), Number(at[1]), Number.isFinite(z)?z:0],
+      reason:`${end.port==='start'?'시작':'끝'} 쪽이 열림 · (${Math.round(at[0])}, ${Math.round(at[1])}) z ${Math.round(Number.isFinite(z)?z:0)}`
+        +` · ${end.system??'계통 없음'} — 이어질 곳도 끝날 장비도 못 찾았다. 도면에서 끊겼는지, 다른 층·장비로 가는지 확인`
+        +assumedHeightText({z_basis:end.z_basis}),
+    });
+  });
   for (const category of Object.keys(elements).sort()) {
     for (const record of elements[category] || []) {
       const diagnostics=(record.edit_diagnostics || record.diagnostics || []).map(diagnosticText).filter(Boolean);
@@ -192,9 +205,9 @@ export function buildReviewEntries(elements={}, report={}, clashes=[], connectiv
       entries.push({key:`stale:${eid}`,kind:'stale',eid:null,category:'stale',floor:'',
         reason:'이전 검토 또는 수정의 원본 형상이 변경됨',action:'open-orphan',orphan:eid});
   const categoryOrder=['wall','column','slab','beam','zone','opening','pipe','duct','tray','equipment'];
-  const rank=entry=>({clash:-4,rule:-3,suggestion:-2,gap:-1,element:0})[entry.kind]??1;
+  const rank=entry=>({clash:-4,rule:-3,suggestion:-2,gap:-1,end:-0.5,element:0})[entry.kind]??1;
   const catRank=entry=>{ const index=categoryOrder.indexOf(entry.category); return index<0?999:index; };
-  const ordered=new Set(['clash','gap','rule','suggestion']);
+  const ordered=new Set(['clash','gap','rule','suggestion','end']);
   return entries.sort((a,b)=> rank(a)-rank(b) ||
     (a.kind===b.kind&&ordered.has(a.kind) ? a.order-b.order :
     a.floor.localeCompare(b.floor,undefined,{numeric:true}) ||
@@ -211,7 +224,9 @@ export function escHtml(value) {
 
 export function reviewRowHtml(entry, canSave=false) {
   // data-struct: 간섭의 상대 구조부재 — 클릭하면 배관과 **같이** 켠다(간섭은 두 부재의 사건이다).
-  const head=`<button class="review-item" data-eid="${escHtml(entry.eid||'')}" data-orphan="${escHtml(entry.orphan||'')}" data-struct="${escHtml(entry.struct||'')}">`
+  // data-at: 점 하나가 문제인 행(끊긴 끝) — 클릭하면 부재 전체가 아니라 그 점으로 카메라를 댄다.
+  const at=Array.isArray(entry.at)&&entry.at.every(Number.isFinite)?entry.at.join(','):'';
+  const head=`<button class="review-item" data-eid="${escHtml(entry.eid||'')}" data-orphan="${escHtml(entry.orphan||'')}" data-struct="${escHtml(entry.struct||'')}" data-at="${escHtml(at)}">`
     +`<b>${escHtml(entry.eid||entry.orphan||entry.label||entry.kind)}</b> · ${escHtml(entry.category)}`
     +`${entry.floor?' · 층 '+escHtml(entry.floor):''}<small>${escHtml(entry.reason)}</small></button>`;
   // 이음 확정·규칙 적용은 서버(프로젝트)에 저장된다 — 독립 HTML 로 연 미리보기에는 저장할 곳이
@@ -383,6 +398,25 @@ export function clashMarkerSpecs(items = []) {
       level: c.level != null ? String(c.level) : null});
   }
   return out;
+}
+
+// 3D 간섭 고리는 **검토 목록에 보이는 간섭만** — 층·종류 필터를 바꾸면 고리도 따라간다(목록과 장면이 같은 말을 한다).
+export function shownClashItems(items = [], shownEntries = []) {
+  const keys = new Set((shownEntries || []).filter(e => e && e.kind === 'clash').map(e => e.key));
+  return (items || []).filter(c => c && keys.has(`clash:${c.id}`));
+}
+
+// 색상 범례 = 카테고리 숨김 스위치. 3D 에서만 숨긴다 — 모델·물량·간섭 계산은 그대로다(저장하지 않는다).
+export function legendHtml(colors = {}, hidden = new Set(), open = false, extraHtml = '') {
+  const hex = c => '#' + Number(c).toString(16).padStart(6, '0');
+  const rows = Object.entries(colors).map(([cat, c]) => {
+    const off = hidden.has(cat);
+    return `<div class="legend-cat${off ? ' off' : ''}" data-cat="${escHtml(cat)}" role="button" aria-pressed="${off ? 'true' : 'false'}">`
+      + `<span class="sw" style="background:${hex(c)}"></span>${escHtml(cat)}${off ? ' (숨김)' : ''}</div>`;
+  }).join('');
+  const count = [...hidden].filter(cat => cat in colors).length;
+  return `<details${open ? ' open' : ''}><summary>색상 범례${count ? ` · 숨김 ${count}` : ''}</summary>`
+    + `<div class="muted">눌러서 3D 에서 숨기기·보이기(모델·물량은 그대로)</div>` + rows + extraHtml + '</details>';
 }
 
 // 저장 뒤 "무엇이 바뀌었나" — 간섭·연결 후보 수의 전/후. 계산이 실패한 줄은 0 으로 읽지 않는다

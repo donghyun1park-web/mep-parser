@@ -89,7 +89,7 @@
 | 편집기 손맛 여섯(Planform 대조) — 다시 실행 · Shift 직교 · 팬 · 합계 · 각주/배지 · 나란히 보기 | `tests/preview_review.test.mjs`(`createHistory` 2건 · 합계 1건) · `tests/preview_edit_geometry.test.js`(`orthoPoint`) · `tests/test_boq.py::test_excel_says_what_it_does_not_count` |
 | 저장 응답은 기준선만 옮긴다(redo 를 먹지 않는다) · `#view2d` 는 SVG 라 폭을 직접 준다 | 위 `createHistory` 저장 응답 테스트 · **기록만**(브라우저의 치환 요소 동작) |
 | 물량 요약 패널 — 저장이 곧 갱신, 재파싱 재호출 없음 · 높이 출처는 값이 아니라 키 존재로(다층 조립도 같은 신호) | `tests/test_boq.py::test_state_carries_boq_and_an_edit_updates_it_on_save` · `tests/test_preview_editing.py`(boq·level_height_declared 허용목록 2건) · `tests/preview_review.test.mjs`(4건 + 저장 응답 모양 `'the storey-height basis survives a save response…'`) · `tests/test_stack.py`(다층 선언 신호 3건) |
-| 장면이 문제를 가리킨다(HighTopo 대조) — 간섭 상대 강조 · 이음 무리 · 키 가드 · 계통 한 줄 · 간섭 고리 · 저장 뒤 한 줄 | `tests/preview_review.test.mjs` 의 `joinedEids`·`systemLineText`·`isTypingTarget`·`clashMarkerSpecs`·`changeSummaryText` 5건 + `data-struct` 두 줄 |
+| 장면이 문제를 가리킨다(HighTopo 대조) — 간섭 상대 강조 · 이음 무리 · 키 가드 · 계통 한 줄 · 간섭 고리 · 저장 뒤 한 줄 · 끊긴 끝 행 · 범례 숨김 · 3D 간섭 고리 | `tests/preview_review.test.mjs` 의 `joinedEids`·`systemLineText`·`isTypingTarget`·`clashMarkerSpecs`·`changeSummaryText`·끊긴 끝 행·`shownClashItems`·`legendHtml` 8건 + `data-struct` 두 줄 |
 | 흐름 방향 애니메이션을 하지 않는다(평면도에 유향이 없다) · 선택 한 줄기·시선 유지·강조 색 | **기록만**(하지 말라는 기록) · 나머지는 브라우저의 동작 — `release_checklist.md` 8번 |
 | **pascal.md** | |
 | 다리는 반사가 아니라 회전 | `test_the_bridge_is_a_rotation_not_a_mirror` |

@@ -335,6 +335,11 @@ in data` 일 때만(값이 아니라 키 존재) `out['level_height_overrode']` 
 - **저장 뒤 한 줄** — "서버에 저장됨 · 간섭 4 → 3 (−1)". ★ 기준값은 **저장 사이클이 시작될 때**(사용자 동작) 뜬다 — 편집 저장은 응답 뒤 남은 수정을 한 번 더 보내므로
   (`onAck` 의 unchanged=false) 그때 기준을 비우면 두 번째 응답이 첫 문장을 덮는다. 간섭 계산이 실패한 응답(`total:0`+`error`)은 0 으로 읽지 않고 "비교 불가". 둘 다 0 이면 말하지 않는다.
 - **검토 행으로 갈 때 보고 있던 각도 유지** — `frameBox` 에 지금 시선 방향의 복사본을 넘긴다(`frameBox` 가 인자를 normalize 로 바꾼다).
+- **끊긴 끝도 검토 행** — 이어질 곳(후보)도 끝날 곳(장비·단말·슬리브)도 못 찾은 끝(`status:'open'`)만. 행이 점을 들고 가서(`data-at`) 클릭하면
+  부재 전체가 아니라 그 점 둘레로 다가가고 빨간 점을 찍는다. 골든 설비 프로젝트에서 10개·17개라 목록을 묻지 않는다.
+- **범례가 숨김 스위치** — 3D 에서만, 저장하지 않는다. ★ 검토 행이 숨긴 종류의 부재를 가리키면 **그 종류를 다시 보인다** — `selectEid` 는 보이는 메시만 찾으므로
+  안 그러면 클릭이 조용히 죽는다. '맞춤' 은 보이는 것에 맞춘다. 반투명 X-ray 는 하지 않는다 — 클릭 광선이 반투명 벽을 계속 집는다.
+- **3D 간섭 고리는 목록이 보여 주는 것만** — 층·종류 필터를 바꾸면 고리도 따라간다(목록과 장면이 같은 말). `meshes` 밖의 `THREE.Points` 라 클릭·맞춤·단면 범위에 안 섞인다.
 
 같은 브라우저 QA 가 이 묶음과 무관한 결함 하나를 잡았다: 저장 응답의 geometry 에는 `level_height_declared` 가 없고(그건 `preview.py` 가 첫 화면에만 만든다)
 `level_height_overrode` 만 있어, **저장할 때마다 물량 패널 머리가 '층고: 미선언' 으로 뒤집혔다.** 두 모양을 `levelHeightDeclared` 한 곳에서 읽는다(키 존재가 신호 — 위 물량 절과 같은 규약).
@@ -345,6 +350,9 @@ in data` 일 때만(값이 아니라 키 존재) `out['level_height_overrode']` 
 `'clash markers keep the point and the assumed basis, and survive a synthetic slab without a struct eid'` ·
 `'change summary names what moved, says when nothing moved, and never turns a failed clash run into a drop'` ·
 `'the storey-height basis survives a save response, which carries the parser key and not the preview key'` ·
+`'open ends become review rows so a broken end is clickable, and only the unexplained ones'` ·
+`'the 3D clash rings follow the review filters: only clashes the list is showing'` ·
+`'the legend is a hide switch per category that says what is hidden and escapes names'` ·
 `'review rows carry the hooks the click handler needs, and no save buttons without a server'`(`data-struct` 두 줄). 선택 한 줄기·시선 유지·색은 DOM/WebGL 이라
 [release_checklist.md](../release_checklist.md) 8번 수동 점검. 수동 QA: `sample_mep.dxf` 에 벽 평행선 두 쌍을 더한 합성 도면을 `ProjectSession.serve()` 로 열어 위 항목을 전부 눌러 봤다(콘솔 에러 0).
 

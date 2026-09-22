@@ -71,6 +71,9 @@ html,body{margin:0;height:100%;overflow:hidden;font-family:"Segoe UI",sans-serif
 #threeHost canvas{display:block;width:100%;height:100%}
 #legend{max-width:calc(100% - 40px);max-height:60%;overflow:auto}
 #legend summary{cursor:pointer}
+#legend .legend-cat{cursor:pointer;border-radius:3px;padding:0 3px}
+#legend .legend-cat:hover{background:#3a3f4a}
+#legend .legend-cat.off{opacity:.45;text-decoration:line-through}
 .section-inputs{display:grid;grid-template-columns:1fr 82px auto;gap:5px;align-items:center;margin-top:6px}
 #sectionEnabled{width:auto}
 .review-filters{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-bottom:6px}
@@ -123,3 +126,5 @@ html,body{margin:0;height:100%;overflow:hidden;font-family:"Segoe UI",sans-serif
   #linkedWorkspace{grid-template-columns:1fr 1fr} #toolbar{max-width:calc(100% - 16px)}
 }
 @media(max-width:600px){#linkedWorkspace{grid-template-columns:1fr;grid-template-rows:1fr 1fr}#sourcePane{border-right:0;border-bottom:1px solid #3a3f4a}}
+#e_sysrow span:first-child,#e_joinrow span:first-child{white-space:nowrap;margin-right:8px}
+#e_sysrow span:last-child,#e_joinrow span:last-child{text-align:right}

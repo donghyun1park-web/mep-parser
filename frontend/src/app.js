@@ -6,7 +6,7 @@ import { buildReviewEntries, reviewBannerText, bridgeRequest, routineCandidateId
          escHtml, reviewRowHtml, batchButtonHtml, modelBounds, deriveSectionRange, floorKeyOf, isZVisible, reconcileSection, uniqueByEid, fitDistance, recordOnEditFloor, editBackdropState, REASON,
          boqHeightBasisText, boqBodyHtml, createHistory,
          joinedEids, joinedText, systemLineText, isTypingTarget, clashMarkerSpecs, reviewCounts, changeSummaryText,
-         levelHeightDeclared } from './review_logic.js';
+         levelHeightDeclared, shownClashItems, legendHtml } from './review_logic.js';
 import { screenToDrawing, drawingUnitsPerPixel } from './svg_coordinates.js';
 import { linearMepGeometry, footprintMepGeometry, mepPropertyKeys } from './mep_preview_geometry.js';
 
@@ -63,6 +63,32 @@ grid.rotation.x = Math.PI/2; scene.add(grid);
 
 const toM = p => [ (p[0]-CX)*S, (p[1]-CY)*S ];
 const meshes = [];
+// 3D 에서만 숨긴 카테고리(범례 클릭). 저장하지 않는다 — 모델·물량·간섭 계산은 그대로다.
+const hiddenCats = new Set();
+// 장면 안의 표지 — 간섭 고리(검토 목록에 보이는 것만)와 방금 찾아간 끊긴 끝. meshes 밖에 두어 클릭·맞춤·단면 범위에 안 섞인다.
+let clashMarks=[], focusMark=null;
+function markerTexture(kind){
+  const c=document.createElement('canvas'); c.width=c.height=32;
+  const g=c.getContext('2d'); g.strokeStyle=g.fillStyle='#fff'; g.lineWidth=5; g.beginPath(); g.arc(16,16,11,0,Math.PI*2);
+  if(kind==='dot') g.fill(); else g.stroke();
+  return new THREE.CanvasTexture(c);
+}
+function makeMarks(points, color, opacity, kind){
+  const geo=new THREE.BufferGeometry();
+  geo.setAttribute('position',new THREE.Float32BufferAttribute(points.flatMap(p=>[...toM(p),(p[2]||0)*S]),3));
+  const mat=new THREE.PointsMaterial({color, size:18, sizeAttenuation:false, map:markerTexture(kind), transparent:true, opacity,
+    alphaTest:.1, depthTest:false, clippingPlanes:sectionEnabled?[sectionPlane]:[]});
+  const obj=new THREE.Points(geo,mat); obj.renderOrder=10; scene.add(obj); return obj;
+}
+function dropMark(obj){ if(!obj) return; scene.remove(obj); obj.geometry.dispose(); obj.material.map?.dispose(); obj.material.dispose(); }
+function renderClashMarks(items){
+  clashMarks.forEach(dropMark); clashMarks=[];
+  const specs=clashMarkerSpecs(items).filter(c=>c.z!=null);
+  const solid=specs.filter(c=>!c.assumed).map(c=>[c.x,c.y,c.z]), assumed=specs.filter(c=>c.assumed).map(c=>[c.x,c.y,c.z]);
+  if(solid.length) clashMarks.push(makeMarks(solid,0xff3b3b,1,'ring'));
+  if(assumed.length) clashMarks.push(makeMarks(assumed,0xff3b3b,.45,'ring'));   // 가정 높이로 나온 간섭은 옅게(평면과 같다)
+}
+function showFocusMark(point){ dropMark(focusMark); focusMark=point?makeMarks([point],0xff4d4d,1,'dot'):null; }
 let mepRenderWarnings=[];
 let useConf = false, wire = false;
 const sectionPlane=new THREE.Plane(new THREE.Vector3(0,0,-1),0);
@@ -229,8 +255,10 @@ function rebuild(){
   renderWarnings();
 }
 
+// 맞춤은 **보이는 것**에 — 범례로 벽을 숨기고 맞추면 설비에 맞는다. 다 숨겼으면 전체에.
+function shownMeshes(){ const shown=meshes.filter(m=>m.visible); return shown.length?shown:meshes; }
 function fit(){
-  const box=new THREE.Box3(); meshes.forEach(m=>box.expandByObject(m));
+  const box=new THREE.Box3(); shownMeshes().forEach(m=>box.expandByObject(m));
   frameBox(box);
 }
 function frameBox(box,direction=new THREE.Vector3(1,-1,1)){
@@ -242,7 +270,7 @@ function frameBox(box,direction=new THREE.Vector3(1,-1,1)){
   controls.target.copy(sphere.center); controls.update();
 }
 function topView(){
-  const box=new THREE.Box3(); meshes.forEach(m=>box.expandByObject(m));
+  const box=new THREE.Box3(); shownMeshes().forEach(m=>box.expandByObject(m));
   frameBox(box,new THREE.Vector3(0,-.0001,1));
 }
 
@@ -297,7 +325,7 @@ function markPartner(eid){
   for(const mesh of meshes) if(mesh.userData.rec.eid===eid && mesh.visible) mesh.material.emissive?.setHex(HL_PARTNER);
 }
 function select(m){
-  highlight3D(null);
+  highlight3D(null); showFocusMark(null);
   selected=m;
   if(!m){ fillPanel(null, null); updateSourceSelection(null); follow2D(null,null); return; }
   const eid=m.userData.rec.eid;
@@ -310,9 +338,13 @@ function select(m){
   fillPanel(canonical, m.userData.cat);
   follow2D(eid, m.userData.cat);
 }
+function viewDirection(){ const dir=cam.position.clone().sub(controls.target); return dir.lengthSq()>1e-12?dir:undefined; }
 function selectEid(eid,{focus=false}={}){
   const canonical=uniqueByEid(Object.values(EFFECTIVE_ELEMENTS).flat(),eid);
   if(!canonical){ fillPanel(null,null); document.getElementById('noSel').textContent='같은 EID를 가진 부재가 여러 개이거나 대상이 없어 선택할 수 없습니다: '+eid; return false; }
+  // 검토 행이 가리킨 부재를 범례로 숨겨 뒀으면 그 종류를 다시 보인다 — 안 그러면 클릭이 조용히 죽는다.
+  const hiddenHere=[...new Set(meshes.filter(m=>m.userData.rec.eid===eid && hiddenCats.has(m.userData.cat)).map(m=>m.userData.cat))];
+  if(hiddenHere.length){ hiddenHere.forEach(c=>hiddenCats.delete(c)); applyEditVisuals(); renderLegend(); }
   const matching=meshes.filter(m=>m.userData.rec.eid===eid && m.visible);
   if(!matching.length) return false;
   select(matching[0]);
@@ -320,11 +352,16 @@ function selectEid(eid,{focus=false}={}){
   if(focus){
     const box=new THREE.Box3(); matching.forEach(m=>box.expandByObject(m));
     // 지금 보고 있는 각도 그대로 다가간다 — 매번 아이소로 되돌리면 검토 행을 넘길 때마다 방향을 잃는다.
-    // frameBox 가 인자를 normalize 로 바꾸므로 복사본을 넘긴다.
-    const dir=cam.position.clone().sub(controls.target);
-    frameBox(box, dir.lengthSq()>1e-12?dir:undefined);
+    // frameBox 가 인자를 normalize 로 바꾸므로 복사본을 넘긴다(viewDirection 이 새 벡터를 만든다).
+    frameBox(box, viewDirection());
   }
   return true;
+}
+// 점 하나가 문제인 행(끊긴 끝) — 부재 전체가 아니라 그 점 둘레 4m 로 다가가고 점을 찍어 둔다.
+function focusPoint(at){
+  const [x,y]=toM(at);
+  frameBox(new THREE.Box3().setFromCenterAndSize(new THREE.Vector3(x,y,(at[2]||0)*S),new THREE.Vector3(4,4,4)), viewDirection());
+  showFocusMark(at);
 }
 
 // 3D 와 2D 평면 탭이 **같은 패널을 공유**한다. 뷰마다 인스펙터를 따로 두면
@@ -766,6 +803,7 @@ function updateSectionBounds(){
 function applySection(){
   sectionPlane.constant=sectionHeight*S;
   for(const mesh of meshes) mesh.material.clippingPlanes=sectionEnabled?[sectionPlane]:[];
+  for(const mark of [...clashMarks,focusMark]) if(mark) mark.material.clippingPlanes=sectionEnabled?[sectionPlane]:[];
 }
 document.getElementById('sectionEnabled').addEventListener('change',ev=>{sectionEnabled=ev.target.checked;applySection();});
 function changeSection(value){ const z=Math.max(sectionRange.min,Math.min(sectionRange.max,Number(value))); if(!Number.isFinite(z)) return; sectionHeight=z;sectionSlider.value=sectionInput.value=Math.round(z);applySection(); }
@@ -796,6 +834,7 @@ function renderReview(){
   batch.hidden=!batch.innerHTML;
   document.getElementById('reviewList').innerHTML=
     shown.length?shown.map(x=>reviewRowHtml(x,!!RUNTIME)).join(''):'없음';
+  renderClashMarks(shownClashItems(CLASH_REVIEW.items||[],shown));
 }
 async function confirmGap(ids,confirmed){
   markChangeBase();
@@ -842,7 +881,11 @@ document.getElementById('reviewList').addEventListener('click',ev=>{
   const gap=ev.target.closest('.confirm-gap');
   if(gap){ confirmGap(gap.dataset.gap,!gap.dataset.confirmed); return; }
   const row=ev.target.closest('.review-item'); if(!row) return;
-  if(row.dataset.eid){ setTab(false); if(selectEid(row.dataset.eid,{focus:true})) markPartner(row.dataset.struct); }
+  if(row.dataset.eid){
+    setTab(false);
+    const at=(row.dataset.at||'').split(',').map(Number), point=at.length===3&&at.every(Number.isFinite)?at:null;
+    if(selectEid(row.dataset.eid,{focus:!point})){ markPartner(row.dataset.struct); if(point) focusPoint(point); }
+  }
   else {
     const target=document.querySelector(`.orphan[data-orphan="${CSS.escape(row.dataset.orphan)}"]`);
     const destination=target||document.getElementById('orphans');
@@ -1051,7 +1094,7 @@ function render2(){
 
 // 선택은 한 줄기 — 평면에서 고르면 3D 도 같은 부재를, 3D(나란히 보기)에서 고르면 평면도 같은 부재를 밝힌다.
 // selectEid 는 쓰지 않는다: 단면을 끄고 원본 창을 옮겨 편집 중 화면이 튄다.
-function markIn3D(eid){ selected=highlight3D(eid); updateSourceSelection(eid||null); }
+function markIn3D(eid){ selected=highlight3D(eid); showFocusMark(null); updateSourceSelection(eid||null); }
 function follow2D(eid, cat){
   if(!svg2.classList.contains('on')) return;
   if(eid && EDIT_CATS.includes(cat) && cat2!==cat){ cat2=cat; if(cat2Select) cat2Select.value=cat2; }
@@ -1279,7 +1322,7 @@ function baseColorOf(m){
 function applyEditVisuals(){
   for(const m of meshes){
     const eid=m.userData.rec.eid; const e=eid&&edits[eid];
-    m.visible = !(e&&e.deleted);
+    m.visible = !(e&&e.deleted) && !hiddenCats.has(m.userData.cat);
     m.material.color.setHex(m.userData.joined?HL_JOINED_COLOR:baseColorOf(m));
   }
 }
@@ -1479,11 +1522,23 @@ function renderWarnings(){
 const E=EFFECTIVE_ELEMENTS; const cnt=Object.entries(E).filter(([,v])=>v.length).map(([k,v])=>`${k} ${v.length}`).join(' · ');
 document.getElementById('counts').innerHTML=`<div class="muted">${cnt||'요소 없음'}</div>`;
 const wp=DATA.wall_pairing||{};
-document.getElementById('legend').innerHTML =
-  '<details><summary>색상 범례</summary>'+Object.entries(CAT_COLOR).map(([k,c])=>`<div><span class="sw" style="background:#${c.toString(16).padStart(6,'0')}"></span>${k}</div>`).join('')
-  + `<div style="margin-top:6px;border-top:1px solid #3a3f4a;padding-top:6px">신뢰도 색(벽): `
+const LEGEND_EXTRA=`<div style="margin-top:6px;border-top:1px solid #3a3f4a;padding-top:6px">신뢰도 색(벽): `
   + Object.entries(PAIR_COLOR).map(([k,c])=>`<span class="sw" style="background:#${c.toString(16).padStart(6,'0')}"></span>${k} `).join('')+`</div>`
-  + `<div style="margin-top:6px;border-top:1px solid #3a3f4a;padding-top:6px">강조: 노랑 빛 = 고른 부재 · 분홍 = 이음으로 이어진 설비 · 청록 빛 = 간섭 상대 구조부재</div></details>`;
+  + `<div style="margin-top:6px;border-top:1px solid #3a3f4a;padding-top:6px">강조: 노랑 빛 = 고른 부재 · 분홍 = 이음으로 이어진 설비 · 청록 빛 = 간섭 상대 구조부재</div>`
+  + `<div>표지: 빨간 고리 = 검토 목록에 보이는 간섭(옅으면 가정 높이) · 빨간 점 = 방금 찾아간 끊긴 끝</div>`;
+function renderLegend(){
+  const box=document.getElementById('legend'), open=!!box.querySelector('details')?.open;
+  box.innerHTML=legendHtml(CAT_COLOR,hiddenCats,open,LEGEND_EXTRA);
+}
+document.getElementById('legend').addEventListener('click', ev=>{
+  const row=ev.target.closest('.legend-cat'); if(!row) return;
+  const cat=row.dataset.cat;
+  if(hiddenCats.has(cat)) hiddenCats.delete(cat); else hiddenCats.add(cat);
+  // 숨긴 부재를 고른 채로 두지 않는다 — 인스펙터가 안 보이는 것을 가리키게 된다.
+  if(selected && hiddenCats.has(selected.userData.cat)) select(null);
+  applyEditVisuals(); updateSectionBounds(); renderLegend();
+});
+renderLegend();
 
 renderSourceBackdrop(); rebuild(); refreshEditsOnly(); fit(); fitSource();   // 부재가 선 뒤에 맞춘다
 addEventListener('resize', ()=>{

@@ -31,6 +31,8 @@ import {
   reviewCounts,
   changeSummaryText,
   levelHeightDeclared,
+  shownClashItems,
+  legendHtml,
 } from '../frontend/src/review_logic.js';
 
 test('camera framing fits the bounding sphere in both split and wide viewports', () => {
@@ -509,4 +511,48 @@ test('the storey-height basis survives a save response, which carries the parser
   assert.equal(levelHeightDeclared({level_height_declared:false}), false);
   assert.equal(levelHeightDeclared({}), false);
   assert.equal(levelHeightDeclared(null), false);
+});
+
+// ── 두 번째 묶음(2026-09-22): 끊긴 끝 행 · 범례 숨김 · 3D 간섭 고리 ─────────────────────
+
+test('open ends become review rows so a broken end is clickable, and only the unexplained ones', () => {
+  const connectivity={
+    candidates:[{id:'gap:1',kind:'straight',gap_mm:40,points:[[0,0],[40,0]],eids:['p:1','p:2'],systems:['CW','CW'],sizes:['Ø50','Ø50']}],
+    open_ends:[
+      {eid:'p:9',port:'end',at:[1200.4,300],z:2600,z_basis:'assumed',status:'open',system:'CW',level:'B1'},
+      {eid:'p:1',port:'start',at:[0,0],z:2600,status:'candidate'},   // 후보 행이 이미 있다
+      {eid:'p:3',port:'end',at:[5,5],z:2600,status:'terminal'},      // 장비에서 끝났다 — 문제가 아니다
+      {eid:'p:4',port:'end',at:[6,6],z:2600,status:'sleeve'}]};
+  const elements={pipe:[{eid:'p:7',needs_review:true,review_reason:'mep_source_gap'}]};
+  const rows=buildReviewEntries(elements,{},[],connectivity);
+  assert.deepEqual(rows.map(r=>[r.kind,r.eid]), [['gap','p:1'],['end','p:9'],['element','p:7']]);
+  const end=rows[1];
+  assert.equal(end.category,'끊긴 끝');
+  assert.equal(end.floor,'B1');
+  assert.deepEqual(end.at,[1200.4,300,2600]);
+  assert.match(end.reason, /끝 쪽이 열림 · \(1200, 300\) z 2600 · CW/);
+  assert.match(end.reason, /높이 근거: 가정/);
+  // 행이 점을 싣는다 — 클릭 핸들러가 부재 전체가 아니라 그 점으로 카메라를 댄다.
+  assert.match(reviewRowHtml(end,false), /data-eid="p:9"[^>]*data-at="1200.4,300,2600"/);
+  assert.match(reviewRowHtml(rows[2],false), /data-at=""/);
+});
+
+test('the 3D clash rings follow the review filters: only clashes the list is showing', () => {
+  const items=[{id:'a',at:[0,0],z:[0,1]},{id:'b',at:[1,1],z:[0,1]}];
+  const shown=[{kind:'clash',key:'clash:b'},{kind:'element',key:'element:w:1'},{kind:'gap',key:'clash:a'}];
+  assert.deepEqual(shownClashItems(items,shown).map(c=>c.id), ['b']);
+  assert.deepEqual(shownClashItems(items,[]), []);
+  assert.deepEqual(shownClashItems(undefined,undefined), []);
+});
+
+test('the legend is a hide switch per category that says what is hidden and escapes names', () => {
+  const colors={wall:0x6b8fb5, pipe:0x4cc9f0};
+  const shown=legendHtml(colors,new Set(),false,'<i>x</i>');
+  assert.match(shown, /data-cat="wall" role="button" aria-pressed="false"/);
+  assert.ok(!shown.includes('숨김 ') && !shown.includes('<details open'));
+  assert.ok(shown.includes('<i>x</i></details>'));
+  const hidden=legendHtml(colors,new Set(['wall','nope']),true);
+  assert.match(hidden, /<details open><summary>색상 범례 · 숨김 1<\/summary>/);   // 모르는 이름은 세지 않는다
+  assert.match(hidden, /class="legend-cat off" data-cat="wall"[^>]*aria-pressed="true"><span class="sw" style="background:#6b8fb5"><\/span>wall \(숨김\)/);
+  assert.ok(legendHtml({'<b>':1},new Set()).includes('&lt;b&gt;'));
 });
