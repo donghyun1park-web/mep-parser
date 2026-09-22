@@ -230,3 +230,52 @@ def test_review_flags_always_carry_a_reason():
     assert flagged, "이 합성 케이스는 검토 대상이 나와야 한다"
     missing = [w.get("pairing") for w in flagged if not w.get("review_reason")]
     assert not missing, f"사유 없이 검토 플래그만 켠 pairing: {missing}"
+
+
+# ── 미세 선분 ─────────────────────────────────────────────────────────────
+def test_a_micro_edge_never_becomes_a_zero_length_wall():
+    """★ 폴리선의 거의 겹친 꼭짓점이 만든 0.002mm 선분은 방향이 사실상 난수라 면선이 아니다.
+    겹침 판정은 '짧은 쪽 길이의 30%' 라 이런 선분도 옆 선과 짝으로 통과해 **길이 0 인 벽**이 된다
+    (V005 퇴화 형상 — 납품 빌드가 막힌다). 합성 재현이다 — 실측 21개의 원인은 아래 junction 치유였다."""
+    def pl(*pts):
+        return {"kind": "polyline", "closed": False, "layer": "A-WALL-DRY", "z_base": 0.0,
+                "points": [list(p) for p in pts]}
+    recs = [pl((0, 0), (3000, 0), (3000, 0.002)),   # 끝에 0.002mm 수직 꼬리
+            pl((0, 200), (3000, 200)),              # 진짜 짝(두께 200)
+            pl((3200, -1000), (3200, 1000))]        # 꼬리와 평행한 이웃 선
+    out = dp.detect_wall_pairs(recs, {})
+    lengths = [math.dist(r["centerline"][0], r["centerline"][-1]) for r in out]
+    assert min(lengths) >= 1.0, f"길이 {min(lengths)}mm 벽이 생겼다: {out}"
+    assert any(r["pairing"] == "paired" and abs(r["width_detected"] - 200) < 1e-6 for r in out), \
+        "미세 선분을 빼느라 진짜 짝까지 잃었다"
+
+
+
+# ── junction 치유 ─────────────────────────────────────────────────────────
+def _cl(a, b, w):
+    return {"kind": "polyline", "closed": False, "layer": "A-WALL", "z_base": 0.0,
+            "points": [list(a), list(b)], "centerline": [list(a), list(b)],
+            "width_detected": w, "pairing": "paired"}
+
+
+def test_healing_never_pulls_both_ends_of_a_wall_onto_one_point():
+    """★ 치유는 끝점마다 목표를 **원래 모양 기준으로 따로** 정하고, 가드도 '이 끝 하나만 옮기면'
+    만 봤다. 네 줄로 그린 310×90 작은 벽체가 양방향으로 짝지어져 서로 가로지르는 두 벽이 되면,
+    한 벽의 양 끝이 둘 다 상대 벽 중앙(T접합)으로 당겨져 **길이 0** 이 됐다
+    (실측: 종합평면도 기준층 1개 층에서 21개 → V005 가 납품 IFC 를 막았다)."""
+    walls = [_cl((0, 0), (-310, 0), 90.0),        # 310 길이 · 두께 90
+             _cl((-155, 45), (-155, -45), 310.0)]  # 같은 직사각형을 반대로 짝지은 것
+    out, _ = dp.heal_wall_junctions(walls)
+    for r in out:
+        a, b = r["centerline"][0], r["centerline"][-1]
+        assert math.dist(a, b) >= 1.0, f"길이 {math.dist(a, b)} 로 뭉개졌다: {r['centerline']}"
+
+
+def test_healing_does_not_flip_a_wall_whose_ends_cross_over():
+    """두 끝이 서로를 지나쳐 옮겨지면 방향이 뒤집힌 벽이 된다 — 한쪽 끝씩 본 가드는 이것도 못 본다."""
+    walls = [_cl((0, 0), (0, 80), 10.0),
+             _cl((-2505, 37.5), (-2.5, 41.2), 80.0),
+             _cl((-1205, 35.0), (-2.5, 41.2), 90.0)]
+    out, _ = dp.heal_wall_junctions(walls)
+    a, b = out[0]["centerline"][0], out[0]["centerline"][-1]
+    assert math.dist(a, b) >= 1.0 and (b[1] - a[1]) > 0, out[0]["centerline"]

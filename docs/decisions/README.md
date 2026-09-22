@@ -56,9 +56,11 @@
 | `single_offset` 을 `pair_max` 로 줄이지 말 것 | **기록만** (하지 말라는 기록) |
 | EID — `_span_sigs` 는 생성 시점 값 | `tests/test_edit_recovery.py`(16) · 골든 |
 | 칸막이 보드선 · 겹친 짝 접기 | `tests/test_thin_pair.py` · `tests/test_wall_opening_quality.py` |
+| 길이 0 벽 — 치유가 두 끝을 한 점으로 · 미세 선분 | `tests/test_merge_layer.py` 의 `test_healing_never_pulls_both_ends_of_a_wall_onto_one_point` · `test_healing_does_not_flip_a_wall_whose_ends_cross_over` · `test_a_micro_edge_never_becomes_a_zero_length_wall` |
 | **openings.md** | |
 | 개구부 판정은 세 갈래 · `no_host_reason` 네 사유 | `tests/test_openings.py`(9) · `tests/test_verify.py` 의 V106 |
 | 이미 뚫린 자리는 실패가 아니다 | `tests/test_openings.py` 의 `already_void` |
+| 맞닿기만 한 개구부는 호스트가 아니다(축·수직 최소 1mm 겹침) | `test_an_opening_that_only_touches_a_wall_end_is_in_the_gap_not_on_the_wall` · `test_an_opening_whose_cutter_only_touches_the_wall_face_is_not_a_host` |
 | 블록 이름이 부호다 · 문은 창 기본값을 받지 않는다 | `test_block_openings_carry_their_mark_and_doors_do_not_get_window_defaults` |
 | 높이·창대는 일람에서 부호로 · 빈칸은 빈칸 | `test_schedule_rows_fill_height_and_sill_by_mark_and_the_rest_stay_assumed` · `test_blank_schedule_cells_do_not_masquerade_as_user_values` · `test_door_window_prefixes_are_doors_like_every_other_mark_table` · `test_openings_made_from_the_schedule_are_not_listed_as_plan_marks` |
 | 끊김에 이미 창이 있으면 두 번 뚫지 않는다 | `test_a_gap_that_already_holds_a_block_opening_is_not_opened_twice` |
@@ -113,6 +115,7 @@
 | 거부할 때 지난 영수증을 먼저 무효화한다 | `tests/test_artifact_validation.py` 의 `test_a_refused_build_invalidates_the_old_receipt_before_writing` |
 | 적대적 리뷰 7건 — 검사가 빌더의 약속과 IFC 를 대조할 뿐 약속이 맞는지는 모른다 | `tests/test_ifc_delivery.py` 의 `test_a_stacked_build_keeps_each_floors_measured_wall_thickness_and_wall_height` · `test_an_edited_opening_is_cut_where_the_preview_draws_it` · `test_an_opening_that_would_empty_its_wall_is_refused_by_name` · `test_a_footprint_tray_stands_on_the_tray_section_not_the_duct_one` · `test_the_receipt_carries_the_model_bbox_so_the_runaway_solid_check_runs` |
 | 외곽선 MEP 는 `mep_volume` 비율에서 뺀다(합계가 종잇장 사고를 가린다) | `test_a_footprint_duct_is_left_out_of_the_mep_ratio_but_its_volume_is_still_checked` |
+| 스침·거의 중복 절삭은 선언하지 않는다(엔진 허용치 아래 조각) | `tests/test_ifc_delivery.py` 의 `test_a_cutter_that_only_grazes_a_wall_is_not_a_cut` · `test_a_near_duplicate_opening_counts_as_already_void` |
 | `freecad_builder.py` 동결 — `.FCStd`·`check_clashes` 는 남기되 새 기능은 안 얹는다 | **기록만**(하지 말라는 기록) |
 | **construction-rules.md** | |
 | 규칙은 표 한 장 · confirmed 만 적용 | `test_every_rule_row_carries_standard_clause_url_verdict_and_retrieved_date` |

@@ -48,6 +48,14 @@
 못 닿은 경우는 `gaps` 에 축별 간격과 `dist_mm` 을 남긴다 — 양수인 축이 떨어진 축이고,
 셋 다 음수인데 `dist_mm`>0 이면 bbox 만 겹치는 기울어진 벽이다.
 
+**맞닿기만 한 개구부는 호스트가 아니다.** 연결 조건 `over <= r`(벽 축 방향)과 `perp <= reach`(수직 방향)의
+**등호**는 개구부 구간·커터가 벽 끝이나 벽 면에 겹침 0 으로 맞닿는 자리다. 커터가 면으로만 닿아 뚫을 게 없는데 호스트가 되어
+V106 '아무것도 못 뚫음' 이 납품을 막았다(실측: 첫 종합평면도 기준층 — 폭 1520 창 2개가 길이 280 벽 토막 **옆 빈자리**에,
+폭 1200 창 1개가 두께 200 벽 중심선에서 정확히 250mm). 두 축 모두 최소 1mm 겹침(`OPENING_MIN_SPAN_OVERLAP_MM`)을 요구한다 —
+벽 토막 옆의 창은 이미 있는 갈래 `wall_open_at_this_span` 으로, 벽 면 밖의 창은 `no_wall_on_this_line` 으로 간다.
+고정: `tests/test_openings.py` 의 `test_an_opening_that_only_touches_a_wall_end_is_in_the_gap_not_on_the_wall` ·
+`test_an_opening_whose_cutter_only_touches_the_wall_face_is_not_a_host`.
+
 ## 창 위아래 벽 — 도면이 창 자리에서 끊은 벽을 채운다
 
 평면도는 창 높이에서 자른 단면이라 창·문 자리에 벽 선이 없다. 제도자가 그 자리에서 벽을 끊어 그리면 3D 는 바닥부터

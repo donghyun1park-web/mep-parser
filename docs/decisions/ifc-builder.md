@@ -119,6 +119,19 @@ verified 대 `freecad_builder` 66.9초 **BUILD_FAILED**(V107, 체인 벽 exporte
   `inspect_ifc` 가 덮는다 — 빠진 부재는 EID 대조, 빠진 속성은 Pset 필수 검사. 틀렸던 것은
   "V101 이 대조한다" 는 **빌더 주석**이었고 그걸 고쳤다.
 
+## 첫 종합평면도에서 (2026-09-23)
+
+층마다 A1 도곽을 나란히 놓은 xref 묶음 평면도의 기준층 한 장(벽 721 · 개구부 136)을 빌드하자 재검사가 두 가지로 막았다.
+둘 다 **2.5D 계산은 맞는데 IFC 불리언 엔진(OCC)의 허용치 아래 조각을 선언**한 것이다.
+- **스침**: 커터가 여러 선분 벽의 모서리를 평면 0.35mm² 쯤 긁었다(깊이 0.0002mm). 접촉 판정이 '부피 > 1e-6mm³' 라 절삭으로
+  선언됐다. 평면 교차 1mm² 미만(`MIN_CUT_AREA_MM2`)은 닿지 않은 것으로 본다(`_cut_contact`).
+- **거의 중복**: 같은 창이 두 레이어에 조금 어긋나 겹쳐 그려지면 두 번째 커터가 **새로** 빼는 양이 418mm³ 뿐이다. 그걸 선언하면
+  거의 겹친 두 무효체 경계에서 엔진이 28mm³ 쯤 다르게 잘라 V107 '내보낸 부피 ≠ 계산한 부피' 가 났다(허용치는 가장 작은 절삭 ×
+  0.5% = 2mm³ — 빠진 절삭을 잡으려고 일부러 작다). 새로 빼는 양을 평면 면적으로 환산해 1mm² 미만이면 이미 비운 자리(`already_void`)
+  로 본다(`_negligible_cut`). 종전 기준(≤ 1e-6mm³)은 완전 중복만 걸렀다.
+- 좌표가 원점에서 2km 떨어진 것(도곽 배치 위치)은 원인이 **아니었다** — 원점 기준으로 다시 재도 차이는 0.003mm³ 였다.
+- 결과: 그 기준층 `verified`(벽 721 · 절삭 86, 경고만 — 벽이 끊긴 자리의 창 · 검토 대기).
+
 ## 잃은 것 (정직하게)
 
 - `.FCStd` 산출물 — 소비자가 없었다. FreeCAD 버튼은 남아 있으므로 필요하면 그대로 낸다.
@@ -132,6 +145,7 @@ verified 대 `freecad_builder` 66.9초 **BUILD_FAILED**(V107, 체인 벽 exporte
 | 절 | 잠그는 테스트 |
 |---|---|
 | 모든 카테고리가 IFC 에 나가고 재검사를 통과한다 | `test_every_category_reaches_the_ifc_and_the_artifact_verifier_passes` |
+| 스침·거의 중복 절삭은 선언하지 않는다 | `test_a_cutter_that_only_grazes_a_wall_is_not_a_cut` · `test_a_near_duplicate_opening_counts_as_already_void` |
 | 개구부는 선언이고 `create_shape` 가 그 부피를 실제로 뺀다 | `test_an_opening_is_a_declared_void_and_the_shape_really_loses_that_volume` |
 | 층별 `wall_indices`·이음 id·벽타입 — 위층 문이 아래층 벽을 뚫지 않고, 타입이 층마다 복제되지 않는다 | `test_a_stacked_floor_cuts_its_own_wall_and_not_the_one_below` |
 | 이음 몸체 형식은 물량표와 같은 함수에서 온다 | `test_a_confirmed_joint_becomes_a_fitting_body_of_the_kind_the_quantity_table_counts` |

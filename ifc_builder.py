@@ -144,6 +144,32 @@ def _void_volume(host_poly, z0, z1, cutters):
     return total
 
 
+MIN_CUT_AREA_MM2 = 1.0   # 커터가 벽 평면을 이보다 적게 파고들면 닿은 것이 아니다 — 수치상의 스침이다.
+
+
+def _cut_contact(cutter_poly, oz0, oz1, host):
+    """커터 프리즘이 벽 프리즘에 실제로 닿는 부피(mm³). 스침이면 0.
+
+    ★ 평면 교차가 1mm² 미만이면 0 으로 본다. 여러 선분 벽의 모서리를 0.35mm² 쯤 긁은 커터도 종전엔
+      (부피 > 1e-6mm³ 이면) 절삭으로 선언됐다. 그 깊이(0.0002mm)는 IFC 불리언 엔진의 허용치 아래라
+      엔진은 다르게 잘랐고, 재검사가 '내보낸 부피 ≠ 계산한 부피'(28mm³ 차)로 납품을 막았다
+      (실측: 종합평면도 기준층 — 418mm³ 짜리 스침 하나)."""
+    area = cutter_poly.intersection(host["poly"]).area
+    if area < MIN_CUT_AREA_MM2:
+        return 0.0
+    return area * max(0.0, min(host["z1"], oz1) - max(host["z0"], oz0))
+
+
+def _negligible_cut(removed, oz0, oz1, host):
+    """앞선 개구부들이 이미 그 자리를 거의 다 비워 **새로 빼는 양**이 평면 1mm² 미만이면 이미 비운 자리다.
+
+    ★ 같은 창이 두 레이어(세대 평면 오버레이 · 건축허가판)에 조금 어긋나 겹쳐 그려지면 두 번째 커터가
+      418mm³ 만 새로 뺀다(실측: 종합평면도 기준층). 그걸 선언하면 거의 겹친 무효체 경계에서 불리언 엔진이
+      28mm³ 쯤 다르게 잘라 재검사가 납품을 막았다. 종전 기준(≤ 1e-6mm³)은 완전 중복만 걸렀다."""
+    zspan = max(0.0, min(host["z1"], oz1) - max(host["z0"], oz0))
+    return removed <= 1e-6 or (zspan > 0 and removed / zspan < MIN_CUT_AREA_MM2)
+
+
 def _opening_axes(op):
     """(벽 방향, 법선) 단위벡터 — `freecad_builder._opening_axes` 와 같은 규약."""
     hd = op.get("host_dir")
@@ -781,14 +807,13 @@ def _build_elements(model, body, sb, sto, data, z_offset=0.0, connect=False,
                 after = _void_volume(host["poly"], host["z0"], host["z1"],
                                      host["cutters"] + [(cutter_poly, oz0, oz1)])
                 removed = after - before
-                overlap = cutter_poly.intersection(host["poly"]).area * max(
-                    0.0, min(host["z1"], oz1) - max(host["z0"], oz0))
+                overlap = _cut_contact(cutter_poly, oz0, oz1, host)
                 if overlap <= 1e-6:
                     continue                      # 이 벽에는 안 닿는다 — 아래에서 사유를 적는다
                 host_eids = AV.source_eids(host["rec"])
                 touched = True
-                if removed <= 1e-6:
-                    # 먼저 뚫은 개구부가 이미 그 자리를 비웠다 — 실패가 아니다(중복 창호부).
+                if _negligible_cut(removed, oz0, oz1, host):
+                    # 먼저 뚫은 개구부가 이미 그 자리를 (거의) 비웠다 — 실패가 아니다(중복 창호부).
                     result["cut_host_eids"].extend(host_eids)
                     result["already_void"].append({"host_name": host["entry"]["name"], "host_eids": host_eids})
                     continue

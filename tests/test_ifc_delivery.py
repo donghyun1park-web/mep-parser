@@ -417,3 +417,24 @@ def test_round_sections_ship_as_flat_faced_polygons_so_the_re_reader_sees_a_mani
         eid = ifcopenshell.util.element.get_pset(pipe, "Pset_MEPParser")["EID"]
         assert not bad, f"{eid}: 변 {len(bad)}개가 두 면에 안 물렸다"
     assert not model.by_type("IfcSweptDiskSolid")      # 곡면 경로 솔리드가 새로 들어오면 여기서 걸린다
+
+
+def test_a_cutter_that_only_grazes_a_wall_is_not_a_cut():
+    """★ 평면 교차 1mm² 미만은 스침이다 — 종전엔 부피 > 1e-6mm³ 이면 절삭으로 선언돼, 불리언 엔진 허용치
+    아래의 0.0002mm 깊이 절삭이 '내보낸 부피 ≠ 계산한 부피' 로 납품을 막았다(종합평면도 기준층 실측)."""
+    ifc_builder = _ifc_builder()
+    host = {"poly": ifc_builder._prism_polygon([(0, -100), (1000, -100), (1000, 100), (0, 100)]),
+            "z0": 0.0, "z1": 2800.0}
+    graze = ifc_builder._prism_polygon([(400, 99.9998), (1300, 99.9998), (1300, 400), (400, 400)])
+    real = ifc_builder._prism_polygon([(400, 90), (1300, 90), (1300, 400), (400, 400)])
+    assert ifc_builder._cut_contact(graze, 900, 2100, host) == 0.0
+    assert ifc_builder._cut_contact(real, 900, 2100, host) == pytest.approx(600 * 10 * 1200)
+
+
+def test_a_near_duplicate_opening_counts_as_already_void():
+    """앞선 개구부가 이미 거의 다 비운 자리의 커터(새로 빼는 평면 1mm² 미만)는 중복 창호다 — 선언하지 않는다."""
+    ifc_builder = _ifc_builder()
+    host = {"z0": 0.0, "z1": 2800.0}
+    assert ifc_builder._negligible_cut(418.8, 900, 2100, host)              # 418mm³ / 1200mm = 0.35mm²
+    assert ifc_builder._negligible_cut(0.0, 900, 2100, host)
+    assert not ifc_builder._negligible_cut(600 * 10 * 1200, 900, 2100, host)

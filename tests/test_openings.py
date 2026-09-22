@@ -91,3 +91,36 @@ def test_zero_radius_marks_width_assumed_too():
     els = {"opening": [{"kind": "circle", "center": [0, 0], "radius": 0.4}]}
     dp.link_openings_to_walls(els, {})
     assert "width" in (els["opening"][0].get("dims_assumed") or [])
+
+
+# ── 벽 끝에 맞닿기만 한 개구부 ────────────────────────────────────────────
+def test_an_opening_that_only_touches_a_wall_end_is_in_the_gap_not_on_the_wall():
+    """★ 개구부 구간이 벽 토막 끝에 **정확히 맞닿기만** 하면(겹침 0) 연결 조건 `over <= r` 의 등호로
+    호스트가 됐다. 빌더의 커터는 그 벽 끝에 면으로만 닿아 뚫을 것이 없고, V106 '아무것도 못 뚫음' 이
+    납품 IFC 를 막았다(실측: 종합평면도 기준층 — 폭 1520 창 2개가 길이 280 벽 토막 옆 빈자리에 있었다).
+    벽이 끊긴 자리의 개구부다 — 이미 있는 갈래(`wall_open_at_this_span`)로 보낸다."""
+    stub = {"kind": "polyline", "closed": False, "layer": "S-CONC", "z_base": 0.0,
+            "points": [[0, 0], [280, 0]], "centerline": [[0, 0], [280, 0]],
+            "width_detected": 300.0, "pairing": "paired"}
+    touching = _circle(760.0, x=280 + 760, y=150)          # 구간 [280, 1800] — 벽 끝 280 에 맞닿기만
+    overlapping = _circle(760.0, x=280 + 700, y=150)       # 구간 [220, 1740] — 벽을 60mm 자른다
+    els = {"wall": [stub], "opening": [touching, overlapping]}
+    dp.link_openings_to_walls(els, {})
+    assert els["opening"][0]["wall_indices"] == [], els["opening"][0]
+    assert els["opening"][0]["no_host_reason"] == "wall_open_at_this_span"
+    assert els["opening"][1]["wall_indices"] == [0], "실제로 벽 끝을 걸치는 개구부는 여전히 그 벽을 자른다"
+
+
+def test_an_opening_whose_cutter_only_touches_the_wall_face_is_not_a_host():
+    """수직 방향도 같다 — 커터(벽두께+100 깊이)가 벽 면에 **맞닿기만** 하는 거리(= 벽 반두께 + 커터 반깊이)
+    에서 등호로 연결됐다(실측: 폭 1200 창 중심이 두께 200 벽 중심선에서 정확히 250mm). 뚫을 것이 없다."""
+    wall = {"kind": "polyline", "closed": False, "layer": "S-CONC", "z_base": 0.0,
+            "points": [[0, 0], [3000, 0]], "centerline": [[0, 0], [3000, 0]],
+            "width_detected": 200.0, "pairing": "paired"}
+    reach = 200 * 0.5 + (200 + dp.OPENING_CUT_MARGIN_MM) * 0.5            # 250
+    face = _circle(600.0, x=1500, y=reach)
+    inside = _circle(600.0, x=1500, y=reach - 10)
+    els = {"wall": [wall], "opening": [face, inside]}
+    dp.link_openings_to_walls(els, {})
+    assert els["opening"][0]["wall_indices"] == [], els["opening"][0]
+    assert els["opening"][1]["wall_indices"] == [0]

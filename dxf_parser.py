@@ -114,6 +114,8 @@ WALL_PAIR_MIN_MM = 1.0        # 벽 두께 최소. 1mm → 밀착 철골(A-STEEL
 WALL_PAIR_MAX_MM = 500.0      # 벽 두께 최대(이보다 멀면 무관한 선)
 WALL_PAIR_OVERLAP_RATIO = 0.3 # 투영 겹침 최소 비율. 0.5→0.3: 세그먼트 길이 불일치로
                                # 페어링 실패하던 88개 중 상당수 구제.
+WALL_SEG_MIN_LEN_MM = 1.0     # 이보다 짧은 선분은 면선이 아니다 — 폴리선의 거의 겹친 꼭짓점(0.002mm 등)은
+                               # 방향이 사실상 난수인데, 겹침 비율 판정을 통과해 길이 0 인 벽이 됐다(V005).
 # 얇은 오결합 판정 — 레이어 두께 중앙값 대비. 절대값이 아니라 상대값이라
 # '전체가 얇은 레이어'(A-STEEL 30mm 등)는 스스로 통과한다.
 THIN_PAIR_RATIO = 1.0 / 3.0   # 중앙값의 이 비율 미만이면 검토 대상
@@ -134,6 +136,8 @@ WIDTH_CONFLICT_REL = 0.15
 # 커터는 깊이 `host_width + 이 값` 인 상자다. 링크가 커터보다 관대하면 '호스트로 붙여
 # 놓고 커터는 못 닿는' 개구부가 생기고, 그건 구멍이 안 뚫린 채 실패로만 남는다.
 OPENING_CUT_MARGIN_MM = 100.0
+OPENING_MIN_SPAN_OVERLAP_MM = 1.0  # 개구부 구간이 벽 구간과 이만큼은 겹쳐야 그 벽을 자른다 — 끝에 맞닿기만(겹침 0)
+                                  # 하면 커터가 면으로만 닿아 뚫을 게 없고 V106 이 납품을 막았다(벽이 끊긴 자리다).
 OPENING_MIN_SIZE_MM = 50.0
 
 WALL_PAIR_CLAIM_FRAC = 0.6    # [interval-greedy] 겹침구간이 이 비율 이상 이미 점유됐으면
@@ -1170,7 +1174,7 @@ def _wall_segments(wall_records):
             pairs.append((pts[-1], pts[0]))
         for a, b in pairs:
             ux, uy, ln = _seg_dir(a, b)
-            if ln == 0:
+            if ln < WALL_SEG_MIN_LEN_MM:
                 continue
             segs.append({"p1": a, "p2": b, "dir": (ux, uy), "len": ln,
                          "src": idx, "layer": rec.get("layer", ""),
@@ -1930,6 +1934,19 @@ def heal_wall_junctions(wall_records, tol=None):
             continue
         targets[(i, ei)] = (round(tgt[0], 3), round(tgt[1], 3))
 
+    # 가드(양 끝): 위 가드는 끝점 하나씩 원래 모양 기준으로 본다. 한 벽의 **두 끝이 다 옮겨지면**
+    # 같은 점으로 모이거나(길이 0) 서로 지나쳐 뒤집힐 수 있다 — 실측: 네 줄로 그린 310×90 작은 벽체가
+    # 양방향으로 짝지어져 서로 가로지르면, 한 벽의 양 끝이 상대 벽 중앙으로 당겨져 21개가 길이 0 이 됐다
+    # (V005 가 납품 IFC 를 막았다). 둘 다 옮긴 결과가 두께보다 짧거나 방향이 뒤집히면 그 벽은 안 건드린다.
+    for i, s in enumerate(segs):
+        if s is None or (i, 0) not in targets or (i, 1) not in targets:
+            continue
+        a, b = targets[(i, 0)], targets[(i, 1)]
+        new_len = math.hypot(b[0] - a[0], b[1] - a[1])
+        same_dir = (b[0] - a[0]) * (s[1][0] - s[0][0]) + (b[1] - a[1]) * (s[1][1] - s[0][1]) > 0
+        if new_len < s[2] or not same_dir:
+            del targets[(i, 0)], targets[(i, 1)]
+
     if not targets:
         return wall_records, 0
 
@@ -2205,11 +2222,13 @@ def link_openings_to_walls(elements, params):
             # 한쪽만 보면 실제로 잘리는 벽을 놓친다(400mm 벽 밖 350mm 개구부).
             reach = ww * 0.5 + (ww + OPENING_CUT_MARGIN_MM) * 0.5
             nearest_dist = min(nearest_dist, math.hypot(perp, over))
-            if perp <= reach and over <= r:
+            # 등호(맞닿기만)는 뚫을 것이 없다 — 벽 축 방향·수직 방향 둘 다 최소 겹침을 요구한다.
+            touches = perp <= reach - OPENING_MIN_SPAN_OVERLAP_MM
+            if touches and over <= r - OPENING_MIN_SPAN_OVERLAP_MM:
                 indices.append(i)
                 if perp < nearest[0]:
                     nearest = (perp, udir, ww)
-            elif perp <= reach and over <= r + ww:
+            elif touches and over <= r + ww:
                 # 벽 축선 위인데 구간을 벗어났다 — **끝이 바로 코앞일 때만** 세어야
                 # 한다. `perp` 만 보면 벽의 **연장선**까지 축선으로 쳐서, 62m 떨어진
                 # 벽이 '문선이 끊긴 벽' 으로 둔갑한다(실측: 'OPEN' 표시선 6개).
