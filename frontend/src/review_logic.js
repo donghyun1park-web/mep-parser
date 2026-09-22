@@ -210,7 +210,8 @@ export function escHtml(value) {
 }
 
 export function reviewRowHtml(entry, canSave=false) {
-  const head=`<button class="review-item" data-eid="${escHtml(entry.eid||'')}" data-orphan="${escHtml(entry.orphan||'')}">`
+  // data-struct: 간섭의 상대 구조부재 — 클릭하면 배관과 **같이** 켠다(간섭은 두 부재의 사건이다).
+  const head=`<button class="review-item" data-eid="${escHtml(entry.eid||'')}" data-orphan="${escHtml(entry.orphan||'')}" data-struct="${escHtml(entry.struct||'')}">`
     +`<b>${escHtml(entry.eid||entry.orphan||entry.label||entry.kind)}</b> · ${escHtml(entry.category)}`
     +`${entry.floor?' · 층 '+escHtml(entry.floor):''}<small>${escHtml(entry.reason)}</small></button>`;
   // 이음 확정·규칙 적용은 서버(프로젝트)에 저장된다 — 독립 HTML 로 연 미리보기에는 저장할 곳이
@@ -308,6 +309,109 @@ export function createHistory(initial, limit = 100) {
   };
 }
 
+// ── 장면이 문제를 가리킨다(2026-09-22 HighTopo 대조) ─────────────────────────────
+// 전부 순수 함수다. DOM·THREE 는 app.js 가 붙인다.
+
+const ROUTE_CATS = ['pipe', 'duct', 'tray'];
+
+// 이음으로 이어진 무리 — 도면이 이어 그렸거나 사람이 확정한 `joints` id 를 공유하는 것만 따른다
+// (mep_network.analyze 의 union-find 와 같은 정의). 연결 **후보**는 joints 가 아니라 건너지 않는다.
+// 방향은 없다 — 평면도에 흐름 방향이 없으므로 '어디까지 이어졌나' 만 답한다.
+export function joinedEids(elements = {}, eid) {
+  const byJoint = new Map(), jointsOf = new Map();
+  for (const cat of ROUTE_CATS) for (const rec of elements[cat] || []) {
+    if (!rec || !rec.eid) continue;
+    const ids = (rec.joints || []).map(j => String((j && j.id) ?? '')).filter(Boolean);
+    jointsOf.set(rec.eid, [...(jointsOf.get(rec.eid) || []), ...ids]);
+    for (const id of ids) { if (!byJoint.has(id)) byJoint.set(id, new Set()); byJoint.get(id).add(rec.eid); }
+  }
+  if (!jointsOf.has(eid)) return [];
+  const seen = new Set([eid]), queue = [eid];
+  while (queue.length) {
+    for (const id of jointsOf.get(queue.shift()) || [])
+      for (const other of byJoint.get(id)) if (!seen.has(other)) { seen.add(other); queue.push(other); }
+  }
+  return [...seen].sort();
+}
+
+export function joinedText(count) {
+  return count > 1 ? `이 부재 포함 ${count}개 — 3D 에 분홍으로 표시`
+                   : '없음 — 도면이 이어 그린 이음이 없다(연결 후보는 검토 목록에서 확정)';
+}
+
+// 계통·용도는 **적힌 그대로** 보여 준다 — 이름에서 급기/환기·흐름 방향을 추론하지 않는다.
+// 읽는 순서는 mep_network.analyze 와 같다: 편집(overrides) 먼저.
+export function systemOf(rec = {}) {
+  const ov = (rec && rec.overrides) || {};
+  const value = ov.system ?? (rec && rec.system);
+  return value == null || String(value).trim() === '' ? null : String(value);
+}
+
+export function systemLineText(rec = {}) {
+  const ov = (rec && rec.overrides) || {};
+  const service = ov.service ?? (rec && rec.service);
+  const sys = systemOf(rec), svc = service == null || String(service).trim() === '' ? null : String(service);
+  if (!sys && !svc) return '계통 없음 — 설비 설정에서 계통을 선언하면 표시됩니다';
+  return `${sys || '—'} / ${svc || '—'}`;
+}
+
+// 단축키는 **글자를 치는 칸**에서는 양보한다. 인스펙터 폭 칸에서 Delete 를 누르면 평면에서 고른 벽이
+// 지워지고 저장까지 갔다. 체크박스·슬라이더·버튼은 글자를 받지 않으므로 단축키가 그대로 산다.
+const NON_TEXT_INPUTS = new Set(['checkbox', 'radio', 'range', 'button', 'submit', 'reset', 'color', 'file', 'image']);
+export function isTypingTarget(target = {}) {
+  if (!target) return false;
+  if (target.isContentEditable) return true;
+  const tag = String(target.tagName || '').toUpperCase();
+  if (tag === 'TEXTAREA') return true;
+  if (tag !== 'INPUT') return false;
+  return !NON_TEXT_INPUTS.has(String(target.type || 'text').toLowerCase());
+}
+
+// 간섭 지점 — 목록의 좌표를 평면 위 점으로. 크기는 계산하지 않는다(검토 줄이 숫자로 말한다).
+// 이 파싱 결과의 판정이지 실시간 감시가 아니다 — 저장 응답이 올 때까지는 옛 자리다.
+export function clashMarkerSpecs(items = []) {
+  const out = [];
+  for (const c of items || []) {
+    const at = c && c.at;
+    if (!Array.isArray(at) || at.length < 2) continue;
+    const x = Number(at[0]), y = Number(at[1]);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    const z = Array.isArray(c.z) && c.z.length >= 2 ? (Number(c.z[0]) + Number(c.z[1])) / 2 : null;
+    out.push({key: String(c.id ?? ''), x, y, z: Number.isFinite(z) ? z : null,
+      assumed: (c.basis || c.z_basis) === 'assumed',
+      eid: (c.mep || {}).eid || null, struct: (c.struct || {}).eid || null,
+      level: c.level != null ? String(c.level) : null});
+  }
+  return out;
+}
+
+// 저장 뒤 "무엇이 바뀌었나" — 간섭·연결 후보 수의 전/후. 계산이 실패한 줄은 0 으로 읽지 않는다
+// (project_server 는 간섭 실패 때 total:0 과 error 를 싣는다 — 그대로 빼면 엔진이 죽은 것을 −7 로 자랑한다).
+export function reviewCounts(clashReview = {}, connectivity = {}) {
+  const cs = (clashReview && clashReview.summary) || {}, ns = (connectivity && connectivity.summary) || {};
+  const num = v => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v))) ? null : Number(v);
+  return {clash: cs.error ? null : num(cs.total), clashError: !!cs.error,
+          gaps: ns.error ? null : num(ns.candidates), gapsError: !!ns.error};
+}
+
+const CHANGE_METRICS = [['clash', '간섭'], ['gaps', '연결 후보']];
+export function changeSummaryText(prev, next) {
+  if (!prev || !next) return '';
+  const moved = [], still = [], failed = [];
+  for (const [key, label] of CHANGE_METRICS) {
+    if (next[key + 'Error']) { failed.push(`${label} 계산 실패 — 비교 불가`); continue; }
+    const a = prev[key], b = next[key];
+    if (b == null) continue;
+    if (a == null) { moved.push(`${label} ${b}`); continue; }
+    if (a === b) { if (b) still.push([label, b]); continue; }
+    const d = b - a;
+    moved.push(`${label} ${a} → ${b} (${d > 0 ? '+' : '−'}${Math.abs(d)})`);
+  }
+  if (moved.length) return [...moved, ...still.map(([l, n]) => `${l} ${n} 그대로`), ...failed].join(' · ');
+  if (still.length) return still.map(([l, n]) => `${l} ${n}`).join(' · ') + ' — 변화 없음' + (failed.length ? ' · ' + failed.join(' · ') : '');
+  return failed.join(' · ');
+}
+
 // 물량 요약 패널(Phase 4) — `boq_export.aggregate()` 의 `{섹션: [헤더, rows, 합계]}` 를 화면이
 // 쓰는 모양으로 축약한다. 저장할 때마다 서버가 다시 계산해 보내므로(`geometry.boq`) 여기는 순수
 // 변환만 — 언제 다시 부르는지는 app.js 가 정한다.
@@ -342,6 +446,14 @@ export const BOQ_SCOPE_NOTE =
 // 벽·기둥 표에는 근거 열이 없다 — 개별 높이는 이미 계약대로 정직하지만(overrides > 레코드 > params,
 // 섞이면 그 행은 높이를 비운다), 그 값이 '질문에서 선언'인지 'params 기본값'인지는 표만 보면 모른다.
 // 숫자를 다시 말하지 않고 출처만 말한다 — 숫자는 행마다 이미 있다(아래 boqBodyHtml 의 h= 값).
+// 층고 선언 여부 — **키 존재**가 신호다(값 0 도 선언). 첫 화면은 preview.py 가 `level_height_declared` 로 옮겨
+// 주지만, 저장 응답의 geometry 는 파서 출력 그대로라 `level_height_overrode` 만 있다. 종전엔 앞엣것만 읽어
+// 저장할 때마다 패널이 '미선언' 으로 뒤집혔다(브라우저 QA, 2026-09-22). 두 모양을 한 곳에서 읽는다.
+export function levelHeightDeclared(geometry = {}) {
+  const g = geometry || {};
+  return 'level_height_overrode' in g || !!g.level_height_declared;
+}
+
 export function boqHeightBasisText(heightDeclared) {
   return heightDeclared
     ? '층고: 열 때 선언한 값 (행마다 h= 참고)'

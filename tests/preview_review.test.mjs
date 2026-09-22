@@ -22,6 +22,15 @@ import {
   boqBodyHtml,
   BOQ_SCOPE_NOTE,
   createHistory,
+  joinedEids,
+  joinedText,
+  systemOf,
+  systemLineText,
+  isTypingTarget,
+  clashMarkerSpecs,
+  reviewCounts,
+  changeSummaryText,
+  levelHeightDeclared,
 } from '../frontend/src/review_logic.js';
 
 test('camera framing fits the bounding sphere in both split and wide viewports', () => {
@@ -278,6 +287,13 @@ test('review rows carry the hooks the click handler needs, and no save buttons w
   // 서버 없이 연 독립 HTML 에는 저장할 곳이 없다 — 버튼을 그리지 않는다.
   const standalone=reviewRowHtml(gap, false);
   assert.ok(!standalone.includes('confirm-gap') && standalone.includes('data-eid="d:1"'));
+  // 간섭 행은 상대 구조부재를 싣는다 — 클릭 핸들러가 배관과 같이 켠다. 합성 슬래브(부재 아님)는 빈칸.
+  const [clash]=buildReviewEntries({}, {}, [{id:'c',action:'벽 관통',at:[0,0],z:[0,1],
+    struct:{eid:'w:<1>',category:'wall'},mep:{eid:'p:1'}}]);
+  assert.match(reviewRowHtml(clash,false), /data-eid="p:1"[^>]*data-struct="w:&lt;1&gt;"/);
+  const [slab]=buildReviewEntries({}, {}, [{id:'s',action:'슬래브 관통',at:[0,0],z:[0,1],
+    struct:{eid:null,category:'slab',synthetic:'천장'},mep:{eid:'p:1'}}]);
+  assert.match(reviewRowHtml(slab,false), /data-struct=""/);
   assert.equal(batchButtonHtml(['a','b'], false), '');
   assert.match(batchButtonHtml(['a','b'], true), /data-batch="1".*2건/);
   assert.equal(batchButtonHtml([], true), '');
@@ -418,4 +434,79 @@ test('boqBodyHtml renders each section (including the honest per-row height), es
   const failed = boqBodyHtml({error:'<script>x</script>'});
   assert.doesNotMatch(failed, /<script>x<\/script>/);
   assert.match(failed, /물량 계산 실패/);
+});
+
+// ── 장면이 문제를 가리킨다(2026-09-22 HighTopo 대조) ─────────────────────────────
+
+test('joinedEids follows shared joint ids and never crosses a candidate-only gap', () => {
+  const elements={
+    pipe:[{eid:'p:a',joints:[{id:'j1',port:'end'}]},
+          {eid:'p:b',joints:[{id:'j1',port:'start'},{id:'j:bridged',port:'end',basis:'bridged'}]},
+          {eid:'p:c',joints:[{id:'j:bridged',port:'start',basis:'bridged'}]},
+          {eid:'p:lonely'}],                      // 후보 틈 건너편 — joints 가 없으면 무리가 아니다
+    wall:[{eid:'w:1',joints:[{id:'j1'}]}]};           // 경로가 아닌 카테고리는 보지 않는다
+  assert.deepEqual(joinedEids(elements,'p:c'), ['p:a','p:b','p:c']);   // 확정한 이음(bridged)도 joints 다
+  assert.deepEqual(joinedEids(elements,'p:lonely'), ['p:lonely']);
+  assert.deepEqual(joinedEids(elements,'w:1'), []);
+  assert.deepEqual(joinedEids(elements,'missing'), []);
+  assert.match(joinedText(4), /4개/);
+  assert.match(joinedText(1), /없음.*연결 후보는 검토 목록에서 확정/);
+});
+
+test('systemLineText prefers the override the editor saved and says so when nothing was declared', () => {
+  assert.equal(systemOf({system:'SA',overrides:{system:'RA'}}), 'RA');
+  assert.equal(systemOf({system:'  '}), null);
+  assert.equal(systemLineText({system:'SA',service:'supply_air'}), 'SA / supply_air');
+  assert.equal(systemLineText({service:'drain'}), '— / drain');
+  // 이름에서 아무것도 추론하지 않는다 — 없으면 없다고 말한다.
+  assert.match(systemLineText({}), /^계통 없음 — 설비 설정에서 계통을 선언하면/);
+});
+
+test('shortcut keys are ignored while typing in a text field but not on buttons, checkboxes or sliders', () => {
+  assert.equal(isTypingTarget({tagName:'INPUT',type:'number'}), true);
+  assert.equal(isTypingTarget({tagName:'input'}), true);             // type 생략 = text
+  assert.equal(isTypingTarget({tagName:'TEXTAREA'}), true);
+  assert.equal(isTypingTarget({tagName:'DIV',isContentEditable:true}), true);
+  assert.equal(isTypingTarget({tagName:'INPUT',type:'checkbox'}), false);
+  assert.equal(isTypingTarget({tagName:'INPUT',type:'range'}), false);
+  assert.equal(isTypingTarget({tagName:'BUTTON'}), false);
+  assert.equal(isTypingTarget({tagName:'SELECT'}), false);
+  assert.equal(isTypingTarget(null), false);
+});
+
+test('clash markers keep the point and the assumed basis, and survive a synthetic slab without a struct eid', () => {
+  const specs=clashMarkerSpecs([
+    {id:'clash:1',at:[1000,2000],z:[2500,2700],basis:'assumed',level:'B1',struct:{eid:'w:1'},mep:{eid:'p:1'}},
+    {id:'clash:2',at:[5,6],z:[0,200],basis:'declared',struct:{eid:null,synthetic:'천장'},mep:{eid:'d:1'}},
+    {id:'bad',at:['x',1]}, {id:'none'}]);
+  assert.deepEqual(specs, [
+    {key:'clash:1',x:1000,y:2000,z:2600,assumed:true,eid:'p:1',struct:'w:1',level:'B1'},
+    {key:'clash:2',x:5,y:6,z:100,assumed:false,eid:'d:1',struct:null,level:null}]);
+  assert.deepEqual(clashMarkerSpecs(undefined), []);
+});
+
+test('change summary names what moved, says when nothing moved, and never turns a failed clash run into a drop', () => {
+  const before=reviewCounts({summary:{total:7}}, {summary:{candidates:12}});
+  assert.deepEqual(before, {clash:7,clashError:false,gaps:12,gapsError:false});
+  assert.equal(changeSummaryText(before, reviewCounts({summary:{total:5}},{summary:{candidates:12}})),
+    '간섭 7 → 5 (−2) · 연결 후보 12 그대로');
+  assert.equal(changeSummaryText(before, reviewCounts({summary:{total:8}},{summary:{candidates:10}})),
+    '간섭 7 → 8 (+1) · 연결 후보 12 → 10 (−2)');
+  assert.equal(changeSummaryText(before, before), '간섭 7 · 연결 후보 12 — 변화 없음');
+  // project_server 는 간섭 계산이 죽으면 total:0 과 error 를 싣는다 — 7 → 0 으로 읽으면 안 된다.
+  const failed=reviewCounts({summary:{total:0,error:'ValueError: x'}}, {summary:{candidates:12}});
+  assert.equal(failed.clash, null);
+  assert.equal(changeSummaryText(before, failed), '연결 후보 12 — 변화 없음 · 간섭 계산 실패 — 비교 불가');
+  // 설비가 없는 건축 도면: 둘 다 0 이면 아무 말도 하지 않는다(저장마다 '0 그대로' 는 소음이다).
+  const none=reviewCounts({summary:{total:0}}, {summary:{candidates:0}});
+  assert.equal(changeSummaryText(none, none), '');
+  assert.equal(changeSummaryText(null, before), '');
+});
+
+test('the storey-height basis survives a save response, which carries the parser key and not the preview key', () => {
+  assert.equal(levelHeightDeclared({level_height_declared:true}), true);     // 첫 화면(preview.py 페이로드)
+  assert.equal(levelHeightDeclared({level_height_overrode:0}), true);        // 저장 응답 — 0 건 덮어도 선언이다
+  assert.equal(levelHeightDeclared({level_height_declared:false}), false);
+  assert.equal(levelHeightDeclared({}), false);
+  assert.equal(levelHeightDeclared(null), false);
 });

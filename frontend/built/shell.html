@@ -49,7 +49,7 @@
         <label><input id="editSourceEnabled" type="checkbox" checked>원본 DXF 겹쳐 보기</label>
         <label>진하기 <input id="editSourceOpacity" aria-label="원본 DXF 진하기" type="range" min="20" max="100" step="5" value="65"></label>
       </div>
-      <div class="edit-source-legend">회색: 원본 DXF · 색상: 편집 벽 · 노란색: 선택한 벽 · 빨간 점: 끊긴 설비 끝 · 주황 점선: 이음 후보(확정 아님) · 빨간 점선: 다른 계통 끝이 맞닿음</div>
+      <div class="edit-source-legend">회색: 원본 DXF · 색상: 편집 벽 · 노란색: 선택한 벽 · 빨간 점: 끊긴 설비 끝 · 주황 점선: 이음 후보(확정 아님) · 빨간 점선: 다른 계통 끝이 맞닿음 · 빨간 고리: 이 파싱 결과의 간섭 지점(실시간 감시 아님 — 저장하면 다시 잰다)</div>
       <div id="editSourceStatus" role="status"></div>
     </div>
     <div id="err">3D 화면을 시작하지 못했습니다. 브라우저의 WebGL 지원을 확인하세요.</div>
@@ -81,6 +81,8 @@
       <div class="kv"><span>EID</span><span id="e_eid"></span></div>
       <div class="kv"><span>레이어</span><span id="e_layer"></span></div>
       <div class="kv"><span>신뢰도</span><span id="e_conf"></span></div>
+      <div class="kv" id="e_sysrow"><span>계통 / 용도</span><span id="e_sys"></span></div>
+      <div class="kv" id="e_joinrow"><span>이음으로 이어진</span><span id="e_join"></span></div>
       <div id="e_why"></div>
       <div class="row"><label>카테고리</label>
         <select id="e_cat"></select></div>

@@ -76,7 +76,7 @@
 | [walls.md](docs/decisions/walls.md) | 면선 페어링 · 두께 우선순위 · `pair_max` 를 올리면 더 나빠지는 실측 · 중복 부재 · EID |
 | [openings.md](docs/decisions/openings.md) | 붙일 벽을 못 찾는 네 사유와 정반대인 조치 · 이미 뚫린 자리 |
 | [drawings-in-practice.md](docs/decisions/drawings-in-practice.md) | 한 층에 공종 도면 여러 장 · 단위세대 평면 · 환기 평면도 · explode 된 부재의 레이어 |
-| [edits-and-preview.md](docs/decisions/edits-and-preview.md) | 수정 라운드트립의 주입 위치 · 2D 평면 탭 · 미리보기가 근거를 말하는 이유 |
+| [edits-and-preview.md](docs/decisions/edits-and-preview.md) | 수정 라운드트립의 주입 위치 · 2D 평면 탭 · 미리보기가 근거를 말하는 이유 · 장면이 문제를 가리킨다(흐름 애니메이션을 안 한 이유) |
 | [pascal.md](docs/decisions/pascal.md) | Pascal 다리(단위·축·고저) · 편집 화면 호스트의 저장 기준 |
 | [ifc-builder.md](docs/decisions/ifc-builder.md) | 납품 IFC 를 FreeCAD 에서 ifcopenshell 직접 생성으로 뒤집은 경위 · 개구부는 선언 · 층별 `wall_indices` · 적대적 리뷰 7건(검사는 빌더의 약속과 IFC 를 대조할 뿐 약속이 맞는지는 모른다) · 되돌리는 측정 |
 | [construction-rules.md](docs/decisions/construction-rules.md) | 시공기준(KCS/KDS/NFTC) 표 한 장 · confirmed 만 적용 · 선언 없으면 건너뛴다 · V013 |

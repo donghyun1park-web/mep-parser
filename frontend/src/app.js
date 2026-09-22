@@ -4,7 +4,9 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { buildReviewEntries, reviewBannerText, bridgeRequest, routineCandidateIds,
          escHtml, reviewRowHtml, batchButtonHtml, modelBounds, deriveSectionRange, floorKeyOf, isZVisible, reconcileSection, uniqueByEid, fitDistance, recordOnEditFloor, editBackdropState, REASON,
-         boqHeightBasisText, boqBodyHtml, createHistory } from './review_logic.js';
+         boqHeightBasisText, boqBodyHtml, createHistory,
+         joinedEids, joinedText, systemLineText, isTypingTarget, clashMarkerSpecs, reviewCounts, changeSummaryText,
+         levelHeightDeclared } from './review_logic.js';
 import { screenToDrawing, drawingUnitsPerPixel } from './svg_coordinates.js';
 import { linearMepGeometry, footprintMepGeometry, mepPropertyKeys } from './mep_preview_geometry.js';
 
@@ -16,7 +18,7 @@ let CONNECTIVITY=DATA.mep_connectivity || {};
 let CONSTRUCTION_RULES=DATA.construction_rules || {};
 let SUGGESTIONS_APPLY=DATA.suggestions_apply || [];
 let BOQ=DATA.boq || {};
-let LEVEL_HEIGHT_DECLARED=!!DATA.level_height_declared;
+let LEVEL_HEIGHT_DECLARED=levelHeightDeclared(DATA);
 function excludedEditIds(report){ return [...((report||{}).orphaned||[]),...((report||{}).ambiguous||[])]; }
 let BASE_ELEMENTS = MepEdit.deriveBaseElements(DATA.elements || {},DATA.project_edits || {},excludedEditIds(DATA.edits_report));
 let CANONICAL_PRESENTATION = MepEdit.clone(DATA.elements || {});
@@ -219,10 +221,7 @@ function rebuild(){
   if(!meshes.length){ errorBox.textContent='표시할 수 있는 3D 부재가 없습니다. 원본 도면과 검토 경고를 확인하세요.'; errorBox.style.display='block'; }
   else if(errorBox.textContent.includes('표시할 수 있는 3D')) errorBox.style.display='none';
   applyEditVisuals();
-  selected=null;
-  for(const mesh of meshes) if(mesh.userData.rec.eid===selectedEid){
-    mesh.material.emissive?.setHex(0x333300); selected=mesh;
-  }
+  selected=highlight3D(selectedEid);
   if(selectedEid&&!selected){ updateSourceSelection(null); fillPanel(null,null); }
   updateSectionBounds();
   renderSourceOverlay();
@@ -269,18 +268,47 @@ renderer.domElement.addEventListener('click', ev=>{
   }
   select(hit?hit.object:null);
 });
+// 3D 강조는 한 곳에서 — 고른 부재(노랑)와, 설비면 **이음으로 이어진 무리**(옅은 초록). 무리는 도면이 이어
+// 그렸거나 사람이 확정한 joints 만 따른다(joinedEids) — 연결 후보는 건너지 않는다. 방향은 그리지 않는다:
+// 평면도에 흐름 방향이 없다(HighTopo 의 관 표면 흐름 애니메이션을 가져오지 않은 이유, edits-and-preview.md).
+// 무리는 emissive 가 아니라 **색을 바꾼다** — emissive 는 더하기라 하늘색 배관 위에서 안 보였다(브라우저 QA). 분홍은 어느 카테고리 색과도 겹치지 않는다(트레이가 초록이다).
+const HL_SELECTED=0x333300, HL_JOINED_COLOR=0xff7ad9, HL_PARTNER=0x004a5a;
+const ROUTE_CATS=['pipe','duct','tray'];
+function highlight3D(eid){
+  for(const mesh of meshes){
+    mesh.material.emissive?.setHex(0x000000);
+    if(mesh.userData.joined){ mesh.userData.joined=false; mesh.material.color.setHex(baseColorOf(mesh)); }
+  }
+  if(!eid) return null;
+  let first=null;
+  for(const mesh of meshes) if(mesh.userData.rec.eid===eid){ mesh.material.emissive?.setHex(HL_SELECTED); first=first||mesh; }
+  if(first && ROUTE_CATS.includes(first.userData.cat)){
+    const group=new Set(joinedEids(EFFECTIVE_ELEMENTS,eid));
+    for(const mesh of meshes){
+      const other=mesh.userData.rec.eid;
+      if(other!==eid&&group.has(other)){ mesh.userData.joined=true; mesh.material.color.setHex(HL_JOINED_COLOR); }
+    }
+  }
+  return first;
+}
+// 간섭의 상대 구조부재 — 고른 배관을 지우지 않고 **덧칠**한다(select 가 먼저 전부 지운다).
+function markPartner(eid){
+  if(!eid) return;
+  for(const mesh of meshes) if(mesh.userData.rec.eid===eid && mesh.visible) mesh.material.emissive?.setHex(HL_PARTNER);
+}
 function select(m){
-  for(const mesh of meshes) mesh.material.emissive?.setHex(0x000000);
+  highlight3D(null);
   selected=m;
-  if(!m){ fillPanel(null, null); updateSourceSelection(null); return; }
+  if(!m){ fillPanel(null, null); updateSourceSelection(null); follow2D(null,null); return; }
   const eid=m.userData.rec.eid;
   const canonical=uniqueByEid(Object.values(EFFECTIVE_ELEMENTS).flat(),eid);
   if(!canonical){ selected=null; fillPanel(null,null); updateSourceSelection(null); document.getElementById('noSel').textContent='같은 EID를 가진 부재가 여러 개여서 안전하게 선택할 수 없습니다: '+eid; return; }
-  for(const mesh of meshes) if(mesh.userData.rec.eid===eid) mesh.material.emissive?.setHex(0x333300);
+  highlight3D(eid);
   updateSourceSelection(eid);
   if(canonical.level!=null) setSourceFloor(String(canonical.level));
   focusSourceEid(eid);
   fillPanel(canonical, m.userData.cat);
+  follow2D(eid, m.userData.cat);
 }
 function selectEid(eid,{focus=false}={}){
   const canonical=uniqueByEid(Object.values(EFFECTIVE_ELEMENTS).flat(),eid);
@@ -291,7 +319,10 @@ function selectEid(eid,{focus=false}={}){
   if(sectionEnabled){ sectionEnabled=false; document.getElementById('sectionEnabled').checked=false; applySection(); }
   if(focus){
     const box=new THREE.Box3(); matching.forEach(m=>box.expandByObject(m));
-    frameBox(box);
+    // 지금 보고 있는 각도 그대로 다가간다 — 매번 아이소로 되돌리면 검토 행을 넘길 때마다 방향을 잃는다.
+    // frameBox 가 인자를 normalize 로 바꾸므로 복사본을 넘긴다.
+    const dir=cam.position.clone().sub(controls.target);
+    frameBox(box, dir.lengthSq()>1e-12?dir:undefined);
   }
   return true;
 }
@@ -309,6 +340,11 @@ function fillPanel(rec, cat){
   document.getElementById('e_eid').textContent=eid;
   document.getElementById('e_layer').textContent=rec.layer||'-';
   document.getElementById('e_conf').textContent=(rec.confidence!=null?rec.confidence:'-')+(rec.pairing?' / '+rec.pairing:'');
+  const mep=ROUTE_CATS.includes(cat)||cat==='equipment';
+  document.getElementById('e_sysrow').style.display=mep?'flex':'none';
+  document.getElementById('e_sys').textContent=mep?systemLineText(rec):'';
+  document.getElementById('e_joinrow').style.display=ROUTE_CATS.includes(cat)?'flex':'none';
+  document.getElementById('e_join').textContent=ROUTE_CATS.includes(cat)?joinedText(joinedEids(EFFECTIVE_ELEMENTS,rec.eid).length):'';
   sel.value=(edits[eid]?.category)||cat;
   if(['pipe','duct','tray'].includes(cat)) {
     try { const dims=gcMepDimensions(cat,rec,P); document.getElementById('e_w').value=dims.diameter??dims.width_mm??''; document.getElementById('e_h').value=dims.height_mm??''; }
@@ -438,6 +474,7 @@ function applySnapshot(snapshot){
 }
 window.addEventListener('keydown', ev=>{
   if(ACTION_LOCK) return;
+  if(isTypingTarget(ev.target)) return;   // 칸 안의 Ctrl+Z 는 그 칸의 글자를 되돌린다 — 편집 전체가 아니다
   if(!(ev.ctrlKey||ev.metaKey)) return;
   const k=ev.key.toLowerCase();
   if(k==='z' && !ev.shiftKey){ ev.preventDefault(); applySnapshot(HISTORY.undo()); }
@@ -470,7 +507,16 @@ function syncEffective(){
   refreshEditsOnly(); rebuild();
   if(svg2.classList.contains('on')) render2();
 }
+// 저장 뒤 "무엇이 바뀌었나" — 기준은 **저장 사이클이 시작될 때**(사용자 동작) 뜨고, 서버 응답을 받을 때마다
+// 다시 잰다. 편집 저장은 응답 뒤 남은 수정을 한 번 더 보내므로(onAck 의 unchanged=false) 그때는 기준을
+// 비우지 않는다 — 비우면 두 번째 응답이 첫 문장을 '변화 없음' 으로 덮는다.
+let CHANGE_BASE=null, LAST_CHANGE='', RESEND_PENDING=false;
+function markChangeBase(){ if(!CHANGE_BASE) CHANGE_BASE=reviewCounts(CLASH_REVIEW,CONNECTIVITY); }
 function setSaveStatus(kind,text){
+  if(kind==='saved'){
+    if(LAST_CHANGE) text+=' · '+LAST_CHANGE;
+    if(!RESEND_PENDING) CHANGE_BASE=null;
+  }
   const bar=document.getElementById('savebar'); bar.className=kind;
   document.getElementById('savestatus').textContent=text;
   document.getElementById('retry').style.display=kind==='error'?'inline-block':'none';
@@ -499,10 +545,11 @@ function mergeServerPresentation(response){
   CONSTRUCTION_RULES=response.geometry.construction_rules || {};
   SUGGESTIONS_APPLY=response.geometry.suggestions_apply || [];
   BOQ=response.geometry.boq || {};
-  LEVEL_HEIGHT_DECLARED=!!response.geometry.level_height_declared;
+  LEVEL_HEIGHT_DECLARED=levelHeightDeclared(response.geometry);
   orphanSuggestions=((response.geometry.edits_report)||{}).relink_suggestions||[];
   renderOrphans();
   renderBoq();
+  LAST_CHANGE=CHANGE_BASE?changeSummaryText(CHANGE_BASE,reviewCounts(CLASH_REVIEW,CONNECTIVITY)):'';
 }
 function renderBoq(){
   document.getElementById('boqHeightBasis').textContent=boqHeightBasisText(LEVEL_HEIGHT_DECLARED);
@@ -514,6 +561,7 @@ if(RUNTIME){
     send:(snapshot,revision)=>apiPost('/edits',{project_id:RUNTIME.project_id,expected_revision:revision,edits:snapshot}),
     onAck:(response,sent)=>{
       const unchanged=JSON.stringify(edits)===JSON.stringify(sent);
+      RESEND_PENDING=!unchanged;
       if(response.geometry&&response.geometry.elements)
         BASE_ELEMENTS=MepEdit.deriveBaseElements(response.geometry.elements,response.edits||{},excludedEditIds(response.geometry.edits_report));
       if(unchanged) replaceObject(edits,response.edits||{});
@@ -534,6 +582,7 @@ if(RUNTIME){
   });
 }
 function persistAndQueue(){
+  markChangeBase();
   saveLocal();
   CANONICAL_PRESENTATION=null;
   if(!SAVE_QUEUE){ setSaveStatus('unsaved','서버 연결 없음 — 브라우저에 보관됨. edits.json을 다운로드하세요.'); return; }
@@ -749,6 +798,7 @@ function renderReview(){
     shown.length?shown.map(x=>reviewRowHtml(x,!!RUNTIME)).join(''):'없음';
 }
 async function confirmGap(ids,confirmed){
+  markChangeBase();
   setSaveStatus('saving','저장 중…');
   try{
     const response=await apiPost('/bridges',bridgeRequest([].concat(ids),confirmed,RUNTIME));
@@ -768,6 +818,7 @@ document.getElementById('reviewBatch').addEventListener('click',ev=>{
   confirmGap(routineCandidateIds(CONNECTIVITY),true);
 });
 async function applySuggestion(suggestion){
+  markChangeBase();
   setSaveStatus('saving','저장 중…');
   try{
     const response=await apiPost('/layer-rule',
@@ -791,7 +842,7 @@ document.getElementById('reviewList').addEventListener('click',ev=>{
   const gap=ev.target.closest('.confirm-gap');
   if(gap){ confirmGap(gap.dataset.gap,!gap.dataset.confirmed); return; }
   const row=ev.target.closest('.review-item'); if(!row) return;
-  if(row.dataset.eid){ setTab(false); selectEid(row.dataset.eid,{focus:true}); }
+  if(row.dataset.eid){ setTab(false); if(selectEid(row.dataset.eid,{focus:true})) markPartner(row.dataset.struct); }
   else {
     const target=document.querySelector(`.orphan[data-orphan="${CSS.escape(row.dataset.orphan)}"]`);
     const destination=target||document.getElementById('orphans');
@@ -984,6 +1035,9 @@ function render2(){
   }
   for(const end of CONNECTIVITY.open_ends||[])
     if(onEditFloor({level:end.level})) g2.appendChild(mk2('circle',{cx:end.at[0],cy:end.at[1],r:5*k,class:'mep-end '+end.status}));
+  // 간섭 지점(보기 전용) — 이 파싱 결과의 판정이다. 가정 높이로 나온 것은 옅게.
+  for(const c of clashMarkerSpecs(CLASH_REVIEW.items||[]))
+    if(onEditFloor({level:c.level})) g2.appendChild(mk2('circle',{cx:c.x,cy:c.y,r:9*k,class:'clash'+(c.assumed?' assumed':'')}));
   for(const rec of editable2()){
     if(!onEditFloor(rec) || sel2.indexOf(rec.eid)<0 || isDel(rec)) continue;
     const cl=clOf(rec);
@@ -993,6 +1047,16 @@ function render2(){
     }
   }
   document.getElementById('hint2d').textContent = (HINT2[cat2]||HINT2.wall)[mode2] || '';
+}
+
+// 선택은 한 줄기 — 평면에서 고르면 3D 도 같은 부재를, 3D(나란히 보기)에서 고르면 평면도 같은 부재를 밝힌다.
+// selectEid 는 쓰지 않는다: 단면을 끄고 원본 창을 옮겨 편집 중 화면이 튄다.
+function markIn3D(eid){ selected=highlight3D(eid); updateSourceSelection(eid||null); }
+function follow2D(eid, cat){
+  if(!svg2.classList.contains('on')) return;
+  if(eid && EDIT_CATS.includes(cat) && cat2!==cat){ cat2=cat; if(cat2Select) cat2Select.value=cat2; }
+  sel2=(eid && EDIT_CATS.includes(cat) && recByEid(eid))?[eid]:[];
+  render2();
 }
 
 function strokeWidthOf2(rec){
@@ -1042,7 +1106,7 @@ function splitWall(rec, pt){
   const parts=MepEdit.splitPolyline(rec,pt); if(parts.length!==2) return;
   const w1=manualRec(clOf(parts[0]),rec), w2=manualRec(clOf(parts[1]),rec);
   delWall(rec); addWall(w1); addWall(w2); sel2=[w1.eid,w2.eid];
-  refreshEdits(); fillPanel(w1,cat2); render2();
+  refreshEdits(); fillPanel(w1,cat2); markIn3D(w1.eid); render2();
 }
 
 function joinWalls(r1, r2){
@@ -1055,7 +1119,7 @@ function joinWalls(r1, r2){
   }
   const nw=manualRec(clOf(joined),r1);
   delWall(r1); delWall(r2); addWall(nw); sel2=[nw.eid];
-  refreshEdits(); fillPanel(nw,cat2); render2();
+  refreshEdits(); fillPanel(nw,cat2); markIn3D(nw.eid); render2();
 }
 
 // 화면 이동(팬) — 확대해 놓으면 편집할 자리로 갈 방법이 없었다. 원본 DXF 창의 `sourceDrag` 와
@@ -1086,7 +1150,7 @@ svg2.addEventListener('pointerdown', ev=>{
       refreshEdits(); render2(); }
     return;
   }
-  if(!eid){ if(mode2!=='join'){ sel2=[]; fillPanel(null,null); render2(); } return; }
+  if(!eid){ if(mode2!=='join'){ sel2=[]; fillPanel(null,null); markIn3D(null); render2(); } return; }
   const rec=recByEid(eid); if(!rec) return;
   if(mode2==='split'){ splitWall(rec, pt); return; }
   if(mode2==='join'){
@@ -1094,7 +1158,7 @@ svg2.addEventListener('pointerdown', ev=>{
     if(sel2.length===2) joinWalls(recByEid(sel2[0]), recByEid(sel2[1]));
     render2(); return;
   }
-  sel2=[eid]; fillPanel(rec,cat2); render2();
+  sel2=[eid]; fillPanel(rec,cat2); markIn3D(eid); render2();
 });
 
 svg2.addEventListener('pointermove', ev=>{
@@ -1135,7 +1199,7 @@ svg2.addEventListener('pointerup', ()=>{
     nw=manualRec(cl,rec); delWall(rec); addWall(nw);
   }
   sel2=[nw.eid];
-  refreshEdits(); fillPanel(nw,cat2); render2();
+  refreshEdits(); fillPanel(nw,cat2); markIn3D(nw.eid); render2();
 });
 
 svg2.addEventListener('wheel', ev=>{
@@ -1149,6 +1213,7 @@ svg2.addEventListener('wheel', ev=>{
 window.addEventListener('keydown', ev=>{
   if(ACTION_LOCK) return;
   if(!svg2.classList.contains('on')) return;
+  if(isTypingTarget(ev.target)) return;   // 인스펙터 폭 칸의 Delete 는 글자를 지운다 — 고른 벽이 아니다
   if(ev.key==='Delete' && sel2.length){
     for(const eid of sel2){ const r=recByEid(eid); if(r) delWall(r); }
     sel2=[]; refreshEdits(); fillPanel(null,null); render2();
@@ -1207,12 +1272,15 @@ document.getElementById('tside').addEventListener('click', ()=>setTab('side'));
 document.getElementById('tlinked').addEventListener('click', ()=>setTab(false));
 document.getElementById('t3d').addEventListener('click', ()=>setTab('three'));
 
+function baseColorOf(m){
+  const eid=m.userData.rec.eid; const e=eid&&edits[eid];
+  return (e&&e.category) ? (CAT_COLOR[e.category]??0xffffff) : colorFor(m.userData.cat,m.userData.rec);
+}
 function applyEditVisuals(){
   for(const m of meshes){
     const eid=m.userData.rec.eid; const e=eid&&edits[eid];
     m.visible = !(e&&e.deleted);
-    if(e&&e.category){ m.material.color.setHex(CAT_COLOR[e.category]??0xffffff); }
-    else { m.material.color.setHex(colorFor(m.userData.cat,m.userData.rec)); }
+    m.material.color.setHex(m.userData.joined?HL_JOINED_COLOR:baseColorOf(m));
   }
 }
 document.getElementById('dl').addEventListener('click', ()=>{
@@ -1309,6 +1377,7 @@ async function orphanRequest(path,body){
   try{
     await SAVE_QUEUE.idle();
     if(SAVE_QUEUE.error()) return false;
+    markChangeBase();
     setSaveStatus('saving','저장 중…');
     const response=await apiPost(path,Object.assign({project_id:RUNTIME.project_id,
       expected_revision:SAVE_QUEUE.revision()},body));
@@ -1413,7 +1482,8 @@ const wp=DATA.wall_pairing||{};
 document.getElementById('legend').innerHTML =
   '<details><summary>색상 범례</summary>'+Object.entries(CAT_COLOR).map(([k,c])=>`<div><span class="sw" style="background:#${c.toString(16).padStart(6,'0')}"></span>${k}</div>`).join('')
   + `<div style="margin-top:6px;border-top:1px solid #3a3f4a;padding-top:6px">신뢰도 색(벽): `
-  + Object.entries(PAIR_COLOR).map(([k,c])=>`<span class="sw" style="background:#${c.toString(16).padStart(6,'0')}"></span>${k} `).join('')+`</div></details>`;
+  + Object.entries(PAIR_COLOR).map(([k,c])=>`<span class="sw" style="background:#${c.toString(16).padStart(6,'0')}"></span>${k} `).join('')+`</div>`
+  + `<div style="margin-top:6px;border-top:1px solid #3a3f4a;padding-top:6px">강조: 노랑 빛 = 고른 부재 · 분홍 = 이음으로 이어진 설비 · 청록 빛 = 간섭 상대 구조부재</div></details>`;
 
 renderSourceBackdrop(); rebuild(); refreshEditsOnly(); fit(); fitSource();   // 부재가 선 뒤에 맞춘다
 addEventListener('resize', ()=>{

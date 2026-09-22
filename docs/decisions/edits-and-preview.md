@@ -311,6 +311,43 @@ in data` 일 때만(값이 아니라 키 존재) `out['level_height_overrode']` 
 `ProjectSession.serve()` 로 열어 Shift 직교 그리기(두 끝점 y 가 같은 값)·되돌리기→다시 실행·Space 팬·
 나란히 보기 폭(491/490) 을 확인했고, 그 과정에서 위 두 ★(redo 소멸·SVG 폭)를 찾아 고쳤다.
 
+### ★ 장면이 문제를 가리킨다 — 외부 제품(HighTopo)에서 가져온 것과 안 가져온 것
+2026-09-22, 사용자가 [HighTopo](https://www.hightopo.com/en-index.html) 의 파이프라인 글(관 표면 UV 흐름 · 관 성장 · 관 로밍)이
+시각화에 좋지 않겠느냐고 물었다. 대조 전체와 기각 목록은 [plans/2026-09-22-hightopo-reference.md](../plans/2026-09-22-hightopo-reference.md).
+
+**흐름 애니메이션은 가져오지 않았다.** 평면도에는 유향이 없다(`construction_rules.py:10`, `geom_contract.py:936`) — 폴리라인 정점 순서는 그린
+순서일 뿐이고, `service` 에서 방향을 끌어내면 계통→용도→방향 2단 추정이다. 흐르는 관은 없는 방향을 그럴듯하게 그린다. 그 글이 답하려던
+질문("이 관이 어디까지 이어졌나")에는 **이음으로 이어진 무리**로 답한다. 사용자도 같은 결정을 했다(2026-09-22).
+
+가져온 것은 기법이 아니라 습관 — 문제를 목록에서만이 아니라 **장면 안에서** 가리킨다:
+
+- **간섭은 두 부재의 사건이다** — 간섭 행이 상대 구조부재(`data-struct`)를 싣고, 클릭은 배관과 벽을 **같이** 켠다(벽은 청록 빛).
+  `selectEid` 가 true 를 돌려준 **뒤** 덧칠한다 — `select()` 가 먼저 전부 지운다. 두 부재를 합친 상자로 카메라를 잡지 않는다(슬래브와 합치면 건물 크기로 빠진다).
+- **이음으로 이어진 무리** — `joinedEids` 는 `joints[].id` 공유만 따른다(`mep_network` 의 union-find 와 같은 정의, 확정한 이음도 joints 다). 후보는 건너지 않는다.
+  ★ 무리는 emissive 가 아니라 **색을 바꾼다**(분홍). emissive 는 더하기라 하늘색 배관 위에서 보이지 않았고, 연두는 트레이 카테고리 색과 겹쳤다 — 둘 다 브라우저에서만 드러났다.
+  강조는 `highlight3D` 한 곳이 칠하고 지운다(`rebuild` 도 이걸로 복원) — 원래 색은 `baseColorOf`(편집한 카테고리 먼저)로 돌아간다.
+- **선택은 한 줄기** — 평면에서 고르면 3D 도(`markIn3D`), 나란히 보기에서 3D 를 고르면 평면도(`follow2D`, 평면이 화면에 있을 때만). `selectEid` 는 재사용하지 않는다 —
+  단면을 끄고 원본 창을 옮겨 편집 중 화면이 튄다.
+- **단축키는 글자를 치는 칸에서 양보한다**(`isTypingTarget`) — 평면에서 벽을 고른 채 인스펙터 폭 칸에서 Delete 를 누르면 벽이 지워지고 저장까지 갔다.
+  체크박스·슬라이더·버튼·select 는 글자를 안 받으므로 단축키가 그대로 산다.
+- **계통·용도는 적힌 그대로 한 줄** — 없으면 "계통 없음" 이라고 말한다. 색으로 가르지 않는다(골든 설비 프로젝트의 선언 계통이 1개·2개뿐이고, 인라인 색은 선택 표시를 이긴다).
+- **간섭 지점은 평면 위 빨간 고리** — 끊긴 끝의 빨간 점과 모양으로 구분, 가정 높이는 옅은 점선. 이 파싱 결과의 판정이지 실시간 감시가 아니라고 범례가 말한다.
+- **저장 뒤 한 줄** — "서버에 저장됨 · 간섭 4 → 3 (−1)". ★ 기준값은 **저장 사이클이 시작될 때**(사용자 동작) 뜬다 — 편집 저장은 응답 뒤 남은 수정을 한 번 더 보내므로
+  (`onAck` 의 unchanged=false) 그때 기준을 비우면 두 번째 응답이 첫 문장을 덮는다. 간섭 계산이 실패한 응답(`total:0`+`error`)은 0 으로 읽지 않고 "비교 불가". 둘 다 0 이면 말하지 않는다.
+- **검토 행으로 갈 때 보고 있던 각도 유지** — `frameBox` 에 지금 시선 방향의 복사본을 넘긴다(`frameBox` 가 인자를 normalize 로 바꾼다).
+
+같은 브라우저 QA 가 이 묶음과 무관한 결함 하나를 잡았다: 저장 응답의 geometry 에는 `level_height_declared` 가 없고(그건 `preview.py` 가 첫 화면에만 만든다)
+`level_height_overrode` 만 있어, **저장할 때마다 물량 패널 머리가 '층고: 미선언' 으로 뒤집혔다.** 두 모양을 `levelHeightDeclared` 한 곳에서 읽는다(키 존재가 신호 — 위 물량 절과 같은 규약).
+
+고정: `tests/preview_review.test.mjs` 의 `'joinedEids follows shared joint ids and never crosses a candidate-only gap'` ·
+`'systemLineText prefers the override the editor saved and says so when nothing was declared'` ·
+`'shortcut keys are ignored while typing in a text field but not on buttons, checkboxes or sliders'` ·
+`'clash markers keep the point and the assumed basis, and survive a synthetic slab without a struct eid'` ·
+`'change summary names what moved, says when nothing moved, and never turns a failed clash run into a drop'` ·
+`'the storey-height basis survives a save response, which carries the parser key and not the preview key'` ·
+`'review rows carry the hooks the click handler needs, and no save buttons without a server'`(`data-struct` 두 줄). 선택 한 줄기·시선 유지·색은 DOM/WebGL 이라
+[release_checklist.md](../release_checklist.md) 8번 수동 점검. 수동 QA: `sample_mep.dxf` 에 벽 평행선 두 쌍을 더한 합성 도면을 `ProjectSession.serve()` 로 열어 위 항목을 전부 눌러 봤다(콘솔 에러 0).
+
 ### ★ 수정 루프의 남은 한계 — 알고 남겨 둔 것
 전부 "지금도 납품은 되지만, 다음에 이 코드를 여는 사람이 알아야 하는" 것들이다.
 

@@ -4,18 +4,18 @@
   "three": "0.160.0",
   "source_hash": "sha256-lf",
   "assets": {
-    "preview.js": "d1fd685790e16f79eade82cabd9be7dbe6f889a1d88ce0657147830cb0afcf10",
-    "preview.css": "5b849a3c780c9e1e87f53932fd306f8c32a10fb13f9fc458f9b17eb5f17b599c",
-    "shell.html": "23c1ceba66694853ed3afd9bad42397fe8e2d78203e4440075b5cb54fa5b7a13"
+    "preview.js": "165bb371e22906941099804837b7135db98f3b01f2943bbc05958a894c6a95fc",
+    "preview.css": "a5b117bfbd1cc60d971191039a8411704a81c3466cecfe49e3da77c8c1b7b78f",
+    "shell.html": "e169a62ef21570aba04f314dfeeb5c11a66182aa0dd571373ac12e7ee990756e"
   },
   "sources": {
     "frontend/package-lock.json": "03627119091818598186cefeed205a528879ba404f441e62fecce228612e04b4",
     "frontend/package.json": "6ad22f1d058e43fb9861aa8af59693d40dedbee8fef9ab8bb366b8c259ea1d68",
-    "frontend/src/app.js": "bfb950c49336e54fb102fb1258d38a3afb9c243d55e16aac528e6f2073916e08",
+    "frontend/src/app.js": "52ae4a169961a991e7adf4d447778ecad7b4c5b7497ebc6271e3abcbcaeb80ab",
     "frontend/src/mep_preview_geometry.js": "2bcc5fdf265906b6ab759dee82aad530332db057b73434c1d3907f5c024a8111",
-    "frontend/src/review_logic.js": "d10c132e5a965cb8d28b510415b8fbc35a6a59a8f99f4e42abbe7f7214d63837",
-    "frontend/src/shell.html": "e4a8bdc9a92d8a6be7df6349456b0d4846787068ad749267910a6219572bafc3",
-    "frontend/src/style.css": "a8ee4cf5c783c0e5bf2df9be20fd4ca01b5a17e7610f59faeca2aeadcef4d7f5",
+    "frontend/src/review_logic.js": "49d942438a62aa136b4377b1012944c4746b9e8a803595524dc9cddd3d3a689e",
+    "frontend/src/shell.html": "375ff0af6bb806b47be8513475147f750804d905f9e0ddb0dfe6f5032d56556b",
+    "frontend/src/style.css": "89e0a6cc04edc6acfd117b3ae835f8c1cf69190b2fe3e8f3ca431c753254dd17",
     "frontend/src/svg_coordinates.js": "37d499435b9c067d9891abefec37e2e277caffcdd18cfbfbabc7bfd06274d68e",
     "frontend/vite.config.js": "8122603c76002c77fe3165bd97c43924d84d9ccff124b85ae8d440655bedc7d7",
     "vendor/OrbitControls.js": "5a44a9e86a2a0fb11933eed69bc2cd33c76a496854c1aed6ed776efa87d7b064",
