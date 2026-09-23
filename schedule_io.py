@@ -13,6 +13,7 @@ schedule 레코드(내부 표준) = {mark, subtype('door'|'window'), width, heig
 Excel 양식 열 = [부호, 종류, 폭(mm), 높이(mm), 창대높이(mm), 수량, 비고]
 """
 import os
+import re
 
 # Excel 양식 헤더(고정 순서). 사람이 읽는 한글 열 이름.
 SCHEDULE_HEADERS = ["부호", "종류", "폭(mm)", "높이(mm)", "창대높이(mm)", "수량", "비고"]
@@ -40,7 +41,7 @@ def _kind_label_to_subtype(label, mark=""):
         if s:
             return s
     m = (mark or "").upper()
-    pre = m.split("-", 1)[0]          # 블록식 부호 'W-1200' · 'FSD-1100' · 'ADW-2950' 는 접두가 종류다
+    pre = re.split(r"[-\s]", m, maxsplit=1)[0]   # 'W-1200' · 'FSD-1100' · 'PW 18x22'(세대 창호 부호) 는 접두가 종류다
     if "DW" in pre:
         return "door"                 # 문+창
     if pre == "AG" or (pre.endswith("W") and "D" not in pre):

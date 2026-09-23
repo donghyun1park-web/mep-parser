@@ -301,6 +301,8 @@ OPT_SPEC = {
                            "system(SA/RA 같은 계통 이름)과는 다른 것이다"),
     "subtype":   ("str",   "개구부 종류 선언: door | window. 블록 이름에 부호(D-900·W-1200)가 없거나 창을 선으로 "
                            "그린 도면에서 레이어가 종류를 준다. 종류를 알아야 창대 벽·인방을 채우고 창 높이만큼만 뚫는다"),
+    "mark":      ("str",   "개구부의 창호 부호 선언(**block_map 전용**). 블록 이름에 부호가 없는 도면에서 블록 종류가 "
+                           "부호를 준다 — 창호일람 행과 이 부호로 조인해 높이·창대를 받는다"),
 }
 OPENING_SUBTYPES = ("door", "window")
 ELEVATION_KINDS = ("top", "center")
@@ -360,12 +362,15 @@ def _parse_opts(raw, csv_path="", lineno=0):
     return out
 
 
-def _declare_opening_subtype(rec, cat, attrs):
-    """layer_map/block_map 의 `subtype=` 선언을 개구부 레코드에 싣는다. 블록 이름 부호가 이미 준 종류는 그대로 둔다
-    (그 부재 하나에 대한 더 구체적인 말이다). 선언이 없으면 아무것도 하지 않는다 — 레이어 이름으로 추정하지 않는다."""
-    declared = ((attrs or {}).get("_opts") or {}).get("subtype")
-    if cat == "opening" and declared and not rec.get("subtype"):
-        rec["subtype"] = declared
+def _declare_opening(rec, cat, attrs):
+    """layer_map/block_map 의 `subtype=`·`mark=` 선언을 개구부 레코드에 싣는다. 블록 이름 부호가 이미 준 종류·부호는
+    그대로 둔다(그 부재 하나에 대한 더 구체적인 말이다). 선언이 없으면 아무것도 하지 않는다 — 레이어 이름으로 추정하지 않는다."""
+    opts = (attrs or {}).get("_opts") or {}
+    if cat != "opening":
+        return
+    for key in ("subtype", "mark"):
+        if opts.get(key) and not rec.get(key):
+            rec[key] = opts[key]
 
 
 def _pub_attrs(attrs):
@@ -896,29 +901,73 @@ def _block_opening_center(insert, exploded, cx, cy, width):
     pts = [p for r in exploded for p in (r.get("points") or ([r["center"]] if r.get("center") else []))]
     if len(pts) < 2 or None in axes:
         return None
+    segs = [(a, b) for r in exploded if not r.get("from_arc")
+            for rp in [r.get("points") or []] for a, b in zip(rp, rp[1:] + (rp[:1] if r.get("closed") else []))]
     mids, leaf = [], [0, 0]
     for k, (ux, uy) in enumerate(axes):
         ts = [(p[0] - cx) * ux + (p[1] - cy) * uy for p in pts]
         lo, hi = min(ts), max(ts)
-        mids.append((lo + hi) / 2.0 if abs((hi - lo) - width) <= 0.2 * width else None)
-    for r in exploded:
-        rp = r.get("points") or []
-        if r.get("from_arc"):
+        if abs((hi - lo) - width) <= 0.2 * width:
+            mids.append((lo + hi) / 2.0)
             continue
-        for a, b in zip(rp, rp[1:] + (rp[:1] if r.get("closed") else [])):
-            L = math.hypot(b[0] - a[0], b[1] - a[1])
-            if L < 0.8 * width:
-                continue
-            for k, (ux, uy) in enumerate(axes):
-                if abs((b[0] - a[0]) * ux + (b[1] - a[1]) * uy) >= L * 0.995:
-                    leaf[k] += 1
+        # 범위가 폭과 안 맞으면 그 축의 **폭 길이 직선**(문턱·창틀 바깥선) 가운데. 동적 문 블록은 ezdxf 가 가시성 상태를
+        # 무시해 다른 상태의 문짝·호까지 범위에 들어온다(실측: 700 문의 X 범위 1295) — 전체 범위만 보면 벽 축이 떨어지고
+        # 문짝 쪽(벽에 수직) 축으로 240~415mm 옮겨졌다.
+        on_axis = [(math.hypot(b[0] - a[0], b[1] - a[1]), a, b) for a, b in segs]
+        on_axis = [(L, a, b) for L, a, b in on_axis if abs(L - width) <= 0.2 * width
+                   and abs((b[0] - a[0]) * ux + (b[1] - a[1]) * uy) >= L * 0.995]
+        if on_axis:
+            _, a, b = max(on_axis, key=lambda s: s[0])
+            mids.append(((a[0] + b[0]) / 2.0 - cx) * ux + ((a[1] + b[1]) / 2.0 - cy) * uy)
+        else:
+            mids.append(None)
+    for a, b in segs:
+        L = math.hypot(b[0] - a[0], b[1] - a[1])
+        if L < 0.8 * width:
+            continue
+        for k, (ux, uy) in enumerate(axes):
+            if abs((b[0] - a[0]) * ux + (b[1] - a[1]) * uy) >= L * 0.995:
+                leaf[k] += 1
     k = 0 if mids[0] is not None else 1 if mids[1] is not None else None
     if k == 0 and mids[1] is not None and leaf[0] and not leaf[1]:
         k = 1
-    if k is None or abs(mids[k]) < 1.0:
+    if k is None:
+        return None
+    # 깊이 축(벽 두께 방향)도 기호의 가운데로 — **기준점이 기호의 한 면일 때만**(기호가 기준점 한쪽에만 있다). 그런 창 기호는
+    # 벽 두께를 가로질러 그려지고 기준점이 벽 면이다(실측: 종합평면도 기준층 부엌창 8개가 벽 중심에서 215~360mm 떨어진 채 벽을
+    # 못 찾아 창 자리가 바닥부터 천장까지 뚫렸다). 기준점이 기호 안에 있는 블록(단위세대 평면도의 W-1200·FSD-750)은 이미 벽 선
+    # 위라 옮기면 오히려 벗어났다(FSD-750 이 76mm 옮겨져 벽을 잃었다). 깊이가 폭의 DEPTH_CENTRE_MAX_RATIO 이하일 때만 —
+    # 스윙 문은 문짝이 깊이 축에 서서 깊이 ≥ 폭이다(방 안으로 옮기지 않는다).
+    dx, dy = axes[1 - k]
+    ds = [(p[0] - cx) * dx + (p[1] - cy) * dy for p in pts]
+    lo, hi = min(ds), max(ds)
+    face = lo >= -DEPTH_FACE_TOL_MM or hi <= DEPTH_FACE_TOL_MM   # 기호가 기준점 한쪽에만 있다 = 기준점이 한 면
+    across = (lo + hi) / 2.0 if face and hi - lo <= DEPTH_CENTRE_MAX_RATIO * width else 0.0
+    if abs(mids[k]) < 1.0 and abs(across) < 1.0:
         return None
     ux, uy = axes[k]
-    return [round(cx + ux * mids[k], 3), round(cy + uy * mids[k], 3)]
+    return [round(cx + ux * mids[k] + dx * across, 3), round(cy + uy * mids[k] + dy * across, 3)]
+
+
+DEPTH_CENTRE_MAX_RATIO = 0.8   # 창틀 깊이(실측 510mm)는 폭 640mm 이상 창에서 이 안이다 · 문짝이 선 문은 깊이 ≥ 폭
+DEPTH_FACE_TOL_MM = 5.0        # 기준점이 기호 깊이 범위의 끝에서 이 안이면 '한 면'이다
+
+
+def _nested_records(insert, scale, depth=0):
+    """블록 안 블록(INSERT)의 도형을 실좌표 레코드로(깊이 3까지). 윗 블록 자신의 도형은 넣지 않는다."""
+    out = []
+    try:
+        for ve in insert.virtual_entities():
+            if ve.dxftype() != "INSERT" or depth >= 3:
+                continue
+            for sub in ve.virtual_entities():
+                r = entity_to_record(sub, scale) if sub.dxftype() != "INSERT" else None
+                if r:
+                    out.append(r)
+            out += _nested_records(ve, scale, depth + 1)
+    except Exception:
+        pass
+    return out
 
 
 def insert_to_records(insert, scale, category, attrs):
@@ -962,7 +1011,9 @@ def insert_to_records(insert, scale, category, attrs):
             return solid
         return [_box_record(cx, cy, size or 400.0, size or 400.0, rot)]
     if category == "opening":
-        circ = [r for r in exploded if r["kind"] == "circle"]
+        # 원은 슬리브·원형 개구부다 — 개구부일 수 없는 크기의 원(문 손잡이·철물 r≈8)을 개구부로 돌려주면 조각으로 버려져
+        # 문이 통째로 사라졌다(실측: 종합평면도 기준층 세대 현관문 6개 전부).
+        circ = [r for r in exploded if r["kind"] == "circle" and 2.0 * float(r.get("radius") or 0.0) >= OPENING_MIN_SIZE_MM]
         if circ:
             return circ
         # 창호 블록은 이름이 폭을 말한다(D-900 · PD-750 · FSD-1100 · W-1800). 규칙에 폭이 없으면 그것을 쓴다 —
@@ -972,13 +1023,19 @@ def insert_to_records(insert, scale, category, attrs):
                   "radius": round((size or named or 900.0) / 2.0, 3)}
         if named:
             marker["width_source"] = "block_name"
+        elif not size:
+            # 폭을 아무도 말하지 않았다 — 900 은 가정이다. 반지름에 실리면 link 단계가 '잰 값' 으로 읽는다.
+            marker["width_source"] = "default"
+            marker["dims_assumed"] = ["width"]
         mark, sub = _mark_from_block_name(insert.dxf.name)
         if mark:
             marker["mark"] = mark
             if sub:
                 marker["subtype"] = sub   # 문은 높이 2100·문턱 0 이 기본 — 창 기본값(1200/900)을 받으면 안 된다
         _tag_sig(marker)                  # EID 는 **삽입점** 기준 그대로 — 아래에서 중심을 옮겨도 저장된 수정이 이어진다
-        center = _block_opening_center(insert, exploded, cx, cy, named)
+        # 중심은 중첩 블록 안의 선까지 보고 정한다(창틀이 블록 안 블록인 창). 개구부 레코드에는 넣지 않는다 — 안쪽 원이
+        # 개구부로 바뀌면 안 된다.
+        center = _block_opening_center(insert, exploded + _nested_records(insert, scale), cx, cy, size or named)
         if center:
             marker["center"] = center
             marker["anchor"] = [round(cx, 3), round(cy, 3)]
@@ -2061,8 +2118,99 @@ def drop_opening_fragments(elements):
                 continue
             seen.add(key)
         keep.append(op)
-    elements["opening"] = keep
+    keep = [op for op in keep if not _parallel_line_duplicate(op, keep, dropped)]
+    elements["opening"] = [op for op in keep if not _jamb_or_swing(op, keep, dropped)]
     return dropped
+
+
+# 선 여러 줄로 그린 창 하나 — 창틀 바깥선·유리선·창틀 안쪽선이 벽 두께 안에 나란히 선다(실측: 종합평면도 기준층 선 개구부
+# 69개 = 창·문 약 21~24개, 간격 88~300mm). 두꺼운 벽 앞뒤 면의 두 창(벽 두께 450mm 이상 떨어짐)은 합치지 않는다.
+OPENING_DUP_PERP_MM = 400.0
+OPENING_DUP_OVERLAP = 0.8      # 축 방향으로 긴 쪽 길이의 이만큼 겹쳐야 같은 창 — 옆으로 붙어 선 두 창은 겹치지 않는다
+OPENING_DUP_SIN = 0.05
+
+
+def _line_axis(op):
+    """선 개구부의 점들과 긴 축(가장 긴 변의 방향). 원·점 하나는 None."""
+    pts = [(float(p[0]), float(p[1])) for p in op.get("points") or []]
+    if op.get("kind") == "circle" or len(pts) < 2:
+        return None
+    segs = list(zip(pts, pts[1:])) + ([(pts[-1], pts[0])] if op.get("closed") else [])
+    a, b = max(segs, key=lambda s: math.dist(*s))
+    ln = math.dist(a, b)
+    return (pts, ((b[0] - a[0]) / ln, (b[1] - a[1]) / ln)) if ln > 0 else None
+
+
+def _span_on(pts, u):
+    """점들을 축 u 에 투영한 (시작, 끝, 수직 오프셋의 가운데)."""
+    ts = [p[0] * u[0] + p[1] * u[1] for p in pts]
+    ns = [p[1] * u[0] - p[0] * u[1] for p in pts]
+    return min(ts), max(ts), (min(ns) + max(ns)) / 2.0
+
+
+def _parallel_line_duplicate(op, ops, dropped):
+    """op 가 더 긴 나란한 선 개구부와 같은 창이면 True(그리고 dropped 에 센다). 긴 쪽을 남긴다 — 창틀 바깥선이 벽 틈 폭이다.
+    길이가 같으면 `_geom_key` 가 큰 쪽 하나만 남긴다(결정적). 남는 레코드는 원래 것이라 EID 가 그대로다."""
+    me = _line_axis(op)
+    if me is None:
+        return False
+    z = float(op.get("z_base") or 0.0)
+    m0, m1, _ = _span_on(me[0], me[1])
+    my = (m1 - m0, str(_geom_key(op)))
+    for o in ops:
+        other = _line_axis(o) if o is not op else None
+        if other is None or abs(float(o.get("z_base") or 0.0) - z) >= FLOOR_TOL_MM:
+            continue
+        pts, u = other
+        if abs(u[0] * me[1][1] - u[1] * me[1][0]) > OPENING_DUP_SIN or o.get("subtype") != op.get("subtype"):
+            continue                                  # 문짝선과 창선은 나란해도 같은 개구부가 아니다
+        a0, a1, an = _span_on(pts, u)
+        b0, b1, bn = _span_on(me[0], u)
+        if (a1 - a0, str(_geom_key(o))) <= my:        # 더 긴 쪽(또는 같으면 앞선 쪽)만 남긴다
+            continue
+        if abs(an - bn) <= OPENING_DUP_PERP_MM and min(a1, b1) - max(a0, b0) >= OPENING_DUP_OVERLAP * (a1 - a0):
+            lay = op.get("layer") or "(블록)"
+            dropped[lay] = dropped.get(lay, 0) + 1
+            return True
+    return False
+
+
+OPENING_JAMB_RATIO = 1.5       # 마구리 선은 붙은 개구부보다 이만큼 이상 짧다
+OPENING_JAMB_NEAR_MM = 150.0   # 마구리 선 중심이 개구부 끝·개구부 선에서 이 안에 있다
+OPENING_JAMB_COS = 0.2         # 수직 판정(방향 코사인)
+
+
+def _jamb_or_swing(op, ops, dropped):
+    """선 개구부가 개구부가 아니라 **옆 개구부의 부속선**이면 True(그리고 dropped 에 센다).
+    · 문설주·창틀 마구리 — 더 긴 선 개구부의 **끝**에 수직으로 붙은 짧은 선(실측: 종합평면도 기준층 81~200mm 4개). 벽을
+      가로질러 그려져 개구부가 되면 문설주 자리에 구멍과 창 판이 섰다. 벽이 아니라 개구부를 기준으로 잰다 — 벽 모서리에서는
+      가장 가까운 벽이 나란한 벽이라 벽 기준으로는 놓친다.
+    · 선언된 문 레이어의 원호 — 문의 스윙이다(대각선 개구부가 됐다)."""
+    if op.get("from_arc") and op.get("subtype") == "door" and op.get("kind") != "circle":
+        dropped[op.get("layer") or "(블록)"] = dropped.get(op.get("layer") or "(블록)", 0) + 1
+        return True
+    me = _line_axis(op)
+    if me is None:
+        return False
+    xs, ys = [p[0] for p in me[0]], [p[1] for p in me[0]]
+    cx, cy = (min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0
+    m0, m1, _ = _span_on(me[0], me[1])
+    z = float(op.get("z_base") or 0.0)
+    for o in ops:
+        other = _line_axis(o) if o is not op else None
+        if other is None or abs(float(o.get("z_base") or 0.0) - z) >= FLOOR_TOL_MM:
+            continue
+        pts, u = other
+        if abs(u[0] * me[1][0] + u[1] * me[1][1]) > OPENING_JAMB_COS:
+            continue
+        a0, a1, an = _span_on(pts, u)
+        if a1 - a0 < OPENING_JAMB_RATIO * (m1 - m0):
+            continue
+        t, n = cx * u[0] + cy * u[1], cy * u[0] - cx * u[1]
+        if min(abs(t - a0), abs(t - a1)) <= OPENING_JAMB_NEAR_MM and abs(n - an) <= OPENING_JAMB_NEAR_MM:
+            dropped[op.get("layer") or "(블록)"] = dropped.get(op.get("layer") or "(블록)", 0) + 1
+            return True
+    return False
 
 
 NESTED_PAIR_MAX_DIFF_MM = 50.0   # 같은 레이어에서 이 두께 차 안에 겹쳐 선 벽은 한 벽의 안쪽 선이다
@@ -2634,17 +2782,20 @@ def detect_wall_openings(elements, schedule, params):
     반환: 생성된 opening 개수."""
     walls = elements.get("wall", [])
     openings = elements.setdefault("opening", [])
+    # 평면에 이미 부호로 놓인 행은 끊김 매칭에 쓰지 않는다 — 그 부호의 자리는 평면이 말했다. 남겨 두면 같은 폭의
+    # 빈 벽 틈·통로마다 그 부호의 창이 한 번 더 생기고 창대 벽이 통로를 막는다(실측: 종합평면도 기준층, 부호를
+    # 선언한 블록 창과 일람 15종을 넣자 끊김 매칭 74개).
+    placed = {str(op["mark"]).upper() for op in openings
+              if op.get("mark") and op.get("source") != "wall_gap_match"}
+    schedule = [s for s in schedule or [] if str(s.get("mark") or "").upper() not in placed]
     if not walls or not schedule:
         return 0
 
     # 기존 opening(블록 창호·문 스윙 호) 중심 — 중복 생성 방지. 블록 창호는 삽입점이 창의 **끝**일 수 있어
     # 중심 거리 500mm 로는 못 거른다(실측: 일람을 넣자 W-3600·W-1800 이 벽 끊김에서 한 번 더 생겼다, 10개).
-    # 그래서 '이 끊김 구간 안에 이미 개구부가 있는가' 를 같이 본다.
-    existing = []
-    for op in openings:
-        c = op.get("center")
-        if c:
-            existing.append((float(c[0]), float(c[1])))
+    # 그래서 '이 끊김 구간 안에 이미 개구부가 있는가' 를 같이 본다. 선으로 그린 개구부는 아직 center 가 없다
+    # (link 단계에서 생긴다) — 점들로 잰다.
+    existing = [c for c in map(_opening_center, openings) if c]
 
     # 같은 직선 버킷(merge_collinear_walls 와 동일 키 — 단 두께/pairing 무시)
     items = []
@@ -3064,6 +3215,11 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
         선언이다({"mep": {"pipe": {"material":...}, ...}, "architecture": {"wall": {"material":...}, ...}}).
         카테고리 추정이 아니다 — 사람이 프로젝트를 열 때 한 번 적은 값이고 `declaration_basis` 로
         자기보고한다. 레이어·프로필 선언이 항상 이긴다."""
+    # 부호는 부재 하나의 이름이다 — 레이어 규칙에 적으면 그 레이어의 선·블록 전부에 같은 부호가 찍힌다.
+    for _pat, _cat, _a in rules:
+        if ((_a or {}).get("_opts") or {}).get("mark"):
+            raise LayerMapError(f"layer_map 규칙 {_pat!r}: opts mark= 는 block_map 전용이다 "
+                                "(레이어 규칙에 적으면 그 레이어의 개구부 전부에 같은 부호가 찍힌다)")
     from drawing_units import option_scale, unit_review
     explicit_scale = option_scale({'mep_profile': mep_profile, 'unit_scale_to_mm': unit_scale_to_mm})
     if mep_profile is not None:
@@ -3153,7 +3309,7 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
                 #   이건 레코드가 아니라 **레이어의 성질**이라 여기서 한 번만 모은다.
                 if rec.get("layer") and rec["layer"] != e.dxf.layer:
                     _rule_layer.setdefault(rec["layer"], set()).add(e.dxf.layer)
-                _declare_opening_subtype(rec, cat, attrs)
+                _declare_opening(rec, cat, attrs)
                 if cat in MEP_CATEGORIES:
                     annotate_mep(rec, cat, attrs, elev)
                 else:
@@ -3202,7 +3358,7 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
             rec["overrides"] = _pub_attrs(attrs)
             if attrs.get("_opts"):
                 rec["_parse_opts"] = attrs["_opts"]
-        _declare_opening_subtype(rec, cat, attrs)
+        _declare_opening(rec, cat, attrs)
         elev = _entity_elevation(e, scale)
         if cat in MEP_CATEGORIES:
             annotate_mep(rec, cat, attrs, elev)

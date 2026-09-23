@@ -124,3 +124,52 @@ def test_an_opening_whose_cutter_only_touches_the_wall_face_is_not_a_host():
     dp.link_openings_to_walls(els, {})
     assert els["opening"][0]["wall_indices"] == [], els["opening"][0]
     assert els["opening"][1]["wall_indices"] == [0]
+
+
+# ── 선 여러 줄로 그린 창 하나 ─────────────────────────────────────────────────
+def _line(x0, x1, y, layer="A-WIN"):
+    return {"kind": "polyline", "closed": False, "layer": layer, "points": [[x0, y], [x1, y]]}
+
+
+def test_parallel_sash_lines_of_one_window_are_one_opening():
+    """★ 창틀 바깥선·유리선·안쪽선이 벽 두께 안에 나란히 서서 선마다 개구부가 됐다 — 한 창에 IFC 창 판이 겹겹이 섰다
+    (실측: 종합평면도 기준층 선 개구부 69개). 긴 선(창틀 바깥 = 벽 틈 폭)을 남기고 원래 레코드라 EID 가 그대로다."""
+    els = {"opening": [_line(0, 1400, 0), _line(-50, 1450, 88), _line(0, 1400, 100), _line(0, 1400, 112),
+                       _line(-60, 1460, 200, layer="B-WIN")]}
+    keep = els["opening"][4]
+    assert dp.drop_opening_fragments(els) == {"A-WIN": 4}
+    assert els["opening"] == [keep]
+
+
+def test_two_windows_side_by_side_on_one_wall_stay_two():
+    els = {"opening": [_line(0, 1200, 0), _line(1300, 2500, 0), _line(0, 1200, 100)]}
+    assert dp.drop_opening_fragments(els) == {"A-WIN": 1}
+    assert sorted(o["points"][0][0] for o in els["opening"]) == [0, 1300]
+
+
+def test_windows_on_both_faces_of_a_thick_wall_stay_two():
+    """두꺼운 벽 앞뒤 면의 창(450mm 떨어짐)과 길이가 크게 다른 나란한 선은 같은 창이 아니다 — 합치지 않는 쪽으로 틀린다."""
+    els = {"opening": [_line(0, 1200, 0), _line(0, 1200, 450), _line(0, 700, 100)]}
+    assert dp.drop_opening_fragments(els) == {}
+    assert len(els["opening"]) == 3
+
+
+def test_a_short_line_across_the_end_of_a_window_is_its_jamb_not_an_opening():
+    """문설주·창틀 마구리 선이 벽을 가로질러 그려져 개구부가 되면 문설주 자리에 구멍과 창 판이 섰다. 조각 판정('폭 구간에
+    닿는')은 끝 바깥으로 몇 mm 나간 마구리를 놓친다(실측 548~550mm, 한계 547). 개구부 끝 150mm 안의 수직 **짧은** 선만이다 —
+    모서리에서 만나는 긴 창과 떨어진 곳의 짧은 창은 남는다."""
+    def v(x, y0, y1):
+        return {"kind": "polyline", "closed": False, "layer": "A-WIN", "points": [[x, y0], [x, y1]]}
+    jamb, corner, away = v(-120, -100, 100), v(1300, 0, 900), v(3000, -100, 100)
+    els = {"opening": [_line(0, 1200, 0), jamb, corner, away]}
+    assert dp.drop_opening_fragments(els) == {"A-WIN": 1}
+    assert jamb not in els["opening"] and corner in els["opening"] and away in els["opening"]
+
+
+def test_a_declared_door_swing_arc_is_not_an_opening_and_a_door_leaf_does_not_merge_with_a_window():
+    arc = dict(_line(0, 900, 0, layer="A-DOOR"), from_arc=True, subtype="door")
+    leaf = dict(_line(0, 1200, 100, layer="A-DOOR"), subtype="door")
+    win = dict(_line(0, 1200, 0), subtype="window")
+    els = {"opening": [arc, leaf, win]}
+    assert dp.drop_opening_fragments(els) == {"A-DOOR": 1}
+    assert els["opening"] == [leaf, win]

@@ -211,6 +211,7 @@ Pascal 레벨·층 조립 이동)에 `z_base` 를 쓰면 가짜 층이 생기거
 | `nominal=<DN>` | MEP 부재의 호칭지름 선언(`construction_rules.py` 가 읽는다) — `DN100`·`100A`·`100mm`. 외경(실측 치수)에서 역산하지 않는다(DN100 강관의 실제 외경은 114.3mm) |
 | `service=<용도>` | MEP 부재의 용도 선언 — `construction_rules.SERVICES` 열거형(`drain`·`hydrant_branch` 등). `system`(SA/RA 같은 계통 이름)과는 다른 것이다. 모르는 값은 **로드 시점에 `LayerMapError`** |
 | `subtype=<종류>` | 개구부 종류 선언 — `door` \| `window`. 블록 이름에 부호(`D-900`·`W-1200`)가 없거나 창을 선으로 그린 도면에서 레이어가 종류를 준다. 종류를 알아야 창대 벽·인방을 채우고(`fill_around_openings`) 창 높이만큼만 뚫는다(모르면 층 전체 높이). 블록 이름 부호가 준 종류가 먼저다. 모르는 값은 **로드 시점에 `LayerMapError`** |
+| `mark=<부호>` | 개구부의 창호 부호 선언 — **block_map 전용**(layer_map 에 적으면 `LayerMapError`: 레이어의 선 전부에 같은 부호가 찍힌다). 평면에 부호가 없고 창 블록이 익명(`A$C…`)·설명형 이름인 도면에서 블록 종류가 부호를 주고, 창호일람 행과 그 부호로 조인해 높이·창대를 받는다(`dims_source="schedule"`). 폭은 같은 행의 `width` 로 선언한다 — 블록 안 `W:` 문자 같은 사무소 관례를 파서가 읽지 않는다. 블록 이름 부호(`W-1200`)가 먼저. 세대 xref 는 INSERT 이름에 세대 타입이 있어 행을 세대별로 나눌 수 있다(좁은 행을 위에). 평면에 놓인 부호의 행은 벽 끊김 매칭에 쓰지 않는다 |
 
 ```
 # 보/거더: 외곽선은 넓게 페어링, 축선은 DIMENSION, 단면은 일람표에서
@@ -233,7 +234,7 @@ layer_map.csv와 **동일 형식**이나 `pattern`이 **블록(INSERT)명**에 �
 - INSERT는 `block_map` 우선 분류 → 미매핑이면 INSERT 레이어로 `layer_map` 폴백 → 그래도 없으면 `미매핑 블록` 경고.
 - 분류된 INSERT는 `virtual_entities()`로 블록 내부 형상을 **실좌표 explode** 후 변환.
   - `column`: explode된 closed polyline/circle만 채택. 없으면 `width`(정사각 한 변)로 위치+회전 박스 마커.
-  - `opening`: explode된 circle 우선. 없으면 `width`(지름)로 원 마커.
+  - `opening`: explode된 circle 중 **개구부 크기(지름 ≥ 50mm)** 우선(문 손잡이·철물 원이 개구부가 되어 버려지면 문이 사라진다). 없으면 `width`(지름)로 원 마커 — `width` 도 이름 폭도 없으면 900 이고 `dims_assumed` 에 `width` 로 남는다. 마커 중심은 블록 로컬 축의 폭 구간 가운데(`_block_opening_center`).
   - 그 외 카테고리: explode 레코드 그대로.
 - `-b/--blockmap` 인자로 지정. 생략 시 기본 블록 규칙(COL/기둥/PILLAR→column, DOOR/문·WIND/창→opening).
 

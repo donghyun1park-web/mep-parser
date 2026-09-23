@@ -60,7 +60,8 @@
     "needs_review": 2,
     "openings_dims_assumed": {
       "height": 16,
-      "sill": 16
+      "sill": 16,
+      "width": 1
     },
     "small_openings_dropped": 0,
     "thin_pairs": {
@@ -144,7 +145,8 @@
     "needs_review": 73,
     "openings_dims_assumed": {
       "height": 13,
-      "sill": 13
+      "sill": 13,
+      "width": 1
     },
     "small_openings_dropped": 0,
     "source_coverage": {
@@ -245,7 +247,8 @@
     "needs_review": 118,
     "openings_dims_assumed": {
       "height": 13,
-      "sill": 13
+      "sill": 13,
+      "width": 1
     },
     "small_openings_dropped": 0,
     "source_coverage": {
@@ -292,7 +295,7 @@
     "counts": {
       "column": 80,
       "equipment": 6,
-      "opening": 22,
+      "opening": 24,
       "slab": 8,
       "wall": 664
     },
@@ -301,8 +304,8 @@
       "wall": 10
     },
     "eid_collisions": {},
-    "eid_count": 780,
-    "eid_hash": "0b2c0493db32",
+    "eid_count": 782,
+    "eid_hash": "bfbd37ad0933",
     "face_coverage_pct": 98,
     "floors": [
       0
@@ -310,10 +313,11 @@
     "member_schedule": {},
     "needs_review": 161,
     "openings_dims_assumed": {
-      "height": 22,
-      "sill": 22
+      "height": 24,
+      "sill": 24,
+      "width": 18
     },
-    "small_openings_dropped": 244,
+    "small_openings_dropped": 241,
     "thin_pairs": {
       "A-CON": 5,
       "상부골조": 2
