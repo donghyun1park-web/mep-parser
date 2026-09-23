@@ -30,6 +30,19 @@ python verify.py --dump-checks                         # 검사 목록
 | V103 | — | `isValid()=False` | 해당 footprint 의 자기교차·중복점 확인 |
 | V104 | 모델이 도면보다 훨씬 크다 | 폭주 솔리드 | V005 와 같은 뿌리 |
 
+## 창·문이 이상할 때 (검사는 통과하는데 보기 이상함)
+
+`verified` 여도 창·문은 틀릴 수 있다 — 검사는 빌더의 약속과 IFC 를 대조할 뿐 치수가 맞는지는 모른다. 파싱 결과에서 먼저 센다
+(`drawing-set-intake` 의 `parse_summary.py` 가 한 번에 출력한다):
+
+| 증상 | 먼저 볼 값 | 원인 → 조치 |
+|---|---|---|
+| 창 반쪽짜리 창대 벽·인방, 옆은 바닥부터 뚫림 | `width_source=default` · `dims_assumed` 의 `width` | 폭을 아무도 선언 안 한 블록(900 가정). block_map 에 폭 선언 → `window-schedule-join` |
+| 창대 높이·창 높이가 전부 같다 | `openings_dims_assumed` · `dims_source` | 평면도에는 높이가 없다 — 창호일람 조인(`window-schedule-join`) |
+| 창 판(IfcWindow)이 겹겹이·허공에 | `no_host_reason` 분포 · 선 개구부 수 | 선 여러 줄 창은 파서가 합친다. 남는 `no_wall_on_this_line` 은 벽 레이어 누락이거나 기호가 벽 밖에 그려진 것 |
+| 문이 통째로 없다 | 블록 수 vs 개구부 수 · `small_openings_dropped` | 블록 안 작은 원(철물)을 개구부로 삼던 결함(수정됨) — 재파싱. 그래도 없으면 블록 규칙 확인 |
+| 문턱이 떠 있어야 하는 문(점검구형) | 일람의 H1 | 도구가 문의 창대를 무시한다 — 형상이 맞게 창으로 선언하고 검토표에 적는다 |
+
 ## 원칙
 
 - **검사를 통과시키려고 severity 를 낮추지 말 것.** 사용자가 명시적으로 요청하면

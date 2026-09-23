@@ -1,0 +1,24 @@
+pattern,category,width,height,thickness,opts
+# 프로젝트 layer_map 틀. 작업 폴더(저장소 밖)로 복사해 sheet_inventory 의 'roles' 에 나온 실제 역할 이름으로 고친다.
+# 고친 사본은 고객 레이어 이름을 담으므로 커밋하지 않는다. 컬럼·opts 전체 표는 CLAUDE.md, 증상별 처방은 map-layers 스킬.
+#
+# xref 를 bind 한 도면(종합평면도 등)의 레이어는 '<xref 이름>$0$<역할>' 이다.
+# 패턴을 '$' 로 끝내 꼬리(역할)로 판정한다 — 앞쪽 xref 이름은 도면 세트마다 바뀐다.
+#
+# 벽: 구조 콘크리트벽 · 일반벽 · 건식벽. 좁은 이름(A-WALL-DRY)을 넓은 이름(A-WALL) 위에 둔다(선매칭 우선).
+# pair_min=50 — 건식벽은 보드 면선과 안쪽 선이 10mm 로 붙어 있어 없으면 10mm 벽이 생긴다(실측: 종합평면도 기준층).
+# S-CONC→wall 은 벽식 구조에서만 맞았다(실측 기준층: 기둥 0개). 라멘조면 같은 콘크리트 레이어의 기둥 외곽선
+# (격자 위 작은 닫힌 사각형)도 벽으로 짝지어진다 — 이 줄을 두기 전에 도면에서 확인하고, 있으면 map-layers
+# 스킬대로 나눈다(파서의 layer_evidence·'[분류 의심]' 경고). 이름만 보고 wall 로 두지 않는다.
+S-CONC$,wall,,,,pair_min=50
+A-WALL-DRY$,wall,,,,pair_min=50
+A-WALL$,wall,,,,pair_min=50
+# 개구부: 종류(subtype)를 선언해야 창대 벽·인방이 채워지고 창 높이만큼만 뚫린다(모르면 층 전체 높이로 뚫린다).
+# 창대 호·유리선 레이어(A-WIN-SILL · A-WIN-GLAS 류)는 '$' 앵커 덕에 여기 안 걸리고 아래 ignore 로 간다.
+A-DOOR$,opening,,,,subtype=door
+A-WIN$,opening,,,,subtype=window
+# 기둥·슬래브·보는 이 틀에 없다 — 도면에 있으면 map-layers 스킬대로 위에 추가한다.
+# 나머지(중심선·마감·단열·실명·가구·xref 배경)는 전부 버린다. 저장소 기본 layer_map.csv 의 넓은 규칙
+# (ZONE|ROOM|실 → zone, A-ELE → wall)을 쓰면 실명 레이어가 zone 으로, 승강기 선이 벽으로 들어온다.
+# 반드시 마지막 줄 — 이 아래 규칙은 영원히 가려진다.
+.,ignore,,,,

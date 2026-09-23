@@ -43,7 +43,10 @@ python schedule_table.py <도면.dxf> --layer BEAM_SCHEDULE    # 일람표만 �
 | 도면엔 있는데 모델에 넣기 싫다 | `category=ignore`. 세고 버린다(`result["ignored"]`) |
 | **개구부 치수가 다 똑같다** | 평면도에는 창 높이·문턱이 **없다**(입면도/창호일람표에 있다). `dims_assumed` 가 어느 값이 추정인지 말해준다. 채우려면 `--schedule <창호일람.xlsx>` |
 | **개구부가 수백 개** | 문 하나가 문짝선·스윙호·철물로 여러 엔티티다. 파서가 50mm 미만 조각을 버리고 `small_openings_dropped` 로 센다. 진짜 문은 대개 블록 INSERT 안에 있다 |
-| 참조/xref 배경 (`$0$`, `(하부층)`) | `ignore`. `$0$` 는 xref bind 흔적이라 사실상 100% 신뢰 |
+| 참조/xref 배경 (`$0$`, `(하부층)`) | 배경이면 `ignore`. `$0$` 는 xref bind 흔적이다. ★ 단 **건물 자체가 bind 된 xref** 인 도면(종합평면도: 모든 층이 `<층 xref>$0$A-WALL`)에서는 버리면 벽이 0 이다 — 역할 이름 끝으로 매칭한다(`A-WALL$`). 층이 여러 도곽에 나란히 있으면 `composite-plan-crop` 이 먼저다 |
+| 창·문이 전부 종류 미상(창대 벽·인방 0) | 블록 이름에 부호가 없거나 창을 선으로 그렸다 → 개구부 레이어에 `opts: subtype=door\|window` |
+| 부호 없는 창 블록(익명 `A$C…`·설명형 이름) | block_map 행에 폭(`width`)과 `opts: subtype=…;mark=<부호>` — 부호로 창호일람과 잇는다. `mark=` 는 **block_map 전용**. 절차는 `window-schedule-join` |
+| 칸막이가 10mm 벽으로 나온다 | 보드선 짝지음 → 그 벽 레이어에 `opts: pair_min=50` |
 
 ## 하지 말 것
 
