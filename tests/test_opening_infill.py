@@ -279,3 +279,48 @@ def test_multi_storey_ifc_moves_the_floor_anchor_with_each_storey(tmp_path):
     by_storey = {s.Name: sorted(e.Name or "" for rel in s.ContainsElements for e in rel.RelatedElements)
                  for s in m.by_type("IfcBuildingStorey")}
     assert all(len(v) == 2 for v in by_storey.values()), by_storey
+
+
+# ── 종류 선언(layer_map opts subtype=) ─────────────────────────────────────
+def _unmarked_plan(tmp_path):
+    """부호가 없는 실무 도면: 문은 '안방 도어 평면' 블록(기준점이 가운데), 창은 A-WIN 레이어의 **선**(블록 아님)."""
+    doc = ezdxf.new(units=4)
+    d = doc.blocks.new("안방 도어 평면")
+    d.add_line((-450, 0), (450, 0))
+    d.add_line((-450, 0), (-450, -900))
+    ms = doc.modelspace()
+    for x0, x1 in [(0, 3000), (4200, 6000), (6900, 9000)]:
+        for y in (0, 200):
+            ms.add_line((x0, y), (x1, y), dxfattribs={"layer": "A-WALL"})
+    ms.add_lwpolyline([(3000, 0), (4200, 0), (4200, 200), (3000, 200)], close=True, dxfattribs={"layer": "A-WIN"})
+    ms.add_blockref("안방 도어 평면", (6450, 100), dxfattribs={"layer": "A-DOOR"})
+    p = tmp_path / "unmarked.dxf"
+    doc.saveas(p)
+    return str(p)
+
+
+def _map(tmp_path, declare):
+    rows = ["pattern,category,width,height,thickness,opts", "A-WALL$,wall,,,,",
+            "A-DOOR$,opening,,,," + ("subtype=door" if declare else ""),
+            "A-WIN$,opening,,,," + ("subtype=window" if declare else "")]
+    p = tmp_path / ("declared.csv" if declare else "plain.csv")
+    p.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    return P.load_layer_map(str(p))
+
+
+def test_declared_subtype_gives_unmarked_openings_their_sill_wall_and_lintel(tmp_path):
+    """★ 블록 이름에 부호(D-900·W-1200)가 없고 창을 선으로 그린 도면은 개구부가 **전부 종류 미상**이었다 —
+    채움은 종류를 알 때만 서므로 창·문 자리가 바닥부터 천장까지 뚫려 보였고, 빌더도 층 전체 높이로 뚫었다
+    (실측: 종합평면도 기준층 개구부 136개 전부). layer_map 의 `subtype=` 선언으로 레이어가 종류를 준다 — 추정이 아니라
+    적힌 것이다. 선언이 없으면 종전대로 종류 미상이다."""
+    plan = _unmarked_plan(tmp_path)
+    with contextlib.redirect_stdout(io.StringIO()):
+        g = P.parse(plan, _map(tmp_path, True), P.load_layer_map(str(ROOT / "block_map.csv")))
+        plain = P.parse(plan, _map(tmp_path, False), P.load_layer_map(str(ROOT / "block_map.csv")))
+    subs = sorted(o.get("subtype") or "" for o in g["elements"]["opening"])
+    assert subs == ["door", "window"], subs
+    assert {o.get("subtype") for o in plain["elements"]["opening"]} == {None}
+    parts = sorted((o["subtype"], w["infill_part"]) for w in g["elements"]["wall"] if w.get("source") == "opening_infill"
+                   for o in g["elements"]["opening"] if o["eid"] == w["infill_of"])
+    assert parts == [("door", "above"), ("window", "above"), ("window", "below")], parts
+    assert not [w for w in plain["elements"]["wall"] if w.get("source") == "opening_infill"]

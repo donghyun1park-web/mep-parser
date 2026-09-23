@@ -210,6 +210,7 @@ Pascal 레벨·층 조립 이동)에 `z_base` 를 쓰면 가짜 층이 생기거
 | `material=<이름>` | `IfcMaterial` 이름. **적힌 것만 붙는다** — `wall`→콘크리트 같은 카테고리 추정은 조적벽에서 바로 틀리고, 물량·내화·열관류가 전부 그 위에 얹혀 형상 오류보다 오래 산다. 재질은 `overrides` 를 타고 나간다(벽의 병합·체이닝이 보존하는 필드가 그것). 이름당 `IfcMaterial` 1개, 부여 수는 `build.json` 의 `materials` 에 자기보고. ★ **접합(`connect`) 벽만 붙는 방식이 다르다** — 그쪽은 `IfcMaterialLayerSetUsage` 를 이미 달고 있어 재질을 그 레이어셋에 써 넣는다(덮어쓰면 벽 Body 가 안 생긴다). 그래서 벽타입 캐시 키가 **(두께, 재질)** 이고, 선언이 없으면 레이어 재질을 **비워 둔다**. 고정: `tests/test_ifc_delivery.py` 의 `test_a_declared_wall_material_survives_the_wall_connection_the_gui_turns_on` · `test_two_walls_of_one_thickness_keep_their_own_declared_materials` · `test_an_undeclared_wall_material_stays_empty_instead_of_becoming_concrete` |
 | `nominal=<DN>` | MEP 부재의 호칭지름 선언(`construction_rules.py` 가 읽는다) — `DN100`·`100A`·`100mm`. 외경(실측 치수)에서 역산하지 않는다(DN100 강관의 실제 외경은 114.3mm) |
 | `service=<용도>` | MEP 부재의 용도 선언 — `construction_rules.SERVICES` 열거형(`drain`·`hydrant_branch` 등). `system`(SA/RA 같은 계통 이름)과는 다른 것이다. 모르는 값은 **로드 시점에 `LayerMapError`** |
+| `subtype=<종류>` | 개구부 종류 선언 — `door` \| `window`. 블록 이름에 부호(`D-900`·`W-1200`)가 없거나 창을 선으로 그린 도면에서 레이어가 종류를 준다. 종류를 알아야 창대 벽·인방을 채우고(`fill_around_openings`) 창 높이만큼만 뚫는다(모르면 층 전체 높이). 블록 이름 부호가 준 종류가 먼저다. 모르는 값은 **로드 시점에 `LayerMapError`** |
 
 ```
 # 보/거더: 외곽선은 넓게 페어링, 축선은 DIMENSION, 단면은 일람표에서

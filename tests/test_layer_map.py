@@ -473,3 +473,17 @@ def test_apartment_convention_rows_do_not_shadow_the_wall_rules_below_them():
     # A-COLS·S-COL·COLUMN 은 여전히 기둥이다. 진짜 기둥을 A-COL 로 그린 도면은 닫힌 벽이 되고 경고가 없다(대가).
     assert cat("A-COL") == "wall" and cat("XREF_UNIT_74 expand$0$A-COL") == "wall"
     assert cat("A-COLS") == "column" and cat("S-COL") == "column" and cat("COLUMN") == "column"
+
+
+
+def test_opening_subtype_is_declared_door_or_window_only():
+    """`subtype=` 은 개구부 종류 선언이다 — 오타(창·win)를 조용히 버리면 채움이 말없이 안 선다."""
+    head = "pattern,category,width,height,thickness,opts" + chr(10)
+    r = dp.load_layer_map(write_csv(head + "A-WIN$,opening,,,,subtype=window" + chr(10)))
+    assert r[0][2]["_opts"] == {"subtype": "window"}
+    try:
+        dp.load_layer_map(write_csv(head + "A-WIN$,opening,,,,subtype=창" + chr(10)))
+    except dp.LayerMapError as e:
+        assert "subtype" in str(e)
+        return
+    raise AssertionError("모르는 개구부 종류가 통과했다")

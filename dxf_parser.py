@@ -299,7 +299,10 @@ OPT_SPEC = {
                            "선언 — 외경(diameter)에서 역산하지 않는다"),
     "service":   ("str",   "MEP 부재의 용도(배수/소화전 가지 등) — construction_rules.SERVICES 열거형. "
                            "system(SA/RA 같은 계통 이름)과는 다른 것이다"),
+    "subtype":   ("str",   "개구부 종류 선언: door | window. 블록 이름에 부호(D-900·W-1200)가 없거나 창을 선으로 "
+                           "그린 도면에서 레이어가 종류를 준다. 종류를 알아야 창대 벽·인방을 채우고 창 높이만큼만 뚫는다"),
 }
+OPENING_SUBTYPES = ("door", "window")
 ELEVATION_KINDS = ("top", "center")
 # `centerline=` 값의 형식. 로드 시점에 검증한다 — 오타난 판정 기준을 조용히 안 먹고
 # 넘어가면 외곽선이 그대로 부재가 되는데, 그건 형상이 멀쩡해 보여 검사에 안 걸린다.
@@ -346,11 +349,23 @@ def _parse_opts(raw, csv_path="", lineno=0):
             raise LayerMapError(
                 f"{os.path.basename(csv_path)} {lineno}행: opts centerline={v!r} 형식 오류 — "
                 f"{' 또는 '.join(x + ':<값>' for x in CENTERLINE_KINDS)} 여야 한다")
+        if k == "subtype" and v not in OPENING_SUBTYPES:
+            raise LayerMapError(
+                f"{os.path.basename(csv_path)} {lineno}행: opts subtype={v!r} 는 알 수 없는 개구부 종류다. "
+                f"사용 가능: {', '.join(OPENING_SUBTYPES)}")
         if k == "service" and v not in _CR.SERVICES:
             raise LayerMapError(
                 f"{os.path.basename(csv_path)} {lineno}행: opts service={v!r} 는 알 수 없는 용도다. "
                 f"사용 가능: {', '.join(_CR.SERVICES)}")
     return out
+
+
+def _declare_opening_subtype(rec, cat, attrs):
+    """layer_map/block_map 의 `subtype=` 선언을 개구부 레코드에 싣는다. 블록 이름 부호가 이미 준 종류는 그대로 둔다
+    (그 부재 하나에 대한 더 구체적인 말이다). 선언이 없으면 아무것도 하지 않는다 — 레이어 이름으로 추정하지 않는다."""
+    declared = ((attrs or {}).get("_opts") or {}).get("subtype")
+    if cat == "opening" and declared and not rec.get("subtype"):
+        rec["subtype"] = declared
 
 
 def _pub_attrs(attrs):
@@ -3138,6 +3153,7 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
                 #   이건 레코드가 아니라 **레이어의 성질**이라 여기서 한 번만 모은다.
                 if rec.get("layer") and rec["layer"] != e.dxf.layer:
                     _rule_layer.setdefault(rec["layer"], set()).add(e.dxf.layer)
+                _declare_opening_subtype(rec, cat, attrs)
                 if cat in MEP_CATEGORIES:
                     annotate_mep(rec, cat, attrs, elev)
                 else:
@@ -3186,6 +3202,7 @@ def parse(dxf_path, rules, block_rules=DEFAULT_BLOCK_RULES, params=DEFAULT_PARAM
             rec["overrides"] = _pub_attrs(attrs)
             if attrs.get("_opts"):
                 rec["_parse_opts"] = attrs["_opts"]
+        _declare_opening_subtype(rec, cat, attrs)
         elev = _entity_elevation(e, scale)
         if cat in MEP_CATEGORIES:
             annotate_mep(rec, cat, attrs, elev)
